@@ -132,12 +132,11 @@ def merge_attn_states_kernel(
     # request with zero context length), both LSEs are -inf.
     # IEEE 754: -inf - (-inf) = NaN, which then propagates through
     # exp and division.  The CUDA merge_attn_states kernel handles
-    # this via an early-return branch on isinf(max_lse).  Here we use
-    # a branchless safe-softmax approach instead: replacing -inf with
-    # a finite floor so the subtraction yields -inf (not NaN), and
-    # exp() gives exactly 0.  The epsilon in the denominator then
-    # prevents the resulting 0/0, producing zero output (correct,
-    # since there are no attention scores to merge).
+    # this via an early-return branch on isinf(max_lse).  Here we
+    # replace -inf with a finite floor so the subtraction yields -inf
+    # (not NaN) and exp() gives exactly 0.  The epsilon in the
+    # denominator then prevents the resulting 0/0, producing zero
+    # output (correct, since there are no attention scores to merge).
     max_lse = tl.where(max_lse == float("-inf"), -1e30, max_lse)
 
     p_lse = p_lse - max_lse
