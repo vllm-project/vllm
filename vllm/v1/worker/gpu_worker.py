@@ -993,7 +993,8 @@ class Worker(WorkerBase):
         """
         Receive weights from the trainer (one or more chunks).
 
-        Must be called between start_weight_update and finish_weight_update.
+        start_weight_update must be called before update_weights and
+        finish_weight_update must be called after.
 
         Args:
             update_info: Dictionary containing backend-specific update info
@@ -1010,24 +1011,25 @@ class Worker(WorkerBase):
 
         model = self.model_runner.model
 
-        if self._is_checkpoint_format:
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=model.load_weights,
-            )
-        else:
-            # Weights are already in kernel format, copy directly
-            def load_weights_direct(
-                weights: list[tuple[str, torch.Tensor]],
-            ) -> None:
-                for name, weight in weights:
-                    param = model.get_parameter(name)
-                    param.copy_(weight)
+        with torch.device(self.device):
+            if self._is_checkpoint_format:
+                self.weight_transfer_engine.receive_weights(
+                    typed_update_info,
+                    load_weights=model.load_weights,
+                )
+            else:
+                # Weights are already in kernel format, copy directly
+                def load_weights_direct(
+                    weights: list[tuple[str, torch.Tensor]],
+                ) -> None:
+                    for name, weight in weights:
+                        param = model.get_parameter(name)
+                        param.copy_(weight)
 
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=load_weights_direct,
-            )
+                self.weight_transfer_engine.receive_weights(
+                    typed_update_info,
+                    load_weights=load_weights_direct,
+                )
 
         # NCCL broadcast/packed path are asynchronous.
         # Sync here so the next step uses the new weights.

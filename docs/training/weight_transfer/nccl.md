@@ -84,7 +84,7 @@ Both the trainer (`NCCLTrainerSendWeightsArgs`) and inference side (`NCCLWeightT
 
 ## Receiving Weights (Inference Side)
 
-The inference side triggers weight reception using the three-phase protocol — `start_weight_update`, `update_weights`, `finish_weight_update`:
+The inference side triggers weight reception using the four-phase protocol — `init_weight_transfer_engine`, `start_weight_update`, `update_weights`, `finish_weight_update`. The init phase is shown [above](#initialization). The remaining three steps are:
 
 ```python
 from vllm.distributed.weight_transfer.base import (
