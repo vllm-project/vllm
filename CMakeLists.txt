@@ -227,6 +227,13 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+
+  # When using LTO then *.cpp files must be compiled with same compiler as used linker
+  # So if HIP uses clang linker we also must use it
+  # Otherwise symbols will be missing from .so
+  if (CMAKE_CXX_FLAGS MATCHES "\-flto")
+    set(CMAKE_CXX_COMPILER ${CMAKE_HIP_COMPILER})
+  endif()
 endif()
 
 #
