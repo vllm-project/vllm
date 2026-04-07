@@ -626,6 +626,18 @@ class FlashAttentionImpl(AttentionImpl):
         # Cache the batch invariant result for use in forward passes
         self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
 
+        # FA2 only ships cubins up to ~SM89; it lacks SM100+ cubins and has
+        # no PTX fallback, so it will crash at runtime on Blackwell (B200).
+        # When the encoder-attention path would use FA2 on SM >= 10.0 we
+        # fall back to the Triton-based ``context_attention_fwd`` kernel,
+        # which is device-agnostic (same approach the ROCm backend uses).
+        device_capability = current_platform.get_device_capability()
+        self._use_triton_for_encoder_attn = (
+            self.vllm_flash_attn_version == 2
+            and device_capability is not None
+            and device_capability.major >= 10
+        )
+
         if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
             raise NotImplementedError(
                 "FlashAttention does not support fp8 kv-cache on this device."
@@ -971,15 +983,22 @@ class FlashAttentionImpl(AttentionImpl):
             attn_metadata: Encoder attention metadata
             layer: The attention layer
         """
-        assert self.vllm_flash_attn_version is not None, (
-            "FlashAttention version not detected."
-        )
-
         # For encoder attention, process FP8 quantization if needed
         if is_quantized_kv_cache(self.kv_cache_dtype):
             raise NotImplementedError(
                 "quantization is not supported for encoder attention"
             )
+
+        # FA2 lacks SM100+ cubins, so fall back to the device-agnostic
+        # Triton kernel on Blackwell and newer architectures.
+        if self._use_triton_for_encoder_attn:
+            return self._forward_encoder_attention_triton(
+                query, key, value, output, attn_metadata
+            )
+
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
 
         # Use encoder-specific metadata for sequence information
         cu_seqlens_q = attn_metadata.query_start_loc
@@ -1017,6 +1036,39 @@ class FlashAttentionImpl(AttentionImpl):
             num_splits=1 if self.batch_invariant_enabled else 0,
         )
 
+        return output
+
+    def _forward_encoder_attention_triton(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+    ) -> torch.Tensor:
+        """Triton fallback for encoder attention on devices where FA2 is
+        unsupported (e.g. Blackwell / SM100+).
+
+        Uses the same ``context_attention_fwd`` kernel that the Triton and
+        ROCm attention backends use for their encoder-attention paths.
+        """
+        from vllm.v1.attention.ops.triton_prefill_attention import (
+            context_attention_fwd,
+        )
+
+        context_attention_fwd(
+            q=query,
+            k=key,
+            v=value,
+            o=output,
+            b_start_loc=attn_metadata.query_start_loc,
+            b_seq_len=attn_metadata.seq_lens,
+            max_input_len=attn_metadata.max_query_len,
+            is_causal=False,  # Encoder attention is bidirectional
+            softmax_scale=self.scale,
+            sliding_window_q=self.sliding_window[0],
+            sliding_window_k=self.sliding_window[1],
+        )
         return output
 
 
