@@ -13,6 +13,26 @@ except ImportError:
     )
 
 
+def test_swap_blocks_xpu_fallback(monkeypatch):
+    src = torch.arange(24, dtype=torch.int8).view(4, 6)
+    dst = torch.full((4, 6), fill_value=-1, dtype=torch.int8)
+    block_mapping = torch.tensor([[0, 2], [3, 1]], dtype=torch.int64)
+
+    monkeypatch.setattr(ops.current_platform, "is_xpu", lambda: True)
+
+    ops.swap_blocks(
+        src,
+        dst,
+        src.stride(0) * src.element_size(),
+        block_mapping,
+    )
+
+    torch.testing.assert_close(dst[2], src[0])
+    torch.testing.assert_close(dst[1], src[3])
+    torch.testing.assert_close(dst[0], torch.full((6,), -1, dtype=torch.int8))
+    torch.testing.assert_close(dst[3], torch.full((6,), -1, dtype=torch.int8))
+
+
 @pytest.mark.skipif(torch.accelerator.device_count() < 1, reason="Need CUDA device")
 def test_gather_cache_oob():
     """

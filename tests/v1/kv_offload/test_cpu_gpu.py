@@ -6,6 +6,7 @@ import time
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import (
@@ -21,7 +22,7 @@ GPU_PAGE_SIZES = [512, 1024]
 BLOCK_SIZE_FACTORS = [1, 3]
 NUM_TENSORS = [4]
 SEEDS = [0]
-CUDA_DEVICES = ["cuda:0"]
+CUDA_DEVICES = ["xpu:0" if current_platform.is_xpu() else "cuda:0"] 
 NUM_MAPPINGS = [3]
 
 

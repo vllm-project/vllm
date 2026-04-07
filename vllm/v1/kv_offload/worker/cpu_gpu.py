@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
 from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
@@ -23,10 +25,34 @@ logger = init_logger(__name__)
 @dataclass
 class Transfer:
     job_id: int
-    stream: torch.cuda.Stream
+    stream: Any
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
+
+
+def _new_stream():
+    if current_platform.is_xpu():
+        return torch.xpu.Stream()
+    return torch.cuda.Stream()
+
+
+def _current_stream():
+    if current_platform.is_xpu():
+        return torch.xpu.current_stream()
+    return torch.cuda.current_stream()
+
+
+def _stream_context(stream):
+    if current_platform.is_xpu():
+        return torch.xpu.stream(stream)
+    return torch.cuda.stream(stream)
+
+
+def _new_event():
+    if current_platform.is_xpu():
+        return torch.Event(enable_timing=True)
+    return torch.Event(enable_timing=True)
 
 
 def expand_block_ids(
@@ -101,7 +127,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
             assert gpu_tensor.dtype == torch.int8
             assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda
+            assert gpu_tensor.device.type in ("cuda", "xpu")
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
@@ -145,7 +171,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
         # list of CUDA streams available for re-use
-        self._stream_pool: list[torch.cuda.Stream] = []
+        self._stream_pool: list[Any] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
@@ -175,27 +201,27 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
-        stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
+        stream = self._stream_pool.pop() if self._stream_pool else _new_stream()
         start_event = (
             self._event_pool.pop()
             if self._event_pool
-            else torch.Event(enable_timing=True)
+            else _new_event()
         )
         end_event = (
             self._event_pool.pop()
             if self._event_pool
-            else torch.Event(enable_timing=True)
+            else _new_event()
         )
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
-            stream.wait_stream(torch.cuda.current_stream())
+            stream.wait_stream(_current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
-        with torch.cuda.stream(stream):
+        with _stream_context(stream):
             start_event.record(stream)
             for src_tensor, dst_tensor, block_size_in_bytes in zip(
                 self.src_tensors,
