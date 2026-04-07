@@ -17,6 +17,7 @@ from compressed_tensors.quantization import (
     QuantizationType,
 )
 from compressed_tensors.transform import TransformConfig
+from compressed_tensors.utils.match import is_match
 
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -57,10 +58,14 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear
     get_linear_transform_schemes,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    find_matched_target,
     is_activation_quantization_format,
-    should_ignore_layer,
 )
+
+# Note: is_match from compressed-tensors handles class name matching with support
+# for vLLM-specific classes (see VLLM_CLASS_NAME_MAPPING in utils.py for details).
+# The compressed-tensors library has built-in support for LinearBase → Linear,
+# which covers all vLLM linear classes (ReplicatedLinear, ColumnParallelLinear, etc.)
+# since they inherit from LinearBase.
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -722,12 +727,13 @@ class CompressedTensorsConfig(QuantizationConfig):
             self.sparsity_ignore_list
         )
         sparsity_scheme: SparsityCompressionConfig | None = None
-        with suppress(ValueError):
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=sparsity_targets,
-                fused_mapping=self.packed_modules_mapping,
+        with suppress(StopIteration):
+            matched_target = next(
+                target
+                for target in sparsity_targets
+                if is_match(
+                    layer_name, layer, target, fused=self.packed_modules_mapping
+                )
             )
             sparsity_scheme = self.sparsity_scheme_map[matched_target]
 
@@ -782,19 +788,19 @@ class CompressedTensorsConfig(QuantizationConfig):
                 "format": str | None
             } | None
         """
-        # TODO (@kylesayrs): support ignore module names with ct matching utils
-        if should_ignore_layer(
-            layer_name, ignore=self.ignore, fused_mapping=self.packed_modules_mapping
+        if is_match(
+            layer_name, layer, targets=self.ignore, fused=self.packed_modules_mapping
         ):
             return None
 
         # Will be empty for models with only sparsity
         if self.target_scheme_map:
-            matched_target = find_matched_target(
-                layer_name=layer_name,
-                module=layer,
-                targets=self.target_scheme_map.keys(),
-                fused_mapping=self.packed_modules_mapping,
+            matched_target = next(
+                target
+                for target in self.target_scheme_map.keys()
+                if is_match(
+                    layer_name, layer, target, fused=self.packed_modules_mapping
+                )
             )
             scheme_dict = self.target_scheme_map[matched_target]
             if scheme_dict.get("format") is None:
