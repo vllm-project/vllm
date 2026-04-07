@@ -1145,8 +1145,8 @@ def wait_for_engine_startup(
                     *start_pending,
                 )
             continue
-        if len(events) > 1 or events[0][0] != handshake_socket:
-            # One of the local core processes exited.
+        if not any(sock == handshake_socket for sock, _ in events):
+            # No handshake message; a process or coordinator exited.
             finished = proc_manager.finished_procs() if proc_manager else {}
             if coord_process is not None and coord_process.exitcode is not None:
                 finished[coord_process.name] = coord_process.exitcode
@@ -1231,6 +1231,15 @@ def wait_for_engine_startup(
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY
+        elif status == "FAILED" and engine.state == CoreEngineState.CONNECTED:
+            finished = proc_manager.finished_procs() if proc_manager else {}
+            raise RuntimeError(
+                "Engine core initialization failed. "
+                "See root cause above. "
+                f"Failed core proc(s): {finished}. "
+                f"Error from engine {eng_index}: "
+                f"{msg.get('error_msg', 'unknown')}"
+            )
         else:
             raise RuntimeError(
                 f"Unexpected {status} message for "
