@@ -660,9 +660,7 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
 
             experts = layer.mlp.experts
             assert isinstance(experts, FusedMoE)
-            assert isinstance(
-                experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod
-            )
+            assert isinstance(experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod)
 
         llm.apply_model(check_model)
         output = llm.generate_greedy("Hello my name is", max_tokens=4)
