@@ -67,12 +67,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
-    Mxfp8LinearBackend,
     Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-    swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    NvFp4LinearBackend,
     apply_nvfp4_linear,
     convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
@@ -935,7 +934,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -960,7 +959,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1076,6 +1075,10 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.marlin_input_dtype = None
         self.backend = select_nvfp4_linear_backend()
 
+        self.swizzle = None
+        if self.backend == NvFp4LinearBackend.EMULATION:
+            self.swizzle = False
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -1151,10 +1154,23 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if (
+            torch.unique(layer.input_scale).numel() != 1
+            or torch.unique(layer.weight_scale_2).numel() != 1
+        ):
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for input or weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely results in reduce accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for parallel layers."
+            )
+
         # Rename ModelOpt checkpoint names to standardized names
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale
+
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
@@ -1181,6 +1197,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
             layer=layer,
             x=x,
             bias=bias,
+            swizzle=self.swizzle,
         )
 
 
@@ -1419,7 +1436,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -1444,7 +1461,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1499,8 +1516,8 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # MXFP8 hardware acceleration requires Blackwell (SM100) or newer
-        return 100
+        # Marlin kernel supports MXFP8 on SM80+
+        return 80
 
     @classmethod
     def override_quantization_method(
@@ -1555,9 +1572,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        self.backend: Mxfp8LinearBackend = Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        self.mxfp8_linear_op = Mxfp8LinearOp(backend=self.backend)
-        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
+        self.mxfp8_linear_op = Mxfp8LinearOp()
 
     def create_weights(
         self,
@@ -1615,36 +1630,6 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
-    def _process_weights_after_loading_scale_2d(self, layer: torch.nn.Module) -> None:
-        """Not swizzled - MXFP8 GEMM emulation"""
-        weight = layer.weight.data  # [N, K]
-        N, K = weight.shape
-        scale_k = K // MXFP8_BLOCK_SIZE
-
-        # Slice weight_scale to match weight dimensions (handles padding)
-        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
-
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
-
-    def _process_weights_after_loading_scale_1d(self, layer: torch.nn.Module) -> None:
-        """Swizzled - MXFP8 GEMM Flashinfer CUTLASS"""
-        weight = layer.weight.data  # [N, K]
-        N, K = weight.shape
-
-        # 2D weight scale
-        weight_scale = layer.weight_scale.data
-
-        # Swizzle the weight scales
-        scale_k = K // MXFP8_BLOCK_SIZE
-        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
-        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
-
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(
-            weight_scale_swizzled.contiguous(), requires_grad=False
-        )
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Validate weight tensor
         if layer.weight.ndim != 2:
@@ -1669,14 +1654,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f" got {layer.weight_scale.dtype}"
         )
 
-        if self.backend == Mxfp8LinearBackend.EMULATION:
-            # Swizzled layout is not used
-            self._process_weights_after_loading_scale_2d(layer)
-            return
-
-        assert self.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        # Swizzled layout is required for Flashinfer CUTLASS
-        self._process_weights_after_loading_scale_1d(layer)
+        self.mxfp8_linear_op.process_weights(layer)
 
     def apply(
         self,
@@ -1684,22 +1662,15 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if layer.weight.dtype != MXFP8_VALUE_DTYPE:
-            raise ValueError(
-                f"Weight dtype {layer.weight.dtype} != expected {MXFP8_VALUE_DTYPE}"
-            )
-        if layer.weight_scale.dtype != MXFP8_SCALE_DTYPE:
-            raise ValueError(
-                f"Weight scale dtype {layer.weight_scale.dtype} != "
-                f"expected {MXFP8_SCALE_DTYPE}"
-            )
-
         return self.mxfp8_linear_op.apply(
             input=x,
             weight=layer.weight,
             weight_scale=layer.weight_scale,
             out_dtype=x.dtype,
             bias=bias,
+            workspace=getattr(layer, "workspace", None),
+            size_n=layer.output_size_per_partition,
+            size_k=layer.input_size_per_partition,
         )
 
 

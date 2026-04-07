@@ -40,9 +40,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def mk_owns_shared_expert(self) -> bool:
         # NOTE(rob): temporary attribute to indicate support for
         # completed migration to the new internal MK interface.
-        return (
-            self.moe_kernel is not None and self.moe_kernel.shared_experts is not None
-        )
+        return self.moe_kernel is not None and self.moe_kernel.owns_shared_experts
 
     @abstractmethod
     def create_weights(
@@ -163,7 +161,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         raise NotImplementedError
 
     def apply_monolithic(
@@ -171,5 +169,5 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         raise NotImplementedError

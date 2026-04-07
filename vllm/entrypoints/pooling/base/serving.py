@@ -82,9 +82,20 @@ class PoolingServing:
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
+        ctx = await self._init_ctx(request, raw_request)
+        await self.io_processor.pre_process_online_async(ctx)
+        await self._prepare_generators(ctx)
+        await self._collect_batch(ctx)
+        await self.io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)
+
+    async def _init_ctx(
+        self,
+        request: AnyPoolingRequest,
+        raw_request: Request | None = None,
+    ):
         model_name = self.models.model_name()
         request_id = f"{self.request_id_prefix}-{self._base_request_id(raw_request)}"
-
         await self._check_model(request)
 
         ctx = PoolingServeContext(
@@ -96,11 +107,7 @@ class PoolingServing:
 
         self._validate_request(ctx)
         self._maybe_get_adapters(ctx)
-        await self.io_processor.pre_process_online_async(ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        await self.io_processor.post_process_online_async(ctx)
-        return await self._build_response(ctx)
+        return ctx
 
     async def _prepare_generators(
         self,
