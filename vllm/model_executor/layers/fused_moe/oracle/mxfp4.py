@@ -20,10 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    _swizzle_mxfp4,
-    get_padding_alignment,
-)
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import _swizzle_mxfp4
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -57,8 +54,8 @@ class Mxfp4MoeBackend(Enum):
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
-    # ROCm AITER (CK)
-    CK = "CK"
+    # ROCm AITER
+    AITER = "AITER"
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
@@ -133,7 +130,7 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
-    elif backend == Mxfp4MoeBackend.CK:
+    elif backend == Mxfp4MoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             AiterExperts,
         )
@@ -158,7 +155,7 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
         "flashinfer_cutlass_afp8": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         "triton": Mxfp4MoeBackend.TRITON,
         "marlin": Mxfp4MoeBackend.MARLIN,
-        "ck": Mxfp4MoeBackend.CK,
+        "aiter": Mxfp4MoeBackend.AITER,
         "xpu": Mxfp4MoeBackend.XPU,
     }
     if backend := mapping.get(runner_backend):
@@ -176,7 +173,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.CK,
+        Mxfp4MoeBackend.AITER,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.TRITON_UNFUSED,
@@ -396,9 +393,8 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         intermediate_size = round_up(intermediate_size, 128)
         hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        pad_align = get_padding_alignment()
-        intermediate_size = round_up(intermediate_size, pad_align)
-        hidden_size = round_up(hidden_size, pad_align)
+        intermediate_size = round_up(intermediate_size, 256)
+        hidden_size = round_up(hidden_size, 256)
     else:
         intermediate_size = round_up(intermediate_size, 64)
     return hidden_size, intermediate_size
@@ -660,7 +656,7 @@ def convert_to_mxfp4_moe_kernel_format(
                 w2_bias,
             )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.CK:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER:
         from vllm._aiter_ops import rocm_aiter_ops
 
         if w13_bias is not None:
@@ -798,7 +794,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-        Mxfp4MoeBackend.CK,
+        Mxfp4MoeBackend.AITER,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
@@ -863,7 +859,6 @@ def make_mxfp4_moe_kernel(
             if moe_config.moe_parallel_config.use_deepep_ll_kernels
             else None
         ),
-        moe_parallel_config=moe_config.moe_parallel_config,
         inplace=(
             not moe_config.disable_inplace and mxfp4_backend not in TRTLLM_BACKENDS
         ),

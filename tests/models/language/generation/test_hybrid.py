@@ -57,6 +57,16 @@ FP32_STATE_MODELS = [
 # Avoid OOM
 MAX_NUM_SEQS = 4
 
+ATTN_BACKEND = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+
+
+def _set_conv_state_layout(monkeypatch, layout: str) -> None:
+    """Set conv state layout env var and clear cache to pick up new value."""
+    from vllm.model_executor.layers.mamba import mamba_utils
+
+    monkeypatch.setenv("VLLM_SSM_CONV_STATE_LAYOUT", layout)
+    mamba_utils.get_conv_state_layout.cache_clear()
+
 
 @pytest.mark.parametrize("model", SSM_MODELS + HYBRID_MODELS)
 @pytest.mark.parametrize("max_tokens", [64])
@@ -82,7 +92,9 @@ def test_models(
             example_prompts, max_tokens, num_logprobs
         )
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+    ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
@@ -98,12 +110,15 @@ def test_models(
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("conv_state_layout", ["SD", "DS"])
 def test_batching(
     vllm_runner,
     example_prompts,
+    monkeypatch,
     model: str,
     max_tokens: int,
     num_logprobs: int,
+    conv_state_layout: str,
 ) -> None:
     try:
         model_info = HF_EXAMPLE_MODELS.find_hf_info(model)
@@ -111,6 +126,8 @@ def test_batching(
         model_info.check_transformers_version(on_fail="skip")
     except ValueError:
         pass
+
+    _set_conv_state_layout(monkeypatch, conv_state_layout)
 
     for_loop_outputs = []
     with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
@@ -134,11 +151,14 @@ def test_batching(
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [10])
+@pytest.mark.parametrize("conv_state_layout", ["SD", "DS"])
 def test_chunked_prefill_with_parallel_sampling(
     vllm_runner,
     example_prompts,
+    monkeypatch,
     model: str,
     max_tokens: int,
+    conv_state_layout: str,
 ) -> None:
     """
     Tests chunked prefill in conjunction with n > 1.
@@ -150,6 +170,8 @@ def test_chunked_prefill_with_parallel_sampling(
     decoding steps inside a chunked prefill forward pass
     (where we have both prefill and decode together)
     """
+    _set_conv_state_layout(monkeypatch, conv_state_layout)
+
     sampling_params = SamplingParams(n=3, temperature=1, seed=0, max_tokens=max_tokens)
     with vllm_runner(
         model,
@@ -157,23 +179,29 @@ def test_chunked_prefill_with_parallel_sampling(
         # forces prefill chunks with decoding
         max_num_batched_tokens=MAX_NUM_SEQS * 3,
         max_num_seqs=MAX_NUM_SEQS,
+        attention_backend=ATTN_BACKEND,
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
 @pytest.mark.parametrize("model", [SSM_MODELS[0], HYBRID_MODELS[0]])
 @pytest.mark.parametrize("max_tokens", [20])
+@pytest.mark.parametrize("conv_state_layout", ["SD", "DS"])
 def test_mamba_cache_cg_padding(
     vllm_runner,
     example_prompts,
+    monkeypatch,
     model: str,
     max_tokens: int,
+    conv_state_layout: str,
 ) -> None:
     """
     This test is for verifying that mamba cache is padded to CG captured
     batch size. If it's not, a torch RuntimeError will be raised because
     tensor dimensions aren't compatible.
     """
+    _set_conv_state_layout(monkeypatch, conv_state_layout)
+
     vllm_config = EngineArgs(model=model, trust_remote_code=True).create_engine_config()
     cudagraph_dispatcher = CudagraphDispatcher(vllm_config)
     cudagraph_dispatcher.initialize_cudagraph_keys(
@@ -301,7 +329,9 @@ def test_full_cuda_graph(
             example_prompts, max_tokens, num_logprobs
         )
 
-    with vllm_runner(model, max_num_seqs=MAX_NUM_SEQS) as vllm_model:
+    with vllm_runner(
+        model, max_num_seqs=MAX_NUM_SEQS, attention_backend=ATTN_BACKEND
+    ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             example_prompts, max_tokens, num_logprobs
         )
@@ -370,6 +400,7 @@ def _get_vllm_runner_params(
         "max_model_len": max_model_len,
         "tensor_parallel_size": tensor_parallel_size,
         "gpu_memory_utilization": 0.4,
+        "attention_backend": ATTN_BACKEND,
     }
 
 
@@ -844,6 +875,7 @@ def test_apc_common_prefix_same_batch(
         mamba_block_size=16,
         enable_prefix_caching=True,
         seed=42,
+        attention_backend=ATTN_BACKEND,
     )
     prompts = [
         "hello what is one plus one what is one plus one what is one plus one the answer is",  # noqa: E501
