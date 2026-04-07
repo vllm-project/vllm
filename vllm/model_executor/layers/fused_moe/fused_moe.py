@@ -1946,7 +1946,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             p.is_cuda() and p.has_device_capability((7, 5))
         )
 
-        supported = [(None, None)]
+        supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
             supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
         if device_supports_fp8:

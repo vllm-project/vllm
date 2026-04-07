@@ -928,7 +928,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
-        supported = [(None, None)]
+        supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_fp8:
             supported += [
                 (kFp8Static128BlockSym, kFp8Dynamic128Sym),
