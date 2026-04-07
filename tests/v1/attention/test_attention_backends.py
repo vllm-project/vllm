@@ -749,17 +749,16 @@ def test_sliding_window_encoder_backend_correctness(
     ],
 )
 @pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
-def test_flash_attn_encoder_triton_fallback(batch_spec_name: str, model: str):
-    """Test that the Triton fallback for encoder attention in the
-    FlashAttention backend produces correct results.
-
-    On Blackwell (SM 10.0+), FA2 lacks SM100 cubins so
-    ``FlashAttentionImpl._forward_encoder_attention`` must fall back to
-    the Triton-based ``context_attention_fwd`` kernel. This test forces
-    the fallback path via ``_use_triton_for_encoder_attn = True`` and
-    verifies numerical correctness against an SDPA reference.
-    """
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+def test_flash_attn_encoder_triton_fallback(
+    batch_spec_name: str, model: str, tensor_parallel_size: int
+):
+    """Test that the Triton fallback for encoder attention produces correct
+    results. On SM100+ (Blackwell), FA2 lacks cubins so encoder attention
+    falls back to the Triton-based context_attention_fwd kernel."""
     import unittest.mock
+
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
@@ -780,22 +779,18 @@ def test_flash_attn_encoder_triton_fallback(batch_spec_name: str, model: str):
         bidi_sliding_window_mask_mod, sliding_window=sliding_window
     )
 
-    # Force the Triton fallback path in FlashAttentionImpl by patching
-    # ``_use_triton_for_encoder_attn`` on the class so every instance
-    # created during the test run uses the Triton kernel.
-    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
-
-    orig_init = FlashAttentionImpl.__init__
-
-    def patched_init(self, *args, **kwargs):
-        orig_init(self, *args, **kwargs)
-        self._use_triton_for_encoder_attn = True
-
-    with unittest.mock.patch.object(FlashAttentionImpl, "__init__", patched_init):
+    # Force the Triton fallback path by redirecting the encoder attention
+    # method to the Triton implementation.
+    with unittest.mock.patch.object(
+        FlashAttentionImpl,
+        "_forward_encoder_attention",
+        FlashAttentionImpl._forward_encoder_attention_triton,
+    ):
         _test_backend_correctness(
             batch_spec,
             model,
             [AttentionBackendEnum.FLASH_ATTN],
             sliding_window_mask_mod_fn,
             attn_type=AttentionType.ENCODER_ONLY,
+            tensor_parallel_size=tensor_parallel_size,
         )
