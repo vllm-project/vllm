@@ -6,16 +6,14 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.multiprocessing import spawn
-from vllm.model_executor.layers.minimax_rms_norm.rms_norm_tp import (
-    MiniMaxQKNormWrapper,
-    MiniMaxText01RMSNormTP,
-)
 
+from tests.kernels.utils import opcheck
 from tests.utils import ensure_current_vllm_config, init_test_distributed_environment
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.model_executor.layers.mamba.linear_attn import MiniMaxText01RMSNormTP
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
-from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 
 
 @ensure_current_vllm_config()
@@ -32,6 +30,9 @@ def _worker_forward_qk(
 ):
     """Per-rank worker: compare NCCL allreduce path vs Lamport fused kernel."""
 
+    if not hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
+        cleanup_dist_env_and_memory()
+        return
     device = torch.device(f"cuda:{local_rank}")
     torch.accelerator.set_device_index(device)
     init_test_distributed_environment(
@@ -44,18 +45,6 @@ def _worker_forward_qk(
     q_norm = MiniMaxText01RMSNormTP(hidden_q_full, eps=eps).cuda()
     k_norm = MiniMaxText01RMSNormTP(hidden_k_full, eps=eps).cuda()
 
-    wrapper = MiniMaxQKNormWrapper(
-        q_norm=q_norm,
-        k_norm=k_norm,
-        q_size=hq,
-        kv_size=hk,
-        max_tokens=num_tokens,
-        prefix=f"test_layer_{local_rank}",
-    )
-    assert wrapper._ar_workspace is not None, (
-        f"workspace not initialised (tp={world_size})"
-    )
-
     set_random_seed(seed)
     qw = torch.randn(hidden_q_full, dtype=dtype, device="cuda")
     kw = torch.randn(hidden_k_full, dtype=dtype, device="cuda")
@@ -65,17 +54,48 @@ def _worker_forward_qk(
     torch.manual_seed(seed + 1000 + local_rank)
     qkv = torch.randn(num_tokens, hq + hk + hk, dtype=dtype, device="cuda")
 
-    # Reference: NCCL allreduce path via forward_qk (operates on separate q, k)
     q_ref, k_ref, v_ref = qkv.clone().split([hq, hk, hk], dim=-1)
     ref_q, ref_k = MiniMaxText01RMSNormTP.forward_qk(q_norm, k_norm, q_ref, k_ref)
 
-    # Skip if the Lamport custom op is not compiled in this build.
-    if not hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
-        cleanup_dist_env_and_memory()
-        return
+    # Set up Lamport workspace.
+    from vllm.distributed.parallel_state import get_tp_group
+    from vllm.model_executor.layers.mamba.lamport_workspace import (
+        get_allreduce_workspace,
+    )
 
-    # Fused: Lamport kernel
-    fused_q, fused_k, fused_v = wrapper._fused_kernel(qkv.clone())
+    workspace = get_allreduce_workspace(
+        rank=local_rank,
+        world_size=world_size,
+        max_tokens=num_tokens,
+        process_group=get_tp_group().cpu_group,
+    )
+
+    opcheck(
+        torch.ops._C.minimax_allreduce_rms_qk,
+        (
+            qkv.clone(),
+            q_norm.weight,
+            k_norm.weight,
+            workspace,
+            hq,
+            hk,
+            local_rank,
+            world_size,
+            eps,
+        ),
+    )
+    fused_q, fused_k = torch.ops._C.minimax_allreduce_rms_qk(
+        qkv.clone(),
+        q_norm.weight,
+        k_norm.weight,
+        workspace,
+        hq,
+        hk,
+        local_rank,
+        world_size,
+        eps,
+    )
+    _, _, fused_v = qkv.split([hq, hk, hk], dim=-1)
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(
@@ -83,28 +103,14 @@ def _worker_forward_qk(
         ref_q,
         atol=3e-2,
         rtol=3e-2,
-        msg=f"Q mismatch rank={local_rank} tp={world_size} dtype={dtype}",
     )
-    torch.testing.assert_close(
-        fused_k,
-        ref_k,
-        atol=3e-2,
-        rtol=3e-2,
-        msg=f"K mismatch rank={local_rank} tp={world_size} dtype={dtype}",
-    )
-    torch.testing.assert_close(
-        fused_v,
-        v_ref,
-        atol=0,
-        rtol=0,
-        msg=f"V should be unchanged rank={local_rank} tp={world_size} dtype={dtype}",
-    )
+    torch.testing.assert_close(fused_k, ref_k, atol=3e-2, rtol=3e-2)
 
     cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
+    not current_platform.is_cuda(),
     reason="CUDA required",
 )
 @pytest.mark.parametrize("world_size", [2, 4, 8])
@@ -124,7 +130,7 @@ def test_minimax_reduce_rms_qk(
     eps,
     seed,
 ):
-    num_gpus = cuda_device_count_stateless()
+    num_gpus = current_platform.device_count()
     if num_gpus < world_size:
         pytest.skip(f"Need >= {world_size} GPUs, have {num_gpus}")
     hidden_q_full, hidden_k_full = hidden_dims
