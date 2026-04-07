@@ -1939,7 +1939,10 @@ class NixlConnectorWorker:
         if isinstance(self.kv_topo, DcpTpKVTopology):
             remote_dcp_size = self.kv_topo.remote_dcp_size.get(engine_id, 1)
         effective_remote_tp = remote_tp_size * remote_dcp_size
-        effective_local_tp = self.kv_topo.tp_size
+        local_dcp_size = 1
+        if isinstance(self.kv_topo, DcpTpKVTopology):
+            local_dcp_size = self.kv_topo.dcp_size
+        effective_local_tp = self.kv_topo.tp_size * local_dcp_size
         if effective_local_tp >= effective_remote_tp:
             tp_ratio = effective_local_tp // effective_remote_tp
         else:
@@ -2120,6 +2123,10 @@ class NixlConnectorWorker:
             )
         effective_remote_tp = remote_tp_size * remote_dcp_size
         effective_local_tp = self.kv_topo.tp_size
+        local_dcp_size = 1
+        if isinstance(self.kv_topo, DcpTpKVTopology):
+            local_dcp_size = self.kv_topo.dcp_size
+        effective_local_tp = self.kv_topo.tp_size * local_dcp_size
         if effective_local_tp >= effective_remote_tp:
             assert effective_local_tp % effective_remote_tp == 0, (
                 f"Effective local TP {effective_local_tp} is not divisible "
@@ -2135,9 +2142,10 @@ class NixlConnectorWorker:
 
         logger.debug(
             "Handshake validation: local_tp=%d, remote_tp=%d, "
-            "remote_dcp=%d, eff_local_tp=%d, eff_remote_tp=%d, tp_ratio=%d",
+            "remote_dcp=%d, local_dcp=%d, eff_local_tp=%d, eff_remote_tp=%d, "
+            "tp_ratio=%d",
             self.kv_topo.tp_size, remote_tp_size, remote_dcp_size,
-            effective_local_tp, effective_remote_tp, tp_ratio,
+            local_dcp_size, effective_local_tp, effective_remote_tp, tp_ratio,
         )
 
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
@@ -2588,7 +2596,7 @@ class NixlConnectorWorker:
         effective_remote_tp = (
             self.kv_topo.remote_tp_size[meta.remote.engine_id] * remote_dcp_size
         )
-        effective_local_tp = self.kv_topo.tp_size
+        effective_local_tp = self.kv_topo.tp_size * local_dcp_size
         if effective_local_tp >= effective_remote_tp:
             tp_ratio = effective_local_tp // effective_remote_tp
         else:
