@@ -1144,14 +1144,15 @@ def assert_draft_model_correctness(args: ArgsTest):
     # @pytest.mark.xfail(raises=AsyncSchedulingNotEnabledError) catches only this
     # specific failure — leaving all other assertion failures (e.g. correctness or
     # acceptance-rate checks above) visible as real test failures.
-    if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
+    has_async = spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+    del spec_llm  # CLEANUP
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+    if not has_async:
         raise AsyncSchedulingNotEnabledError(
             "Expected async_scheduling=True for draft_model spec decode, got False."
             " See https://github.com/vllm-project/vllm/issues/38929"
         )
-    del spec_llm  # CLEANUP
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
 
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
