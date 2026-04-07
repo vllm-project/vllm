@@ -390,3 +390,72 @@ def test_merge_attn_states(
         len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) * len(NUM_QUERY_HEADS) * len(DTYPES)
     ):
         generate_markdown_table()
+
+
+@pytest.mark.parametrize("num_tokens", [32, 128, 512])
+@pytest.mark.parametrize("num_query_heads", [8, 32])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("input_dtype", [torch.float32, torch.bfloat16])
+@torch.inference_mode()
+def test_merge_attn_states_both_lse_neg_inf(
+    num_tokens: int,
+    num_query_heads: int,
+    head_size: int,
+    input_dtype: torch.dtype,
+):
+    """Regression test for NaN when both prefix_lse and suffix_lse are -inf.
+
+    This happens during chunked prefill when a request has zero context
+    tokens — both sides produce no valid attention scores, so both LSEs
+    are -inf.  The kernel must produce finite (zero) output, not NaN.
+    """
+    device = "cuda"
+
+    prefix_output = torch.randn(
+        (num_tokens, num_query_heads, head_size),
+        dtype=input_dtype, device=device,
+    )
+    suffix_output = torch.randn(
+        (num_tokens, num_query_heads, head_size),
+        dtype=input_dtype, device=device,
+    )
+    output = torch.zeros_like(prefix_output)
+
+    prefix_lse = torch.randn(
+        num_query_heads, num_tokens, dtype=torch.float32, device=device,
+    )
+    suffix_lse = torch.randn(
+        num_query_heads, num_tokens, dtype=torch.float32, device=device,
+    )
+
+    # --- Inject edge cases ---
+    # ~25% of (head, token) positions: both LSEs = -inf  (the NaN trigger)
+    both_neg_inf_mask = torch.rand(num_query_heads, num_tokens) < 0.25
+    prefix_lse[both_neg_inf_mask] = float("-inf")
+    suffix_lse[both_neg_inf_mask] = float("-inf")
+
+    # ~10% of remaining positions: both LSEs = +inf  (FA2 empty-sequence style)
+    fa2_mask = (torch.rand(num_query_heads, num_tokens) < 0.10) & ~both_neg_inf_mask
+    prefix_lse[fa2_mask] = float("inf")
+    suffix_lse[fa2_mask] = float("inf")
+
+    merge_attn_states_triton(
+        output, prefix_output, prefix_lse, suffix_output, suffix_lse,
+    )
+
+    # 1) No NaN anywhere in the output.
+    nan_count = torch.isnan(output).sum().item()
+    assert nan_count == 0, (
+        f"Found {nan_count} NaN elements in output"
+    )
+
+    # 2) Positions where both LSEs were -inf must produce zero output
+    #    (no attention scores to merge → zero weight on both sides).
+    #    both_neg_inf_mask is [num_heads, num_tokens], output is
+    #    [num_tokens, num_heads, head_size].
+    both_inf_idx = both_neg_inf_mask.T.unsqueeze(-1).expand_as(output)
+    zero_region = output[both_inf_idx]
+    assert torch.all(zero_region == 0), (
+        f"Expected zero output for both-neg-inf positions, "
+        f"got max abs = {zero_region.abs().max().item()}"
+    )
