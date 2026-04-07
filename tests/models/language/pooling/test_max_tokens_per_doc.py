@@ -34,8 +34,10 @@ RERANK_CONFIGS = [
         model="jinaai/jina-reranker-v2-base-multilingual",
         args=[
             "--enforce-eager",
-            "--max-model-len", "256",
-            "--gpu-memory-utilization", "0.3",
+            "--max-model-len",
+            "256",
+            "--gpu-memory-utilization",
+            "0.3",
             "--trust-remote-code",
         ],
     ),
@@ -43,13 +45,18 @@ RERANK_CONFIGS = [
         model="BAAI/bge-reranker-v2-gemma",
         args=[
             "--enforce-eager",
-            "--max-model-len", "256",
-            "--gpu-memory-utilization", "0.3",
-            "--hf-overrides", json.dumps({
-                "architectures": ["GemmaForSequenceClassification"],
-                "classifier_from_token": ["Yes"],
-                "method": "no_post_processing",
-            }),
+            "--max-model-len",
+            "256",
+            "--gpu-memory-utilization",
+            "0.3",
+            "--hf-overrides",
+            json.dumps(
+                {
+                    "architectures": ["GemmaForSequenceClassification"],
+                    "classifier_from_token": ["Yes"],
+                    "method": "no_post_processing",
+                }
+            ),
             "--chat-template",
             os.path.join(TEMPLATE_DIR, "bge-reranker-v2-gemma.jinja"),
         ],
@@ -58,13 +65,18 @@ RERANK_CONFIGS = [
         model="Qwen/Qwen3-Reranker-0.6B",
         args=[
             "--enforce-eager",
-            "--max-model-len", "256",
-            "--gpu-memory-utilization", "0.3",
-            "--hf-overrides", json.dumps({
-                "architectures": ["Qwen3ForSequenceClassification"],
-                "classifier_from_token": ["no", "yes"],
-                "is_original_qwen3_reranker": True,
-            }),
+            "--max-model-len",
+            "256",
+            "--gpu-memory-utilization",
+            "0.3",
+            "--hf-overrides",
+            json.dumps(
+                {
+                    "architectures": ["Qwen3ForSequenceClassification"],
+                    "classifier_from_token": ["no", "yes"],
+                    "is_original_qwen3_reranker": True,
+                }
+            ),
             "--chat-template",
             os.path.join(TEMPLATE_DIR, "qwen3_reranker.jinja"),
         ],
@@ -130,11 +142,6 @@ def test_max_tokens_per_doc_reduces_tokens(server):
         },
     )
     response_with_limit.raise_for_status()
-    rerank_with_limit = RerankResponse.model_validate(
-        response_with_limit.json()
-    )
+    rerank_with_limit = RerankResponse.model_validate(response_with_limit.json())
 
-    assert (
-        rerank_with_limit.usage.prompt_tokens
-        < rerank_no_limit.usage.prompt_tokens
-    )
+    assert rerank_with_limit.usage.prompt_tokens < rerank_no_limit.usage.prompt_tokens

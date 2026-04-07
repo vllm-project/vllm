@@ -236,9 +236,7 @@ class PoolingServingBase(ABC):
         for param_name in ("max_tokens_per_doc", "max_tokens_per_query"):
             value = getattr(ctx.request, param_name, 0)
             if value < 0:
-                raise ValueError(
-                    f"{param_name} must be a non-negative integer"
-                )
+                raise ValueError(f"{param_name} must be a non-negative integer")
             if value > 0 and value >= self.max_model_len:
                 raise ValueError(
                     f"{param_name} ({value}) must be less "

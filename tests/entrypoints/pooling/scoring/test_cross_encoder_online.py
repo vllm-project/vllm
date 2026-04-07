@@ -529,14 +529,9 @@ async def test_rerank_max_tokens_per_doc_reduces_tokens(
         },
     )
     response_with_limit.raise_for_status()
-    rerank_with_limit = RerankResponse.model_validate(
-        response_with_limit.json()
-    )
+    rerank_with_limit = RerankResponse.model_validate(response_with_limit.json())
 
-    assert (
-        rerank_with_limit.usage.prompt_tokens
-        < rerank_no_limit.usage.prompt_tokens
-    )
+    assert rerank_with_limit.usage.prompt_tokens < rerank_no_limit.usage.prompt_tokens
 
 
 @pytest.mark.asyncio

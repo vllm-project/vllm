@@ -49,9 +49,7 @@ def truncate_text_to_tokens(
     boundary, avoiding lossy encode→decode round-trips that can shift
     the token count by 1-3 tokens due to BPE merge boundary changes.
     """
-    encoding = tokenizer(
-        text, add_special_tokens=False, return_offsets_mapping=True
-    )
+    encoding = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     if len(encoding["input_ids"]) <= max_tokens:
         return text
     char_end = encoding["offset_mapping"][max_tokens - 1][1]

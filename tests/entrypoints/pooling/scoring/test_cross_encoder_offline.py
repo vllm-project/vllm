@@ -128,9 +128,7 @@ def test_max_tokens_per_doc_offline(llm: LLM):
     outputs_with_limit = llm.score(
         TEXTS_1[0],
         long_doc,
-        pooling_params=PoolingParams(
-            extra_kwargs={"max_tokens_per_doc": 10}
-        ),
+        pooling_params=PoolingParams(extra_kwargs={"max_tokens_per_doc": 10}),
         use_tqdm=False,
     )
 
