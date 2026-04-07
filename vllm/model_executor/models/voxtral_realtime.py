@@ -296,7 +296,6 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        # Multi-modal token ID may exceed vocab size
     ) -> torch.Tensor:
         """Pass post-conv embeddings directly as input.
 
@@ -306,6 +305,19 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
         client disconnect), return zero embeddings instead of crashing
         the engine so that all other in-flight requests stay alive.
         """
+        pool_size = self.config.audio_config.block_pool_size
+        embed_dim = self.config.audio_config.d_model * pool_size
+
+        # Always allocate full-sized output — one row per scheduled token.
+        # Non-multimodal positions stay zero, which is correct because
+        # forward() adds audio_text_embeds + text_embeds.
+        output = torch.zeros(
+            input_ids.shape[0],
+            embed_dim,
+            dtype=self.whisper_encoder.dtype,
+            device=input_ids.device,
+        )
+
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
             logger.warning(
                 "Realtime model received empty multimodal embeddings "
@@ -313,16 +325,24 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
                 "avoid engine crash.",
                 input_ids.shape[0],
             )
-            pool_size = self.config.audio_config.block_pool_size
-            embed_dim = self.config.audio_config.d_model * pool_size
-            return torch.zeros(
-                input_ids.shape[0],
-                embed_dim,
-                dtype=self.whisper_encoder.dtype,
-                device=input_ids.device,
-            )
+            return output
+
         mm_embeds_flat = _flatten_embeddings(multimodal_embeddings)
-        return mm_embeds_flat
+
+        if is_multimodal is not None and is_multimodal.any():
+            # Place multimodal embeddings at the correct positions
+            output[is_multimodal] = mm_embeds_flat.to(dtype=output.dtype)
+        else:
+            # Fallback: if no mask provided, assume all tokens are multimodal
+            # (original behavior for backwards compatibility)
+            if mm_embeds_flat.shape[0] == input_ids.shape[0]:
+                output = mm_embeds_flat.to(dtype=output.dtype)
+            else:
+                # Size mismatch with no mask — place what we have at the start
+                output[:mm_embeds_flat.shape[0]] = mm_embeds_flat.to(
+                    dtype=output.dtype)
+
+        return output
 
     def forward(
         self,

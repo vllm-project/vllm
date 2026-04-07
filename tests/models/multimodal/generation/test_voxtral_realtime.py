@@ -4,6 +4,7 @@ import contextlib
 
 import pytest
 import pytest_asyncio
+import torch
 from mistral_common.audio import Audio
 from mistral_common.protocol.instruct.chunk import RawAudio
 from mistral_common.protocol.transcription.request import (
@@ -95,6 +96,8 @@ async def async_engine():
         llm.shutdown()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="Requires GPU")
 def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
     audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
 
@@ -141,6 +144,8 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
         )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(),
+                    reason="Requires GPU")
 @pytest.mark.asyncio
 async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine):
     # Lazy import to avoid CUDA-reinitialization error
@@ -192,3 +197,121 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
             f"  got:      {got!r}\n"
             f"  expected: {expected!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for embed_input_ids mixed-batch fix (issue #39202)
+# ---------------------------------------------------------------------------
+
+
+class _FakeAudioConfig:
+    """Minimal stand-in for the audio config attributes used by
+    embed_input_ids."""
+
+    def __init__(self, d_model: int = 64, block_pool_size: int = 2):
+        self.d_model = d_model
+        self.block_pool_size = block_pool_size
+
+
+class _FakeConfig:
+    def __init__(self, d_model: int = 64, block_pool_size: int = 2):
+        self.audio_config = _FakeAudioConfig(d_model, block_pool_size)
+
+
+class _FakeEncoder:
+    dtype = torch.float32
+
+
+class _FakeVoxtralRealtimeGeneration:
+    """Minimal stub that reuses the real embed_input_ids logic."""
+
+    def __init__(self, d_model: int = 64, block_pool_size: int = 2):
+        self.config = _FakeConfig(d_model, block_pool_size)
+        self.whisper_encoder = _FakeEncoder()
+
+    # Bind the real method — import lazily to avoid CUDA init at import time.
+    @property
+    def _real_cls(self):
+        from vllm.model_executor.models.voxtral_realtime import (
+            VoxtralRealtimeGeneration,
+        )
+        return VoxtralRealtimeGeneration
+
+    def embed_input_ids(self, input_ids, multimodal_embeddings=None, *,
+                        is_multimodal=None):
+        return self._real_cls.embed_input_ids(
+            self, input_ids, multimodal_embeddings,
+            is_multimodal=is_multimodal)
+
+
+def _make_stub(d_model=64, block_pool_size=2):
+    return _FakeVoxtralRealtimeGeneration(d_model, block_pool_size)
+
+
+@pytest.mark.skip_global_cleanup
+def test_embed_input_ids_all_multimodal():
+    """All tokens are multimodal — output must equal the embeddings."""
+    stub = _make_stub()
+    embed_dim = 64 * 2  # d_model * block_pool_size
+    n_tokens = 3
+    input_ids = torch.zeros(n_tokens, dtype=torch.long)
+    mm_embeds = [torch.randn(n_tokens, embed_dim)]
+    is_mm = torch.ones(n_tokens, dtype=torch.bool)
+
+    out = stub.embed_input_ids(input_ids, mm_embeds, is_multimodal=is_mm)
+
+    assert out.shape == (n_tokens, embed_dim)
+    torch.testing.assert_close(out, mm_embeds[0])
+
+
+@pytest.mark.skip_global_cleanup
+def test_embed_input_ids_mixed_batch():
+    """Mixed batch: some multimodal, some not — must not crash and must
+    return the correct shape with zeros for non-multimodal positions."""
+    stub = _make_stub()
+    embed_dim = 64 * 2
+    n_tokens = 5
+    n_mm = 3
+    input_ids = torch.zeros(n_tokens, dtype=torch.long)
+    mm_data = torch.randn(n_mm, embed_dim)
+    mm_embeds = [mm_data]
+    # First 3 tokens are multimodal, last 2 are not
+    is_mm = torch.tensor([True, True, True, False, False])
+
+    out = stub.embed_input_ids(input_ids, mm_embeds, is_multimodal=is_mm)
+
+    assert out.shape == (n_tokens, embed_dim)
+    # Multimodal positions should match the embeddings
+    torch.testing.assert_close(out[:n_mm], mm_data)
+    # Non-multimodal positions should be zero
+    assert (out[n_mm:] == 0).all()
+
+
+@pytest.mark.skip_global_cleanup
+def test_embed_input_ids_no_multimodal():
+    """No multimodal embeddings — should return all zeros."""
+    stub = _make_stub()
+    embed_dim = 64 * 2
+    n_tokens = 4
+    input_ids = torch.zeros(n_tokens, dtype=torch.long)
+
+    out = stub.embed_input_ids(input_ids, [], is_multimodal=None)
+
+    assert out.shape == (n_tokens, embed_dim)
+    assert (out == 0).all()
+
+
+@pytest.mark.skip_global_cleanup
+def test_embed_input_ids_no_mask_exact_match():
+    """Fallback: is_multimodal is None but embeddings match token count."""
+    stub = _make_stub()
+    embed_dim = 64 * 2
+    n_tokens = 3
+    input_ids = torch.zeros(n_tokens, dtype=torch.long)
+    mm_data = torch.randn(n_tokens, embed_dim)
+    mm_embeds = [mm_data]
+
+    out = stub.embed_input_ids(input_ids, mm_embeds, is_multimodal=None)
+
+    assert out.shape == (n_tokens, embed_dim)
+    torch.testing.assert_close(out, mm_data)
