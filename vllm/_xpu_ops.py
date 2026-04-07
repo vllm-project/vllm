@@ -318,6 +318,91 @@ class xpu_ops:
         dst_scale[:] = kv_cache_flat[scale_indices]
 
     @staticmethod
+    def fp8_mqa_logits_torch(
+        q: torch.Tensor,
+        kv: tuple[torch.Tensor, torch.Tensor],
+        weights: torch.Tensor,
+        cu_seqlen_ks: torch.Tensor,
+        cu_seqlen_ke: torch.Tensor,
+    ) -> torch.Tensor:
+        kv, scale = kv
+        seq_len_kv = kv.shape[0]
+        k = kv.to(torch.bfloat16)
+        q = q.to(torch.bfloat16)
+
+        token_idx = torch.arange(0, seq_len_kv, device=q.device)
+        mask_lo = token_idx[None, :] >= cu_seqlen_ks[:, None]
+        mask_hi = token_idx[None, :] < cu_seqlen_ke[:, None]
+        mask = mask_lo & mask_hi
+
+        score = torch.einsum("mhd,nd->hmn", q, k).float() * scale
+        logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
+        logits = logits.masked_fill(~mask, float("-inf"))
+        return logits
+
+    @staticmethod
+    def fp8_paged_mqa_logits_torch(
+        q: torch.Tensor,
+        kv_cache: torch.Tensor,
+        weights: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables: torch.Tensor,
+        max_model_len: int,
+    ) -> torch.Tensor:
+        from vllm.utils.math_utils import cdiv
+
+        fp8_dtype = current_platform.fp8_dtype()
+        batch_size, next_n, _, dim = q.size()
+        kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
+        scale = scale.contiguous().view(torch.float)
+        q = q.float()
+        kv_cache = kv_cache.view(fp8_dtype).float() * scale
+        _, block_size, _, _ = kv_cache.size()
+        logits = torch.full(
+            [batch_size * next_n, max_model_len],
+            float("-inf"),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        context_lens_list = context_lens.tolist()
+
+        for i in range(batch_size):
+            context_len = context_lens_list[i]
+            q_offsets = torch.arange(
+                context_len - next_n, context_len, device=q.device
+            )
+            weight_slice = (
+                weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
+            )
+            for block_rk in range(cdiv(context_len, block_size)):
+                block_idx = block_tables[i][block_rk]
+                qx, kx = q[i], kv_cache[block_idx]
+                k_offsets = torch.arange(
+                    block_rk * block_size,
+                    (block_rk + 1) * block_size,
+                    device=q.device,
+                )
+                mask = (k_offsets[None, :] < context_len) & (
+                    k_offsets[None, :] <= q_offsets[:, None]
+                )
+                s = torch.where(
+                    mask[None, :, :],
+                    (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
+                        logits.dtype
+                    ),
+                    float("-inf"),
+                )
+                s = torch.relu(s) * weight_slice[..., None]
+                s = s.sum(dim=0)
+                logits[
+                    i * next_n : (i + 1) * next_n,
+                    block_rk * block_size : (block_rk + 1) * block_size,
+                ] = torch.where(k_offsets[None, :] <= q_offsets[:, None],
+                                s,
+                                float("-inf"))
+        return logits
+
+    @staticmethod
     def register_ops_once() -> None:
         global _OPS_REGISTERED
         if not _OPS_REGISTERED:
