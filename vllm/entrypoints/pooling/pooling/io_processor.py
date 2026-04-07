@@ -5,10 +5,16 @@ from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
+from vllm.entrypoints.pooling.typing import (
+    OfflineInputsContext,
+    OfflineOutputsContext,
+)
 from vllm.inputs import EngineInput
+from vllm.logger import init_logger
 from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import prompt_to_seq
+
+logger = init_logger(__name__)
 
 
 class PluginIOProcessor(PoolingIOProcessor):

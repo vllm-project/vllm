@@ -44,7 +44,6 @@ class EngineClient(ABC):
     vllm_config: VllmConfig
     model_config: ModelConfig
     renderer: BaseRenderer
-    io_processor: IOProcessor | None
     input_processor: InputProcessor
 
     @property

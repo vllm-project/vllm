@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateConfig,
-    ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
@@ -35,7 +34,7 @@ from vllm.utils.async_utils import merge_async_iterators
 from .io_processor import PoolingIOProcessor
 
 
-class PoolingServing:
+class PoolingServingBase:
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -43,51 +42,28 @@ class PoolingServing:
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
+        chat_template_config: ChatTemplateConfig,
         request_logger: RequestLogger | None,
-        chat_template: str | None = None,
-        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
-        trust_request_chat_template: bool = False,
         return_tokens_as_token_ids: bool = False,
         log_error_stack: bool = False,
     ):
-        super().__init__()
         self.engine_client = engine_client
         self.models = models
         self.model_config = models.model_config
+        self.renderer = models.renderer
+        self.vllm_config = engine_client.vllm_config
         self.max_model_len = self.model_config.max_model_len
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
         self.log_error_stack = log_error_stack
-        self.chat_template_config = ChatTemplateConfig(
-            chat_template=chat_template,
-            chat_template_content_format=chat_template_content_format,
-            trust_request_chat_template=trust_request_chat_template,
-        )
-        self.io_processor = self.init_io_processor(
-            vllm_config=engine_client.vllm_config,
-            renderer=models.renderer,
-            chat_template_config=self.chat_template_config,
-        )
-
-    def init_io_processor(
-        self,
-        vllm_config: VllmConfig,
-        renderer: BaseRenderer,
-        chat_template_config: ChatTemplateConfig,
-    ) -> PoolingIOProcessor:
-        raise NotImplementedError
+        self.chat_template_config = chat_template_config
 
     async def __call__(
         self,
         request: AnyPoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
-        ctx = await self._init_ctx(request, raw_request)
-        await self.io_processor.pre_process_online_async(ctx)
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-        await self.io_processor.post_process_online_async(ctx)
-        return await self._build_response(ctx)
+        raise NotImplementedError
 
     async def _init_ctx(
         self,
@@ -124,10 +100,8 @@ class PoolingServing:
             else await self._get_trace_headers(ctx.raw_request.headers)
         )
 
-        if ctx.pooling_params is None:
-            pooling_params = self.io_processor.create_pooling_params(ctx.request)
-        else:
-            pooling_params = ctx.pooling_params
+        assert ctx.pooling_params is not None
+        pooling_params = ctx.pooling_params
 
         if isinstance(pooling_params, list):
             for params in pooling_params:
@@ -355,3 +329,38 @@ class PoolingServing:
             params=params,
             lora_request=lora_request,
         )
+
+
+class PoolingServing(PoolingServingBase):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.io_processor = self.init_io_processor(
+            vllm_config=self.vllm_config,
+            renderer=self.renderer,
+            chat_template_config=self.chat_template_config,
+        )
+
+    def init_io_processor(
+        self,
+        vllm_config: VllmConfig,
+        renderer: BaseRenderer,
+        chat_template_config: ChatTemplateConfig,
+    ) -> PoolingIOProcessor:
+        raise NotImplementedError
+
+    async def __call__(
+        self,
+        request: AnyPoolingRequest,
+        raw_request: Request | None = None,
+    ) -> Response:
+        ctx = await self._init_ctx(request, raw_request)
+        await self.io_processor.pre_process_online_async(ctx)
+
+        if ctx.pooling_params is None:
+            ctx.pooling_params = self.io_processor.create_pooling_params(request)
+
+        await self._prepare_generators(ctx)
+        await self._collect_batch(ctx)
+        await self.io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)

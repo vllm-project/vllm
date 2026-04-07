@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.pooling.utils import enable_scoring_api
 from vllm.logger import init_logger
 
@@ -67,25 +68,25 @@ def init_pooling_state(
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
-    from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+    from vllm.entrypoints.pooling.pooling.serving import ServingPooling
     from vllm.entrypoints.pooling.scoring.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
     model_config = engine_client.model_config
-
-    resolved_chat_template = load_chat_template(args.chat_template)
+    chat_template_config = ChatTemplateConfig(
+        chat_template=load_chat_template(args.chat_template),
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+    )
 
     state.serving_pooling = (
         (
-            OpenAIServingPooling(
+            ServingPooling(
                 engine_client,
                 state.openai_serving_models,
-                state.openai_serving_render,
                 supported_tasks=supported_tasks,
                 request_logger=request_logger,
-                chat_template=resolved_chat_template,
-                chat_template_content_format=args.chat_template_content_format,
-                trust_request_chat_template=args.trust_request_chat_template,
+                chat_template_config=chat_template_config,
             )
         )
         if any(t in supported_tasks for t in POOLING_TASKS)
@@ -96,9 +97,7 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
+            chat_template_config=chat_template_config,
         )
         if "embed" in supported_tasks
         else None
@@ -108,9 +107,7 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
+            chat_template_config=chat_template_config,
         )
         if "classify" in supported_tasks
         else None
@@ -120,9 +117,7 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
+            chat_template_config=chat_template_config,
             enable_flash_late_interaction=getattr(
                 args, "enable_flash_late_interaction", True
             ),
