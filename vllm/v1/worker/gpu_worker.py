@@ -960,7 +960,7 @@ class Worker(WorkerBase):
         Start a new weight update.
 
         Prepares the model for receiving weights. For checkpoint format,
-        this runs initialize_layerwise_reload. For kernel format, this is
+        this initializes state for layerwise processing. For kernel format, this is
         a no-op but must still be called for consistency.
 
         Args:
@@ -1039,7 +1039,7 @@ class Worker(WorkerBase):
         """
         Finish the current weight update.
 
-        For checkpoint format, this runs finalize_layerwise_reload.
+        For checkpoint format, this runs layerwise postprocessing.
         Uses the is_checkpoint_format state stored by start_weight_update.
         """
         self._check_weight_transfer_engine()
