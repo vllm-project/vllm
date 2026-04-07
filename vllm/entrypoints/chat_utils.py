@@ -1129,7 +1129,7 @@ def _load_chat_template(
 
     try:
         with open(chat_template) as f:
-            if chat_template.endswith(".json"):
+            if str(chat_template).endswith(".json"):
                 chat_template_jinja = json.load(f)
                 return chat_template_jinja.get("chat_template",None)
             else:
