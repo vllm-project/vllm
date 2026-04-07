@@ -6,7 +6,7 @@ import functools
 import inspect
 import os
 import traceback
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from typing import Any
 
@@ -187,7 +187,7 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
-    events: list[dict[str, Any]] | None = None,
+    events: Iterable[Any] | None = None,
 ):
     """Manually create and end a span with explicit timestamps.
 
@@ -198,7 +198,8 @@ def manual_instrument_otel(
         attributes: Dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
-        events: List of event dicts with 'name', 'timestamp', and 'attributes' keys.
+        events: Iterable of event dicts or objects with `name`,
+            `timestamp_ns`, and `attributes`.
     """
     if not _IS_OTEL_AVAILABLE:
         return
@@ -221,9 +222,9 @@ def manual_instrument_otel(
     if events:
         for event in events:
             span.add_event(
-                name=event["name"],
-                timestamp=event.get("timestamp"),
-                attributes=event.get("attributes"),
+                name=_get_event_name(event),
+                timestamp=_get_event_timestamp(event),
+                attributes=_get_event_attributes(event),
             )
     if end_time is not None:
         span.end(end_time=end_time)
@@ -253,6 +254,24 @@ def _get_smart_context() -> Context | None:
         carrier = dict(os.environ)
 
     return TraceContextTextMapPropagator().extract(carrier)
+
+
+def _get_event_name(event: Any) -> str:
+    if isinstance(event, Mapping):
+        return event["name"]
+    return event.name
+
+
+def _get_event_timestamp(event: Any) -> int | None:
+    if isinstance(event, Mapping):
+        return event.get("timestamp")
+    return getattr(event, "timestamp_ns", None)
+
+
+def _get_event_attributes(event: Any) -> dict[str, Any] | None:
+    if isinstance(event, Mapping):
+        return event.get("attributes")
+    return getattr(event, "attributes", None)
 
 
 @contextmanager

@@ -5,6 +5,7 @@ import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
+from itertools import chain
 from typing import Any, cast
 
 import numpy as np
@@ -33,7 +34,6 @@ from vllm.v1.engine import (
     EngineCoreOutput,
     EngineCoreRequest,
     FinishReason,
-    get_event_name,
 )
 from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
@@ -777,26 +777,15 @@ class OutputProcessor:
             )
 
         # Build events list for token level tracing
-        events: list[dict[str, Any]] = []
+        events: Iterable[Any] | None = None
         assert req_state.observable_context is not None
         if req_state.observable_context.not_empty:
             attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = TOKEN_LEVEL_TRACE
             ob_context = req_state.observable_context
-            events = [
-                {
-                    "name": get_event_name(e.type),
-                    "timestamp": int(e.wall_clock_timestamp * 1e9),
-                    "attributes": e.attributes,
-                }
-                for e in ob_context.engine_core_events
-            ] + [
-                {
-                    "name": e.name,
-                    "timestamp": int(e.timestamp * 1e9),
-                    "attributes": e.attributes,
-                }
-                for e in ob_context.token_related_events
-            ]
+            events = chain(
+                ob_context.engine_core_events,
+                ob_context.token_related_events,
+            )
         else:
             attributes[SpanAttributes.GEN_AI_REQUEST_TRACE_LEVEL] = NORMAL_TRACE
 
@@ -806,7 +795,7 @@ class OutputProcessor:
             attributes=attributes,
             context=trace_context,
             kind=SpanKind.SERVER,
-            events=events if events else None,
+            events=events,
         )
 
     def _update_stats_from_output(

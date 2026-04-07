@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import functools
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, TypeAlias
 
 # Import the implementation details
@@ -131,7 +131,7 @@ def instrument_manual(
     attributes: dict[str, Any] | None = None,
     context: Any = None,
     kind: Any = None,
-    events: list[dict[str, Any]] | None = None,
+    events: Iterable[Any] | None = None,
 ):
     """Manually create a span with explicit timestamps.
 
@@ -142,7 +142,7 @@ def instrument_manual(
         attributes: Optional dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
-        events: Optional list of event dicts with 'name', 'timestamp', and 'attributes'.
+        events: Optional iterable of event dicts or event objects.
     """
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():

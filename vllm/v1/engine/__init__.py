@@ -150,6 +150,14 @@ class EngineCoreEvent(msgspec.Struct):
     wall_clock_timestamp: float
     attributes: dict[str, Any] | None = None
 
+    @property
+    def name(self) -> str:
+        return get_event_name(self.type)
+
+    @property
+    def timestamp_ns(self) -> int:
+        return int(self.wall_clock_timestamp * 1e9)
+
     @classmethod
     def new_event(
         cls,
