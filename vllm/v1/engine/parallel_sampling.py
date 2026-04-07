@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
-from typing import Any, cast
+from typing import cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -48,7 +48,6 @@ class ParentRequest:
         )
         self.max_num_generation_tokens = 0
         self.cached_child_sampling_params = None
-        self.output_kv_transfer_params_list = []
 
     def _get_child_sampling_params(
         self,

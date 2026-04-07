@@ -179,13 +179,23 @@ class RequestOutput:
                         )
                         completion.finish_reason = next_completion.finish_reason
                         completion.stop_reason = next_completion.stop_reason
+                        completion.kv_transfer_params = (
+                            next_completion.kv_transfer_params
+                        )
                     else:
                         # Replace the output with the new one
                         self.outputs[i] = next_completion
+                        if next_completion.kv_transfer_params:
+                            self.kv_transfer_params_list[i] = (
+                                next_completion.kv_transfer_params
+                            )
                     break
             else:
                 self.outputs.append(next_completion)
-                self.kv_transfer_params_list.extend(next_completion.kv_transfer_params)
+                if next_completion.kv_transfer_params:
+                    self.kv_transfer_params_list.extend(
+                        next_completion.kv_transfer_params
+                    )
 
     def __repr__(self) -> str:
         return (
