@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
     ReqId,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
@@ -58,6 +59,12 @@ class OffloadingConnectorWorker:
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
+
+        # Maps internal worker job IDs to scheduler-assigned job IDs
+        # for per-job store completion reporting.
+        self._internal_to_sched_job: dict[int, int] = {}
+        # Completed store jobs to report via build_connector_worker_meta.
+        self._completed_store_jobs: dict[int, int] = {}
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -321,10 +328,12 @@ class OffloadingConnectorWorker:
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
-        for req_id, transfer_spec in metadata.reqs_to_store.items():
+        for req_id, (sched_job_id, transfer_spec) in metadata.reqs_to_store.items():
             job_id = self._generate_job_id()
             self._jobs[job_id] = (req_id, True)
             self._store_jobs[req_id].add(job_id)
+            # Map internal job ID to scheduler job ID for per-job reporting.
+            self._internal_to_sched_job[job_id] = sched_job_id
             # NOTE(orozery): defer the store to the beginning of the next engine step,
             # so that offloading starts AFTER transfers related to token sampling,
             # thereby avoiding delays to token generation due to offloading.
@@ -358,6 +367,11 @@ class OffloadingConnectorWorker:
                     transfer_type=transfer_result.transfer_type,
                 )
             if store:
+                # Report per-job completion via worker metadata.
+                sched_job_id = self._internal_to_sched_job.pop(job_id, None)
+                if sched_job_id is not None:
+                    self._completed_store_jobs[sched_job_id] = 1
+
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
                 if req_jobs:
@@ -382,6 +396,16 @@ class OffloadingConnectorWorker:
                 del self._store_jobs[req_id]
 
         return finished_sending, finished_recving
+
+    def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
+        """Return completed store job IDs since the last call."""
+        if not self._completed_store_jobs:
+            return None
+        meta = OffloadingWorkerMetadata(
+            completed_store_jobs=self._completed_store_jobs,
+        )
+        self._completed_store_jobs = {}
+        return meta
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
