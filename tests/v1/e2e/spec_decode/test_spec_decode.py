@@ -30,6 +30,13 @@ from vllm.v1.metrics.reader import Metric
 MTP_SIMILARITY_RATE = 0.8
 
 
+class AsyncSchedulingNotEnabledError(AssertionError):
+    """Raised when async_scheduling is expected to be True for draft_model
+    spec decode but is False. Tracked in:
+    https://github.com/vllm-project/vllm/issues/38929
+    """
+
+
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
     """Skip test if available GPUs < tp_size on ROCm."""
     available_gpus = torch.accelerator.device_count()
@@ -849,7 +856,8 @@ cases = [
 @single_gpu_only
 # TODO: Fix async_scheduling & engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
 @pytest.mark.xfail(
-    reason="tests fail with async_scheduling=False & engine init errors: issue #38929"
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
 )
 def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
     args.enforce_eager = enforce_eager
@@ -859,7 +867,8 @@ def test_draft_model_correctness(args: ArgsTest, enforce_eager: bool):
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
 @pytest.mark.xfail(
-    reason="Tests fail with async_scheduling=False & engine init errors: issue #38929"
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
 )
 def test_draft_model_realistic_example():
     args = ArgsTest(
@@ -878,7 +887,8 @@ def test_draft_model_realistic_example():
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
 @pytest.mark.xfail(
-    reason="Tests fail with async_scheduling=False & engine init errors: issue #38929"
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
 )
 def test_draft_model_parallel_drafting():
     args = ArgsTest(
@@ -908,7 +918,8 @@ def test_draft_model_parallel_drafting():
 @single_gpu_only
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
 @pytest.mark.xfail(
-    reason="Tests fail with async_scheduling=False & engine init errors: issue #38929"
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
 )
 def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
     tgt_model, draft_model = models
@@ -924,7 +935,8 @@ def test_draft_model_quantization(models: tuple[str, str], enforce_eager: bool):
 @multi_gpu_only(num_gpus=2)
 # TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
 @pytest.mark.xfail(
-    reason="Tests fail with async_scheduling=False & engine init errors: issue #38929"
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
 )
 def test_draft_model_tensor_parallelism():
     """Ensure spec decode works when running with TP > 1."""
@@ -1122,9 +1134,15 @@ def assert_draft_model_correctness(args: ArgsTest):
     assert acceptance_rate >= args.expected_acceptance_rate
     assert acceptance_len >= args.expected_acceptance_len
     # draft_model auto-enables async scheduling; assert it is active.
-    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling, (
-        "Expected async_scheduling=True for draft_model spec decode, got False."
-    )
+    # Raise AsyncSchedulingNotEnabledError (a subclass of AssertionError) so that
+    # @pytest.mark.xfail(raises=AsyncSchedulingNotEnabledError) catches only this
+    # specific failure — leaving all other assertion failures (e.g. correctness or
+    # acceptance-rate checks above) visible as real test failures.
+    if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
+        raise AsyncSchedulingNotEnabledError(
+            "Expected async_scheduling=True for draft_model spec decode, got False."
+            " See https://github.com/vllm-project/vllm/issues/38929"
+        )
     del spec_llm  # CLEANUP
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
