@@ -270,7 +270,7 @@ class AiterFusedAddRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
                 group_size=128,
             )
 
-            # result, scale, residual
+            # result, residual, scale
             return at[0], at[1], at[2]
 
         pm.register_replacement(
@@ -488,6 +488,7 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
     with an triton_add_rmsnorm_pad op from AITER.
     """
 
+    @enable_fake_mode
     def __init__(self, config: VllmConfig):
         super().__init__(config)
         self.patterns: PatternMatcherPass = PatternMatcherPass(
