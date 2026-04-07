@@ -191,7 +191,7 @@ def fused_sigmoid_gating_delta_rule_update(
     scale: float = None,
     initial_state: torch.Tensor = None,
     inplace_final_state: bool = True,
-    cu_seqlens: torch.LongTensor | None = None,
+    cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,

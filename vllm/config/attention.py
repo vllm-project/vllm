@@ -56,7 +56,7 @@ class AttentionConfig:
         """
         from vllm.config.utils import get_hash_factors, hash_factors
 
-        ignored_factors: list[str] = []
+        ignored_factors: set[str] = set()
         factors = get_hash_factors(self, ignored_factors)
         return hash_factors(factors)
 

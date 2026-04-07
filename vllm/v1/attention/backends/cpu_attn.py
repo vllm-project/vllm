@@ -6,9 +6,11 @@ from typing import ClassVar
 import torch
 
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -16,7 +18,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
-    is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
@@ -38,7 +39,7 @@ class CPUAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256]
+        return [32, 64, 80, 96, 112, 128, 160, 192, 224, 256, 512]
 
     @staticmethod
     def get_name() -> str:
@@ -181,7 +182,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             causal=causal,
             sliding_window_size=self.window_size,
             isa=self.isa,
-            enable_kv_split=True,
+            enable_kv_split=envs.VLLM_CPU_ATTN_SPLIT_KV,
         )
 
         attn_metadata = CPUAttentionMetadata(
@@ -482,7 +483,7 @@ def _get_attn_isa(
 ) -> str:
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
         return "vec16"
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
+    supports_amx = torch.cpu._is_amx_tile_supported()
     supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
     supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:

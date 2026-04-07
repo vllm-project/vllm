@@ -6,10 +6,10 @@ Unit tests for engine classes (parsing, validation, registry).
 Integration tests for NCCL and IPC weight transfer between processes using Ray.
 """
 
-import base64
 import pickle
 from unittest.mock import MagicMock
 
+import pybase64 as base64
 import pytest
 import ray
 import torch
