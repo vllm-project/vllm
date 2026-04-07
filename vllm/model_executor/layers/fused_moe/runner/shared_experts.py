@@ -88,23 +88,22 @@ class SharedExperts:
                 )
 
     @property
-    def _use_external_experts(self) -> bool:
-        if self._use_dp_chunking:
-            return False
-
+    def _disable_shared_expert_overlap(self) -> bool:
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        backend = self._moe_config.moe_parallel_config.all2all_backend
+        parallel_config = self._moe_config.moe_parallel_config
         return (
-            self._moe_config.moe_parallel_config.enable_eplb
-            and backend != "allgather_reducescatter"
-        ) or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
+            parallel_config.enable_eplb
+            and parallel_config.all2all_backend != "allgather_reducescatter"
+        )
 
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
+        if self._disable_shared_expert_overlap:
+            return SharedExpertsOrder.NO_OVERLAP
+
         if self._quant_method.mk_owns_shared_expert:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
