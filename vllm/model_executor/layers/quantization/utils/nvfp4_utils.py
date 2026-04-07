@@ -17,23 +17,91 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    kE2M1ToFloat_handle,
     run_nvfp4_emulations,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
+from vllm.utils.import_utils import has_fbgemm_gpu
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
 
+# NOTE: This is ordered by preferred backend.
+# Example: if both are available, FLASHINFER_CUTLASS is preferred to VLLM_CUTLASS.
 class NvFp4LinearBackend(Enum):
-    VLLM_CUTLASS = "cutlass"
     FLASHINFER_CUTLASS = "flashinfer-cutlass"
+    VLLM_CUTLASS = "cutlass"
+    MARLIN = "marlin"
     FLASHINFER_TRTLLM = "flashinfer-trtllm"
     FLASHINFER_CUDNN = "flashinfer-cudnn"
     FBGEMM = "fbgemm"
-    MARLIN = "marlin"
     EMULATION = "emulation"
+
+
+NVFP4_LINEAR_BACKENDS = list(NvFp4LinearBackend)
+
+
+def is_backend_supported(backend: NvFp4LinearBackend) -> tuple[bool, str | None]:
+    reason = None
+    supported = True
+
+    if backend == NvFp4LinearBackend.FLASHINFER_CUTLASS:
+        # cutlass_fp4_supported() checks that the vLLM NVFP4 kernels (both
+        # quantization and GEMM) were compiled for the current SM version.
+        # FlashInfer backends still rely on the vLLM quantization kernels,
+        # so we gate them on the same check.
+        supported = (
+            cutlass_fp4_supported()
+            and current_platform.has_device_capability(100)
+            and has_flashinfer()
+        )
+
+        if not supported:
+            reason = "FlashInfer is required, >=sm_100 is required"
+    elif backend == NvFp4LinearBackend.VLLM_CUTLASS:
+        supported = cutlass_fp4_supported()
+        if not supported:
+            reason = "Cutlass is required"
+    elif backend == NvFp4LinearBackend.MARLIN:
+        supported = is_fp4_marlin_supported()
+        if not supported:
+            reason = "Marlin is required"
+    elif backend in [
+        NvFp4LinearBackend.FLASHINFER_TRTLLM,
+        NvFp4LinearBackend.FLASHINFER_CUDNN,
+    ]:
+        supported = has_flashinfer()
+        if not supported:
+            reason = "FlashInfer is required"
+    elif backend == NvFp4LinearBackend.FBGEMM:
+        supported = has_fbgemm_gpu()
+        if not supported:
+            reason = "fbgemm_gpu is required"
+    elif backend == NvFp4LinearBackend.EMULATION:
+        # e.g. AMD Instinct does not support native NVFP4.
+        unsupported_reasons = {}
+        for other_backend in NVFP4_LINEAR_BACKENDS:
+            if other_backend == NvFp4LinearBackend.EMULATION:
+                continue
+            other_supported, other_reason = is_backend_supported(other_backend)
+            if not other_supported:
+                unsupported_reasons[other_backend] = other_reason
+
+        if unsupported_reasons:
+            unsupported_reasons_str = "\n - ".join(
+                [f"{b.value}: {r}" for b, r in unsupported_reasons.items()]
+            )
+            logger.warning_once(
+                f"NVFP4 linear falling back to the slow and unoptimized "
+                f"backend=NvFp4LinearBackend.EMULATION as no optimized backend is "
+                f"available (unavailable reasons:\n - {unsupported_reasons_str}\n). "
+                "In case you expect one of these backend to be used, "
+                "please verify your environment."
+            )
+
+    return supported, reason
 
 
 def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
@@ -41,7 +109,7 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     Select the best available NVFP4 GEMM backend based on environment
     configuration and platform capabilities.
     """
-    backend: NvFp4LinearBackend | None = None
+    selected_backend: NvFp4LinearBackend | None = None
 
     if envs.VLLM_USE_FBGEMM:
         try:
@@ -51,51 +119,36 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
                 "Backend fbgemm requires fbgemm.f4f4bf16 operator, "
                 "Please install with: pip install fbgemm-gpu-genai"
             ) from exc
-        backend = NvFp4LinearBackend.FBGEMM
+        selected_backend = NvFp4LinearBackend.FBGEMM
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-        backend = NvFp4LinearBackend.EMULATION
+        selected_backend = NvFp4LinearBackend.EMULATION
     elif envs.VLLM_NVFP4_GEMM_BACKEND is None:
-        # Auto-select best available backend.
-        # cutlass_fp4_supported() checks that the vLLM NVFP4 kernels (both
-        # quantization and GEMM) were compiled for the current SM version.
-        # FlashInfer backends still rely on the vLLM quantization kernels,
-        # so we gate them on the same check.
-        if (
-            cutlass_fp4_supported()
-            and current_platform.has_device_capability(100)
-            and has_flashinfer()
-        ):
-            backend = NvFp4LinearBackend.FLASHINFER_CUTLASS
-        elif cutlass_fp4_supported():
-            backend = NvFp4LinearBackend.VLLM_CUTLASS
-        elif is_fp4_marlin_supported():
-            backend = NvFp4LinearBackend.MARLIN
+        for backend in NVFP4_LINEAR_BACKENDS:
+            supported, reason = is_backend_supported(backend)
+            if supported:
+                selected_backend = backend
+                break
     else:
-        backend = NvFp4LinearBackend(envs.VLLM_NVFP4_GEMM_BACKEND)
+        selected_backend = NvFp4LinearBackend(envs.VLLM_NVFP4_GEMM_BACKEND)
 
-    # Validate that the backend is supported
-    if backend in (
-        NvFp4LinearBackend.FLASHINFER_CUTLASS,
-        NvFp4LinearBackend.FLASHINFER_TRTLLM,
-        NvFp4LinearBackend.FLASHINFER_CUDNN,
-    ):
-        assert has_flashinfer(), f"FlashInfer is required for {backend}"
-        assert cutlass_fp4_supported(), (
-            f"{backend} requires vLLM NVFP4 quantization kernels compiled "
-            f"for the current GPU (SM {current_platform.get_device_capability()})"
-        )
-    elif backend == NvFp4LinearBackend.VLLM_CUTLASS:
-        assert cutlass_fp4_supported(), f"Cutlass is required for {backend}"
-    elif backend == NvFp4LinearBackend.MARLIN:
-        assert is_fp4_marlin_supported(), f"Marlin is required for {backend}"
-    elif backend is None:
+    if selected_backend is None:
         raise ValueError(
             f"No NVFP4 GEMM backend selected, "
-            f"available backends: {list(NvFp4LinearBackend)}"
+            f"available backends: {NVFP4_LINEAR_BACKENDS}"
         )
 
-    logger.info_once(f"Using {backend} for NVFP4 GEMM")
-    return backend
+    supported, reason = is_backend_supported(selected_backend)
+
+    if not supported:
+        raise ValueError(
+            f"The selected backend={selected_backend} is not supported in current "
+            f"environment. Reason: {reason}. Current environment: "
+            f"{envs.VLLM_USE_FBGEMM=}, {envs.VLLM_USE_NVFP4_CT_EMULATIONS=}, "
+            f"{envs.VLLM_NVFP4_GEMM_BACKEND}."
+        )
+
+    logger.info_once(f"Using {selected_backend} for NVFP4 GEMM")
+    return selected_backend
 
 
 def prepare_weights_for_nvfp4_flashinfer_trtllm(
@@ -183,6 +236,10 @@ def convert_to_nvfp4_linear_kernel_format(
         layer.weight = torch.nn.Parameter(weight, requires_grad=False)
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
         layer.weights_padding_cols = weights_padding_cols
+    elif backend == NvFp4LinearBackend.EMULATION:
+        # We can not call `.to(device)` during cuda graph capture - do it here instead.
+        # (operation not permitted when stream is capturing)
+        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(layer.weight.device)
 
 
 def apply_nvfp4_linear(
@@ -190,6 +247,7 @@ def apply_nvfp4_linear(
     layer: torch.nn.Module,
     x: torch.Tensor,
     bias: torch.Tensor | None = None,
+    swizzle: bool | None = None,
 ) -> torch.Tensor:
     """
     Apply NVFP4 linear transformation using the specified backend.
@@ -220,6 +278,7 @@ def apply_nvfp4_linear(
             weight=weight,
             weight_scale_swizzled=weight_scale,
             weight_global_scale=weight_global_scale,
+            swizzle=swizzle,
         )
         if bias is not None:
             out = out + bias
