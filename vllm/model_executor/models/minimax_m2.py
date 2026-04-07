@@ -32,7 +32,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
@@ -156,7 +156,6 @@ class MiniMaxM2Attention(nn.Module):
         qkv_bias: bool = False,
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
-        max_num_batched_tokens: int = 8192,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -219,13 +218,12 @@ class MiniMaxM2Attention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
         )
+
         self.q_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_heads,
-            eps=rms_norm_eps,
+            self.head_dim * self.total_num_heads, eps=rms_norm_eps
         )
         self.k_norm = MiniMaxText01RMSNormTP(
-            self.head_dim * self.total_num_kv_heads,
-            eps=rms_norm_eps,
+            self.head_dim * self.total_num_kv_heads, eps=rms_norm_eps
         )
 
     def forward(
@@ -235,7 +233,9 @@ class MiniMaxM2Attention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = MiniMaxText01RMSNormTP.forward_qk(self.q_norm, self.k_norm, q, k)
+        q, k = MiniMaxText01RMSNormTP.forward_qk(
+            self.q_norm, self.k_norm, q.contiguous(), k.contiguous()
+        )
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
@@ -245,19 +245,15 @@ class MiniMaxM2Attention(nn.Module):
 class MiniMaxM2DecoderLayer(nn.Module):
     def __init__(
         self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-        # model_config: ModelConfig,
-        # cache_config: CacheConfig | None = None,
-        # quant_config: QuantizationConfig | None = None,
+        config: PretrainedConfig,
+        prefix: str,
+        model_config: ModelConfig,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
     ) -> None:
         super().__init__()
-
-        config = vllm_config.model_config.hf_config
-
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
-
         if hasattr(config, "max_model_len") and isinstance(config.max_model_len, int):
             max_position_embeddings = max(
                 config.max_position_embeddings, config.max_model_len
@@ -277,15 +273,14 @@ class MiniMaxM2DecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, "attention_bias", False),
             head_dim=getattr(config, "head_dim", None),
-            cache_config=vllm_config.cache_config,
-            quant_config=vllm_config.quant_config,
-            max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+            cache_config=cache_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
 
         self.block_sparse_moe = MiniMaxM2MoE(
             config=config,
-            quant_config=vllm_config.quant_config,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -326,6 +321,9 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.config = config
 
         self.vocab_size = config.vocab_size
@@ -334,7 +332,7 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
-                quant_config=vllm_config.quant_config,
+                quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
             )
         else:
@@ -343,8 +341,11 @@ class MiniMaxM2Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: MiniMaxM2DecoderLayer(
-                vllm_config,
+                config,
                 prefix,
+                model_config=model_config,
+                cache_config=cache_config,
+                quant_config=quant_config,
             ),
             prefix=f"{prefix}.layers",
         )
