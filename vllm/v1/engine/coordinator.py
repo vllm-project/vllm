@@ -163,6 +163,10 @@ class DPCoordinatorProc:
         self.stats_update_interval_ms = min_stats_update_interval_ms
         self.enable_wave_coordination = enable_wave_coordination
 
+        # Tracks which engines have acknowledged a scheduler pause.
+        # When all engines have acked, we broadcast ALL_PAUSED.
+        self.pause_acks: set[int] = set()
+
     @staticmethod
     def run_coordinator(
         engine_count: int,
@@ -442,6 +446,21 @@ class DPCoordinatorProc:
                             wave_state_changed = True
                             self._send_start_wave(publish_back, wave, eng_index)
 
+                    # Pause barrier: collect acks from engines, broadcast
+                    # ALL_PAUSED once every engine has acknowledged.
+                    if outputs.pause_ack:
+                        self.pause_acks.add(eng_index)
+                        logger.debug(
+                            "Pause ack from engine %d (%d/%d).",
+                            eng_index,
+                            len(self.pause_acks),
+                            len(self.engines),
+                        )
+                        if len(self.pause_acks) >= len(self.engines):
+                            logger.debug("All engines paused, broadcasting ALL_PAUSED.")
+                            self._send_all_paused(publish_back)
+                            self.pause_acks.clear()
+
                 if wave_state_changed:
                     message = (None, current_wave, engines_running)
                     publish_front.send(msgspec.msgpack.encode(message))
@@ -457,6 +476,14 @@ class DPCoordinatorProc:
         """
         wave_encoded = msgspec.msgpack.encode((wave, exclude_engine_index))
         socket.send_multipart((EngineCoreRequestType.START_DP_WAVE.value, wave_encoded))
+
+    @staticmethod
+    def _send_all_paused(socket: zmq.Socket):
+        """Broadcast ALL_PAUSED to all engines once every engine has
+        acknowledged a scheduler pause."""
+        socket.send_multipart(
+            (EngineCoreRequestType.ALL_PAUSED.value, msgspec.msgpack.encode(None))
+        )
 
     def _get_engine_counts(self, do_copy=False) -> list[list[int]]:
         """Return list of [waiting, running] count lists for each engine."""

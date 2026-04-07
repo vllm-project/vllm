@@ -1604,6 +1604,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.eep_scaling_state: ElasticEPScalingState | None = None
 
+        # Future that is pending until the coordinator broadcasts ALL_PAUSED.
+        self._pause_barrier_future: Future[Any] | None = None
+
         # Initialize the engine.
         dp_rank = vllm_config.parallel_config.data_parallel_rank
         super().__init__(
@@ -1665,6 +1668,45 @@ class DPEngineCoreProc(EngineCoreProc):
                 (-1, EngineCoreOutputs(start_wave=self.current_wave))
             )
 
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        if not self.has_coordinator:
+            return super().pause_scheduler(mode=mode, clear_cache=clear_cache)
+
+        # With a coordinator we barrier-sync the pause: each engine sends
+        # a PAUSE_ACK after its local pause completes, and the coordinator
+        # broadcasts ALL_PAUSED once every engine has acknowledged. The
+        # returned Future is resolved only when ALL_PAUSED is received,
+        # so the /pause HTTP response is deferred until all DP ranks are
+        # paused.
+        if mode not in ("keep", "abort", "wait"):
+            raise ValueError(f"Invalid pause mode: {mode}")
+
+        if mode == "abort":
+            aborted_reqs = self.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            self._send_abort_outputs(aborted_reqs)
+
+        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        self.scheduler.set_pause_state(pause_state)
+
+        barrier_future: Future[Any] = Future()
+
+        def _on_idle(engine: "DPEngineCoreProc") -> None:
+            if clear_cache:
+                engine._reset_caches()
+            engine.output_queue.put_nowait((-1, EngineCoreOutputs(pause_ack=True)))
+            engine._pause_barrier_future = barrier_future
+
+        if not self.has_work():
+            _on_idle(self)
+        else:
+            self._idle_state_callbacks.append(_on_idle)
+
+        return barrier_future
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -1677,6 +1719,12 @@ class DPEngineCoreProc(EngineCoreProc):
                 if not self.engines_running:
                     logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
                     self.engines_running = True
+        elif request_type == EngineCoreRequestType.ALL_PAUSED:
+            future = getattr(self, "_pause_barrier_future", None)
+            if future is not None:
+                logger.debug("ALL_PAUSED received, completing pause barrier.")
+                future.set_result(None)
+                self._pause_barrier_future = None
         else:
             super()._handle_client_request(request_type, request)
 

@@ -209,6 +209,10 @@ class EngineCoreOutputs(
     # "old" wave, so the next wave needs to be started in other engines.
     start_wave: int | None = None
 
+    # Sent by an engine to the coordinator after its scheduler has
+    # finished pausing, so the coordinator can barrier-sync all engines.
+    pause_ack: bool = False
+
     def __post_init__(self):
         if self.timestamp == 0.0:
             self.timestamp = time.monotonic()
@@ -228,6 +232,9 @@ class EngineCoreRequestType(enum.Enum):
     EXECUTOR_FAILED = b"\x04"
     # Sentinel to wake up input_queue.get() during shutdown.
     WAKEUP = b"\x05"
+    # Broadcast from coordinator to engines when all DP ranks have
+    # acknowledged a scheduler pause.
+    ALL_PAUSED = b"\x06"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
