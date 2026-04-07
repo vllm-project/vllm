@@ -223,9 +223,18 @@ if current_platform.is_rocm():
         x,
         k_stride0,
         v_stride0,
+        kc_stride0,
+        kc_stride1,
+        kc_stride2,
+        kc_stride3,
+        kc_stride4,
+        vc_stride0,
+        vc_stride1,
+        vc_stride2,
+        vc_stride3,
+        vc_stride4,
         block_size,
         head_size,
-        num_kv_heads,
         BLOCK_SIZE: tl.constexpr,
         QUANT: tl.constexpr,
     ):
@@ -239,18 +248,19 @@ if current_platform.is_rocm():
             return
         block_id = slot_id // block_size
         block_offset = slot_id % block_size
-        dst_offset = (
-            block_id * num_kv_heads * head_size * block_size
-            + head_id * head_size * block_size
-        )
         dst_k_shuffle_offset = (
-            dst_offset + offset // x * block_size * x + block_offset * x + offset % x
+            block_id * kc_stride0
+            + head_id * kc_stride1
+            + (offset // x) * kc_stride2
+            + block_offset * kc_stride3
+            + (offset % x) * kc_stride4
         )
         dst_v_shuffle_offset = (
-            dst_offset
-            + block_offset // x * head_size * x
-            + offset * x
-            + block_offset % x
+            block_id * vc_stride0
+            + head_id * vc_stride1
+            + (block_offset // x) * vc_stride2
+            + offset * vc_stride3
+            + (block_offset % x) * vc_stride4
         )
         k_val = tl.load(key_ptr + src_offset_k + offset)
         v_val = tl.load(value_ptr + src_offset_v + offset)
@@ -290,6 +300,8 @@ if current_platform.is_rocm():
         )
         new_key_cache = key_cache.view_as(k_cache_template)
         new_value_cache = value_cache.view_as(v_cache_template)
+        k_cache_strides = new_key_cache.stride()
+        v_cache_strides = new_value_cache.stride()
         QUANT = False
         if is_quantized_kv_cache(kv_cache_dtype):
             QUANT = True
@@ -308,9 +320,18 @@ if current_platform.is_rocm():
             x,
             key.stride(0),
             value.stride(0),
+            k_cache_strides[0],
+            k_cache_strides[1],
+            k_cache_strides[2],
+            k_cache_strides[3],
+            k_cache_strides[4],
+            v_cache_strides[0],
+            v_cache_strides[1],
+            v_cache_strides[2],
+            v_cache_strides[3],
+            v_cache_strides[4],
             block_size,
             head_size,
-            num_kv_heads,
             BLOCK_SIZE=head_size,
             QUANT=QUANT,
         )
