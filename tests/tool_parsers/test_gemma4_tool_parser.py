@@ -571,7 +571,7 @@ class TestStreamingExtraction:
             'path:<|"|>index.html<|"|>,',
             'content:<|"|><!DOCTYPE html>\n<',
             'html lang="zh-CN">\n<',
-            'head>\n    <',
+            "head>\n    <",
             'meta charset="UTF-8">\n    <',
             'meta name="viewport" content="width=device-width">\n',
             '<|"|>}',
@@ -585,8 +585,7 @@ class TestStreamingExtraction:
         parsed_args = json.loads(args_text)
         assert parsed_args["path"] == "index.html"
         assert (
-            parsed_args["content"]
-            == "<!DOCTYPE html>\n"
+            parsed_args["content"] == "<!DOCTYPE html>\n"
             '<html lang="zh-CN">\n'
             "<head>\n"
             '    <meta charset="UTF-8">\n'
