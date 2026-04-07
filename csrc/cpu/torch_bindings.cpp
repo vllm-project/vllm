@@ -8,8 +8,6 @@
 // libraries use different ISAs.
 #define TORCH_EXTENSION_NAME _C
 
-std::string init_cpu_threads_env(const std::string& cpu_ids);
-
 void release_dnnl_matmul_handler(int64_t handler);
 
 int64_t create_onednn_scaled_mm_handler(const torch::Tensor& b,
@@ -354,7 +352,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "str act, str isa) -> ()");
   ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
 #endif
-  ops.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
   ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
