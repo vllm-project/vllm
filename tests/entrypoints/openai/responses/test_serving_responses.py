@@ -877,3 +877,143 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+class TestForcedToolStreaming:
+    @staticmethod
+    async def _collect_events_for_request(request: ResponsesRequest):
+        serving = _make_serving_instance_with_reasoning()
+        serving.parser = None
+
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore[attr-defined]
+        chunks = list(request.extra_body["_test_chunks"])
+
+        async def result_generator():
+            token_id = 10
+            for chunk in chunks:
+                yield _make_simple_context_with_output(chunk, [token_id])
+                token_id += 1
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+        return events
+
+    @staticmethod
+    def _assert_structured_function_call(
+        events, expected_name: str, expected_args: str
+    ):
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 1
+        function_item = function_items[0].item
+        assert function_item.name == expected_name
+
+        argument_deltas = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas
+        assert "".join(event.delta for event in argument_deltas) == expected_args
+        assert all(event.type != "response.output_text.delta" for event in events)
+
+        function_done = [
+            event
+            for event in events
+            if event.type == "response.output_item.done"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_done) == 1
+        assert function_done[0].item.arguments == expected_args
+        assert function_done[0].item.name == expected_name
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_required_tool_choice_streams_function_call_events(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice="required",
+            stream=True,
+            extra_body={
+                "_test_chunks": [
+                    '[{"name":"get_weather","parameters":{"location":"',
+                    'Berlin',
+                    '"}}]',
+                ]
+            },
+        )
+
+        events = await self._collect_events_for_request(request)
+        self._assert_structured_function_call(
+            events, "get_weather", '{"location":"Berlin"}'
+        )
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_named_tool_choice_streams_function_call_events(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice={"type": "function", "name": "get_weather"},
+            stream=True,
+            extra_body={
+                "_test_chunks": [
+                    '{"location":"',
+                    'Berlin',
+                    '"}',
+                ]
+            },
+        )
+
+        events = await self._collect_events_for_request(request)
+        self._assert_structured_function_call(
+            events, "get_weather", '{"location":"Berlin"}'
+        )
