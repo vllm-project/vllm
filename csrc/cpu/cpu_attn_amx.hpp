@@ -302,6 +302,330 @@ class TileGemm122<c10::BFloat16> {
     _tile_loadconfig(&config);
   }
 };
+// Minimum query-head count to engage AMX for FP8 tiles; below this the AMX
+// tile-config/release overhead dominates and we fall back to the 1-2-2 pattern
+// with a smaller tile footprint (TileGemm122 already handles m <= 16).
+constexpr static int32_t kAmxMinM = 1;
+
+// FP8 E4M3/E5M2 KV cache specialisation of TileGemm224.
+// The A tile (query buffer) is always BF16; only the B tile (KV cache) is FP8.
+// FP8 bytes are dequantised to BF16 into a stack scratch buffer before being
+// loaded into AMX tiles via _tile_stream_loadd.
+// All element-count pointer-arithmetic is identical to the BF16 path; the
+// difference is purely in byte widths (1 byte/FP8 vs 2 bytes/BF16).
+template <>
+class TileGemm224<uint8_t> {
+ public:
+  static thread_local float s_k_scale;
+  static thread_local float s_v_scale;
+  static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
+  static void set_scales(
+      float k, float v,
+      Fp8KVCacheDataType dtype = Fp8KVCacheDataType::kFp8E4M3) noexcept {
+    s_k_scale = k;
+    s_v_scale = v;
+    s_fp8_kv_dtype = dtype;
+  }
+
+  template <AttentionGemmPhase phase, int32_t k_size>
+  FORCE_INLINE static void gemm(const int32_t m_size,
+                                c10::BFloat16* __restrict__ a_tile,
+                                uint8_t* __restrict__ b_tile,
+                                float* __restrict__ c_tile, const int64_t lda,
+                                const int64_t ldb, const int64_t ldc,
+                                const int32_t block_size,
+                                const int32_t dynamic_k_size,
+                                const bool accum_c) {
+    const float scale =
+        (phase == AttentionGemmPhase::QK) ? s_k_scale : s_v_scale;
+    const bool is_e5m2 = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2);
+    const float scale_2p8 = is_e5m2 ? scale : scale * 0x1p8f;
+    auto fp8_to_bf16vec = [&](const uint8_t* p) -> vec_op::BF16Vec32 {
+      if (is_e5m2) return vec_op::BF16Vec32(p, vec_op::fp8_e5m2_tag{});
+      return vec_op::BF16Vec32(p, scale_2p8);
+    };
+    // Same 32-element grouping as the BF16 path; FP8 uses 1 byte/element.
+    const int32_t k_times = dynamic_k_size / 32;
+    constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+
+    c10::BFloat16* __restrict__ a_tile_0 = a_tile;
+    c10::BFloat16* __restrict__ a_tile_1 = a_tile + lda * AMX_TILE_ROW_NUM;
+    const int64_t a_tile_stride = [&]() {
+      if constexpr (phase == AttentionGemmPhase::QK) {
+        return AMX_TILE_ROW_BYTES;
+      } else if constexpr (phase == AttentionGemmPhase::PV) {
+        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
+      } else {
+        TORCH_CHECK(false, "Unreachable");
+      }
+    }();
+
+    uint8_t* __restrict__ b_tile_2 = b_tile;
+    uint8_t* __restrict__ b_tile_3 = [&]() {
+      if constexpr (phase == AttentionGemmPhase::QK) {
+        return b_tile + (k_size * AMX_TILE_ROW_BYTES / 4);
+      } else if constexpr (phase == AttentionGemmPhase::PV) {
+        return b_tile + (block_size * AMX_TILE_ROW_BYTES / 4);
+      } else {
+        TORCH_CHECK(false, "Unreachable");
+      }
+    }();
+    const int32_t b_tile_stride = AMX_TILE_ROW_BYTES;
+
+    float* __restrict__ c_tile_4 = c_tile;
+    float* __restrict__ c_tile_5 =
+        c_tile_4 + AMX_TILE_ROW_BYTES / sizeof(float);
+    float* __restrict__ c_tile_6 = c_tile + AMX_TILE_ROW_NUM * ldc;
+    float* __restrict__ c_tile_7 =
+        c_tile_6 + AMX_TILE_ROW_BYTES / sizeof(float);
+    const int32_t c_tile_stride = ldc * sizeof(float);
+
+    if (accum_c) {
+      _tile_loadd(4, c_tile_4, c_tile_stride);
+      _tile_loadd(5, c_tile_5, c_tile_stride);
+      _tile_loadd(6, c_tile_6, c_tile_stride);
+      _tile_loadd(7, c_tile_7, c_tile_stride);
+    } else {
+      _tile_zero(4);
+      _tile_zero(5);
+      _tile_zero(6);
+      _tile_zero(7);
+    }
+
+    for (int32_t k = 0; k < k_times; ++k) {
+      // Dequantise FP8 → actual BF16 into aligned scratch buffers so that
+      // _tile_stream_loadd receives valid BF16 data.
+      alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
+      alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
+      for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
+        vec_op::BF16Vec32 fp8_bits_2 = fp8_to_bf16vec(b_tile_2 + r * 32);
+        vec_op::BF16Vec16 bf16_lo_2(
+            vec_op::FP32Vec16(fp8_bits_2, scale_2p8, 0));
+        vec_op::BF16Vec16 bf16_hi_2(
+            vec_op::FP32Vec16(fp8_bits_2, scale_2p8, 1));
+        bf16_lo_2.save(scratch_2 + r * 32);
+        bf16_hi_2.save(scratch_2 + r * 32 + 16);
+
+        vec_op::BF16Vec32 fp8_bits_3 = fp8_to_bf16vec(b_tile_3 + r * 32);
+        vec_op::BF16Vec16 bf16_lo_3(
+            vec_op::FP32Vec16(fp8_bits_3, scale_2p8, 0));
+        vec_op::BF16Vec16 bf16_hi_3(
+            vec_op::FP32Vec16(fp8_bits_3, scale_2p8, 1));
+        bf16_lo_3.save(scratch_3 + r * 32);
+        bf16_hi_3.save(scratch_3 + r * 32 + 16);
+      }
+
+      _tile_loadd(0, a_tile_0, a_tile_stride);
+      _tile_stream_loadd(2, scratch_2, b_tile_stride);
+      _tile_dpbf16ps(4, 0, 2);
+      _tile_stream_loadd(3, scratch_3, b_tile_stride);
+      _tile_dpbf16ps(5, 0, 3);
+      _tile_loadd(1, a_tile_1, a_tile_stride);
+      _tile_dpbf16ps(6, 1, 2);
+      _tile_dpbf16ps(7, 1, 3);
+
+      if constexpr (phase == AttentionGemmPhase::QK) {
+        a_tile_0 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
+        a_tile_1 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      } else if constexpr (phase == AttentionGemmPhase::PV) {
+        a_tile_0 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
+        a_tile_1 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
+      } else {
+        TORCH_CHECK(false, "Unreachable");
+      }
+      b_tile_2 += fp8_tile_elems;
+      b_tile_3 += fp8_tile_elems;
+    }
+
+    _tile_stored(4, c_tile_4, c_tile_stride);
+    _tile_stored(5, c_tile_5, c_tile_stride);
+    _tile_stored(6, c_tile_6, c_tile_stride);
+    _tile_stored(7, c_tile_7, c_tile_stride);
+  }
+
+  FORCE_INLINE static void init_tile_config(int32_t m, __tilecfg& config) {
+    const int32_t m_0 = AMX_TILE_ROW_NUM;
+    const int32_t m_1 = m - AMX_TILE_ROW_NUM;
+    config.rows[0] = m_0;
+    config.rows[1] = m_1;
+    config.rows[2] = AMX_TILE_ROW_NUM;
+    config.rows[3] = AMX_TILE_ROW_NUM;
+    config.rows[4] = m_0;
+    config.rows[5] = m_0;
+    config.rows[6] = m_1;
+    config.rows[7] = m_1;
+    _tile_loadconfig(&config);
+  }
+};
+
+thread_local float TileGemm224<uint8_t>::s_k_scale = 1.0f;
+thread_local float TileGemm224<uint8_t>::s_v_scale = 1.0f;
+thread_local Fp8KVCacheDataType TileGemm224<uint8_t>::s_fp8_kv_dtype =
+    Fp8KVCacheDataType::kFp8E4M3;
+
+// FP8 E4M3/E5M2 KV cache specialisation of TileGemm122.
+template <>
+class TileGemm122<uint8_t> {
+ public:
+  static thread_local float s_k_scale;
+  static thread_local float s_v_scale;
+  static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
+  static void set_scales(
+      float k, float v,
+      Fp8KVCacheDataType dtype = Fp8KVCacheDataType::kFp8E4M3) noexcept {
+    s_k_scale = k;
+    s_v_scale = v;
+    s_fp8_kv_dtype = dtype;
+  }
+
+  template <AttentionGemmPhase phase, int32_t k_size>
+  FORCE_INLINE static void gemm(const int32_t m_size,
+                                c10::BFloat16* __restrict__ a_tile,
+                                uint8_t* __restrict__ b_tile,
+                                float* __restrict__ c_tile, const int64_t lda,
+                                const int64_t ldb, const int64_t ldc,
+                                const int32_t block_size,
+                                const int32_t dynamic_k_size,
+                                const bool accum_c) {
+    const float scale =
+        (phase == AttentionGemmPhase::QK) ? s_k_scale : s_v_scale;
+    const bool is_e5m2 = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2);
+    const float scale_2p8 = is_e5m2 ? scale : scale * 0x1p8f;
+    auto fp8_to_bf16vec = [&](const uint8_t* p) -> vec_op::BF16Vec32 {
+      if (is_e5m2) return vec_op::BF16Vec32(p, vec_op::fp8_e5m2_tag{});
+      return vec_op::BF16Vec32(p, scale_2p8);
+    };
+    constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+
+    c10::BFloat16* __restrict__ a_tile_0 = a_tile;
+    c10::BFloat16* __restrict__ a_tile_1 = [&]() {
+      if constexpr (phase == AttentionGemmPhase::QK) {
+        return a_tile + AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      } else if constexpr (phase == AttentionGemmPhase::PV) {
+        return a_tile + AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
+      } else {
+        TORCH_CHECK(false, "Unreachable");
+      }
+    }();
+    const int64_t a_tile_stride = [&]() {
+      if constexpr (phase == AttentionGemmPhase::QK) {
+        return AMX_TILE_ROW_BYTES;
+      } else if constexpr (phase == AttentionGemmPhase::PV) {
+        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
+      } else {
+        TORCH_CHECK(false, "Unreachable");
+      }
+    }();
+
+    uint8_t* __restrict__ b_tile_2 = b_tile;
+    uint8_t* __restrict__ b_tile_3 = [&]() {
+      if constexpr (phase == AttentionGemmPhase::QK) {
+        return b_tile + (k_size * AMX_TILE_ROW_BYTES / 4);
+      } else if constexpr (phase == AttentionGemmPhase::PV) {
+        return b_tile + (block_size * AMX_TILE_ROW_BYTES / 4);
+      } else {
+        TORCH_CHECK(false, "Unreachable");
+      }
+    }();
+    uint8_t* __restrict__ b_tile_4 = b_tile_2 + fp8_tile_elems;
+    uint8_t* __restrict__ b_tile_5 = b_tile_3 + fp8_tile_elems;
+    const int64_t b_stride = AMX_TILE_ROW_BYTES;
+
+    float* __restrict__ c_tile_6 = c_tile;
+    float* __restrict__ c_tile_7 = c_tile + AMX_TILE_ROW_BYTES / sizeof(float);
+    const int64_t c_stride = ldc * sizeof(float);
+
+    const int32_t k_times = dynamic_k_size / 32;
+    const int32_t k_group_times = k_times / 2;
+    const bool has_tail = (k_times % 2 == 1);
+
+    if (accum_c) {
+      _tile_loadd(6, c_tile_6, c_stride);
+      _tile_loadd(7, c_tile_7, c_stride);
+    } else {
+      _tile_zero(6);
+      _tile_zero(7);
+    }
+
+    auto deq_tile = [&](uint8_t* src, c10::BFloat16* dst) {
+      for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
+        vec_op::BF16Vec32 fp8_bits = fp8_to_bf16vec(src + r * 32);
+        vec_op::BF16Vec16 lo(vec_op::FP32Vec16(fp8_bits, scale_2p8, 0));
+        vec_op::BF16Vec16 hi(vec_op::FP32Vec16(fp8_bits, scale_2p8, 1));
+        lo.save(dst + r * 32);
+        hi.save(dst + r * 32 + 16);
+      }
+    };
+
+    for (int32_t k = 0; k < k_group_times; ++k) {
+      alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
+      alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
+      alignas(64) c10::BFloat16 scratch_4[fp8_tile_elems];
+      alignas(64) c10::BFloat16 scratch_5[fp8_tile_elems];
+      deq_tile(b_tile_2, scratch_2);
+      deq_tile(b_tile_3, scratch_3);
+      deq_tile(b_tile_4, scratch_4);
+      deq_tile(b_tile_5, scratch_5);
+
+      _tile_loadd(0, a_tile_0, a_tile_stride);
+      _tile_stream_loadd(2, scratch_2, b_stride);
+      _tile_dpbf16ps(6, 0, 2);
+      _tile_stream_loadd(3, scratch_3, b_stride);
+      _tile_dpbf16ps(7, 0, 3);
+      _tile_loadd(1, a_tile_1, a_tile_stride);
+      _tile_stream_loadd(4, scratch_4, b_stride);
+      _tile_dpbf16ps(6, 1, 4);
+      _tile_stream_loadd(5, scratch_5, b_stride);
+      _tile_dpbf16ps(7, 1, 5);
+
+      if constexpr (phase == AttentionGemmPhase::QK) {
+        a_tile_0 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
+        a_tile_1 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      } else if constexpr (phase == AttentionGemmPhase::PV) {
+        a_tile_0 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
+        a_tile_1 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
+      }
+      b_tile_2 += 2 * fp8_tile_elems;
+      b_tile_3 += 2 * fp8_tile_elems;
+      b_tile_4 += 2 * fp8_tile_elems;
+      b_tile_5 += 2 * fp8_tile_elems;
+    }
+
+    if (has_tail) {
+      alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
+      alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
+      deq_tile(b_tile_2, scratch_2);
+      deq_tile(b_tile_3, scratch_3);
+
+      _tile_loadd(0, a_tile_0, a_tile_stride);
+      _tile_stream_loadd(2, scratch_2, b_stride);
+      _tile_dpbf16ps(6, 0, 2);
+      _tile_stream_loadd(3, scratch_3, b_stride);
+      _tile_dpbf16ps(7, 0, 3);
+    }
+
+    _tile_stored(6, c_tile_6, c_stride);
+    _tile_stored(7, c_tile_7, c_stride);
+  }
+
+  FORCE_INLINE static void init_tile_config(int32_t m, __tilecfg& config) {
+    config.rows[0] = m;
+    config.rows[1] = m;
+    config.rows[2] = AMX_TILE_ROW_NUM;
+    config.rows[3] = AMX_TILE_ROW_NUM;
+    config.rows[4] = AMX_TILE_ROW_NUM;
+    config.rows[5] = AMX_TILE_ROW_NUM;
+    config.rows[6] = m;
+    config.rows[7] = m;
+    _tile_loadconfig(&config);
+  }
+};
+
+thread_local float TileGemm122<uint8_t>::s_k_scale = 1.0f;
+thread_local float TileGemm122<uint8_t>::s_v_scale = 1.0f;
+thread_local Fp8KVCacheDataType TileGemm122<uint8_t>::s_fp8_kv_dtype =
+    Fp8KVCacheDataType::kFp8E4M3;
+
 }  // namespace
 
 template <typename scalar_t, int64_t head_dim>
@@ -502,9 +826,84 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim> {
     }
   }
 
- private:
+ protected:
   alignas(64) __tilecfg amx_tile_config_;
   int32_t current_q_head_num_;
+};
+
+// FP8 E4M3 KV-cache variant of the AMX attention implementation.
+// Uses TileGemm224<uint8_t> / TileGemm122<uint8_t> which dequantise FP8 bytes
+// to BF16 in a stack scratch buffer before each AMX tile load.
+// BlockSizeAlignment is hardcoded to 32 (same as BF16 AMX) because
+// AMX_TILE_ROW_BYTES / sizeof(uint8_t) = 64 would reject block_size=32.
+template <typename scalar_t, int64_t head_dim>
+class AttentionImplFP8AMX : public AttentionImpl<ISA::AMX, scalar_t, head_dim> {
+  using Base = AttentionImpl<ISA::AMX, scalar_t, head_dim>;
+
+ public:
+  using query_t = typename Base::query_t;
+  using q_buffer_t = typename Base::q_buffer_t;
+  using logits_buffer_t = typename Base::logits_buffer_t;
+  using partial_output_buffer_t = typename Base::partial_output_buffer_t;
+  using prob_buffer_t = typename Base::prob_buffer_t;
+  // Override: KV cache is uint8 (FP8 E4M3).
+  using kv_cache_t = uint8_t;
+
+  // Override BlockSizeAlignment so that block_size=32 is accepted.
+  constexpr static int64_t BlockSizeAlignment = 32;
+  // Re-export constants the mainloop accesses directly on this type.
+  constexpr static int64_t HeadDimAlignment = Base::HeadDimAlignment;
+  constexpr static int64_t MaxQHeadNumPerIteration =
+      Base::MaxQHeadNumPerIteration;
+  constexpr static int64_t HeadDim = Base::HeadDim;
+  constexpr static ISA ISAType = Base::ISAType;
+  constexpr static bool scale_on_logits = Base::scale_on_logits;
+
+  // Override stride helpers to use BlockSizeAlignment = 32.
+  constexpr static int64_t k_cache_token_group_stride(
+      const int32_t /*block_size*/) {
+    return BlockSizeAlignment * head_dim;
+  }
+  constexpr static int64_t v_cache_token_group_stride(
+      const int32_t /*block_size*/) {
+    return BlockSizeAlignment * (AMX_TILE_ROW_BYTES / 4);
+  }
+  constexpr static int64_t v_cache_head_group_stride(const int32_t block_size) {
+    return block_size * HeadDimAlignment;
+  }
+
+  float k_scale = 1.0f;
+  float v_scale = 1.0f;
+  Fp8KVCacheDataType fp8_kv_dtype = Fp8KVCacheDataType::kFp8E4M3;
+
+  void init_from_input(const AttentionInput* input) {
+    k_scale = input->k_scale_fp8;
+    v_scale = input->v_scale_fp8;
+    fp8_kv_dtype = input->fp8_kv_dtype;
+  }
+
+  template <template <typename tile_gemm_t> typename attention>
+  FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
+    TileGemm224<uint8_t>::set_scales(k_scale, v_scale, fp8_kv_dtype);
+    TileGemm122<uint8_t>::set_scales(k_scale, v_scale, fp8_kv_dtype);
+    if (q_head_num > AMX_TILE_ROW_NUM) {
+      if (q_head_num != this->current_q_head_num_) {
+        this->current_q_head_num_ = q_head_num;
+        TileGemm224<uint8_t>::init_tile_config(q_head_num,
+                                               this->amx_tile_config_);
+      }
+      attention<TileGemm224<uint8_t>> attention_iteration;
+      attention_iteration(CPU_ATTENTION_PARAMS);
+    } else {
+      if (q_head_num != this->current_q_head_num_) {
+        this->current_q_head_num_ = q_head_num;
+        TileGemm122<uint8_t>::init_tile_config(q_head_num,
+                                               this->amx_tile_config_);
+      }
+      attention<TileGemm122<uint8_t>> attention_iteration;
+      attention_iteration(CPU_ATTENTION_PARAMS);
+    }
+  }
 };
 }  // namespace cpu_attention
 

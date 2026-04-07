@@ -102,12 +102,11 @@ void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 const torch::Tensor& slot_mapping,
                                 const std::string& isa);
 
-void cpu_attn_reshape_and_cache_fp8(const torch::Tensor& key,
-                                    const torch::Tensor& value,
-                                    torch::Tensor& key_cache,
-                                    torch::Tensor& value_cache,
-                                    const torch::Tensor& slot_mapping,
-                                    double k_scale, double v_scale);
+void cpu_attn_reshape_and_cache_fp8(
+    const torch::Tensor& key, const torch::Tensor& value,
+    torch::Tensor& key_cache, torch::Tensor& value_cache,
+    const torch::Tensor& slot_mapping, double k_scale, double v_scale,
+    const std::string& isa, const std::string& kv_cache_dtype);
 
 void cpu_attention_with_kv_cache(
     const torch::Tensor& query, const torch::Tensor& key_cache,
@@ -130,7 +129,7 @@ void cpu_attention_with_kv_cache_fp8(
     const torch::Tensor& block_table, const double softcap,
     const torch::Tensor& scheduler_metadata,
     const std::optional<torch::Tensor>& s_aux, const double k_scale,
-    const double v_scale);
+    const double v_scale, const std::string& kv_cache_dtype);
 
 // Note: just for avoiding importing errors
 void placeholder_op() { TORCH_CHECK(false, "Unimplemented"); }
@@ -341,7 +340,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "cpu_attn_reshape_and_cache_fp8(Tensor key, Tensor value, Tensor(a2!) "
       "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, "
-      "float k_scale, float v_scale) -> ()",
+      "float k_scale, float v_scale, str isa=\"vec\", "
+      "str kv_cache_dtype=\"fp8_e4m3\") -> ()",
       &cpu_attn_reshape_and_cache_fp8);
   ops.def(
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
@@ -356,7 +356,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor seq_lens, float scale, bool causal, Tensor? alibi_slopes, "
       "SymInt sliding_window_left, SymInt sliding_window_right, "
       "Tensor block_table, float softcap, Tensor scheduler_metadata, "
-      "Tensor? s_aux, float k_scale, float v_scale) -> ()",
+      "Tensor? s_aux, float k_scale, float v_scale, "
+      "str kv_cache_dtype=\"fp8_e4m3\") -> ()",
       &cpu_attention_with_kv_cache_fp8);
 
   // placeholders

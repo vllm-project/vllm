@@ -11,6 +11,10 @@ static_assert(false, "AVX2 must be supported for the current implementation.");
 
 namespace vec_op {
 
+// Tag for E5M2 BF16Vec32 constructor (avoids collision with E4M3 float-scale
+// ctor).
+struct fp8_e5m2_tag {};
+
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
   AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__) \
@@ -190,6 +194,15 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     reg = _mm512_or_si512(sign, payload);
   }
 
+  // Decode 32 FP8-E5M2 bytes to FP16 layout.
+  // E5M2 and FP16 share the same 5-bit exponent bias (15), so FP8 byte b maps
+  // directly to FP16 bits by shifting left 8 — no sign/payload reconstruction.
+  // Scale is applied later in FP32Vec16(BF16Vec32&, scale, upper).
+  explicit BF16Vec32(const uint8_t* ptr, fp8_e5m2_tag) {
+    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    reg = _mm512_slli_epi16(_mm512_cvtepu8_epi16(b8), 8);
+  }
+
   void save(void* ptr) const { *reinterpret_cast<__m512i*>(ptr) = reg; }
 };
 #else
@@ -214,10 +227,8 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
             _mm256_castsi128_si256((__m128i)vec8_data.reg),
             (__m128i)vec8_data.reg, 1)) {}
 
-  // Decode 32 FP8-E4M3 bytes to FP16 layout (stored in the BF16 register).
-  // scale is intentionally not applied here; it is passed through to the
-  // downstream FP32Vec16(BF16Vec32&, scale, upper) call that converts to float.
-  // The float parameter must be kept to avoid collision with BF16Vec32(void*).
+  // E4M3 decode (AVX2 path) — same bit-layout trick as the AVX512 variant
+  // above.
   explicit BF16Vec32(const uint8_t* ptr, [[maybe_unused]] float /*scale*/) {
     __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
     __m128i b8_low = _mm256_extracti128_si256(b8, 0);
@@ -235,6 +246,16 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
         _mm256_and_si256(b16_high, _mm256_set1_epi16(0x7F)), 7);
     reg_low = _mm256_or_si256(sign_low, payload_low);
     reg_high = _mm256_or_si256(sign_high, payload_high);
+  }
+
+  // E5M2 decode (AVX2 path) — b << 8 maps to FP16 bits; see AVX512 variant
+  // above.
+  explicit BF16Vec32(const uint8_t* ptr, fp8_e5m2_tag) {
+    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    __m128i b8_low = _mm256_extracti128_si256(b8, 0);
+    __m128i b8_high = _mm256_extracti128_si256(b8, 1);
+    reg_low = _mm256_slli_epi16(_mm256_cvtepu8_epi16(b8_low), 8);
+    reg_high = _mm256_slli_epi16(_mm256_cvtepu8_epi16(b8_high), 8);
   }
 
   void save(void* ptr) const {

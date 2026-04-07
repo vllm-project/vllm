@@ -119,9 +119,13 @@ class TileGemm82FP8 {
  public:
   static thread_local float s_k_scale;
   static thread_local float s_v_scale;
-  static void set_scales(float k, float v) noexcept {
+  static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
+  static void set_scales(
+      float k, float v,
+      Fp8KVCacheDataType dtype = Fp8KVCacheDataType::kFp8E4M3) noexcept {
     s_k_scale = k;
     s_v_scale = v;
+    s_fp8_kv_dtype = dtype;
   }
 
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -189,10 +193,15 @@ class TileGemm82FP8 {
     }
 
     float* __restrict__ curr_a = a_tile;
-    const float scale_2p8 = scale * 0x1p8f;
+    const bool is_e5m2 = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2);
+    const float scale_2p8 = is_e5m2 ? scale : scale * 0x1p8f;
+    auto fp8_to_bf16vec = [&](const uint8_t* p) -> vec_op::BF16Vec32 {
+      if (is_e5m2) return vec_op::BF16Vec32(p, vec_op::fp8_e5m2_tag{});
+      return vec_op::BF16Vec32(p, scale_2p8);
+    };
     for (int32_t k = 0; k < dynamic_k_size; ++k) {
       // Dequantize 32 FP8 bytes (two groups of 16) to float32.
-      vec_op::BF16Vec32 fp16_b_reg(curr_b_0, scale_2p8);
+      vec_op::BF16Vec32 fp16_b_reg = fp8_to_bf16vec(curr_b_0);
       vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, scale_2p8, 0);
       vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, scale_2p8, 1);
 
@@ -220,6 +229,8 @@ class TileGemm82FP8 {
 
 thread_local float TileGemm82FP8::s_k_scale = 1.0f;
 thread_local float TileGemm82FP8::s_v_scale = 1.0f;
+thread_local Fp8KVCacheDataType TileGemm82FP8::s_fp8_kv_dtype =
+    Fp8KVCacheDataType::kFp8E4M3;
 
 }  // namespace
 
@@ -368,20 +379,22 @@ class AttentionImplFP8VEC : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
   using logits_buffer_t = typename Base::logits_buffer_t;
   using partial_output_buffer_t = typename Base::partial_output_buffer_t;
   using prob_buffer_t = typename Base::prob_buffer_t;
-  // Override: KV cache is stored as uint8 (FP8 E4M3).
+  // Override: KV cache is stored as uint8 (FP8 E4M3 or E5M2).
   using kv_cache_t = uint8_t;
 
   float k_scale = 1.0f;
   float v_scale = 1.0f;
+  Fp8KVCacheDataType fp8_kv_dtype = Fp8KVCacheDataType::kFp8E4M3;
 
   void init_from_input(const AttentionInput* input) {
     k_scale = input->k_scale_fp8;
     v_scale = input->v_scale_fp8;
+    fp8_kv_dtype = input->fp8_kv_dtype;
   }
 
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
-    TileGemm82FP8::set_scales(k_scale, v_scale);
+    TileGemm82FP8::set_scales(k_scale, v_scale, fp8_kv_dtype);
     attention<TileGemm82FP8> attention_iteration;
     attention_iteration(CPU_ATTENTION_PARAMS);
   }

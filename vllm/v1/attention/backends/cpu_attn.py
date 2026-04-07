@@ -35,7 +35,12 @@ class CPUAttentionBackend(AttentionBackend):
         torch.bfloat16,
         torch.float32,
     ]
-    supported_kv_cache_dtypes: ClassVar[list[str]] = ["auto", "fp8", "fp8_e4m3"]
+    supported_kv_cache_dtypes: ClassVar[list[str]] = [
+        "auto",
+        "fp8",
+        "fp8_e4m3",
+        "fp8_e5m2",
+    ]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
@@ -331,6 +336,8 @@ class CPUAttentionBackendImpl(AttentionImpl):
                     attn_metadata.slot_mapping,
                     layer._k_scale_float,
                     layer._v_scale_float,
+                    attn_metadata.isa,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
             else:
                 ops.cpu_attn_reshape_and_cache(
@@ -374,6 +381,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
                     s_aux=self.sinks,
                     k_scale=layer._k_scale_float,
                     v_scale=layer._v_scale_float,
+                    kv_cache_dtype=self.kv_cache_dtype,
                 )
             else:
                 ops.cpu_attention_with_kv_cache(
@@ -527,12 +535,7 @@ def _get_attn_isa(
         raise NotImplementedError(
             "FP8 KV cache is only supported on x86 (requires AVX2 or AVX-512)."
         )
-    if (
-        supports_amx
-        and dtype in (torch.bfloat16,)
-        and block_size % 32 == 0
-        and not fp8_kv
-    ):
+    if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:
         if supports_arm:

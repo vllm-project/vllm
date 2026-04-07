@@ -3184,6 +3184,8 @@ def cpu_attn_reshape_and_cache_fp8(
     slot_mapping: torch.Tensor,
     k_scale: float,
     v_scale: float,
+    isa: str = "vec",
+    kv_cache_dtype: str = "fp8_e4m3",
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache_fp8(
         key,
@@ -3193,6 +3195,8 @@ def cpu_attn_reshape_and_cache_fp8(
         slot_mapping,
         k_scale,
         v_scale,
+        isa,
+        kv_cache_dtype,
     )
 
 
@@ -3248,6 +3252,7 @@ def cpu_attention_with_kv_cache_fp8(
     s_aux: torch.Tensor | None,
     k_scale: float,
     v_scale: float,
+    kv_cache_dtype: str = "fp8_e4m3",
 ) -> None:
     torch.ops._C.cpu_attention_with_kv_cache_fp8(
         query,
@@ -3267,6 +3272,7 @@ def cpu_attention_with_kv_cache_fp8(
         s_aux,
         k_scale,
         v_scale,
+        kv_cache_dtype,
     )
 
 

@@ -14,6 +14,13 @@
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16, NEON, VXE };
 
+// Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType.
+// "fp8" / "fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
+enum class Fp8KVCacheDataType {
+  kFp8E4M3 = 0,
+  kFp8E5M2 = 1,
+};
+
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};
 
@@ -780,6 +787,8 @@ struct AttentionInput {
   // FP8 KV cache scales (used by AttentionImplFP8VEC; ignored by other impls)
   float k_scale_fp8 = 1.0f;
   float v_scale_fp8 = 1.0f;
+  // FP8 format: E4M3 (default) or E5M2
+  Fp8KVCacheDataType fp8_kv_dtype = Fp8KVCacheDataType::kFp8E4M3;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \

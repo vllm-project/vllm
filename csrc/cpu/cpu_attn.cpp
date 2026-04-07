@@ -1,6 +1,17 @@
 #include "cpu_attn_dispatch_generated.h"
 #include "cpu/cpu_attn_fp8.hpp"
 
+// Maps kv_cache_dtype string to Fp8KVCacheDataType enum.
+// Mirrors DISPATCH_BY_KV_CACHE_DTYPE in
+// csrc/quantization/w8a8/fp8/nvidia/quant_utils.cuh:
+//   "fp8" / "fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
+static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
+    const std::string& kv_cache_dtype) {
+  if (kv_cache_dtype == "fp8_e5m2")
+    return cpu_attention::Fp8KVCacheDataType::kFp8E5M2;
+  return cpu_attention::Fp8KVCacheDataType::kFp8E4M3;
+}
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -131,7 +142,8 @@ void cpu_attn_reshape_and_cache_fp8(
         key_cache,  // [num_blocks, num_kv_heads, block_size, head_size] uint8
     torch::Tensor& value_cache,         // same shape, uint8
     const torch::Tensor& slot_mapping,  // [token_num]
-    const double k_scale, const double v_scale) {
+    const double k_scale, const double v_scale, const std::string& isa,
+    const std::string& kv_cache_dtype) {
   TORCH_CHECK(key_cache.scalar_type() == at::ScalarType::Byte,
               "key_cache must be uint8 for FP8 path");
   TORCH_CHECK(value_cache.scalar_type() == at::ScalarType::Byte,
@@ -143,21 +155,58 @@ void cpu_attn_reshape_and_cache_fp8(
 
   const float k_inv = 1.0f / static_cast<float>(k_scale);
   const float v_inv = 1.0f / static_cast<float>(v_scale);
+  const auto fp8_dtype = parse_fp8_kv_dtype(kv_cache_dtype);
 
   const int64_t token_num = key.size(0);
   const int64_t head_num = key.size(1);
   const int64_t head_dim = key.size(2);
   const int64_t block_size = key_cache.size(2);
 
+#if defined(CPU_CAPABILITY_AMXBF16)
+  if (isa == "amx") {
+    VLLM_DISPATCH_FLOATING_TYPES(
+        key.scalar_type(), "cpu_attn_reshape_and_cache_fp8_amx", [&]() {
+          if (fp8_dtype == cpu_attention::Fp8KVCacheDataType::kFp8E5M2) {
+            reshape_and_cache_fp8_amx_e5m2_typed<scalar_t>(
+                key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+                key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
+                slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
+                block_size, key.stride(0), key.stride(1), value.stride(0),
+                value.stride(1), key_cache.stride(0), key_cache.stride(1),
+                value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
+          } else {
+            reshape_and_cache_fp8_amx_typed<scalar_t>(
+                key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+                key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
+                slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
+                block_size, key.stride(0), key.stride(1), value.stride(0),
+                value.stride(1), key_cache.stride(0), key_cache.stride(1),
+                value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
+          }
+        });
+    return;
+  }
+#endif
+
   VLLM_DISPATCH_FLOATING_TYPES(
       key.scalar_type(), "cpu_attn_reshape_and_cache_fp8", [&]() {
-        reshape_and_cache_fp8_typed<scalar_t>(
-            key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
-            key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
-            slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
-            block_size, key.stride(0), key.stride(1), value.stride(0),
-            value.stride(1), key_cache.stride(0), key_cache.stride(1),
-            value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
+        if (fp8_dtype == cpu_attention::Fp8KVCacheDataType::kFp8E5M2) {
+          reshape_and_cache_fp8_e5m2_typed<scalar_t>(
+              key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+              key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
+              slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
+              block_size, key.stride(0), key.stride(1), value.stride(0),
+              value.stride(1), key_cache.stride(0), key_cache.stride(1),
+              value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
+        } else {
+          reshape_and_cache_fp8_typed<scalar_t>(
+              key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
+              key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
+              slot_mapping.data_ptr<int64_t>(), token_num, head_num, head_dim,
+              block_size, key.stride(0), key.stride(1), value.stride(0),
+              value.stride(1), key_cache.stride(0), key_cache.stride(1),
+              value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
+        }
       });
 }
 
@@ -240,7 +289,8 @@ void cpu_attention_with_kv_cache_fp8(
     const torch::Tensor& block_table,  // [num_tokens, max_block_num]
     const double softcap, const torch::Tensor& scheduler_metadata,
     const std::optional<torch::Tensor>& s_aux,  // [num_heads]
-    const double k_scale, const double v_scale) {
+    const double k_scale, const double v_scale,
+    const std::string& kv_cache_dtype) {
   TORCH_CHECK_EQ(query.dim(), 3);
   TORCH_CHECK_EQ(query.stride(2), 1);
   TORCH_CHECK_EQ(key_cache.dim(), 4);
@@ -282,15 +332,43 @@ void cpu_attention_with_kv_cache_fp8(
   input.softcap = static_cast<float>(softcap);
   input.k_scale_fp8 = static_cast<float>(k_scale);
   input.v_scale_fp8 = static_cast<float>(v_scale);
+  input.fp8_kv_dtype = parse_fp8_kv_dtype(kv_cache_dtype);
 
 #if !defined(__AVX2__) && !defined(__AVX512F__)
   TORCH_CHECK(false,
               "cpu_attention_with_kv_cache_fp8 requires AVX2 or AVX-512; "
               "FP8 KV cache is not supported on this platform.");
 #endif
+
+#if defined(CPU_CAPABILITY_AMXBF16)
+  // AMX FP8 path: only supported for BFloat16 queries.
+  if (input.metadata->isa == cpu_attention::ISA::AMX) {
+    TORCH_CHECK(query.scalar_type() == at::ScalarType::BFloat16,
+                "cpu_attention_with_kv_cache_fp8 AMX path requires "
+                "BFloat16 query dtype");
+    using scalar_t = c10::BFloat16;
+    CPU_ATTN_DISPATCH(query.size(2), cpu_attention::ISA::AMX, [&]() {
+      // Some head_dims (80, 112) are mapped to VEC16 even when ISA::AMX is
+      // requested.  Only use AttentionImplFP8AMX when the dispatch actually
+      // resolved to a native AMX implementation.
+      if constexpr (attn_impl::ISAType == cpu_attention::ISA::AMX) {
+        using fp8_impl_t =
+            cpu_attention::AttentionImplFP8AMX<scalar_t, attn_impl::HeadDim>;
+        TORCH_CHECK_EQ(input.block_size % fp8_impl_t::BlockSizeAlignment, 0);
+        cpu_attention::AttentionMainLoop<fp8_impl_t> mainloop;
+        mainloop(&input);
+      } else {
+        TORCH_CHECK(false, "FP8 AMX is not supported for head_dim=",
+                    attn_impl::HeadDim, "; use ISA vec instead");
+      }
+    });
+    return;
+  }
+#endif
+
+  // VEC path (all supported floating-point query dtypes).
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "cpu_attention_with_kv_cache_fp8", [&]() {
-        // FP8 is only supported on the VEC (x86 AVX2/AVX-512) path.
         CPU_ATTN_DISPATCH(query.size(2), cpu_attention::ISA::VEC, [&]() {
           using fp8_impl_t =
               cpu_attention::AttentionImplFP8VEC<scalar_t, attn_impl::HeadDim>;

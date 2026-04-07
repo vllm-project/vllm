@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ctypes
+import ctypes.util
 import functools
 import math
+import sys
 
 import pytest
 import torch
@@ -19,6 +22,25 @@ from vllm._custom_ops import (
     cpu_attn_get_scheduler_metadata,
     cpu_attn_reshape_and_cache,
 )
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _init_amx_tile_state():
+    """Enable AMX tile state for this process via arch_prctl.
+
+    On Linux, AMX tile instructions (_tile_loadconfig, _tile_dpbf16ps, etc.)
+    cause SIGILL unless the process has opted in via
+    arch_prctl(ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA).  The call is
+    idempotent (safe to call multiple times) and only needed once per process.
+    torch.cpu._is_amx_tile_supported() checks hardware capability via CPUID
+    but does NOT enable the tile state — this fixture fills that gap.
+    """
+    if sys.platform == "linux" and torch.cpu._is_amx_tile_supported():
+        _ARCH_REQ_XCOMP_PERM = 0x1023
+        _XFEATURE_XTILEDATA = 18
+        _libc = ctypes.CDLL(ctypes.util.find_library("c"), use_errno=True)
+        _libc.syscall(158, _ARCH_REQ_XCOMP_PERM, _XFEATURE_XTILEDATA)
+
 
 NUM_HEADS = [
     (4, 4),
@@ -637,6 +659,26 @@ from vllm._custom_ops import (  # noqa: E402
     cpu_attn_reshape_and_cache_fp8,
 )
 
+# Tolerances for FP8 vs float attention output comparisons.
+# E5M2 (2 mantissa bits) introduces slightly more noise than E4M3 (3 bits).
+_FP8_ATOL = {"fp8_e4m3": 0.2, "fp8_e5m2": 0.3}
+_FP8_RTOL = 0.1
+
+
+def _dequant_fp8_cache(
+    cache: torch.Tensor, scale: float, kv_cache_dtype: str
+) -> torch.Tensor:
+    """Dequantize a uint8 FP8 cache tensor to float32.
+
+    For E4M3: reinterpret as torch.float8_e4m3fn.
+    For E5M2: FP8 byte b → FP16 bits = b << 8 (bias=15 matches FP16).
+    """
+    if kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        return cache.view(torch.float8_e4m3fn).float() * scale
+    # fp8_e5m2: single left-shift maps byte to FP16 bit pattern
+    fp16_bits = (cache.to(torch.int32) << 8).to(torch.int16).view(torch.float16)
+    return fp16_bits.float() * scale
+
 
 def test_fp8_backend_init():
     """Test E: CPUAttentionBackendImpl init with FP8 dtype raises no error."""
@@ -697,10 +739,11 @@ def test_fp8_round_trip(dtype: torch.dtype):
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("k_scale,v_scale", [(1.0, 1.0), (0.5, 2.0)])
 def test_fp8_reshape_and_cache_round_trip(
-    dtype: torch.dtype, k_scale: float, v_scale: float
+    dtype: torch.dtype, k_scale: float, v_scale: float, kv_cache_dtype: str
 ):
     """Tests the encode path of cpu_attn_reshape_and_cache_fp8.
 
@@ -716,9 +759,7 @@ def test_fp8_reshape_and_cache_round_trip(
     block_size = 32
     num_blocks = 64
     seq_lens = [(1, 128), (1, 64)]
-    isa = _get_attn_isa(dtype, block_size, head_size)
-    if isa == "amx":
-        isa = "vec"  # FP8 path always uses vec
+    isa = "vec"  # This test targets the VEC reshape path explicitly.
 
     scale = head_size**-0.5
     query_lens = [x[0] for x in seq_lens]
@@ -751,10 +792,11 @@ def test_fp8_reshape_and_cache_round_trip(
         slot_mapping,
         k_scale=k_scale,
         v_scale=v_scale,
+        kv_cache_dtype=kv_cache_dtype,
     )
     # Dequantize for attention
-    key_cache_f32 = key_cache_fp8.view(torch.float8_e4m3fn).float() * k_scale
-    value_cache_f32 = value_cache_fp8.view(torch.float8_e4m3fn).float() * v_scale
+    key_cache_f32 = _dequant_fp8_cache(key_cache_fp8, k_scale, kv_cache_dtype)
+    value_cache_f32 = _dequant_fp8_cache(value_cache_fp8, v_scale, kv_cache_dtype)
 
     # --- Reference path: non-quantized float cache ---
     key_cache_ref = torch.zeros(
@@ -829,9 +871,9 @@ def test_fp8_reshape_and_cache_round_trip(
     )
 
     # FP8 output should be close to full-float output (within quantization noise).
-    # E4M3 with 3-bit mantissa gives ~6% per-element error; attention averaging
-    # reduces this, but attention weights are also affected. atol=0.1 is appropriate.
-    torch.testing.assert_close(output_fp8, output_ref, atol=0.1, rtol=0.1)
+    # E4M3 (3-bit mantissa): atol=0.1; E5M2 (2-bit mantissa): slightly more noise.
+    atol = 0.15 if kv_cache_dtype == "fp8_e5m2" else 0.1
+    torch.testing.assert_close(output_fp8, output_ref, atol=atol, rtol=0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -840,30 +882,20 @@ def test_fp8_reshape_and_cache_round_trip(
 # ---------------------------------------------------------------------------
 
 
-@torch.inference_mode()
-@pytest.mark.parametrize(
-    "seq_lens",
-    [
-        [(1, 213), (1, 1), (1, 312), (1, 7), (1, 7812)],  # decode
-        [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)],  # mixed
-    ],
-)
-@pytest.mark.parametrize("num_heads", [(4, 4), (8, 2)])
-@pytest.mark.parametrize("head_size", [96, 128])
-@pytest.mark.parametrize("k_scale,v_scale", [(1.0, 1.0), (0.5, 2.0)])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-def test_fp8_end_to_end_native(
+def _fp8_attn_e2e(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     head_size: int,
     k_scale: float,
     v_scale: float,
     dtype: torch.dtype,
+    kv_cache_dtype: str,
+    isa: str,
 ) -> None:
-    """Phase 2: cpu_attention_with_kv_cache_fp8 performs on-the-fly dequant.
+    """Run FP8 on-the-fly dequant attention and compare output to float reference.
 
-    The output must match running the same attention over a float KV cache
-    built from the same original values (within FP8 quantisation noise).
+    Shared body for test_fp8_end_to_end_native and test_fp8_amx_end_to_end;
+    the two tests differ only in ISA selection and parametrize coverage.
     """
     set_random_seed(0)
     block_size = 32
@@ -879,10 +911,6 @@ def test_fp8_end_to_end_native(
     # num_blocks must cover all block table entries (num_seqs * max_num_blocks_per_seq).
     num_blocks = max_num_blocks_per_seq * num_seqs
 
-    isa = _get_attn_isa(dtype, block_size, head_size)
-    if isa == "amx":
-        isa = "vec"
-
     query = torch.randn(token_num, num_query_heads, head_size, dtype=dtype)
 
     kv_flat_size = num_blocks * block_size * num_kv_heads * head_size
@@ -894,7 +922,6 @@ def test_fp8_end_to_end_native(
     )
     slot_mapping = torch.arange(num_blocks * block_size, dtype=torch.int64)
 
-    # Build FP8 uint8 cache.
     key_cache_fp8 = torch.zeros(
         num_blocks, num_kv_heads, block_size, head_size, dtype=torch.uint8
     )
@@ -907,9 +934,10 @@ def test_fp8_end_to_end_native(
         slot_mapping,
         k_scale=k_scale,
         v_scale=v_scale,
+        isa=isa,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
-    # Build float reference cache (using the same original values).
     key_cache_ref = torch.zeros(
         num_blocks, num_kv_heads, block_size, head_size, dtype=dtype
     )
@@ -945,13 +973,12 @@ def test_fp8_end_to_end_native(
         enable_kv_split=True,
     )
 
-    # --- Phase 2 native path: on-the-fly FP8 dequant inside the kernel ---
-    output_fp8_native = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
+    output_fp8 = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
     cpu_attention_with_kv_cache_fp8(
         query=query,
         key_cache=key_cache_fp8,
         value_cache=value_cache_fp8,
-        output=output_fp8_native,
+        output=output_fp8,
         query_start_loc=cu_query_lens,
         seq_lens=kv_lens_tensor,
         scale=scale,
@@ -964,9 +991,9 @@ def test_fp8_end_to_end_native(
         s_aux=None,
         k_scale=k_scale,
         v_scale=v_scale,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
-    # --- Float reference path ---
     output_ref = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
     cpu_attention_with_kv_cache(
         query=query,
@@ -985,4 +1012,79 @@ def test_fp8_end_to_end_native(
         s_aux=None,
     )
 
-    torch.testing.assert_close(output_fp8_native, output_ref, atol=0.2, rtol=0.1)
+    torch.testing.assert_close(
+        output_fp8, output_ref, atol=_FP8_ATOL[kv_cache_dtype], rtol=_FP8_RTOL
+    )
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(1, 213), (1, 1), (1, 312), (1, 7), (1, 7812)],  # decode
+        [(992, 2456), (1, 1234), (98, 1145), (1, 4162), (2345, 2345)],  # mixed
+    ],
+)
+@pytest.mark.parametrize("num_heads", [(4, 4), (8, 2)])
+@pytest.mark.parametrize("head_size", [96, 128])
+@pytest.mark.parametrize("k_scale,v_scale", [(1.0, 1.0), (0.5, 2.0)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_fp8_end_to_end_native(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    k_scale: float,
+    v_scale: float,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+) -> None:
+    """Phase 2: cpu_attention_with_kv_cache_fp8 performs on-the-fly dequant.
+
+    The output must match running the same attention over a float KV cache
+    built from the same original values (within FP8 quantisation noise).
+    """
+    isa = _get_attn_isa(dtype, block_size=32, head_size=head_size)
+    if isa == "amx":
+        isa = "vec"
+    _fp8_attn_e2e(
+        seq_lens, num_heads, head_size, k_scale, v_scale, dtype, kv_cache_dtype, isa
+    )
+
+
+# ---------------------------------------------------------------------------
+# FP8 KV cache tests — AMX layout (on-the-fly dequantization via AMX tiles).
+# ---------------------------------------------------------------------------
+
+
+@torch.inference_mode()
+@pytest.mark.skipif(not torch.cpu._is_amx_tile_supported(), reason="no AMX support")
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_e4m3", "fp8_e5m2"])
+@pytest.mark.parametrize(
+    "seq_lens",
+    [
+        [(1, 213), (1, 1), (1, 312), (1, 7), (1, 7812)],  # decode
+        [(32, 256), (1, 128), (16, 512)],  # mixed
+    ],
+)
+@pytest.mark.parametrize("num_heads", [(4, 4), (8, 2)])
+@pytest.mark.parametrize("head_size", [64, 128])
+@pytest.mark.parametrize("k_scale,v_scale", [(1.0, 1.0), (0.5, 2.0)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+def test_fp8_amx_end_to_end(
+    seq_lens: list[tuple[int, int]],
+    num_heads: tuple[int, int],
+    head_size: int,
+    k_scale: float,
+    v_scale: float,
+    dtype: torch.dtype,
+    kv_cache_dtype: str,
+) -> None:
+    """FP8 AMX: reshape with AMX layout, run AMX attention, compare to float.
+
+    Uses isa='amx' for both reshape and the scheduler metadata so that the
+    full AMX tile path is exercised (TileGemm224/122<uint8_t>).
+    """
+    _fp8_attn_e2e(
+        seq_lens, num_heads, head_size, k_scale, v_scale, dtype, kv_cache_dtype, "amx"
+    )
