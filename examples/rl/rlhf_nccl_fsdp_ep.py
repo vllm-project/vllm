@@ -43,7 +43,6 @@ import vllm
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferFinishRequest,
     WeightTransferInitRequest,
     WeightTransferStartRequest,
     WeightTransferUpdateRequest,
@@ -323,7 +322,7 @@ async def main():
     )
     ray.get(broadcast_handles)
 
-    await engine.finish_weight_update(WeightTransferFinishRequest())
+    await engine.finish_weight_update()
     print("[sync] Weight broadcast complete.")
 
     print("[sync] Resuming generation...")

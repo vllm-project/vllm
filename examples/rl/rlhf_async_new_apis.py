@@ -51,7 +51,6 @@ import vllm
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferFinishRequest,
     WeightTransferInitRequest,
     WeightTransferStartRequest,
     WeightTransferUpdateRequest,
@@ -337,7 +336,7 @@ inference_handle = llm.update_weights.remote(
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
-ray.get(llm.finish_weight_update.remote(WeightTransferFinishRequest()))
+ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.resume_generation.remote())
 results = ray.get(gen_futures)

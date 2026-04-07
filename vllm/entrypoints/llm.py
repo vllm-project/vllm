@@ -38,7 +38,6 @@ from vllm.config.quantization import (
     OnlineQuantizationConfigArgs,
 )
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferFinishRequest,
     WeightTransferInitRequest,
     WeightTransferStartRequest,
     WeightTransferUpdateRequest,
@@ -1875,22 +1874,16 @@ class LLM:
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, request: WeightTransferStartRequest | dict) -> None:
+    def start_weight_update(self, request: WeightTransferStartRequest) -> None:
         """
-        Start a new weight update sequence.
+        Start a new weight update.
 
         Args:
             request: Weight transfer start request with is_checkpoint_format
         """
-        is_checkpoint_format = (
-            request["is_checkpoint_format"]
-            if isinstance(request, dict)
-            else request.is_checkpoint_format
-        )
-
         self.llm_engine.collective_rpc(
             "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
+            kwargs={"is_checkpoint_format": request.is_checkpoint_format},
         )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
@@ -1908,11 +1901,9 @@ class LLM:
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    def finish_weight_update(
-        self, request: WeightTransferFinishRequest | dict | None = None
-    ) -> None:
+    def finish_weight_update(self) -> None:
         """
-        Finish the current weight update sequence.
+        Finish the current weight update.
         """
         self.llm_engine.collective_rpc("finish_weight_update")
 

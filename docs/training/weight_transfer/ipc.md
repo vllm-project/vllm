@@ -38,23 +38,18 @@ trainer_args = IPCTrainerSendWeightsArgs(
     mode="ray",
     llm_handle=llm_actor_handle,
 )
-
+# start
+llm_actor_handle.start_weight_update.remote(WeightUpdateStartRequest(is_checkpoint_format=True))
+# send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )
+# finish
+llm_actor_handle.finish_weight_update.remote()
 ```
 
-In Ray mode, the engine calls `llm_handle.update_weights.remote(...)` directly, passing the IPC handles via Ray's serialization. You must call `start_weight_update` before and `finish_weight_update` after `trainer_send_weights`:
-
-```python
-llm.start_weight_update(dict(is_checkpoint_format=False))
-IPCWeightTransferEngine.trainer_send_weights(
-    iterator=model.named_parameters(),
-    trainer_args=trainer_args,
-)
-llm.finish_weight_update()
-```
+In Ray mode, the engine calls `llm_handle.update_weights.remote(...)` directly, passing the IPC handles via Ray's serialization.
 
 ### HTTP Mode
 
@@ -66,13 +61,22 @@ trainer_args = IPCTrainerSendWeightsArgs(
     url="http://localhost:8000",
 )
 
+# start 
+url = f"{args.url}/start_weight_update"
+response = requests.post(url, json={"is_checkpoint_format": True}, timeout=60)
+response.raise_for_status()
+# send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),
     trainer_args=trainer_args,
 )
+# finish
+url = f"{args.url}/finish_weight_update"
+response = requests.post(url, json={}, timeout=60)
+response.raise_for_status()
 ```
 
-In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. As with Ray mode, you must call `/start_weight_update` before and `/finish_weight_update` after.
+In HTTP mode, IPC handles are pickled, base64-encoded, and sent as JSON to the `/update_weights` endpoint. As with Ray mode, you must call `start_weight_update` before and `finish_weight_update` after.
 
 See [`IPCTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/weight_transfer/ipc_engine.py) for the full list of configurable fields.
 

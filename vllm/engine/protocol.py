@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferFinishRequest,
     WeightTransferInitRequest,
     WeightTransferStartRequest,
     WeightTransferUpdateRequest,
@@ -234,13 +233,13 @@ class EngineClient(ABC):
         raise NotImplementedError
 
     async def start_weight_update(self, request: WeightTransferStartRequest) -> None:
-        """Start a new weight update sequence."""
+        """Start a new weight update."""
         raise NotImplementedError
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """Batched weight update for RL training."""
         raise NotImplementedError
 
-    async def finish_weight_update(self, request: WeightTransferFinishRequest) -> None:
-        """Finish the current weight update sequence."""
+    async def finish_weight_update(self) -> None:
+        """Finish the current weight update."""
         raise NotImplementedError

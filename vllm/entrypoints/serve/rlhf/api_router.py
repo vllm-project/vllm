@@ -10,7 +10,6 @@ from fastapi.responses import JSONResponse
 
 import vllm.envs as envs
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferFinishRequest,
     WeightTransferInitRequest,
     WeightTransferStartRequest,
     WeightTransferUpdateRequest,
@@ -163,7 +162,7 @@ async def update_weights(raw_request: Request):
 
 @router.post("/finish_weight_update")
 async def finish_weight_update(raw_request: Request):
-    await engine_client(raw_request).finish_weight_update(WeightTransferFinishRequest())
+    await engine_client(raw_request).finish_weight_update()
     return JSONResponse(content={"message": "Weight update finished"})
 
 

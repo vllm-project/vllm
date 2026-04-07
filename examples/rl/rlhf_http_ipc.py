@@ -84,7 +84,7 @@ def start_weight_update(
     base_url: str,
     is_checkpoint_format: bool = True,
 ) -> None:
-    """Start a weight update sequence via HTTP endpoint."""
+    """Start a weight update via HTTP endpoint."""
     url = f"{base_url}/start_weight_update"
     payload = {"is_checkpoint_format": is_checkpoint_format}
     response = requests.post(url, json=payload, timeout=60)
@@ -92,7 +92,7 @@ def start_weight_update(
 
 
 def finish_weight_update(base_url: str) -> None:
-    """Finish a weight update sequence via HTTP endpoint."""
+    """Finish a weight update via HTTP endpoint."""
     url = f"{base_url}/finish_weight_update"
     response = requests.post(url, json={}, timeout=60)
     response.raise_for_status()

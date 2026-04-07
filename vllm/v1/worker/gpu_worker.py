@@ -139,6 +139,8 @@ class Worker(WorkerBase):
             if self.vllm_config.weight_transfer_config is not None
             else None
         )
+        self._weight_update_active = False
+        self._is_checkpoint_format = True
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -955,7 +957,7 @@ class Worker(WorkerBase):
 
     def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """
-        Start a new weight update sequence.
+        Start a new weight update.
 
         Prepares the model for receiving weights. For checkpoint format,
         this runs initialize_layerwise_reload. For kernel format, this is
@@ -967,6 +969,12 @@ class Worker(WorkerBase):
                 copy). Stored as state for finish_weight_update.
         """
         self._check_weight_transfer_engine()
+
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is "
+                "already active. Call finish_weight_update first."
+            )
 
         # Store state so update_weights/finish_weight_update can check
         self._is_checkpoint_format = is_checkpoint_format
@@ -992,7 +1000,7 @@ class Worker(WorkerBase):
         """
         self._check_weight_transfer_engine()
 
-        if not getattr(self, "_weight_update_active", False):
+        if not self._weight_update_active:
             raise RuntimeError(
                 "start_weight_update must be called before update_weights."
             )
@@ -1027,14 +1035,14 @@ class Worker(WorkerBase):
 
     def finish_weight_update(self) -> None:
         """
-        Finish the current weight update sequence.
+        Finish the current weight update.
 
         For checkpoint format, this runs finalize_layerwise_reload.
         Uses the is_checkpoint_format state stored by start_weight_update.
         """
         self._check_weight_transfer_engine()
 
-        if not getattr(self, "_weight_update_active", False):
+        if not self._weight_update_active:
             raise RuntimeError(
                 "start_weight_update must be called before finish_weight_update."
             )
@@ -1047,7 +1055,8 @@ class Worker(WorkerBase):
             )
 
             model = self.model_runner.model
-            finalize_layerwise_reload(model, self.model_config)
+            with torch.device(self.device):
+                finalize_layerwise_reload(model, self.model_config)
 
         # Reset state
         self._weight_update_active = False

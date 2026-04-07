@@ -87,7 +87,7 @@ def start_weight_update(
     base_url: str,
     is_checkpoint_format: bool = True,
 ) -> None:
-    """Start a weight update sequence via HTTP endpoint."""
+    """Start a weight update via HTTP endpoint."""
     url = f"{base_url}/start_weight_update"
     payload = {"is_checkpoint_format": is_checkpoint_format}
     response = requests.post(url, json=payload, timeout=60)
@@ -116,7 +116,7 @@ def update_weights(
 
 
 def finish_weight_update(base_url: str) -> None:
-    """Finish a weight update sequence via HTTP endpoint."""
+    """Finish a weight update via HTTP endpoint."""
     url = f"{base_url}/finish_weight_update"
     response = requests.post(url, json={}, timeout=60)
     response.raise_for_status()
@@ -222,7 +222,7 @@ def main():
         dtype_names.append(str(p.dtype).split(".")[-1])
         shapes.append(list(p.shape))
 
-    # Start weight update sequence
+    # Start weight update
     start_weight_update(BASE_URL, is_checkpoint_format=True)
 
     # Start the update_weights call in a separate thread since it will block
@@ -248,7 +248,7 @@ def main():
     # Wait for update_weights to complete
     update_thread.join()
 
-    # Finish weight update sequence
+    # Finish weight update
     finish_weight_update(BASE_URL)
 
     # Resume generation after weight sync

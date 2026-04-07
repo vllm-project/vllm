@@ -29,6 +29,9 @@ from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferStartRequest,
+)
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCTrainerSendWeightsArgs,
     IPCWeightTransferEngine,
@@ -135,7 +138,11 @@ ray.get(llm.sleep.remote(level=0))
 
 ray.get(train_model.init_weight_transfer.remote())
 # Start weight update, sync weights, then finish
-ray.get(llm.start_weight_update.remote(dict(is_checkpoint_format=False)))
+ray.get(
+    llm.start_weight_update.remote(
+        WeightTransferStartRequest(is_checkpoint_format=False)
+    )
+)
 ray.get(train_model.broadcast_weights.remote(llm))
 ray.get(llm.finish_weight_update.remote())
 

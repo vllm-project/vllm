@@ -15,7 +15,6 @@ import vllm.envs as envs
 from vllm import TokensPrompt
 from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferFinishRequest,
     WeightTransferInitRequest,
     WeightTransferStartRequest,
     WeightTransferUpdateRequest,
@@ -1055,7 +1054,7 @@ class AsyncLLM(EngineClient):
         )
 
     async def start_weight_update(self, request: WeightTransferStartRequest) -> None:
-        """Start a new weight update sequence."""
+        """Start a new weight update."""
         if not isinstance(request, WeightTransferStartRequest):
             raise TypeError(f"Expected WeightTransferStartRequest, got {type(request)}")
 
@@ -1083,11 +1082,6 @@ class AsyncLLM(EngineClient):
             "update_weights", kwargs={"update_info": update_info_dict}
         )
 
-    async def finish_weight_update(self, request: WeightTransferFinishRequest) -> None:
-        """Finish the current weight update sequence."""
-        if not isinstance(request, WeightTransferFinishRequest):
-            raise TypeError(
-                f"Expected WeightTransferFinishRequest, got {type(request)}"
-            )
-
+    async def finish_weight_update(self) -> None:
+        """Finish the current weight update."""
         await self.collective_rpc("finish_weight_update")

@@ -19,7 +19,6 @@ from vllm import LLM
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
-    WeightTransferFinishRequest,
     WeightTransferInitInfo,
     WeightTransferInitRequest,
     WeightTransferStartRequest,
@@ -279,7 +278,7 @@ def test_full_weight_transfer_flow():
         )
 
         # Step 4: Finish weight update
-        llm.finish_weight_update(WeightTransferFinishRequest())
+        llm.finish_weight_update()
 
         # Verify the full flow completed
         def check_flow(self):

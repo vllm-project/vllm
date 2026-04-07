@@ -35,6 +35,9 @@ from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferStartRequest,
+)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
@@ -186,8 +189,12 @@ ray.get([train_handle, inference_handle])
 # Collect all weight metadata from the training actor
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
-# Start weight update sequence
-ray.get(llm.start_weight_update.remote(dict(is_checkpoint_format=True)))
+# Start weight update
+ray.get(
+    llm.start_weight_update.remote(
+        WeightTransferStartRequest(is_checkpoint_format=True)
+    )
+)
 
 # Issue update_weights call with NCCL-specific update info
 # packed=True enables efficient batched tensor broadcasting
@@ -206,7 +213,7 @@ inference_handle = llm.update_weights.remote(
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
-# Finish weight update sequence
+# Finish weight update
 ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))

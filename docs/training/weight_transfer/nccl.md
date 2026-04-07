@@ -88,12 +88,11 @@ The inference side triggers weight reception using the three-phase protocol — 
 
 ```python
 from vllm.distributed.weight_transfer.base import (
-    WeightTransferFinishRequest,
     WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 
-# 1. Start the weight update sequence
+# 1. Start the weight update
 llm.start_weight_update(
     WeightTransferStartRequest(is_checkpoint_format=True)
 )
@@ -110,8 +109,8 @@ llm.update_weights(
     )
 )
 
-# 3. Finish the weight update sequence
-llm.finish_weight_update(WeightTransferFinishRequest())
+# 3. Finish the weight update
+llm.finish_weight_update()
 ```
 
 The `names`, `dtype_names`, and `shapes` lists describe each parameter. These must match the order in which the trainer iterates over its parameters.
