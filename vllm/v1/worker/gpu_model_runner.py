@@ -4041,7 +4041,7 @@ class GPUModelRunner(
             if not self.broadcast_pp_output:
                 # Common case.
                 if not get_pp_group().is_last_rank:
-                    if self.routed_experts_initialized:
+                    if self.routed_experts_initialized and self.routed_experts_layer_range is not None:
                         capturer = RoutedExpertsCapturer.get_instance()
                         if capturer is not None:
                             capturer.save_captured_experts(
