@@ -27,6 +27,7 @@ SKIP_TENSORS: set[str] = {
     "expert_global_to_physical",
     "expert_physical_to_global",
     "expert_local_to_global",
+    "e_score_correction_bias",
 }
 
 
@@ -94,14 +95,15 @@ def restore_layer_on_meta(layer: torch.nn.Module, info: LayerReloadingInfo):
             layer.register_buffer(name, buffer)
 
 
-def materialize_layer(layer: torch.nn.Module) -> None:
+def materialize_layer(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Materialize all meta tensors in a layer to actual tensors."""
     if layer.__class__.__name__ in SKIP_MODULES:
         return
 
-    for name, tensor in get_layer_tensors(layer).items():
-        if name not in SKIP_TENSORS:
-            setattr(layer, name, materialize_meta_tensor(tensor))
+    with info.restore_device:
+        for name, tensor in get_layer_tensors(layer).items():
+            if name not in SKIP_TENSORS:
+                setattr(layer, name, materialize_meta_tensor(tensor))
 
 
 class CopyCounter(TorchDispatchMode):

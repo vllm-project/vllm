@@ -373,6 +373,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp")

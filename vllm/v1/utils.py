@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import threading
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -269,8 +270,6 @@ def wait_for_completion_or_failure(
         coordinator: The coordinator for data parallel.
     """
 
-    from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
-
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
@@ -282,33 +281,40 @@ def wait_for_completion_or_failure(
         if coordinator:
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
-        actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
-            actor_run_refs = engine_manager.get_run_refs()
+        if engine_manager:
+            core_shutdown_recv, core_shutdown_send = connection.Pipe(duplex=False)
+
+            def monitor_engines():
+                try:
+                    engine_manager.monitor_engine_liveness()
+                finally:
+                    core_shutdown_send.close()
+                    core_shutdown_recv.close()
+
+            # start monitor for engine liveness
+            threading.Thread(target=monitor_engines, daemon=True).start()
+            sentinel_to_proc[core_shutdown_recv] = None  # type: ignore[assignment]
 
         # Check if any process terminates
-        while sentinel_to_proc or actor_run_refs:
-            # Wait for any process to terminate
-            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
+        while sentinel_to_proc:
+            # Wait for any process to terminate (or engine shutdown signal)
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc)
 
             # Process any terminated processes
             for sentinel in ready_sentinels:
                 proc = sentinel_to_proc.pop(sentinel)
 
                 # Check if process exited with error
-                if proc.exitcode != 0:
+                if proc is not None and proc.exitcode != 0:
                     raise RuntimeError(
                         f"Process {proc.name} (PID: {proc.pid}) "
                         f"died with exit code {proc.exitcode}"
                     )
-
-            if actor_run_refs:
-                import ray
-
-                _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
+                if engine_manager and engine_manager.failed_proc_name is not None:
+                    raise RuntimeError(
+                        f"Engine core process {engine_manager.failed_proc_name} "
+                        "died unexpectedly."
+                    )
 
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, shutting down API servers...")
