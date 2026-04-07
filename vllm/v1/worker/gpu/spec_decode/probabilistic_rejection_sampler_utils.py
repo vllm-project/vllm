@@ -3,7 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_block_argmax, tl_rand64
 
 
 @triton.jit
@@ -265,7 +265,7 @@ def _probabilistic_rejection_kernel(
                 target_log_prob = target_logit - target_lse
                 draft_log_prob = draft_logit - draft_lse
                 pos = tl.load(pos_ptr + logit_idx)
-                u = tl.rand(seed, pos)
+                u = tl_rand64(seed, pos, includes_zero=False)
                 # Probability ratio test: p(x) > u * q(x)
                 # Equivalent log form: log_p(x) > log(u) + log_q(x)
                 accepted &= target_log_prob > tl.log(u) + draft_log_prob
@@ -570,7 +570,7 @@ def probabilistic_rejection_sample(
         num_reqs, resample_num_blocks, dtype=torch.int64
     )
     resampled_local_max = target_logits.new_empty(
-        num_reqs, resample_num_blocks, dtype=torch.float32
+        num_reqs, resample_num_blocks, dtype=torch.float64
     )
     _resample_kernel[(num_reqs, resample_num_blocks)](
         resampled_local_argmax,
