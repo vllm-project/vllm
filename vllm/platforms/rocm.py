@@ -927,8 +927,7 @@ class RocmPlatform(Platform):
         # TODO(luka/TJ) use aiter, vllm_c, native by default on ROCm
         cc = vllm_config.compilation_config
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
-        default = ["native"] if using_inductor else ["vllm_c", "native"]
-
+        default_rms_norm = ["native"] if using_inductor else ["vllm_c", "native"]
         # This (mostly) preserves previous CustomOp behavior
         # Necessary on ROCm because it's common that users
         # enable rms_norm to use the aiter kernel.
@@ -938,20 +937,22 @@ class RocmPlatform(Platform):
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
         ):
-            rms_norm = ["aiter"] + default
+            rms_norm = ["aiter"] + default_rms_norm
         else:
-            rms_norm = default
+            rms_norm = default_rms_norm
 
-        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_LINEAR:
-            quant_fp8 = ["aiter"] + default
-        else:
-            quant_fp8 = default
+        use_aiter_quant = (
+            cc.is_custom_op_enabled("quant_fp8")
+            and envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_LINEAR
+        )
+        # static_group_quant_fp8 has no aiter implementation yet
+        quant_fp8 = ["aiter", "native"] if use_aiter_quant else ["native"]
 
-        return IrOpPriorityConfig.with_default(
-            default,
+        return IrOpPriorityConfig(
             rms_norm=rms_norm,
             static_quant_fp8=quant_fp8,
-            static_group_quant_fp8=quant_fp8,
+            static_group_quant_fp8=["native"],
             dynamic_quant_fp8=quant_fp8,
             dynamic_group_quant_fp8=quant_fp8,
         )

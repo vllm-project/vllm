@@ -138,13 +138,17 @@ class QuantFP8(CustomOp):
         scale_ub: torch.Tensor | None = None,
         use_triton: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # TODO: This path is probably for static quant, port to IR
         if self.is_group_quant and use_triton:
             assert scale is None, "Dynamic group quantization does not use scale"
-
             return torch.ops.vllm.triton_per_token_group_quant_fp8(x, self.group_size)
 
-        return self.forward_native(x, scale, scale_ub, use_triton)
+        use_aiter_quant = self.use_aiter and scale_ub is None and x.is_contiguous()
+        if use_aiter_quant or use_triton or self.is_group_quant:
+            if self.is_group_quant:
+                assert scale is None, "Dynamic group quantization does not use scale"
+            return self.forward_native(x, scale, scale_ub, use_triton)
+
+        return self.forward_cuda(x, scale, scale_ub)
 
     def forward_xpu(
         self,

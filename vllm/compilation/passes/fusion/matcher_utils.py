@@ -288,15 +288,18 @@ class MatcherQuantFP8(MatcherCustomOp):
         input: torch.Tensor,
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        import vllm.ir.ops
+
         quant_key_group_shape = self.quant_key.scale.group_shape
         if quant_key_group_shape == GroupShape.PER_TOKEN:
-            return self.QUANT_OP(  # type: ignore[no-any-return]
-                x=input,
-                quant_dtype=self.quant_key.dtype,
-                scale=scale,
-            )
-        else:
-            return self.QUANT_OP(input, quant_key_group_shape.col)  # type: ignore[no-any-return]
+            assert scale is None
+            return vllm.ir.ops.dynamic_quant_fp8(input, per_token=True)
+        return vllm.ir.ops.dynamic_group_quant_fp8(
+            input,
+            group_shape=[1, quant_key_group_shape.col],
+            column_major=False,
+            use_ue8m0=False,
+        )
 
     def forward_custom(
         self,
