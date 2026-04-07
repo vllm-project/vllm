@@ -486,6 +486,16 @@ def safe_apply_chat_template(
         chat_template_kwargs=kwargs,
     )
 
+    # Dereference $ref in tool schemas so chat templates can see the
+    # full flattened properties instead of unresolved references.
+    # See: https://github.com/vllm-project/vllm/issues/39108
+    if tools is not None:
+        try:
+            import jsonref
+            tools = jsonref.replace_refs(tools)  # type: ignore[assignment]
+        except ImportError:
+            pass
+
     try:
         return tokenizer.apply_chat_template(
             conversation=conversation,  # type: ignore[arg-type]
