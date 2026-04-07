@@ -17,10 +17,11 @@ from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_proc
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
     PoolingBytesResponse,
+    PoolingRequest,
     PoolingResponse,
     PoolingResponseData,
 )
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
+from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.pooling.utils import (
     encode_pooling_bytes,
     encode_pooling_output_base64,
@@ -56,7 +57,7 @@ class ServingPooling(PoolingServingBase):
 
     async def __call__(
         self,
-        request: AnyPoolingRequest,
+        request: PoolingRequest,
         raw_request: Request | None = None,
     ) -> Response:
         ctx = await self._init_ctx(request, raw_request)
@@ -82,7 +83,7 @@ class ServingPooling(PoolingServingBase):
                     request.task,
                 )
 
-        if isinstance(request, IOProcessorRequest):
+        if request.task == "plugin" or isinstance(request, IOProcessorRequest):
             if "plugin" not in self.io_processors:
                 raise ValueError(
                     "No IOProcessor plugin installed. Please refer "
@@ -90,14 +91,13 @@ class ServingPooling(PoolingServingBase):
                     "'prithvi_geospatial_mae_io_processor' "
                     "offline inference example for more details."
                 )
+            request.task = "plugin"
 
-            io_processor = self.io_processors["plugin"]
-        else:
-            io_processor = self.io_processors[request.task]
-            await io_processor.pre_process_online_async(ctx)
+        io_processor = self.io_processors[request.task]
+        await io_processor.pre_process_online_async(ctx)
 
-            if ctx.pooling_params is None:
-                ctx.pooling_params = io_processor.create_pooling_params(request)
+        if ctx.pooling_params is None:
+            ctx.pooling_params = io_processor.create_pooling_params(request)
 
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)

@@ -1078,23 +1078,15 @@ class LLM:
             pooled hidden states in the same order as the input prompts.
         """
 
-        self._verify_pooling_task(pooling_task)
-
         if isinstance(prompts, dict) and "data" in prompts:
             if pooling_task != "plugin":
                 raise ValueError(
                     "The 'data' field is only supported for the 'plugin' pooling task."
                 )
 
-            if "plugin" not in self.pooling_io_processors:
-                raise ValueError(
-                    "No IOProcessor plugin installed. Please refer "
-                    "to the documentation and to the "
-                    "'prithvi_geospatial_mae_io_processor' "
-                    "offline inference example for more details."
-                )
-
+        self._verify_pooling_task(pooling_task)
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
+
         io_processor = self.pooling_io_processors[pooling_task]
 
         ctx = OfflineInputsContext(
@@ -1196,6 +1188,14 @@ class LLM:
                     'via PoolerConfig(task="%s"). ',
                     pooling_task,
                 )
+
+        if pooling_task == "plugin" and "plugin" not in self.pooling_io_processors:
+            raise ValueError(
+                "No IOProcessor plugin installed. Please refer "
+                "to the documentation and to the "
+                "'prithvi_geospatial_mae_io_processor' "
+                "offline inference example for more details."
+            )
 
     def embed(
         self,

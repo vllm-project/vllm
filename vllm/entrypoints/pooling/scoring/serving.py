@@ -60,7 +60,7 @@ class ServingScores(PoolingServing):
 
         assert score_type in ScoringIOProcessors
         processor_cls = ScoringIOProcessors[score_type]
-        return processor_cls(vllm_config=vllm_config, *args, **kwargs)
+        return processor_cls(vllm_config, *args, **kwargs)
 
     async def __call__(self, *args, **kwargs) -> Response:
         if not self.enable_flash_late_interaction:

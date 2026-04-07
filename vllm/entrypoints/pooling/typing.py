@@ -30,7 +30,7 @@ from vllm.entrypoints.pooling.pooling.protocol import (
 )
 from vllm.entrypoints.pooling.scoring.protocol import ScoringRequest, ScoringResponse
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
-from vllm.inputs import EngineInput
+from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 
 PoolingCompletionLikeRequest: TypeAlias = (
@@ -89,7 +89,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
 @dataclass
 class OfflineInputsContext:
-    prompts: PromptType | Sequence[PromptType] | ScoringData
+    prompts: PromptType | Sequence[PromptType] | DataPrompt | ScoringData
     pooling_params: PoolingParams | list[PoolingParams] | None = None
     tokenization_kwargs: dict[str, Any] | None = None
     chat_template: str | None = None
