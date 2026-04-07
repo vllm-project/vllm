@@ -39,6 +39,16 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] == self.start_token_id:
+                return False
+            if input_ids[i] == self.end_token_id:
+                return True
+        # No reasoning tokens found — thinking was never started,
+        # treat as already ended so structured output is applied.
+        return True
+
     def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 

@@ -36,13 +36,13 @@ NO_CONTENT = {
     "output": "This is content",
     "reasoning": "This is content",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NO_REASONING_STREAMING = {
     "output": "This is a reasoning section",
     "reasoning": "This is a reasoning section",
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 MULTIPLE_LINES = {
     "output": "This\nThat</think>This is the rest\nThat",
@@ -102,13 +102,13 @@ EMPTY = {
     "output": "",
     "reasoning": None,
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 EMPTY_STREAMING = {
     "output": "",
     "reasoning": None,
     "content": None,
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NEW_LINE = {
     "output": "\n<think>This is a reasoning section</think>\nThis is the rest",

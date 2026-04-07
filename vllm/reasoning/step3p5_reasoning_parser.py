@@ -90,7 +90,9 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
             self._end_token_pending = False
             return True
 
-        return False
+        # No reasoning tokens found — thinking was never started,
+        # treat as already ended so structured output is applied.
+        return True
 
     def extract_reasoning(
         self,

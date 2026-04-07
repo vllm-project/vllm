@@ -116,12 +116,11 @@ class TestBaseThinkingReasoningParserMethods:
         # Test with end token present
         assert parser.is_reasoning_end([1, 2, end_token_id, 4]) is True
 
-        # Test without any reasoning tokens — reasoning was never started,
-        # so it should be considered ended.
-        assert parser.is_reasoning_end([1, 2, 3, 4]) is True
+        # Test without any reasoning tokens
+        assert parser.is_reasoning_end([1, 2, 3, 4]) is False
 
-        # Test with empty list — same logic, no reasoning tokens present.
-        assert parser.is_reasoning_end([]) is True
+        # Test with empty list
+        assert parser.is_reasoning_end([]) is False
 
         # Test with interleaved thinking
         assert parser.is_reasoning_end([1, start_token_id, 2, end_token_id]) is True

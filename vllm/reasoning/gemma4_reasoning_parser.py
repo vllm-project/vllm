@@ -94,7 +94,9 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
                 return False
             if input_ids[i] == end_token_id:
                 return True
-        return False
+        # No reasoning tokens found — thinking was never started,
+        # treat as already ended so structured output is applied.
+        return True
 
     # ------------------------------------------------------------------
     # Non-streaming path
