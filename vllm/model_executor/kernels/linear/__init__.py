@@ -404,11 +404,48 @@ def choose_mp_linear_kernel(
     )
 
 
+# Maps VLLM_NVFP4_GEMM_BACKEND env var values to kernel classes.
+_NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
+    "flashinfer-cutlass": FlashInferCutlassNvFp4LinearKernel,
+    "cutlass": CutlassNvFp4LinearKernel,
+    "marlin": MarlinNvFp4LinearKernel,
+    "flashinfer-trtllm": FlashInferTrtllmNvFp4LinearKernel,
+    "flashinfer-cudnn": FlashInferCudnnNvFp4LinearKernel,
+    "emulation": EmulationNvFp4LinearKernel,
+}
+
+
 def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     """Select and instantiate the best NVFP4 linear kernel for the
     current platform."""
     config = NvFp4LinearLayerConfig()
 
+    # Env-var overrides.
+    force_kernel: type[NvFp4LinearKernel] | None = None
+    if envs.VLLM_USE_FBGEMM:
+        force_kernel = FbgemmNvFp4LinearKernel
+    elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
+        force_kernel = EmulationNvFp4LinearKernel
+    elif envs.VLLM_NVFP4_GEMM_BACKEND is not None:
+        backend_name = envs.VLLM_NVFP4_GEMM_BACKEND
+        force_kernel = _NVFP4_BACKEND_TO_KERNEL.get(backend_name)
+        if force_kernel is None:
+            raise ValueError(
+                f"Unknown VLLM_NVFP4_GEMM_BACKEND={backend_name!r}. "
+                f"Valid choices: {list(_NVFP4_BACKEND_TO_KERNEL.keys())}"
+            )
+
+    if force_kernel is not None:
+        is_supported, reason = force_kernel.is_supported()
+        if not is_supported:
+            raise ValueError(
+                f"Forced NVFP4 kernel {force_kernel.__name__} is not "
+                f"supported: {reason}"
+            )
+        logger.info_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
+        return force_kernel(config)
+
+    # Auto-select from registry.
     platform = current_platform._enum
     possible = _POSSIBLE_NVFP4_KERNELS.get(platform, [])
 
