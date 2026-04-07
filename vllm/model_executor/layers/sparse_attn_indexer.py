@@ -19,6 +19,11 @@ from vllm.v1.attention.backends.mla.indexer import (
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
+if current_platform.is_xpu():
+    from vllm._xpu_ops import xpu_ops
+else:
+    xpu_ops = None
+
 logger = init_logger(__name__)
 
 
@@ -117,8 +122,7 @@ def sparse_attn_indexer(
                 )
 
             if current_platform.is_xpu():
-                from vllm._xpu_ops import xpu_ops
-
+                assert xpu_ops is not None
                 logits = xpu_ops.fp8_mqa_logits_torch(
                     q_fp8[chunk.token_start : chunk.token_end],
                     (k_fp8, k_scale.view(torch.float32).flatten()),
@@ -187,8 +191,7 @@ def sparse_attn_indexer(
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
         if current_platform.is_xpu():
-            from vllm._xpu_ops import xpu_ops
-
+            assert xpu_ops is not None
             logits = xpu_ops.fp8_paged_mqa_logits_torch(
                 padded_q_fp8_decode_tokens,
                 kv_cache,
