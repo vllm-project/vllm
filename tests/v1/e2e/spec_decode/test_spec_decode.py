@@ -771,7 +771,7 @@ def test_mtp_correctness(
             max_model_len=2048,
             attention_backend=attn_backend,
         )
-        # MTP auto-enables async scheduling; assert it is active.
+        # MTP supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
