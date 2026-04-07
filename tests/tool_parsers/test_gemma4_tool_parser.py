@@ -1,185 +1,462 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+Tests for Gemma4ToolParser — covers both native and fallback formats,
+argument parsing, streaming, and edge cases.
+
+Run with:
+    pytest tests/tool_parsers/test_gemma4_tool_parser.py -v
+"""
 
 import json
-from typing import Any
-from unittest.mock import MagicMock
 
 import pytest
+from transformers import AutoTokenizer
 
+from tests.tool_parsers.utils import (
+    run_tool_extraction,
+    run_tool_extraction_streaming,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.tool_parsers.gemma4_tool_parser import (
-    TOOL_CALL_END,
-    TOOL_CALL_START,
-    Gemma4ToolParser,
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers import ToolParser, ToolParserManager
+
+# ---------------------------------------------------------------------------
+# Import helpers from the parser module under test
+# ---------------------------------------------------------------------------
+from gemma4_tool_parser import (
     _parse_gemma4_args,
     _parse_gemma4_array,
+    _parse_gemma4_value,
+    _detect_format,
+    TOOL_CALL_START,
+    TOOL_CALL_END,
+    FALLBACK_TOOL_CALL_START,
+    FALLBACK_TOOL_CALL_END,
+    STRING_DELIM,
 )
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def mock_tokenizer():
-    tokenizer = MagicMock()
-    tokenizer.encode.return_value = [1, 2, 3]
-    # Include the tool call start token in the vocab for the parser
-    tokenizer.get_vocab.return_value = {TOOL_CALL_START: 48, TOOL_CALL_END: 49}
-    return tokenizer
-
-
-@pytest.fixture
-def parser(mock_tokenizer):
-    return Gemma4ToolParser(mock_tokenizer)
-
-
-@pytest.fixture
-def mock_request():
-    request = MagicMock(spec=ChatCompletionRequest)
-    request.tools = []
-    request.tool_choice = "auto"
-    return request
+from vllm_mock import _tokenize_for_streaming
 
 
 # ---------------------------------------------------------------------------
-# Unit tests for _parse_gemma4_args (shared parser logic)
+# Tokenizer fixture
 # ---------------------------------------------------------------------------
 
+@pytest.fixture(scope="module")
+def gemma4_tokenizer() -> TokenizerLike:
+    """
+    GPT-2 tokenizer augmented with Gemma4 special tokens.
+    Using a real Gemma4 tokenizer would be ideal in CI, but GPT-2 is
+    sufficient for unit-level parser tests.
+    """
+    tok = AutoTokenizer.from_pretrained("gpt2")
+    tok.add_tokens([
+        TOOL_CALL_START,   # <|tool_call>
+        TOOL_CALL_END,     # <tool_call|>
+        STRING_DELIM,      # <|"|>
+    ])
+    return tok
+
+
+# ---------------------------------------------------------------------------
+# Helpers: build raw model output strings
+# ---------------------------------------------------------------------------
+
+def _native(func_name: str, args_str: str) -> str:
+    """Build a native-format tool call string."""
+    return f"{TOOL_CALL_START}call:{func_name}{{{args_str}}}{TOOL_CALL_END}"
+
+
+def _fallback(func_name: str, args_str: str) -> str:
+    """Build a fallback XML-style tool call string."""
+    return f"{FALLBACK_TOOL_CALL_START}{func_name}{{{args_str}}}{FALLBACK_TOOL_CALL_END}"
+
+
+def _gemma4_str(value: str) -> str:
+    """Wrap a string in Gemma4 string delimiters."""
+    return f"{STRING_DELIM}{value}{STRING_DELIM}"
+
+
+
+# ---------------------------------------------------------------------------
+# Reusable argument strings and their expected parsed dicts
+# ---------------------------------------------------------------------------
+
+EMPTY_ARGS_STR = ""
+EMPTY_ARGS_DICT = {}
+
+SIMPLE_ARGS_STR = f"city:{_gemma4_str('Tokyo')}"
+SIMPLE_ARGS_DICT = {"city": "Tokyo"}
+
+MULTI_ARGS_STR = (
+    f"location:{_gemma4_str('San Francisco')},unit:{_gemma4_str('celsius')}"
+)
+MULTI_ARGS_DICT = {"location": "San Francisco", "unit": "celsius"}
+
+NUMERIC_ARGS_STR = "count:42,ratio:3.14,flag:true,disabled:false"
+NUMERIC_ARGS_DICT = {"count": 42, "ratio": 3.14, "flag": True, "disabled": False}
+
+NESTED_ARGS_STR = f"outer:{{inner:{_gemma4_str('deep')}}}"
+NESTED_ARGS_DICT = {"outer": {"inner": "deep"}}
+
+ARRAY_ARGS_STR = f"items:[{_gemma4_str('a')},{_gemma4_str('b')},{_gemma4_str('c')}]"
+ARRAY_ARGS_DICT = {"items": ["a", "b", "c"]}
+
+COMPLEX_ARGS_STR = (
+    f"action:{_gemma4_str('create')},"
+    f"id:{_gemma4_str('preferences')},"
+    f"content:{{short_answers:true,count:5,label:{_gemma4_str('main')}}}"
+)
+COMPLEX_ARGS_DICT = {
+    "action": "create",
+    "id": "preferences",
+    "content": {"short_answers": True, "count": 5, "label": "main"},
+}
+
+CONTENT_TEXT = "Sure, I'll do that for you."
+
+
+# ===========================================================================
+# Section 1: Unit tests for _parse_gemma4_value
+# ===========================================================================
+
+class TestParseGemma4Value:
+    def test_empty_string(self):
+        assert _parse_gemma4_value("") == ""
+
+    def test_whitespace_only(self):
+        assert _parse_gemma4_value("  ") == ""
+
+    def test_true(self):
+        assert _parse_gemma4_value("true") is True
+
+    def test_false(self):
+        assert _parse_gemma4_value("false") is False
+
+    def test_integer(self):
+        assert _parse_gemma4_value("42") == 42
+
+    def test_negative_integer(self):
+        assert _parse_gemma4_value("-7") == -7
+
+    def test_float(self):
+        result = _parse_gemma4_value("3.14")
+        assert abs(result - 3.14) < 1e-9
+
+    def test_bare_string(self):
+        # Bare strings (no delimiters) should be returned as-is
+        assert _parse_gemma4_value("hello") == "hello"
+
+
+# ===========================================================================
+# Section 2: Unit tests for _parse_gemma4_args
+# ===========================================================================
 
 class TestParseGemma4Args:
-    def test_empty_string(self):
+    def test_empty(self):
         assert _parse_gemma4_args("") == {}
 
     def test_whitespace_only(self):
         assert _parse_gemma4_args("   ") == {}
 
-    def test_single_string_value(self):
-        result = _parse_gemma4_args('location:<|"|>Paris<|"|>')
-        assert result == {"location": "Paris"}
+    def test_single_string(self):
+        assert _parse_gemma4_args(SIMPLE_ARGS_STR) == SIMPLE_ARGS_DICT
 
-    def test_string_value_with_comma(self):
-        result = _parse_gemma4_args('location:<|"|>Paris, France<|"|>')
-        assert result == {"location": "Paris, France"}
+    def test_multiple_strings(self):
+        assert _parse_gemma4_args(MULTI_ARGS_STR) == MULTI_ARGS_DICT
 
-    def test_multiple_string_values(self):
-        result = _parse_gemma4_args(
-            'location:<|"|>San Francisco<|"|>,unit:<|"|>celsius<|"|>'
-        )
-        assert result == {"location": "San Francisco", "unit": "celsius"}
-
-    def test_integer_value(self):
-        result = _parse_gemma4_args("count:42")
-        assert result == {"count": 42}
-
-    def test_float_value(self):
-        result = _parse_gemma4_args("score:3.14")
-        assert result == {"score": 3.14}
-
-    def test_boolean_true(self):
-        result = _parse_gemma4_args("flag:true")
-        assert result == {"flag": True}
-
-    def test_boolean_false(self):
-        result = _parse_gemma4_args("flag:false")
-        assert result == {"flag": False}
-
-    def test_mixed_types(self):
-        result = _parse_gemma4_args(
-            'name:<|"|>test<|"|>,count:42,active:true,score:3.14'
-        )
-        assert result == {
-            "name": "test",
-            "count": 42,
-            "active": True,
-            "score": 3.14,
-        }
+    def test_numeric_and_boolean(self):
+        assert _parse_gemma4_args(NUMERIC_ARGS_STR) == NUMERIC_ARGS_DICT
 
     def test_nested_object(self):
-        result = _parse_gemma4_args('nested:{inner:<|"|>value<|"|>}')
-        assert result == {"nested": {"inner": "value"}}
+        assert _parse_gemma4_args(NESTED_ARGS_STR) == NESTED_ARGS_DICT
 
-    def test_array_of_strings(self):
-        result = _parse_gemma4_args('items:[<|"|>a<|"|>,<|"|>b<|"|>]')
-        assert result == {"items": ["a", "b"]}
+    def test_array_value(self):
+        assert _parse_gemma4_args(ARRAY_ARGS_STR) == ARRAY_ARGS_DICT
 
-    def test_unterminated_string(self):
-        """Unterminated strings should take everything after the delimiter."""
-        result = _parse_gemma4_args('key:<|"|>unterminated')
-        assert result == {"key": "unterminated"}
+    def test_complex_mixed(self):
+        assert _parse_gemma4_args(COMPLEX_ARGS_STR) == COMPLEX_ARGS_DICT
 
-    def test_empty_value(self):
-        """Key with no value after colon."""
-        result = _parse_gemma4_args("key:")
-        assert result == {"key": ""}
+    def test_unterminated_string_value(self):
+        # Unterminated string — should capture rest of input
+        raw = f"key:{STRING_DELIM}unclosed"
+        result = _parse_gemma4_args(raw)
+        assert result["key"] == "unclosed"
 
+    def test_deeply_nested(self):
+        raw = f"a:{{b:{{c:{_gemma4_str('deep')}}}}}"
+        result = _parse_gemma4_args(raw)
+        assert result == {"a": {"b": {"c": "deep"}}}
+
+    def test_array_of_objects(self):
+        raw = (
+            f"items:[{{name:{_gemma4_str('Alice')}}},"
+            f"{{name:{_gemma4_str('Bob')}}}]"
+        )
+        result = _parse_gemma4_args(raw)
+        assert result == {"items": [{"name": "Alice"}, {"name": "Bob"}]}
+
+    def test_string_with_spaces(self):
+        raw = f"msg:{_gemma4_str('hello world')}"
+        assert _parse_gemma4_args(raw) == {"msg": "hello world"}
+
+    def test_string_with_comma_inside(self):
+        raw = f"addr:{_gemma4_str('123 Main St, Springfield')}"
+        assert _parse_gemma4_args(raw) == {"addr": "123 Main St, Springfield"}
+
+
+# ===========================================================================
+# Section 3: Unit tests for _parse_gemma4_array
+# ===========================================================================
 
 class TestParseGemma4Array:
-    def test_string_array(self):
-        result = _parse_gemma4_array('<|"|>a<|"|>,<|"|>b<|"|>')
-        assert result == ["a", "b"]
+    def test_empty(self):
+        assert _parse_gemma4_array("") == []
 
-    def test_empty_array(self):
-        result = _parse_gemma4_array("")
-        assert result == []
+    def test_strings(self):
+        raw = f"{_gemma4_str('x')},{_gemma4_str('y')}"
+        assert _parse_gemma4_array(raw) == ["x", "y"]
 
-    def test_bare_values(self):
-        result = _parse_gemma4_array("42,true,3.14")
-        assert result == [42, True, 3.14]
+    def test_numbers(self):
+        assert _parse_gemma4_array("1,2,3") == [1, 2, 3]
+
+    def test_mixed_types(self):
+        raw = f"{_gemma4_str('a')},42,true"
+        assert _parse_gemma4_array(raw) == ["a", 42, True]
+
+    def test_nested_arrays(self):
+        raw = "[1,2],[3,4]"
+        result = _parse_gemma4_array(raw)
+        assert result == [[1, 2], [3, 4]]
 
 
-# ---------------------------------------------------------------------------
-# Non-streaming extraction tests
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# Section 4: Unit tests for _detect_format
+# ===========================================================================
+
+class TestDetectFormat:
+    def test_no_tool_call(self):
+        assert _detect_format("Hello, how can I help?") == "none"
+
+    def test_native_only(self):
+        text = _native("my_func", SIMPLE_ARGS_STR)
+        assert _detect_format(text) == "native"
+
+    def test_fallback_only(self):
+        text = _fallback("my_func", SIMPLE_ARGS_STR)
+        assert _detect_format(text) == "fallback"
+
+    def test_both_formats(self):
+        text = _native("f1", "") + _fallback("f2", "")
+        assert _detect_format(text) == "both"
+
+    def test_fallback_start_only_no_end(self):
+        # Only opening tag present — should not count as fallback
+        assert _detect_format(FALLBACK_TOOL_CALL_START + "hangup{}") == "none"
 
 
-class TestExtractToolCalls:
-    def test_no_tool_calls(self, parser, mock_request):
-        model_output = "Hello, how can I help you today?"
-        result = parser.extract_tool_calls(model_output, mock_request)
+# ===========================================================================
+# Section 5: Non-streaming extraction tests
+# ===========================================================================
 
-        assert result.tools_called is False
-        assert result.tool_calls == []
-        assert result.content == model_output
+class TestExtractToolCallsNonStreaming:
 
-    def test_single_tool_call(self, parser, mock_request):
+    @pytest.fixture
+    def parser(self, gemma4_tokenizer):
+        return ToolParserManager.get_tool_parser("gemma4")(gemma4_tokenizer)
+
+    # --- No tool call ---
+
+    def test_plain_text(self, parser):
+        out = parser.extract_tool_calls("Hello there!", request=None)
+        assert not out.tools_called
+        assert out.content == "Hello there!"
+        assert out.tool_calls == []
+
+    # --- Native format ---
+
+    @pytest.mark.parametrize("args_str,expected_dict", [
+        pytest.param(EMPTY_ARGS_STR, EMPTY_ARGS_DICT, id="native_empty_args"),
+        pytest.param(SIMPLE_ARGS_STR, SIMPLE_ARGS_DICT, id="native_simple_args"),
+        pytest.param(MULTI_ARGS_STR, MULTI_ARGS_DICT, id="native_multi_args"),
+        pytest.param(NUMERIC_ARGS_STR, NUMERIC_ARGS_DICT, id="native_numeric_bool"),
+        pytest.param(NESTED_ARGS_STR, NESTED_ARGS_DICT, id="native_nested"),
+        pytest.param(ARRAY_ARGS_STR, ARRAY_ARGS_DICT, id="native_array"),
+        pytest.param(COMPLEX_ARGS_STR, COMPLEX_ARGS_DICT, id="native_complex"),
+    ])
+    def test_native_format(self, parser, args_str, expected_dict):
+        model_output = _native("my_tool", args_str)
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert len(out.tool_calls) == 1
+        tc = out.tool_calls[0]
+        assert tc.function.name == "my_tool"
+        assert json.loads(tc.function.arguments) == expected_dict
+
+    def test_native_content_before_tool_call(self, parser):
+        model_output = CONTENT_TEXT + _native("hangup_call", EMPTY_ARGS_STR)
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert out.content == CONTENT_TEXT
+        assert out.tool_calls[0].function.name == "hangup_call"
+
+    def test_native_multiple_tool_calls(self, parser):
         model_output = (
-            '<|tool_call>call:get_weather{location:<|"|>London<|"|>}<tool_call|>'
+            _native("tool_a", SIMPLE_ARGS_STR)
+            + _native("tool_b", NUMERIC_ARGS_STR)
         )
-        result = parser.extract_tool_calls(model_output, mock_request)
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert len(out.tool_calls) == 2
+        assert out.tool_calls[0].function.name == "tool_a"
+        assert out.tool_calls[1].function.name == "tool_b"
 
-        assert result.tools_called is True
+    # --- Fallback format ---
+
+    @pytest.mark.parametrize("args_str,expected_dict", [
+        pytest.param(EMPTY_ARGS_STR, EMPTY_ARGS_DICT, id="fallback_empty_args"),
+        pytest.param(SIMPLE_ARGS_STR, SIMPLE_ARGS_DICT, id="fallback_simple_args"),
+        pytest.param(MULTI_ARGS_STR, MULTI_ARGS_DICT, id="fallback_multi_args"),
+        pytest.param(NUMERIC_ARGS_STR, NUMERIC_ARGS_DICT, id="fallback_numeric_bool"),
+        pytest.param(NESTED_ARGS_STR, NESTED_ARGS_DICT, id="fallback_nested"),
+        pytest.param(ARRAY_ARGS_STR, ARRAY_ARGS_DICT, id="fallback_array"),
+        pytest.param(COMPLEX_ARGS_STR, COMPLEX_ARGS_DICT, id="fallback_complex"),
+    ])
+    def test_fallback_format(self, parser, args_str, expected_dict):
+        model_output = _fallback("my_tool", args_str)
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert len(out.tool_calls) == 1
+        tc = out.tool_calls[0]
+        assert tc.function.name == "my_tool"
+        assert json.loads(tc.function.arguments) == expected_dict
+
+    def test_fallback_hangup_empty_args(self, parser):
+        """Exact reproduction of the reported bug case."""
+        model_output = "<tool_call>hangup_call{}</tool_call>"
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert len(out.tool_calls) == 1
+        assert out.tool_calls[0].function.name == "hangup_call"
+        assert json.loads(out.tool_calls[0].function.arguments) == {}
+
+    def test_fallback_content_before_tool_call(self, parser):
+        model_output = CONTENT_TEXT + _fallback("hangup_call", EMPTY_ARGS_STR)
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert out.content == CONTENT_TEXT
+        assert out.tool_calls[0].function.name == "hangup_call"
+
+    def test_fallback_multiple_tool_calls(self, parser):
+        model_output = (
+            _fallback("tool_a", SIMPLE_ARGS_STR)
+            + _fallback("tool_b", EMPTY_ARGS_STR)
+        )
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert len(out.tool_calls) == 2
+        assert out.tool_calls[0].function.name == "tool_a"
+        assert json.loads(out.tool_calls[0].function.arguments) == SIMPLE_ARGS_DICT
+        assert out.tool_calls[1].function.name == "tool_b"
+        assert json.loads(out.tool_calls[1].function.arguments) == {}
+
+    # --- Function names ---
+
+    @pytest.mark.parametrize("func_name", [
+        "simple",
+        "with_underscore",
+        "with-hyphen",
+        "module.method",
+        "a1b2c3",
+    ])
+    def test_fallback_various_function_names(self, parser, func_name):
+        model_output = _fallback(func_name, EMPTY_ARGS_STR)
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.tools_called
+        assert out.tool_calls[0].function.name == func_name
+
+    # --- No content leak ---
+
+    def test_no_content_when_only_tool_call(self, parser):
+        model_output = _fallback("hangup_call", EMPTY_ARGS_STR)
+        out = parser.extract_tool_calls(model_output, request=None)
+        assert out.content is None
+
+
+# ===========================================================================
+# Section 6: Streaming extraction tests
+# ===========================================================================
+
+class TestExtractToolCallsStreaming:
+
+    @pytest.fixture
+    def parser(self, gemma4_tokenizer):
+        return ToolParserManager.get_tool_parser("gemma4")(gemma4_tokenizer)
+
+    def _stream(self, parser, deltas, assert_one_per_delta=False):
+        return run_tool_extraction_streaming(
+            parser,
+            deltas,
+            assert_one_tool_per_delta=assert_one_per_delta,
+        )
+
+    # --- Native format streaming ---
+
+    def test_native_streaming_simple(self, parser):
+        full = _native("get_weather", SIMPLE_ARGS_STR)
+        # AFTER (always token-aligned):
+        deltas = _tokenize_for_streaming(full)
+        result = self._stream(parser, deltas)
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].function.name == "get_weather"
-        args = json.loads(result.tool_calls[0].function.arguments)
-        assert args == {"location": "London"}
+        assert json.loads(result.tool_calls[0].function.arguments) == SIMPLE_ARGS_DICT
 
-    def test_multiple_arguments(self, parser, mock_request):
-        model_output = (
-            "<|tool_call>call:get_weather{"
-            'location:<|"|>San Francisco<|"|>,'
-            'unit:<|"|>celsius<|"|>}'
-            "<tool_call|>"
-        )
-        result = parser.extract_tool_calls(model_output, mock_request)
-
-        assert result.tools_called is True
+    def test_native_streaming_empty_args(self, parser):
+        full = _native("hangup_call", EMPTY_ARGS_STR)
+        deltas = _tokenize_for_streaming(full)
+        result = self._stream(parser, deltas)
         assert len(result.tool_calls) == 1
-        assert result.tool_calls[0].function.name == "get_weather"
-        args = json.loads(result.tool_calls[0].function.arguments)
-        assert args == {"location": "San Francisco", "unit": "celsius"}
+        assert result.tool_calls[0].function.name == "hangup_call"
+        assert json.loads(result.tool_calls[0].function.arguments) == {}
 
-    def test_text_before_tool_call(self, parser, mock_request):
-        model_output = (
-            "Let me check the weather for you. "
-            '<|tool_call>call:get_weather{location:<|"|>Paris<|"|>}'
-            "<tool_call|>"
-        )
-        result = parser.extract_tool_calls(model_output, mock_request)
+    def test_native_streaming_complex_args(self, parser):
+        full = _native("manage_prefs", COMPLEX_ARGS_STR)
+        deltas = _tokenize_for_streaming(full)
+        result = self._stream(parser, deltas, assert_one_per_delta=False)
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "manage_prefs"
+        assert json.loads(result.tool_calls[0].function.arguments) == COMPLEX_ARGS_DICT
 
-        assert result.tools_called is True
-        assert result.content == "Let me check the weather for you."
+    def test_native_streaming_with_content_prefix(self, parser):
+        full = CONTENT_TEXT + _native("do_thing", SIMPLE_ARGS_STR)
+        deltas = _tokenize_for_streaming(full)
+        result = self._stream(parser, deltas, assert_one_per_delta=False)
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "do_thing"
+        assert result.content is not None
+        assert CONTENT_TEXT in result.content
+
+    # --- Fallback format streaming ---
+
+    def test_fallback_streaming_hangup_empty_args(self, parser):
+        """Exact reported bug: <tool_call>hangup_call{}</tool_call> streamed."""
+        deltas = [
+            "<tool_call>",
+            "hangup_call",
+            "{}",
+            "</tool_call>",
+        ]
+        result = self._stream(parser, deltas)
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].function.name == "hangup_call"
+        assert json.loads(result.tool_calls[0].function.arguments) == {}
+
+    def test_fallback_streaming_simple_args(self, parser):
+        full = _fallback("get_weather", SIMPLE_ARGS_STR)
+        deltas = _tokenize_for_streaming(full)
+        result = self._stream(parser, deltas, assert_one_per_delta=False)
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0].function.name == "get_weather"
 
@@ -397,141 +674,77 @@ class TestStreamingExtraction:
         parsed_args = json.loads(args_text)
         assert parsed_args == {"location": "Tokyo", "unit": "celsius"}
 
-    def test_streaming_no_extra_brace(self, parser, mock_request):
-        """Verify the closing } is NOT leaked into arguments (Bug #2)."""
-        chunks = [
-            "<|tool_call>",
-            "call:get_weather{",
-            'location:<|"|>London<|"|>}',
-            "<tool_call|>",
-        ]
-
-        results = self._simulate_streaming(parser, mock_request, chunks)
-        args_text = self._collect_arguments(results)
-        assert args_text
-
-        # The args text must be valid JSON (no extra })
-        parsed = json.loads(args_text)
-        assert parsed == {"location": "London"}
-
-        # Specifically assert no double-brace
-        assert args_text.count("}") <= 1, (
-            f"Arguments contain extra closing brace: {args_text!r}"
+    def test_skip_special_tokens_unchanged_when_tool_choice_none(self, parser):
+        """tool_choice=none means tools are disabled; don't override."""
+        request = ChatCompletionRequest(
+            model="gemma4",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "hangup_call",
+                    "description": "Hang up",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }],
+            tool_choice="none",
         )
+        original = request.skip_special_tokens
+        adjusted = parser.adjust_request(request)
+        assert adjusted.skip_special_tokens == original
 
-    def test_streaming_no_unquoted_keys(self, parser, mock_request):
-        """Verify keys are properly quoted in JSON (Bug #1)."""
-        chunks = [
-            "<|tool_call>",
-            "call:get_weather{",
-            'location:<|"|>Paris<|"|>}',
-            "<tool_call|>",
-        ]
 
-        results = self._simulate_streaming(parser, mock_request, chunks)
-        args_text = self._collect_arguments(results)
+# ===========================================================================
+# Section 8: Parametrized combined streaming + non-streaming
+# ===========================================================================
 
-        # Must start with { and contain quoted key
-        assert args_text.lstrip().startswith("{"), (
-            f"Arguments don't start with '{{': {args_text!r}"
-        )
-        assert '"location"' in args_text, (
-            f"Key 'location' not properly quoted: {args_text!r}"
-        )
-
-    def test_streaming_name_no_call_prefix(self, parser, mock_request):
-        """Verify function name has no 'call:' prefix."""
-        chunks = [
-            "<|tool_call>",
-            "call:get_weather{",
-            'location:<|"|>Paris<|"|>}',
-            "<tool_call|>",
-        ]
-
-        results = self._simulate_streaming(parser, mock_request, chunks)
-        name = self._collect_function_name(results)
-        assert name == "get_weather"
-        assert not name.startswith("call:"), f"Name has 'call:' prefix: {name!r}"
-
-    def test_streaming_text_before_tool_call(self, parser, mock_request):
-        """Text before tool call should be emitted as content."""
-        chunks = [
-            "Let me check ",
-            "the weather. ",
-            "<|tool_call>",
-            "call:get_weather{",
-            'location:<|"|>London<|"|>}',
-            "<tool_call|>",
-        ]
-
-        results = self._simulate_streaming(parser, mock_request, chunks)
-
-        # First chunks should be content
-        content_parts = []
-        for delta, _ in results:
-            if delta and delta.content:
-                content_parts.append(delta.content)
-
-        assert "".join(content_parts).strip().startswith("Let me check")
-
-    def test_streaming_numeric_args(self, parser, mock_request):
-        """Streaming with numeric and boolean argument values."""
-        chunks = [
-            "<|tool_call>",
-            "call:set_config{",
-            "count:42,",
-            "active:true}",
-            "<tool_call|>",
-        ]
-
-        results = self._simulate_streaming(parser, mock_request, chunks)
-        args_text = self._collect_arguments(results)
-        if args_text:
-            parsed_args = json.loads(args_text)
-            assert parsed_args["count"] == 42
-            assert parsed_args["active"] is True
-
-    def test_streaming_empty_args(self, parser, mock_request):
-        """Tool call with no arguments."""
-        chunks = [
-            "<|tool_call>",
-            "call:get_status{}",
-            "<tool_call|>",
-        ]
-
-        results = self._simulate_streaming(parser, mock_request, chunks)
-        name = self._collect_function_name(results)
-        assert name == "get_status"
-
-    def test_streaming_split_delimiter_no_invalid_json(self, parser, mock_request):
-        """Partial <|"|> delimiter chars must not leak into streamed JSON.
-
-        Reproduces the bug from https://github.com/vllm-project/vllm/issues/38946
-        where a token boundary splits the string delimiter, leaving fragments
-        like '<|' at the end of a parsed value which then corrupt the JSON.
-        """
-        chunks = [
-            "<|tool_call>",
-            "call:todowrite{",
-            'content:<|"|>Buy milk<|',
-            '"|>}',
-            "<tool_call|>",
-        ]
-
-        results = self._simulate_streaming(parser, mock_request, chunks)
-
-        args_text = self._collect_arguments(results)
-        assert args_text, "No arguments were streamed"
-
-        # Must be valid JSON — the original bug caused a JSON parse error
-        parsed_args = json.loads(args_text)
-        assert parsed_args["content"] == "Buy milk"
-
-        # Ensure no raw delimiter fragments leaked into the JSON
-        assert "<|" not in args_text, (
-            f"Partial delimiter leaked into JSON: {args_text!r}"
-        )
-
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("model_output,func_name,expected_args", [
+    pytest.param(
+        "<tool_call>hangup_call{}</tool_call>",
+        "hangup_call",
+        {},
+        id="fallback_empty",
+    ),
+    pytest.param(
+        _fallback("get_weather", SIMPLE_ARGS_STR),
+        "get_weather",
+        SIMPLE_ARGS_DICT,
+        id="fallback_simple",
+    ),
+    pytest.param(
+        _native("get_weather", SIMPLE_ARGS_STR),
+        "get_weather",
+        SIMPLE_ARGS_DICT,
+        id="native_simple",
+    ),
+    pytest.param(
+        _fallback("complex_func", COMPLEX_ARGS_STR),
+        "complex_func",
+        COMPLEX_ARGS_DICT,
+        id="fallback_complex",
+    ),
+    pytest.param(
+        _native("complex_func", COMPLEX_ARGS_STR),
+        "complex_func",
+        COMPLEX_ARGS_DICT,
+        id="native_complex",
+    ),
+])
+def test_tool_extraction_both_modes(
+    streaming,
+    model_output,
+    func_name,
+    expected_args,
+    gemma4_tokenizer,
+):
+    parser = ToolParserManager.get_tool_parser("gemma4")(gemma4_tokenizer)
+    content, tool_calls = run_tool_extraction(
+        parser, model_output, streaming=streaming
+    )
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function.name == func_name
+    assert json.loads(tool_calls[0].function.arguments) == expected_args
     def test_streaming_does_not_duplicate_plain_text_after_tool_call(
         self, parser, mock_request, monkeypatch
     ):

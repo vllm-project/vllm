@@ -3,12 +3,24 @@
 """
 Tool call parser for Google Gemma4 models.
 
-Gemma4 uses a custom serialization format (not JSON) for tool calls::
+Handles TWO tool call formats emitted by Gemma4:
 
+FORMAT 1 — Native token format (primary):
     <|tool_call>call:func_name{key:<|"|>value<|"|>,num:42}<tool_call|>
 
-Strings are delimited by ``<|"|>`` (token 52), keys are unquoted, and
-multiple tool calls are concatenated without separators.
+FORMAT 2 — Fallback XML-style format (seen when the model regresses):
+    <tool_call>hangup_call{}</tool_call>
+    <tool_call>func_name{key:<|"|>value<|"|>}</tool_call>
+
+The fallback format differs from the native format in three ways:
+  - Uses plain ``<tool_call>`` / ``</tool_call>`` tags instead of
+    ``<|tool_call>`` / ``<tool_call|>``
+  - Does NOT include the ``call:`` prefix before the function name
+  - Is otherwise structurally identical (same key:value / <|"|> encoding)
+
+Both formats share the same Gemma4 argument encoding, so
+``_parse_gemma4_args()`` is reused for both.
+
 
 Used when ``--enable-auto-tool-choice --tool-call-parser gemma4`` are set.
 
@@ -49,6 +61,26 @@ TOOL_CALL_END = "<tool_call|>"
 STRING_DELIM = '<|"|>'
 
 
+# ---------------------------------------------------------------------------
+# Fallback format constants
+# ---------------------------------------------------------------------------
+FALLBACK_TOOL_CALL_START = "<tool_call>"
+FALLBACK_TOOL_CALL_END = "</tool_call>"
+
+# Regex for native format (complete match, non-streaming)
+#   <|tool_call>call:func_name{...}<tool_call|>
+_NATIVE_REGEX = re.compile(
+    r"<\|tool_call>call:([\w\-\.]+)\{(.*?)\}<tool_call\|>",
+    re.DOTALL,
+)
+
+# Regex for fallback format (complete match, non-streaming)
+#   <tool_call>func_name{...}</tool_call>
+#   Works for empty args too:  <tool_call>hangup_call{}</tool_call>
+_FALLBACK_REGEX = re.compile(
+    r"<tool_call>([\w\-\.]+)\{(.*?)\}</tool_call>",
+    re.DOTALL,
+)
 # ---------------------------------------------------------------------------
 # Gemma4 argument parser (used by both streaming and non-streaming paths)
 # ---------------------------------------------------------------------------
@@ -249,6 +281,41 @@ def _parse_gemma4_array(arr_str: str) -> list:
     return items
 
 
+
+# ---------------------------------------------------------------------------
+# Helper: detect which format is present
+# ---------------------------------------------------------------------------
+
+def _detect_format(text: str) -> str:
+    """Return 'native', 'fallback', 'both', or 'none'."""
+    has_native = TOOL_CALL_START in text
+    has_fallback = FALLBACK_TOOL_CALL_START in text and FALLBACK_TOOL_CALL_END in text
+    if has_native and has_fallback:
+        return "both"
+    if has_native:
+        return "native"
+    if has_fallback:
+        return "fallback"
+    return "none"
+
+
+def _build_tool_calls(matches: list[tuple[str, str]]) -> list[ToolCall]:
+    """Convert (func_name, args_str) match pairs into ToolCall objects."""
+    tool_calls = []
+    for func_name, args_str in matches:
+        arguments = _parse_gemma4_args(args_str)
+        tool_calls.append(
+            ToolCall(
+                type="function",
+                function=FunctionCall(
+                    name=func_name,
+                    arguments=json.dumps(arguments, ensure_ascii=False),
+                ),
+            )
+        )
+    return tool_calls
+
+
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
@@ -261,6 +328,12 @@ class Gemma4ToolParser(ToolParser):
     Handles the Gemma4 function call format::
 
         <|tool_call>call:func_name{key:<|"|>value<|"|>}<tool_call|>
+
+     **Fallback XML-style** (seen when the model regresses or uses a
+    non-native chat template)::
+
+        <tool_call>hangup_call{}</tool_call>
+        <tool_call>func_name{key:<|"|>value<|"|>}</tool_call>
 
     Used when ``--enable-auto-tool-choice --tool-call-parser gemma4``
     are set.
@@ -304,13 +377,9 @@ class Gemma4ToolParser(ToolParser):
                 f"token '{TOOL_CALL_START}' in the tokenizer!"
             )
 
-        # Regex for non-streaming: extract complete tool calls.
-        # Supports function names with letters, digits, underscores,
-        # hyphens, and dots (e.g. "get-weather", "module.func").
-        self.tool_call_regex = re.compile(
-            r"<\|tool_call>call:([\w\-\.]+)\{(.*?)\}<tool_call\|>",
-            re.DOTALL,
-        )
+         # Native and fallback regexes (non-streaming, complete match)
+        self.tool_call_regex = _NATIVE_REGEX
+        self.fallback_tool_call_regex = _FALLBACK_REGEX
 
         # Streaming state — reset per-request via _reset_streaming_state()
         self._reset_streaming_state()
@@ -324,6 +393,8 @@ class Gemma4ToolParser(ToolParser):
         self.current_tool_name_sent = False
         self.prev_tool_call_arr: list[dict] = []
         self.streamed_args_for_tool: list[str] = []
+        # Track which format the current stream is using
+        self._streaming_format: str = "none"
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -354,13 +425,18 @@ class Gemma4ToolParser(ToolParser):
         """
         combined = self.buffered_delta_text + delta_text
 
+        all_tags = [
+            TOOL_CALL_START, TOOL_CALL_END,
+            FALLBACK_TOOL_CALL_START, FALLBACK_TOOL_CALL_END,
+        ]
+
         # Check if combined ends with a complete special token
-        if combined.endswith(TOOL_CALL_START) or combined.endswith(TOOL_CALL_END):
+        if any(combined.endswith(tag) for tag in all_tags):
             self.buffered_delta_text = ""
             return combined
 
         # Check if combined ends with a partial prefix of a special token
-        for tag in [TOOL_CALL_START, TOOL_CALL_END]:
+        for tag in all_tags:
             for i in range(1, len(tag)):
                 if combined.endswith(tag[:i]):
                     self.buffered_delta_text = combined[-i:]
@@ -379,40 +455,49 @@ class Gemma4ToolParser(ToolParser):
         model_output: str,
         request: ChatCompletionRequest,
     ) -> ExtractedToolCallInformation:
-        if self.tool_call_start_token not in model_output:
+        """Extract tool calls from a complete model output string.
+
+        Tries the native format first; falls back to the XML-style format
+        if no native tool calls are found.
+        """
+        fmt = _detect_format(model_output)
+
+        if fmt == "none":
             return ExtractedToolCallInformation(
                 tools_called=False, tool_calls=[], content=model_output
             )
 
         try:
-            matches = self.tool_call_regex.findall(model_output)
-            if not matches:
-                return ExtractedToolCallInformation(
-                    tools_called=False, tool_calls=[], content=model_output
-                )
-
-            tool_calls: list[ToolCall] = []
-            for func_name, args_str in matches:
-                arguments = _parse_gemma4_args(args_str)
-                tool_calls.append(
-                    ToolCall(
-                        type="function",
-                        function=FunctionCall(
-                            name=func_name,
-                            arguments=json.dumps(arguments, ensure_ascii=False),
-                        ),
+       # --- Native format ---
+            if fmt in ("native", "both"):
+                matches = self.tool_call_regex.findall(model_output)
+                if matches:
+                    tool_calls = _build_tool_calls(matches)
+                    content_end = model_output.find(TOOL_CALL_START)
+                    content = model_output[:content_end].strip() or None
+                    return ExtractedToolCallInformation(
+                        tools_called=True,
+                        tool_calls=tool_calls,
+                        content=content,
                     )
-                )
 
-            # Content = text before first tool call (if any)
-            content_end = model_output.find(self.tool_call_start_token)
-            content = model_output[:content_end].strip() if content_end > 0 else None
+            # --- Fallback XML-style format ---
+            if fmt in ("fallback", "both"):
+                matches = self.fallback_tool_call_regex.findall(model_output)
+                if matches:
+                    logger.debug(
+                        "Gemma4ToolParser: using fallback XML format for %d tool call(s)",
+                        len(matches),
+                    )
+                    tool_calls = _build_tool_calls(matches)
+                    content_end = model_output.find(FALLBACK_TOOL_CALL_START)
+                    content = model_output[:content_end].strip() or None
+                    return ExtractedToolCallInformation(
+                        tools_called=True,
+                        tool_calls=tool_calls,
+                        content=content,
+                    )
 
-            return ExtractedToolCallInformation(
-                tools_called=True,
-                tool_calls=tool_calls,
-                content=content if content else None,
-            )
 
         except Exception:
             logger.exception("Error extracting tool calls from Gemma4 response")
@@ -434,53 +519,67 @@ class Gemma4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
-        # Buffer delta text to handle multi-token special sequences
+        # Buffer delta text to handle multi-token tag sequences
         delta_text = self._buffer_delta_text(delta_text)
         # Keep current_text from the upstream stream state. The buffered delta
         # is only for emission, and must not be stitched back into the
         # accumulated model text or normal content like "<div>" can be
         # duplicated into "<<div>" when a tool call just ended.
 
+        # Detect which format is active (latch on first detection)
+        if self._streaming_format == "none":
+            if TOOL_CALL_START in current_text:
+                self._streaming_format = "native"
+                logger.debug("Gemma4ToolParser: streaming format = native")
+            elif FALLBACK_TOOL_CALL_START in current_text:
+                self._streaming_format = "fallback"
+                logger.debug("Gemma4ToolParser: streaming format = fallback")
+
+
         # If no tool call token seen yet, emit as content
-        if self.tool_call_start_token not in current_text:
+        if self._streaming_format == "none":
             if delta_text:
                 return DeltaMessage(content=delta_text)
             return None
 
         try:
-            return self._extract_streaming(
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-            )
+            if self._streaming_format == "native":
+                return self._extract_streaming_native(
+                    previous_text=previous_text,
+                    current_text=current_text,
+                    delta_text=delta_text,
+                )
+            else:  # fallback
+                return self._extract_streaming_fallback(
+                    previous_text=previous_text,
+                    current_text=current_text,
+                    delta_text=delta_text,
+                )
         except Exception:
             logger.exception("Error in Gemma4 streaming tool call extraction")
             return None
 
-    def _extract_streaming(
+
+    # ------------------------------------------------------------------
+    # Native format streaming
+    # ------------------------------------------------------------------
+    def _extract_streaming_native(
         self,
         previous_text: str,
         current_text: str,
         delta_text: str,
     ) -> DeltaMessage | None:
-        """Tag-counting streaming parser.
-
-        Uses the proven approach from FunctionGemma/Hermes: count start/end
-        tags in previous vs current text to determine phase, then
-        accumulate-parse-diff for arguments.
-
-        Format: ``<|tool_call>call:name{args}<tool_call|>``
-        """
-        start_count = current_text.count(self.tool_call_start_token)
-        end_count = current_text.count(self.tool_call_end_token)
-        prev_start_count = previous_text.count(self.tool_call_start_token)
-        prev_end_count = previous_text.count(self.tool_call_end_token)
+        """Streaming handler for native <|tool_call>...<tool_call|> format."""
+        start_count = current_text.count(TOOL_CALL_START)
+        end_count = current_text.count(TOOL_CALL_END)
+        prev_start_count = previous_text.count(TOOL_CALL_START)
+        prev_end_count = previous_text.count(TOOL_CALL_END)
 
         # Case 1: Not inside any tool call — emit as content
         if (
             start_count == end_count
             and prev_end_count == end_count
-            and self.tool_call_end_token not in delta_text
+            and TOOL_CALL_END not in delta_text
         ):
             if delta_text:
                 return DeltaMessage(content=delta_text)
@@ -496,100 +595,130 @@ class Gemma4ToolParser(ToolParser):
             # Don't return yet — fall through to try parsing if there's
             # content after <|tool_call> in this same delta
             # (but usually it's just the token itself, so return None)
-            if len(delta_text) <= len(self.tool_call_start_token):
+            if len(delta_text) <= len(TOOL_CALL_START):
                 return None
 
         # Case 3: Tool call just ended
         if end_count > prev_end_count:
-            return self._handle_tool_call_end(current_text)
+            return self._handle_tool_call_end(current_text,self.tool_call_regex, TOOL_CALL_START)
 
         # Case 4: In the middle of a tool call — parse partial content
         if start_count > end_count:
-            return self._handle_tool_call_middle(current_text)
+            return self._handle_tool_call_middle_native(current_text)
 
         # Default: generate text outside tool calls
         if delta_text:
-            text = delta_text.replace(self.tool_call_start_token, "")
-            text = text.replace(self.tool_call_end_token, "")
+            text = delta_text.replace(TOOL_CALL_START, "").replace(TOOL_CALL_END, "")
             if text:
                 return DeltaMessage(content=text)
         return None
 
-    def _extract_partial_call(self, current_text: str) -> tuple[str | None, str]:
-        """Extract function name and raw argument string from partial text.
-
-        Returns (func_name, raw_args_str) or (None, "") if not parseable yet.
-        """
-        # Get the text after the last <|tool_call> token
-        last_start = current_text.rfind(self.tool_call_start_token)
+    def _handle_tool_call_middle_native(
+        self, current_text: str
+    ) -> DeltaMessage | None:
+        """Parse partial native-format tool call and emit name/arg deltas."""
+        last_start = current_text.rfind(TOOL_CALL_START)
         if last_start == -1:
-            return None, ""
+            return None
 
-        partial_call = current_text[last_start + len(self.tool_call_start_token) :]
+        partial_call = current_text[last_start + len(TOOL_CALL_START):]
+        if TOOL_CALL_END in partial_call:
+            partial_call = partial_call.split(TOOL_CALL_END)[0]
 
-        # Strip end token if present
-        if self.tool_call_end_token in partial_call:
-            partial_call = partial_call.split(self.tool_call_end_token)[0]
-
-        # Expect "call:name{args...}" or "call:name{args...}"
         if not partial_call.startswith("call:"):
-            return None, ""
+            return None
 
         func_part = partial_call[5:]  # skip "call:"
-
         if "{" not in func_part:
-            # Still accumulating function name, not ready yet
-            return None, ""
+            return None
 
         func_name, _, args_part = func_part.partition("{")
         func_name = func_name.strip()
-
-        # Strip trailing '}' if present (Gemma4 structural brace)
         if args_part.endswith("}"):
             args_part = args_part[:-1]
 
-        return func_name, args_part
+        return self._emit_name_then_args(func_name, args_part)
 
-    def _handle_tool_call_middle(self, current_text: str) -> DeltaMessage | None:
-        """Handle streaming when we're inside an active tool call.
 
-        Accumulates the raw Gemma4 arguments, parses them into JSON, and
-        diffs against the previously-streamed JSON to emit only the new
-        fragment.
-        """
-        func_name, args_part = self._extract_partial_call(current_text)
+    # ------------------------------------------------------------------
+    # Fallback format streaming
+    # ------------------------------------------------------------------
 
-        if func_name is None:
+    def _extract_streaming_fallback(
+        self,
+        previous_text: str,
+        current_text: str,
+        delta_text: str,
+    ) -> DeltaMessage | None:
+        """Streaming handler for fallback <tool_call>...</tool_call> format."""
+        start_count = current_text.count(FALLBACK_TOOL_CALL_START)
+        end_count = current_text.count(FALLBACK_TOOL_CALL_END)
+        prev_start_count = previous_text.count(FALLBACK_TOOL_CALL_START)
+        prev_end_count = previous_text.count(FALLBACK_TOOL_CALL_END)
+
+        # Outside any tool call — emit as content
+        if (
+            start_count == end_count
+            and prev_end_count == end_count
+            and FALLBACK_TOOL_CALL_END not in delta_text
+        ):
+            if delta_text:
+                return DeltaMessage(content=delta_text)
             return None
 
-        # Step 1: Send function name (once)
-        if not self.current_tool_name_sent and func_name:
-            self.current_tool_name_sent = True
-            self.prev_tool_call_arr[self.current_tool_id] = {
-                "name": func_name,
-                "arguments": {},
-            }
-            return DeltaMessage(
-                tool_calls=[
-                    DeltaToolCall(
-                        index=self.current_tool_id,
-                        type="function",
-                        id=make_tool_call_id(),
-                        function=DeltaFunctionCall(
-                            name=func_name,
-                            arguments="",
-                        ).model_dump(exclude_none=True),
-                    )
-                ]
+        # New tool call starting
+        if start_count > prev_start_count and start_count > end_count:
+            self.current_tool_id += 1
+            self.current_tool_name_sent = False
+            self.streamed_args_for_tool.append("")
+            self.prev_tool_call_arr.append({})
+            if len(delta_text) <= len(FALLBACK_TOOL_CALL_START):
+                return None
+
+        # Tool call just ended
+        if end_count > prev_end_count:
+            return self._handle_tool_call_end(
+                current_text, self.fallback_tool_call_regex, FALLBACK_TOOL_CALL_START
             )
 
-        # Step 2: Parse and diff arguments
-        if self.current_tool_name_sent and args_part:
-            return self._emit_argument_diff(args_part)
+        # Inside a tool call — parse partial content
+        if start_count > end_count:
+            return self._handle_tool_call_middle_fallback(current_text)
 
+        if delta_text:
+            text = (
+                delta_text
+                .replace(FALLBACK_TOOL_CALL_START, "")
+                .replace(FALLBACK_TOOL_CALL_END, "")
+            )
+            if text:
+                return DeltaMessage(content=text)
         return None
 
-    def _handle_tool_call_end(self, current_text: str) -> DeltaMessage | None:
+    def _handle_tool_call_middle_fallback(
+        self, current_text: str
+    ) -> DeltaMessage | None:
+        """Parse partial fallback-format tool call and emit name/arg deltas."""
+        last_start = current_text.rfind(FALLBACK_TOOL_CALL_START)
+        if last_start == -1:
+            return None
+
+        partial_call = current_text[last_start + len(FALLBACK_TOOL_CALL_START):]
+        if FALLBACK_TOOL_CALL_END in partial_call:
+            partial_call = partial_call.split(FALLBACK_TOOL_CALL_END)[0]
+
+        # Fallback format: func_name{args...}  (NO "call:" prefix)
+        if "{" not in partial_call:
+            return None
+
+        func_name, _, args_part = partial_call.partition("{")
+        func_name = func_name.strip()
+        if args_part.endswith("}"):
+            args_part = args_part[:-1]
+
+        return self._emit_name_then_args(func_name, args_part)
+
+    def _handle_tool_call_end(self,  current_text: str,regex: re.Pattern,start_token: str) -> DeltaMessage | None:
         """Handle streaming when a tool call has just completed.
 
         Performs a final parse of the complete tool call and flushes
