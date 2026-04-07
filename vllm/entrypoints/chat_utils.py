@@ -40,9 +40,10 @@ from typing_extensions import Required, TypedDict
 
 from vllm import envs
 from vllm.config import ModelConfig
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFlatField,
@@ -1186,6 +1187,7 @@ def _get_full_multimodal_text_prompt(
     placeholder_storage: dict[str, list],
     texts: list[str],
     interleave_strings: bool,
+    multimodal_content_part_separator: str = "\n",
 ) -> str:
     """Combine multimodal prompts for a multimodal language model."""
 
@@ -1231,9 +1233,11 @@ def _get_full_multimodal_text_prompt(
     # NOTE: Default behaviour: we always add missing placeholders
     # at the front of the prompt, if interleave_strings=False
     if text_prompt:
-        return "\n".join(missing_placeholders + [text_prompt])
+        return multimodal_content_part_separator.join(
+            missing_placeholders + [text_prompt]
+        )
     else:
-        return "\n".join(missing_placeholders)
+        return multimodal_content_part_separator.join(missing_placeholders)
 
 
 # No need to validate using Pydantic again
@@ -1383,6 +1387,7 @@ def _parse_chat_message_content_parts(
     wrap_dicts: bool,
     interleave_strings: bool,
     mm_processor_kwargs: dict[str, Any] | None = None,
+    multimodal_content_part_separator="\n",
 ) -> list[ConversationMessage]:
     content = list[_ContentPart]()
 
@@ -1405,7 +1410,10 @@ def _parse_chat_message_content_parts(
     mm_placeholder_storage = mm_parser.mm_placeholder_storage()
     if mm_placeholder_storage:
         text_prompt = _get_full_multimodal_text_prompt(
-            mm_placeholder_storage, texts, interleave_strings
+            mm_placeholder_storage,
+            texts,
+            interleave_strings,
+            multimodal_content_part_separator=multimodal_content_part_separator,
         )
     else:
         text_prompt = "\n".join(texts)

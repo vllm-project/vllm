@@ -5,6 +5,8 @@ import argparse
 
 import uvloop
 
+from vllm import envs
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (
@@ -108,8 +110,6 @@ def cmd_init() -> list[CLISubcommand]:
 
 async def run_launch_fastapi(args: argparse.Namespace) -> None:
     """Run the online serving layer with FastAPI (no GPU inference)."""
-    from vllm.config import VllmConfig
-
     # 1. Socket binding
     listen_address, sock = setup_server(args)
 
@@ -120,6 +120,10 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # Render servers preprocess data only — no inference, no quantized kernels.
     # Clear quantization so VllmConfig skips quant dtype/capability validation.
     model_config.quantization = None
+
+    # Render servers never allocate KV cache; suppress the spurious CPU KV
+    # cache space warning from CpuPlatform.check_and_update_config.
+    envs.VLLM_CPU_KVCACHE_SPACE = 0
 
     vllm_config = VllmConfig(model_config=model_config)
     shutdown_task = await build_and_serve_renderer(
