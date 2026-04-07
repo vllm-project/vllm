@@ -577,13 +577,13 @@ class EplbState:
                 # for each layer:
                 #   (mean load across ranks) / (max load across ranks)
                 # then average over active layers.
-                per_layer_mean = num_tokens_per_rank.mean(dim=1)
-                per_layer_max = num_tokens_per_rank.max(dim=1).values
+                per_layer_mean = num_tokens_per_rank.mean(dim=1, dtype=torch.float64)
+                per_layer_max = num_tokens_per_rank.max(dim=1).values.to(torch.float64)
                 active = per_layer_max > 0
                 if active.any():
                     balancedness = (
-                        per_layer_mean[active] / per_layer_max[active]
-                    ).mean().item()
+                        (per_layer_mean[active] / per_layer_max[active]).mean().item()
+                    )
                 else:
                     balancedness = 0.0
                 avg_tokens = per_layer_mean.sum().item()
