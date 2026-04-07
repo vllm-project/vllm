@@ -52,8 +52,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     verify_marlin_supported,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kInt4Static,
-    kInt8Static,
+    QuantKey,
+    kInt4StaticGroupScale,
+    kInt8StaticGroupScale,
 )
 from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
@@ -507,15 +508,15 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         self.quant_config = quant_config
         if self.quant_config.quant_type.size_bits == 4:
             self.quant_type = scalar_types.uint4b8
+            self.scale = kInt4StaticGroupScale
         elif self.quant_config.quant_type.size_bits == 8:
             self.quant_type = scalar_types.uint8b128
+            self.scale = kInt8StaticGroupScale
         else:
             raise ValueError("GPTQMarlinMoEMethod only supports int4 and int8 now.")
         self.input_dtype = None
         self.use_marlin = True
-        weight_key = (
-            kInt4Static if self.quant_type == scalar_types.uint4b8 else kInt8Static
-        )
+        weight_key = QuantKey(self.quant_type, self.scale)
 
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe, weight_key, quant_config.weight_bits

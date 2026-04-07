@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
 MXFP_SCALE_DTYPE = torch.uint8
-INT4_DTYPE = scalar_types.int4
-INT8_DTYPE = scalar_types.int8
+INT4_DTYPE = scalar_types.uint4b8
+INT8_DTYPE = scalar_types.uint8b128
 
 
 def get_fp8_min_max() -> tuple[float, float]:
