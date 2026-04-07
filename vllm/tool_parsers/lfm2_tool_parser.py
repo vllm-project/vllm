@@ -175,9 +175,9 @@ class Lfm2ToolParser(ToolParser):
         if TOOL_CALL_START not in current_text:
             return DeltaMessage(content=delta_text)
 
-        # If the tool call end token just appeared, we are done with tools.
-        # Any content after the end token should be streamed as text.
-        if TOOL_CALL_END in current_text:
+        # If the tool call end token appeared and tools were already parsed,
+        # stream any remaining content after the end token.
+        if TOOL_CALL_END in current_text and self.prev_tool_call_arr:
             after_end = current_text.split(TOOL_CALL_END, 1)[1]
             prev_after_end = (
                 previous_text.split(TOOL_CALL_END, 1)[1]
@@ -187,14 +187,13 @@ class Lfm2ToolParser(ToolParser):
             new_content = after_end[len(prev_after_end) :]
             if new_content:
                 return DeltaMessage(content=new_content)
-            # If nothing new after end token but we have parsed tools,
-            # return empty delta so finish_reason gets set.
-            if self.prev_tool_call_arr:
-                return DeltaMessage(content="")
-            return None
+            return DeltaMessage(content="")
 
-        # We are between start and end tokens — extract the pythonic text.
+        # Extract the pythonic text between start and end tokens.
         tool_text = current_text.split(TOOL_CALL_START, 1)[1]
+        # Strip the end token if present (entire call arrived at once).
+        if TOOL_CALL_END in tool_text:
+            tool_text = tool_text.split(TOOL_CALL_END, 1)[0]
 
         try:
             valid_and_added_text = make_valid_python(tool_text)
