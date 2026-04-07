@@ -2,17 +2,15 @@
 
 `vllm-frontend-rs` is an early-stage Rust alternative frontend for the [vLLM](https://github.com/vllm-project/vllm) inference engine. The current goal is to rebuild the northbound serving layer in Rust while still talking to a headless Python vLLM engine via ZMQ over the existing engine boundary.
 
-At the moment, the repository contains a minimal end-to-end path up to an OpenAI-compatible HTTP server plus a Rust CLI that can either connect to an existing headless Python engine or manage one for you.
-
 ## Architecture
 
 The project is organized as a Cargo workspace with several crates, layered bottom-up:
 
 ```
 ┌─────────────────────────────────┐
-│  vllm-cmd / vllm-rs             │  CLI entrypoint: external-engine
-│                                 │  frontend mode + managed-engine
-│                                 │  serve mode
+│  vllm-cmd / vllm-rs             │  CLI entrypoint:
+│                                 │  Python vLLM frontend subprocess
+│                                 │  Rust managed-engine serve mode
 ├─────────────────────────────────┤
 │  vllm-server                    │  OpenAI-compatible HTTP API (axum)
 ├─────────────────────────────────┤
@@ -42,9 +40,26 @@ cargo install --path src/cmd --bin vllm-rs
 cargo install --git https://github.com/inferact/vllm-frontend-rs --bin vllm-rs
 ```
 
+### Python Integration
+
+`vllm-rs` can be integrated into Python `vllm` as a Rust frontend subprocess. In that setup,
+Python owns process startup and launches the Rust API server as a Python-supervised worker, while
+passing the inherited listening socket and transport addresses into `vllm-rs`.
+
+This is expected to become the simplest way to try the Rust frontend once the corresponding Python
+changes land.
+
+For example:
+
+```bash
+VLLM_RUST_FRONTEND_PATH=/path/to/vllm-rs \
+python3 -m vllm.entrypoints.cli.main serve Qwen/Qwen3-0.6B
+```
+
 ### Managed Engine
 
-Use `serve` when you want `vllm-rs` to start a headless Python `vllm` engine for you and then launch the Rust OpenAI-compatible frontend. The long-term goal of this path is to become a drop-in replacement for Python `vllm serve`.
+You can also use `vllm-rs` as the entrypoint and let it manage the lifecycle of the Python engine subprocess.
+The long-term goal of this path is to become a drop-in replacement for Python `vllm serve`.
 
 ### Minimal Startup
 
@@ -83,22 +98,27 @@ are recognized by `vllm-rs` and reported explicitly instead of being forwarded.
 
 ### External Engine
 
-Use `frontend` when you already have a headless Python `vllm` engine running:
+Use `vllm-rs serve` with `--data-parallel-size-local 0` when the Python engines are started elsewhere and
+this node should run only the Rust frontend. The frontend still uses the global
+`--data-parallel-size` to determine how many engines it expects to join the shared handshake.
 
 ```bash
 python3 -m vllm.entrypoints.cli.main serve Qwen/Qwen3-0.6B \
   --headless \
   --data-parallel-address 127.0.0.1 \
   --data-parallel-rpc-port 62100 \
+  --data-parallel-size 1 \
   --data-parallel-size-local 1
 ```
 
-Then start the Rust frontend against that engine:
+Then start the Rust frontend-only server:
 
 ```bash
-vllm-rs frontend \
-  --handshake-address tcp://127.0.0.1:62100 \
-  Qwen/Qwen3-0.6B
+vllm-rs serve Qwen/Qwen3-0.6B \
+  --data-parallel-address 127.0.0.1 \
+  --data-parallel-rpc-port 62100 \
+  --data-parallel-size 1 \
+  --data-parallel-size-local 0
 ```
 
 ### Example Request

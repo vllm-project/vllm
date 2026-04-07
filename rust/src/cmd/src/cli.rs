@@ -250,9 +250,12 @@ pub struct ServeArgs {
         value_parser = clap::value_parser!(u16).range(1..)
     )]
     pub handshake_port: Option<u16>,
-    /// Total number of data-parallel engines to launch.
-    #[arg(long, visible_alias = "data-parallel-size", default_value_t = 1)]
-    pub engine_count: usize,
+    /// Number of data parallel replicas across the whole deployment.
+    #[arg(long, default_value_t = 1)]
+    pub data_parallel_size: usize,
+    /// Number of data parallel replicas to run on this node.
+    #[arg(long)]
+    pub data_parallel_size_local: Option<usize>,
 
     /// Flag to print debug information about CLI argument parsing and exit.
     #[educe(Debug(ignore))]
@@ -277,6 +280,11 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
+    /// Build the handshake address shared by the Rust frontend and managed Python engine.
+    pub fn handshake_address(&self, handshake_port: u16) -> String {
+        format!("tcp://{}:{}", self.handshake_host, handshake_port)
+    }
+
     /// Build the OpenAI-server runtime config used after the managed Python engine starts.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
         self.runtime.clone().into_managed_config(
@@ -284,24 +292,29 @@ impl ServeArgs {
             self.port,
             handshake_address,
             self.handshake_host.clone(),
-            self.engine_count,
+            self.data_parallel_size,
         )
     }
 
     /// Build the managed Python-engine spawn configuration for one resolved handshake port.
     pub fn into_managed_engine_config(self, handshake_port: u16) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
-        // Forward `--max-model-len` to the Python engine so both sides agree on the limit.
+        // Manually forward some args to the Python engine.
         if let Some(max_model_len) = self.runtime.max_model_len {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len.to_string());
         }
+        if let Some(data_parallel_size_local) = self.data_parallel_size_local {
+            python_args.push("--data-parallel-size-local".to_string());
+            python_args.push(data_parallel_size_local.to_string());
+        }
+
         ManagedEngineConfig {
             python: self.python,
             model: self.runtime.model,
             handshake_host: self.handshake_host,
             handshake_port,
-            engine_count: self.engine_count,
+            data_parallel_size: self.data_parallel_size,
             python_args,
         }
     }

@@ -35,11 +35,11 @@ pub struct ManagedEngineConfig {
     pub handshake_host: String,
     /// Port portion of the headless-engine handshake endpoint.
     pub handshake_port: u16,
-    /// Total number of engines expected on the shared handshake socket.
+    /// Number of data parallel replicas across the whole deployment.
     ///
-    /// Note: this does not mean that we will start this many engines. It can also be
-    /// `--data-parallel-size-local` if it's provided in `python_args`.
-    pub engine_count: usize,
+    /// The per-node replica count is forwarded separately in `python_args` as
+    /// `--data-parallel-size-local`.
+    pub data_parallel_size: usize,
     /// Extra CLI arguments forwarded verbatim to Python vLLM.
     pub python_args: Vec<String>,
 }
@@ -64,7 +64,7 @@ impl ManagedEngineConfig {
             .arg("--data-parallel-rpc-port")
             .arg(self.handshake_port.to_string())
             .arg("--data-parallel-size")
-            .arg(self.engine_count.to_string())
+            .arg(self.data_parallel_size.to_string())
             .args(&self.python_args);
         command
     }
@@ -207,7 +207,7 @@ mod tests {
             model: "Qwen/Qwen3-0.6B".to_string(),
             handshake_host: "127.0.0.1".to_string(),
             handshake_port: 62100,
-            engine_count: 4,
+            data_parallel_size: 4,
             python_args: vec![
                 "--data-parallel-size-local".to_string(),
                 "2".to_string(),

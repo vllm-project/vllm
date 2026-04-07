@@ -4,7 +4,7 @@ mod managed_engine;
 
 use std::process::ExitStatus;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use futures::FutureExt as _;
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -52,6 +52,22 @@ async fn main() -> Result<()> {
                 Some(port) => port,
                 None => allocate_handshake_port(&args.handshake_host)?,
             };
+
+            if args.data_parallel_size_local == Some(0) {
+                if args.headless {
+                    bail!("cannot combine `--headless` with `--data-parallel-size-local 0`");
+                }
+
+                let handshake_address = args.handshake_address(handshake_port);
+                info!(
+                    %handshake_address,
+                    engine_count = args.data_parallel_size,
+                    "running Rust frontend without a managed local Python engine"
+                );
+                let config = args.to_frontend_config(handshake_address);
+                return vllm_server::serve(config, shutdown_signal()).await;
+            }
+
             let engine_config = args.clone().into_managed_engine_config(handshake_port);
             let handshake_address = engine_config.handshake_address();
 
