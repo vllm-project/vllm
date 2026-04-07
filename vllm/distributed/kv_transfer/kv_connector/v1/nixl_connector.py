@@ -147,7 +147,7 @@ def _filter_draft_kv_cache_groups(
             idx is not None and idx >= target_num_layers for idx in layer_indices
         ):
             draft_group_indices.add(i)
-            logger.info(
+            logger.debug(
                 "Filtering draft KV cache group %d (%d layers) from NIXL "
                 "transfer config",
                 i,
