@@ -233,8 +233,15 @@ class AutoWeightsLoader:
     ):
         """
         Add tensor names that are not in the model params that may be in the
-        safetensors, e.g., batch normalization stats.
+        safetensors, e.g., batch normalization stats and registered buffers.
         """
+        # Add persistent registered buffers.
+        # Non-persistent buffers are excluded, matching PyTorch state_dict().
+        non_persistent = getattr(module, "_non_persistent_buffers_set", set())
+        for buf_name, buf in module.named_buffers(recurse=False):
+            if buf_name not in child_params and buf_name not in non_persistent:
+                child_params[buf_name] = buf
+
         if isinstance(
             module,
             (

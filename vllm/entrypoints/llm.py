@@ -34,6 +34,9 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
+from vllm.config.quantization import (
+    OnlineQuantizationConfigArgs,
+)
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -247,6 +250,9 @@ class LLM:
         attention_config: dict[str, Any] | AttentionConfig | None = None,
         kv_cache_memory_bytes: int | None = None,
         compilation_config: int | dict[str, Any] | CompilationConfig | None = None,
+        quantization_config: dict[str, Any]
+        | OnlineQuantizationConfigArgs
+        | None = None,
         logits_processors: list[str | type[LogitsProcessor]] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -367,6 +373,7 @@ class LLM:
             profiler_config=profiler_config_instance,
             attention_config=attention_config_instance,
             compilation_config=compilation_config_instance,
+            quantization_config=quantization_config,
             logits_processors=logits_processors,
             **kwargs,
         )
@@ -1449,14 +1456,14 @@ class LLM:
 
         pooling_task = io_processor.pooling_task
         scoring_data = io_processor.valid_inputs(data_1, data_2)
-        offset = len(scoring_data.data_1)
+        n_queries = len(scoring_data.data_1)
 
         ctx = OfflineInputsContext(
             prompts=scoring_data,
             pooling_params=pooling_params,
             tokenization_kwargs=tokenization_kwargs,
             chat_template=chat_template,
-            offset=offset,
+            n_queries=n_queries,
         )
 
         processor_inputs = io_processor.pre_process_offline(ctx)
@@ -1487,7 +1494,7 @@ class LLM:
 
         outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
-            ctx=OfflineOutputsContext(outputs=outputs, offset=offset),
+            ctx=OfflineOutputsContext(outputs=outputs, n_queries=n_queries),
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]
