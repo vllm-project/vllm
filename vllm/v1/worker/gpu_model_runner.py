@@ -4365,7 +4365,8 @@ class GPUModelRunner(
         assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
             "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
         )
-        # Skip for chunked prefill: sampled tokens are dummy ant will be discarded, no need to broadcast.
+        # Skip for chunked prefill: sampled tokens are dummy
+        # and will be discarded, no need to broadcast.
         if not self._is_all_reqs_chunked_prefill():
             torch.distributed.broadcast(
                 sampled_token_ids, src=pp.rank, group=pp.device_group
