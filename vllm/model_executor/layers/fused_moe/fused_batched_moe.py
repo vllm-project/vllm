@@ -1077,7 +1077,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             B_scale=self.w1_scale,
             B_zp=self.w1_zp,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,
@@ -1116,7 +1115,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             B_scale=self.w2_scale,
             B_zp=self.w2_zp,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,
