@@ -608,13 +608,11 @@ class NanoNemotronVLMultiModalProcessor(
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
-        hf_processor = self.info.get_hf_processor(**inputs.hf_processor_mm_kwargs)
-
-        use_audio_in_video = bool(
-            inputs.hf_processor_mm_kwargs.get(
-                "use_audio_in_video", hf_processor.use_audio_in_video
-            )
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        merged_kwargs = mm_config.merge_mm_processor_kwargs(
+            inputs.hf_processor_mm_kwargs
         )
+        use_audio_in_video = bool(merged_kwargs.get("use_audio_in_video", False))
 
         inputs.hf_processor_mm_kwargs = {
             k: v
@@ -622,17 +620,27 @@ class NanoNemotronVLMultiModalProcessor(
             if k != "use_audio_in_video"
         }
 
-        if not (
-            use_audio_in_video
-            and "video" in inputs.mm_data_items
-            and "audio" not in inputs.mm_data_items
-        ):
+        if not (use_audio_in_video and "video" in inputs.mm_data_items):
             return super().apply(inputs, timing_ctx)
 
-        mm_items, audio_items, has_audio = self._extract_audio_from_videos(
-            inputs.mm_data_items
-        )
-        inputs.mm_data_items = mm_items
+        mm_items = inputs.mm_data_items
+        if "audio" in mm_items:
+            # Audio was pre-populated by upstream (e.g., OpenAI chat endpoint).
+            # Reuse existing audio items; validate 1:1 correspondence.
+            videos = mm_items.get_items("video", VideoProcessorItems)
+            audios = mm_items.get_items("audio", AudioProcessorItems)
+            if len(audios) != len(videos):
+                raise ValueError(
+                    "use_audio_in_video requires equal number of audio and "
+                    f"video items, got num_audios={len(audios)}, "
+                    f"num_videos={len(videos)}"
+                )
+            audio_items = audios.get_all()
+            has_audio = [True] * len(videos)
+        else:
+            # Extract audio from video bytes (library usage path).
+            mm_items, audio_items, has_audio = self._extract_audio_from_videos(mm_items)
+            inputs.mm_data_items = mm_items
 
         if not audio_items:
             return super().apply(inputs, timing_ctx)
@@ -645,13 +653,13 @@ class NanoNemotronVLMultiModalProcessor(
         # Inject AUDIO_CONTEXT only after <video> tokens whose video
         # actually contained an audio stream (preserving video-audio pairing).
         tag = "<video>"
-        parts = prompt.split(tag)
-        rebuilt = [parts[0]]
-        for i, part in enumerate(parts[1:]):
+        head, *rest = prompt.split(tag)
+        rebuilt = [head]
+        for i, suffix in enumerate(rest):
             rebuilt.append(tag)
             if i < len(has_audio) and has_audio[i]:
                 rebuilt.append(AUDIO_CONTEXT)
-            rebuilt.append(part)
+            rebuilt.append(suffix)
         prompt = "".join(rebuilt)
 
         inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
