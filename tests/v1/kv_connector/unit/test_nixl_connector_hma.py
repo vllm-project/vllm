@@ -60,11 +60,16 @@ def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
 
 @pytest.mark.cpu_test
 def test_logical_to_kernel_block_ids_with_hma():
-    """Test _logical_to_kernel_block_ids expands blocks when HMA is enabled.
+    """Test logical_to_kernel_block_ids expands blocks when HMA is enabled.
 
     When HMA is enabled, the logical block size may differ from the kernel
     block size. Each logical block maps to multiple kernel blocks.
     """
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+        block_transfer_policy as btp,
+    )
+
+    DenseModelBlockTransferPolicy = btp.DenseModelBlockTransferPolicy
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -78,10 +83,16 @@ def test_logical_to_kernel_block_ids_with_hma():
     worker._physical_blocks_per_logical_kv_block = 2
     # FA + SW groups (neither is MambaSpec, so both get expanded)
     worker.kv_cache_config = make_kv_cache_config(block_size=16, swa_enabled=True)
+    worker.block_transfer_policy = DenseModelBlockTransferPolicy(
+        worker.kv_cache_config,
+        2,
+    )
 
     # Test conversion: FA + SW group
     logical_block_ids = [[0, 1, 2], [3, 4]]
-    kernel_block_ids = worker._logical_to_kernel_block_ids(logical_block_ids)
+    kernel_block_ids = worker.block_transfer_policy.logical_to_kernel_block_ids(
+        logical_block_ids
+    )
 
     expected_kernel_block_ids = [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]]
     assert kernel_block_ids == expected_kernel_block_ids, (
@@ -211,6 +222,9 @@ def test_nixl_metadata_hma_block_ids_structure():
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _get_block_descs_ids uses per-group strides for hybrid FA+SSM
     when ratio=1 (no kernel block size mismatch)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+        block_transfer_policy as btp,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -228,6 +242,10 @@ def test_get_block_descs_ids_hybrid_ssm():
     worker.block_len_per_layer = [100]
     # num_descs = num_regions * num_blocks (no blocks_first doubling)
     worker.num_descs = 2 * num_blocks
+    policy = object.__new__(btp.MambaModelBlockTransferPolicy)
+    policy._is_mamba_group = [False, True]
+    policy._mamba_phys_ratio = {engine_id: 1}
+    worker.block_transfer_policy = policy
 
     fa_blocks = [3, 5]
     ssm_blocks = [1, 2]
@@ -247,6 +265,9 @@ def test_get_block_descs_ids_hybrid_ssm():
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _get_block_descs_ids uses different strides for FA (kernel blocks)
     vs SSM (logical blocks) when ratio > 1."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
+        block_transfer_policy as btp,
+    )
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
@@ -265,6 +286,10 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     worker._mamba_phys_ratio = {engine_id: ratio}
     worker.block_len_per_layer = [100]
     worker.num_descs = 2 * num_blocks  # 800
+    policy = object.__new__(btp.MambaModelBlockTransferPolicy)
+    policy._is_mamba_group = [False, True]
+    policy._mamba_phys_ratio = {engine_id: ratio}
+    worker.block_transfer_policy = policy
 
     fa_blocks = [3, 7]  # kernel-level block IDs
     ssm_blocks = [1, 2]  # logical block IDs
