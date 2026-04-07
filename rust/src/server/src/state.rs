@@ -11,6 +11,8 @@ pub struct AppState {
     pub model_id: String,
     /// Shared chat facade used by all requests.
     pub chat: ChatLlm,
+    /// Whether to log a summary line for each completed request.
+    pub enable_log_requests: bool,
     /// Number of in-flight inference requests currently owned by this frontend.
     server_load: AtomicU64,
 }
@@ -21,8 +23,15 @@ impl AppState {
         Self {
             model_id: model_id.into(),
             chat,
+            enable_log_requests: false,
             server_load: AtomicU64::new(0),
         }
+    }
+
+    /// Enable per-request completion logging.
+    pub fn with_log_requests(mut self, enabled: bool) -> Self {
+        self.enable_log_requests = enabled;
+        self
     }
 
     /// Return a reference to the underlying engine core client for utility calls.

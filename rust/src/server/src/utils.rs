@@ -90,5 +90,9 @@ pub fn resolve_base_request_id(
     request_id_header
         .or(request_id)
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| Uuid::new_v4().to_string())
+        .unwrap_or_else(|| {
+            let mut id = Uuid::new_v4().simple().to_string();
+            id.truncate(8);
+            id
+        })
 }

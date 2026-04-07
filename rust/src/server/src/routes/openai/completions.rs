@@ -52,12 +52,7 @@ pub async fn completions(
         .sampling_params
         .prompt_logprobs
         .is_some();
-    info!(
-        request_id = %prepared.request_id,
-        model = %prepared.response_model,
-        stream,
-        "completion"
-    );
+    let log_request = state.enable_log_requests;
 
     let text_stream = match state.chat.text().generate(prepared.text_request).await {
         Ok(stream) => stream,
@@ -76,6 +71,7 @@ pub async fn completions(
             prepared.request_id,
             prepared.response_model,
             created,
+            log_request,
             prepared.include_usage,
             prepared.echo,
             logprobs,
@@ -104,6 +100,18 @@ pub async fn completions(
             Ok(response) => response,
             Err(error) => return error.into_response(),
         };
+
+        if log_request {
+            let usage = response.usage.as_ref();
+            info!(
+                request_id = %response.id,
+                model = %response.model,
+                prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
+                output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
+                finish_reason = response.choices.first().and_then(|c| c.finish_reason.as_deref()).unwrap_or("unknown"),
+                "completion finished"
+            );
+        }
 
         Json(response).into_response()
     }
@@ -191,6 +199,7 @@ async fn completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    log_request: bool,
     include_usage: bool,
     echo: Option<String>,
     requested_logprobs: Option<u32>,
@@ -258,6 +267,16 @@ async fn completion_chunk_stream(
                 visible_text_len = visible_text_len.saturating_add(delta_text_len);
 
                 if let Some(finished) = finished {
+                    if log_request {
+                        info!(
+                            %request_id,
+                            model = %response_model,
+                            prompt_tokens = finished.prompt_token_count,
+                            output_tokens = finished.output_token_count,
+                            finish_reason = finished.finish_reason.as_str(),
+                            "completion finished [stream]"
+                        );
+                    }
                     yield CompletionSseChunk::Chunk(final_chunk(
                         &request_id,
                         &response_model,
@@ -481,6 +500,7 @@ mod tests {
             "cmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             false,
             None,
             Some(1),

@@ -23,7 +23,11 @@ const PROCESS_LABEL: &str = "RustFrontend";
 
 /// Install the process-wide vLLM-style tracing subscriber for the CLI binary.
 pub(crate) fn init_tracing() {
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug"));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let level = std::env::var("VLLM_LOGGING_LEVEL").unwrap_or_else(|_| "INFO".to_string());
+        let level = map_python_log_level(&level);
+        EnvFilter::new(level)
+    });
     let formatter = VllmEventFormatter::new();
 
     let _ = tracing_subscriber::fmt()
@@ -102,6 +106,9 @@ impl VllmEventFormatter {
         line: Option<u32>,
         ansi: bool,
     ) -> fmt::Result {
+        // TODO: logging the entire file path is too long, but logging just the filename
+        //     (as we do in python) is often ambiguous.
+        // let Some(file) = file.map(|f| f.rsplit_once('/').map_or(f, |(_, name)| name)) else {
         let Some(file) = file else {
             return Ok(());
         };
@@ -196,4 +203,17 @@ fn write_colored(
     }
 
     writer.write_str(text)
+}
+
+/// Map a Python logging level name to the corresponding Rust tracing level.
+fn map_python_log_level(level: &str) -> &'static str {
+    match level.to_ascii_uppercase().as_str() {
+        "CRITICAL" | "FATAL" => "error",
+        "ERROR" => "error",
+        "WARNING" | "WARN" => "warn",
+        "INFO" => "info",
+        "DEBUG" => "debug",
+        "NOTSET" => "trace",
+        _ => "info",
+    }
 }

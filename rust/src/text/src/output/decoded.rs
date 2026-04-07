@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::{Stream, StreamExt};
 use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
-use tracing::info;
+use tracing::debug;
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput};
@@ -242,7 +242,7 @@ pub async fn decoded_text_event_stream(
 
             let text_len = text.len();
 
-            info!(
+            debug!(
                 %request_id,
                 finish_reason = ?reason,
                 text_length_bytes = text_len,

@@ -385,15 +385,6 @@ pub struct EngineUnsupportedArgs {
     /// Log aggregate rather than per-engine statistics when using data parallelism.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
     pub aggregate_engine_logging: Option<Unsupported>,
-
-    /// Log requests.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-requests",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_requests: Option<Unsupported>,
 }
 
 /// Frontend-owned Python OpenAI server arguments that `vllm-rs` recognizes but does not support

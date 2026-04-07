@@ -52,12 +52,7 @@ pub async fn chat_completions(
     };
 
     let created = unix_timestamp();
-    info!(
-        request_id = %prepared.request_id,
-        model = %prepared.response_model,
-        stream,
-        "chat completion"
-    );
+    let log_request = state.enable_log_requests;
 
     let chat_stream = match state.chat.chat(prepared.chat_request).await {
         Ok(stream) => stream,
@@ -76,6 +71,7 @@ pub async fn chat_completions(
             prepared.request_id,
             prepared.response_model,
             created,
+            log_request,
             prepared.include_usage,
             prepared.requested_logprobs,
             prepared.echo,
@@ -104,6 +100,18 @@ pub async fn chat_completions(
             Ok(response) => response,
             Err(error) => return error.into_response(),
         };
+
+        if log_request {
+            let usage = response.usage.as_ref();
+            info!(
+                request_id = %response.id,
+                model = %response.model,
+                prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
+                output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
+                finish_reason = response.choices.first().and_then(|c| c.finish_reason.as_deref()).unwrap_or("unknown"),
+                "chat completion finished"
+            );
+        }
 
         Json(response).into_response()
     }
@@ -211,6 +219,7 @@ async fn chat_completion_chunk_stream(
     request_id: String,
     response_model: String,
     created: u64,
+    log_request: bool,
     include_usage: bool,
     requested_logprobs: bool,
     echo: Option<String>,
@@ -331,6 +340,17 @@ async fn chat_completion_chunk_stream(
                 output_token_count,
                 ..
             }) => {
+                if log_request {
+                    info!(
+                        %request_id,
+                        model = %response_model,
+                        prompt_tokens = prompt_token_count,
+                        output_tokens = output_token_count,
+                        finish_reason = finish_reason.as_str(),
+                        "chat completion finished [stream]"
+                    );
+                }
+
                 if let Some(pending_chunk) = pending_chunk.as_mut()
                     && let Some(chunk) =
                         pending_chunk.take_chunk(&request_id, &response_model, created)
@@ -843,6 +863,7 @@ mod tests {
             "model".to_string(),
             1,
             false,
+            false,
             true,
             None,
             false,
@@ -904,6 +925,7 @@ mod tests {
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
+            false,
             false,
             true,
             None,

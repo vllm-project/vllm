@@ -38,6 +38,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         max_model_len: Some(
                             512,
                         ),
+                        enable_log_requests: false,
                     },
                     python_args: [
                         "--dtype",
@@ -200,6 +201,7 @@ fn frontend_args_accept_json() {
                         tool_call_parser: None,
                         reasoning_parser: None,
                         max_model_len: None,
+                        enable_log_requests: false,
                     },
                 },
             ),
@@ -552,6 +554,7 @@ fn serve_args_accept_handshake_aliases() {
                         tool_call_parser: None,
                         reasoning_parser: None,
                         max_model_len: None,
+                        enable_log_requests: false,
                     },
                     python_args: [],
                 },
@@ -622,6 +625,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             tool_call_parser: None,
             reasoning_parser: None,
             max_model_len: None,
+            enable_log_requests: false,
         }
     "#]]
     .assert_debug_eq(&config);

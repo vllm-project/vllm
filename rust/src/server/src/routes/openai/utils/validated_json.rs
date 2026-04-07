@@ -1,4 +1,5 @@
 //! Validated JSON extractor for automatic request validation.
+//! Variation of https://github.com/lightseekorg/smg/blob/main/crates/protocols/src/validated.rs
 
 use axum::Json;
 use axum::extract::rejection::JsonRejection;

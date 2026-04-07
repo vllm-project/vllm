@@ -28,13 +28,12 @@ pub async fn generate(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<GenerateRequest>,
 ) -> Response {
-    let stream = body.stream;
     let prepared = match prepare_generate_request(body, &state.model_id, headers) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
 
-    info!(request_id = %prepared.request_id, stream, "raw generate");
+    let log_request = state.enable_log_requests;
     let include_logprobs = prepared.include_logprobs;
     let include_prompt_logprobs = prepared.include_prompt_logprobs;
 
@@ -49,8 +48,29 @@ pub async fn generate(
         }
     };
 
+    let collected = match raw_stream.collect_output().await {
+        Ok(collected) => collected,
+        Err(error) => {
+            return server_error!(
+                "failed to collect raw generate response: {}",
+                error.to_report_string()
+            )
+            .into_response();
+        }
+    };
+
+    if log_request {
+        info!(
+            request_id = %collected.request_id,
+            prompt_tokens = collected.prompt_token_ids.len(),
+            output_tokens = collected.token_ids.len(),
+            finish_reason = collected.finish_reason.as_str(),
+            "generate finished"
+        );
+    }
+
     let response = match collect_generate(
-        raw_stream.collect_output().await,
+        collected,
         prepared.request_id,
         include_logprobs,
         include_prompt_logprobs,
@@ -63,18 +83,11 @@ pub async fn generate(
 }
 
 fn collect_generate(
-    collected: vllm_llm::Result<CollectedGenerateOutput>,
+    collected: CollectedGenerateOutput,
     request_id: String,
     include_logprobs: bool,
     include_prompt_logprobs: bool,
 ) -> Result<GenerateResponse, ApiError> {
-    let collected = collected.map_err(|error| {
-        server_error!(
-            "failed to collect raw generate response: {}",
-            error.to_report_string()
-        )
-    })?;
-
     let logprobs = if include_logprobs {
         let logprobs = collected.logprobs.as_ref().ok_or_else(|| {
             ApiError::server_error(

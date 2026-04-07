@@ -39,6 +39,8 @@ pub struct Config {
     /// Override for the maximum model context length. Takes priority over the model's
     /// `max_position_embeddings` from `config.json`.
     pub max_model_len: Option<u32>,
+    /// Log a summary line for each completed request.
+    pub enable_log_requests: bool,
 }
 
 impl Config {
