@@ -142,9 +142,7 @@ def select_int8_moe_backend(
                 logger.info_once(_make_log_backend(backend), scope="local")
                 return backend, k_cls
             else:
-                logger.debug_once(
-                    _make_log_unsupported(backend, reason), scope="local"
-                )
+                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
