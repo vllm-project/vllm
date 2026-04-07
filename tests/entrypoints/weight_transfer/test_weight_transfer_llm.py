@@ -21,7 +21,6 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferInitRequest,
-    WeightTransferStartRequest,
     WeightTransferUpdateInfo,
     WeightTransferUpdateRequest,
 )
@@ -201,7 +200,7 @@ def test_update_weights_calls_engine():
         )
 
         # Start weight update (required before update_weights)
-        llm.start_weight_update(WeightTransferStartRequest(is_checkpoint_format=True))
+        llm.start_weight_update(is_checkpoint_format=True)
 
         # Call update_weights
         test_names = ["layer.weight", "layer.bias"]
@@ -264,7 +263,7 @@ def test_full_weight_transfer_flow():
         )
 
         # Step 2: Start weight update
-        llm.start_weight_update(WeightTransferStartRequest(is_checkpoint_format=True))
+        llm.start_weight_update(is_checkpoint_format=True)
 
         # Step 3: Update weights
         llm.update_weights(

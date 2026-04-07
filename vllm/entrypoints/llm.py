@@ -39,7 +39,6 @@ from vllm.config.quantization import (
 )
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import EngineArgs
@@ -1874,16 +1873,18 @@ class LLM:
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, request: WeightTransferStartRequest) -> None:
+    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """
         Start a new weight update.
 
         Args:
-            request: Weight transfer start request with is_checkpoint_format
+            is_checkpoint_format: Whether incoming weights are in checkpoint
+                format (need layerwise processing) or kernel format (direct
+                copy).
         """
         self.llm_engine.collective_rpc(
             "start_weight_update",
-            kwargs={"is_checkpoint_format": request.is_checkpoint_format},
+            kwargs={"is_checkpoint_format": is_checkpoint_format},
         )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:

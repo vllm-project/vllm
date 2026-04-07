@@ -44,7 +44,6 @@ from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.distributed.weight_transfer.nccl_engine import (
@@ -300,9 +299,7 @@ async def main():
     print(f"[sync] Got metadata for {len(names)} parameters.")
 
     print("[sync] Starting weight update...")
-    await engine.start_weight_update(
-        WeightTransferStartRequest(is_checkpoint_format=True)
-    )
+    await engine.start_weight_update(is_checkpoint_format=True)
 
     print("[sync] Broadcasting weights from FSDP → vLLM...")
     broadcast_handles = [

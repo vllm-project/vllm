@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.inputs import EngineInput, PromptType
@@ -232,7 +231,7 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
-    async def start_weight_update(self, request: WeightTransferStartRequest) -> None:
+    async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """Start a new weight update."""
         raise NotImplementedError
 

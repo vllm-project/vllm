@@ -50,7 +50,7 @@ When running vLLM as an HTTP server, the following endpoints are available for w
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
 | `/init_weight_transfer_engine` | POST | Initialize the weight transfer engine with backend-specific info |
-| `/start_weight_update` | POST | Start a weight update (accepts `is_checkpoint_format`) |
+| `/start_weight_update` | POST | Start a weight update |
 | `/update_weights` | POST | Transfer a batch of weights with backend-specific metadata |
 | `/finish_weight_update` | POST | Finish the weight update and run post-processing |
 | `/pause` | POST | Pause generation before weight sync to handle inflight requests |
@@ -69,7 +69,7 @@ Both backends provide static methods that the trainer calls to send weights. The
 EngineClass.trainer_init(init_info)
 
 # 2. Start weight update on inference side
-llm.start_weight_update(WeightTransferStartRequest(is_checkpoint_format=True))
+llm.start_weight_update(is_checkpoint_format=True)
 
 # 3. Send weights to inference workers
 EngineClass.trainer_send_weights(

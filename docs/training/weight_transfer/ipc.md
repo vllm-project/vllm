@@ -39,7 +39,7 @@ trainer_args = IPCTrainerSendWeightsArgs(
     llm_handle=llm_actor_handle,
 )
 # start
-llm_actor_handle.start_weight_update.remote(WeightUpdateStartRequest(is_checkpoint_format=True))
+llm_actor_handle.start_weight_update.remote(is_checkpoint_format=True)
 # send weights
 IPCWeightTransferEngine.trainer_send_weights(
     iterator=model.named_parameters(),

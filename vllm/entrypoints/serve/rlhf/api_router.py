@@ -11,7 +11,6 @@ from fastapi.responses import JSONResponse
 import vllm.envs as envs
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
-    WeightTransferStartRequest,
     WeightTransferUpdateRequest,
 )
 from vllm.engine.protocol import EngineClient
@@ -137,7 +136,7 @@ async def start_weight_update(raw_request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
     is_checkpoint_format = body.get("is_checkpoint_format", True)
     await engine_client(raw_request).start_weight_update(
-        WeightTransferStartRequest(is_checkpoint_format=is_checkpoint_format)
+        is_checkpoint_format=is_checkpoint_format
     )
     return JSONResponse(content={"message": "Weight update started"})
 
