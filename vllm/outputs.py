@@ -140,7 +140,7 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
-        self.kv_transfer_params_list = []
+        self.kv_transfer_params_list: list[dict[str, Any]] = []
         for output in outputs:
             if output.kv_transfer_params:
                 self.kv_transfer_params_list.append(output.kv_transfer_params)
@@ -193,7 +193,7 @@ class RequestOutput:
             else:
                 self.outputs.append(next_completion)
                 if next_completion.kv_transfer_params:
-                    self.kv_transfer_params_list.extend(
+                    self.kv_transfer_params_list.append(
                         next_completion.kv_transfer_params
                     )
 
