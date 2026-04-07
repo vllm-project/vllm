@@ -797,12 +797,12 @@ class AnthropicServingMessages(OpenAIServingChat):
         if isinstance(result, ErrorResponse):
             return result
 
-        _, engine_prompts = result
+        _, engine_inputs = result
 
         input_tokens = sum(  # type: ignore
-            len(prompt["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
-            for prompt in engine_prompts
-            if "prompt_token_ids" in prompt
+            len(engine_input["prompt_token_ids"])  # type: ignore[typeddict-item, misc]
+            for engine_input in engine_inputs
+            if "prompt_token_ids" in engine_input
         )
 
         response = AnthropicCountTokensResponse(

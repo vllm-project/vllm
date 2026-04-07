@@ -19,9 +19,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -43,8 +45,8 @@ class DeepSeekV32ToolParser(ToolParser):
     </｜DSML｜function_calls>
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
 
         self.prev_tool_call_arr: list[dict] = []
 
@@ -77,7 +79,9 @@ class DeepSeekV32ToolParser(ToolParser):
             "vLLM Successfully import tool parser %s !", self.__class__.__name__
         )
 
-    def adjust_request(self, request):
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
             # Ensure tool call tokens
@@ -99,7 +103,7 @@ class DeepSeekV32ToolParser(ToolParser):
             param_dict[param_name] = param_val
         return param_dict
 
-    def _convert_param_value(self, value: str, param_type: str) -> Any:
+    def _convert_param_value_checked(self, value: str, param_type: str) -> Any:
         """Convert parameter value to the correct type."""
         if value.lower() == "null":
             return None
@@ -108,40 +112,41 @@ class DeepSeekV32ToolParser(ToolParser):
         if param_type in ["string", "str", "text"]:
             return value
         elif param_type in ["integer", "int"]:
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                return value
+            return int(value)
         elif param_type in ["number", "float"]:
-            try:
-                val = float(value)
-                return val if val != int(val) else int(val)
-            except (ValueError, TypeError):
-                return value
+            val = float(value)
+            return val if val != int(val) else int(val)
         elif param_type in ["boolean", "bool"]:
+            value = value.strip()
+            if value.lower() not in ["false", "0", "true", "1"]:
+                raise ValueError("Invalid boolean value")
             return value.lower() in ["true", "1"]
         elif param_type in ["object", "array"]:
-            try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
+            return json.loads(value)
         else:
-            # Try JSON parse first, fallback to string
+            return json.loads(value)
+
+    def _convert_param_value(self, value: str, param_type: str | list[str]) -> Any:
+        """Convert parameter value to the correct type."""
+        if not isinstance(param_type, list):
+            param_type = [param_type]
+        for current_type in param_type:
             try:
-                return json.loads(value)
-            except json.JSONDecodeError:
-                return value
+                return self._convert_param_value_checked(value, current_type)
+            except Exception:
+                continue
+        # return value as fallback
+        return value
 
     def _convert_params_with_schema(
         self,
         function_name: str,
         param_dict: dict[str, str],
-        request: ChatCompletionRequest | None,
     ) -> dict[str, Any]:
         """Convert raw string param values using the tool schema types."""
         param_config: dict = {}
-        if request and request.tools:
-            for tool in request.tools:
+        if self.tools:
+            for tool in self.tools:
                 if (
                     hasattr(tool, "function")
                     and tool.function.name == function_name
@@ -235,9 +240,7 @@ class DeepSeekV32ToolParser(ToolParser):
             invoke_name, invoke_body = complete_invokes[self.current_tool_index]
             param_dict = self._parse_invoke_params(invoke_body)
 
-            converted = self._convert_params_with_schema(
-                invoke_name, param_dict, request
-            )
+            converted = self._convert_params_with_schema(invoke_name, param_dict)
             args_json = json.dumps(converted, ensure_ascii=False)
             idx = self.current_tool_index
             self.current_tool_index += 1

@@ -8,6 +8,7 @@
 # --------------------------------------------------------
 
 import math
+import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -66,6 +67,30 @@ def input_conditioner(x: torch.Tensor, norm_mean: torch.Tensor, norm_std: torch.
     return (x - norm_mean) / norm_std
 
 
+def _bicubic_from_ndarray(
+    array: npt.NDArray[Any], *, size: tuple[int, int]
+) -> torch.Tensor:
+    """
+    Convert a 4D NHWC ndarray to NCHW and interpolate with bicubic.
+    Suppresses PyTorch's non-writable NumPy warning because interpolate copies,
+    and torch.from_numpy(array) is discarded at the end of function scope.
+    """
+
+    with warnings.catch_warnings():
+        msg = "The given NumPy array is not writ.*"
+        # Apparently, different versions of PyTorch use writable or writeable.
+        warnings.filterwarnings("ignore", message=msg, category=UserWarning)
+        tensor = torch.from_numpy(array)
+    assert tensor.ndim == 4, f"{tensor.ndim=}"
+    tensor = tensor.permute(0, 3, 1, 2)
+    return (
+        torch.nn.functional.interpolate(
+            tensor, size=size, mode="bicubic", align_corners=False, antialias=True
+        )
+        / 255.0
+    )
+
+
 def dynamic_preprocess(
     image,
     *,
@@ -90,36 +115,19 @@ def dynamic_preprocess(
         image.convert("RGB") if image.mode != "RGB" else image, dtype=np.uint8
     )
 
-    image = torch.from_numpy(image).unsqueeze(0)  # (1, H, W, 3)
-    image = image.permute(0, 3, 1, 2)  # (1, 3, H, W)
+    image = np.expand_dims(image, axis=0)
 
-    resized_img = torch.nn.functional.interpolate(
-        image,
-        size=(target_height, target_width),
-        mode="bicubic",
-        align_corners=False,
-        antialias=True,
-    )
+    resized_img = _bicubic_from_ndarray(image, size=(target_height, target_width))
     B, C, H, W = resized_img.shape
     hp, wp = H // image_size, W // image_size
     patches = (
         resized_img.reshape(B, C, hp, image_size, wp, image_size)
         .permute(0, 2, 4, 1, 3, 5)
         .reshape(B * hp * wp, C, image_size, image_size)
-        / 255.0
     )
 
     if use_thumbnail and patches.shape[0] > 1:
-        thumb = (
-            torch.nn.functional.interpolate(
-                image,
-                size=(image_size, image_size),
-                mode="bicubic",
-                align_corners=False,
-                antialias=True,
-            )
-            / 255.0
-        )
+        thumb = _bicubic_from_ndarray(image, size=(image_size, image_size))
         patches = torch.cat([patches, thumb], dim=0)
 
     return list(patches)
@@ -241,21 +249,9 @@ def video_to_pixel_values(
             downsample_ratio=downsample_ratio,
         )
         if video_tensor.shape[2] != target_h or video_tensor.shape[3] != target_w:
-            video_tensor = torch.nn.functional.interpolate(
-                video_tensor,
-                size=(target_h, target_w),
-                mode="bicubic",
-                align_corners=False,
-                antialias=True,
-            )
+            return _bicubic_from_ndarray(video, size=(target_h, target_w))
     elif video_tensor.shape[2] != input_size or video_tensor.shape[3] != input_size:
-        video_tensor = torch.nn.functional.interpolate(
-            video_tensor,
-            size=(input_size, input_size),
-            mode="bicubic",
-            align_corners=False,
-            antialias=True,
-        )
+        return _bicubic_from_ndarray(video, size=(input_size, input_size))
 
     video_tensor = video_tensor / 255.0
 
@@ -360,15 +356,6 @@ class DynamicResolutionImageTiler:
                 feature_sizes.append(param.num_embeddings)
         return images, feature_sizes
 
-    feature_size_cache: dict[Image.Image, int] = {}
-
-    @classmethod
-    def get_cached_feature_size(cls, image: Image.Image) -> int:
-        feature_size = cls.feature_size_cache[id(image)]
-        # hard assert that we only use the feature size once
-        del cls.feature_size_cache[id(image)]
-        return feature_size
-
     @dataclass
     class DynamicResolutionParams:
         media: Image.Image
@@ -385,16 +372,8 @@ class DynamicResolutionImageTiler:
             params.media.convert("RGB") if params.media.mode != "RGB" else params.media,
             dtype=np.uint8,
         )
-        resized_img = (
-            torch.nn.functional.interpolate(
-                torch.from_numpy(image).unsqueeze(0).permute(0, 3, 1, 2),
-                size=target_size,
-                mode="bicubic",
-                align_corners=False,
-                antialias=True,
-            )
-            / 255.0
-        )
+        image = np.expand_dims(image, axis=0)
+        resized_img = _bicubic_from_ndarray(image, size=target_size)
         return list(resized_img)
 
     def process_media(
@@ -531,7 +510,6 @@ class DynamicResolutionImageTiler:
                 param, token_count = self.process_media(media, tokens_for_media)
                 params.append(param)
                 token_counts.append(token_count)
-                self.feature_size_cache[id(param.media)] = param.num_embeddings
 
             # Step 2: Check if total tokens is within budget
             total_tokens = sum(token_counts)
@@ -869,13 +847,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
     @property
     def supports_video(self) -> bool:
-        return self.video_token_id is not None
+        return True
 
     @property
-    def video_token_id(self) -> int | None:
-        if self.video_token is None:
-            return None
-        return self.tokenizer.get_vocab().get(self.video_token, None)
+    def video_token_id(self) -> int:
+        assert self.video_token is not None
+        return self.tokenizer.get_vocab()[self.video_token]
 
     @property
     def image_token_id(self) -> int:
@@ -1067,6 +1044,13 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
         combined_inputs = {**text_inputs, **video_inputs, **audio_inputs}
+        frames_indices = combined_inputs.get("frames_indices")
+        ragged_frames_indices = (
+            isinstance(frames_indices, list)
+            and len({len(frame_indices) for frame_indices in frames_indices}) > 1
+        )
+        if ragged_frames_indices:
+            combined_inputs.pop("frames_indices")
 
         if self.dynamic_tiler is None:
             batch = BatchFeature(
@@ -1078,6 +1062,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             # allow images to be exempt from the BatchFeature validation:
             # We will .stack() them in _parse_and_validate_image_input
             batch.update(image_inputs)
+        if ragged_frames_indices:
+            assert isinstance(frames_indices, list)
+            batch["frames_indices"] = [
+                torch.as_tensor(frame_indices, dtype=torch.int64)
+                for frame_indices in frames_indices
+            ]
         return batch
 
     def get_image_repl(

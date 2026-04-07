@@ -128,6 +128,12 @@ scaled_fp4_grouped_quantize = _lazy_import_wrapper(
 nvfp4_block_scale_interleave = _lazy_import_wrapper(
     "flashinfer.fp4_quantization", "block_scale_interleave"
 )
+flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
+    "flashinfer", "cute_dsl_fused_moe_nvfp4"
+)
+flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
+    "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
@@ -202,6 +208,7 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
         ("flashinfer.fused_moe", "trtllm_fp8_per_tensor_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
         ("flashinfer.fused_moe", "trtllm_mxint4_block_scale_moe"),
+        ("flashinfer.fused_moe", "trtllm_bf16_moe"),
     ]
     for module_name, attr_name in required_functions:
         mod = _get_submodule(module_name)
@@ -252,6 +259,15 @@ def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
 
 
 @functools.cache
+def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
+    """Return ``True`` if FlashInfer cute_dsl_fused_moe_nvfp4 is available."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
 def has_nvidia_artifactory() -> bool:
     """Return `True` if NVIDIA's artifactory is accessible.
 
@@ -289,10 +305,10 @@ def supports_trtllm_attention() -> bool:
     if envs.VLLM_BATCH_INVARIANT:
         return False
 
-    # Requires SM100 and NVIDIA artifactory to be accessible to download cubins
-    return (
-        current_platform.is_device_capability_family(100) and has_nvidia_artifactory()
-    )
+    # TRTLLM attention is currently only validated on SM100 (CC 10.0).
+    # SM103 (GB300) hangs with FlashInfer >= 0.6.7.
+    # See: https://github.com/flashinfer-ai/flashinfer/issues/2939
+    return current_platform.is_device_capability(100) and has_nvidia_artifactory()
 
 
 def force_use_trtllm_attention() -> bool | None:
@@ -767,6 +783,8 @@ __all__ = [
     "silu_and_mul_scaled_nvfp4_experts_quantize",
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
+    "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "autotune",
     "has_flashinfer_moe",
@@ -775,6 +793,7 @@ __all__ = [
     "has_flashinfer_nvlink_one_sided",
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
+    "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
