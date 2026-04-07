@@ -4,8 +4,6 @@
 import json
 from collections.abc import Sequence
 from enum import Enum, auto
-from random import choices
-from string import ascii_letters, digits
 from typing import Any
 
 import ijson
@@ -43,11 +41,13 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import (
+    generate_mistral_tool_call_id,
+    is_mistral_tokenizer,
+    is_valid_mistral_tool_call_id,
+)
 
 logger = init_logger(__name__)
-
-ALPHANUMERIC = ascii_letters + digits
 
 _DEFAULT_JSON_SCHEMA = {"anyOf": [{"type": "object"}, {"type": "array"}]}
 
@@ -73,13 +73,11 @@ class MistralToolCall(ToolCall):
 
     @staticmethod
     def generate_random_id():
-        # Mistral Tool Call Ids must be alphanumeric with a length of 9.
-        # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
-        return "".join(choices(ALPHANUMERIC, k=9))
+        return generate_mistral_tool_call_id()
 
     @staticmethod
     def is_valid_id(id: str) -> bool:
-        return id.isalnum() and len(id) == 9
+        return is_valid_mistral_tool_call_id(id)
 
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
