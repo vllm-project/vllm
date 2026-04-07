@@ -980,7 +980,22 @@ class EngineCoreProc(EngineCore):
             addresses = self.startup_handshake(
                 handshake_socket, local_client, headless, parallel_config_to_update
             )
-            yield addresses
+            try:
+                yield addresses
+            except Exception as e:
+                # Send failure notification to frontend (best-effort).
+                try:
+                    handshake_socket.send(
+                        msgspec.msgpack.encode({
+                            "status": "FAILED",
+                            "local": local_client,
+                            "headless": headless,
+                            "error_msg": str(e),
+                        })
+                    )
+                except Exception:
+                    pass
+                raise
 
             # Send ready message.
             ready_msg = {
