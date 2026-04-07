@@ -5,7 +5,10 @@ import torch
 
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group, get_tp_group
+from vllm.logger import init_logger
 from vllm.v1.fault_tolerance import BaseSentinel
+
+logger = init_logger(__name__)
 
 
 class WorkerSentinel(BaseSentinel):

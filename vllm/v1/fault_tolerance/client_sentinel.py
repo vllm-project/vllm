@@ -7,6 +7,7 @@ import msgspec.msgpack
 import zmq.asyncio
 
 from vllm.config import ParallelConfig
+from vllm.logger import init_logger
 from vllm.utils.network_utils import close_sockets, make_zmq_socket
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
@@ -15,6 +16,8 @@ from vllm.v1.fault_tolerance.utils import (
     FaultInfo,
     FaultToleranceZmqAddresses,
 )
+
+logger = init_logger(__name__)
 
 
 class ClientSentinel(BaseSentinel):
@@ -35,12 +38,12 @@ class ClientSentinel(BaseSentinel):
         fault_tolerance_addresses: FaultToleranceZmqAddresses,
         shutdown_callback: Callable,
     ):
+        self.ctx = zmq.asyncio.Context()
         super().__init__(None, b"client_sentinel")
         self.ft_config = parallel_config.fault_tolerance_config
-        self.ctx_async = zmq.asyncio.Context()
+
         self.instance_shutdown_callback = shutdown_callback
         self.sentinel_dead = False
-        self.logger = self._make_logger()
         self._shutdown_task: asyncio.Task | None = None
 
         # Port for receiving fault signals:
@@ -48,14 +51,14 @@ class ClientSentinel(BaseSentinel):
         # 2. Exit notifications of EngineCoreProc monitored by CoreEngineActorManager
         #    or CoreEngineProcManager
         self.fault_receiver_socket = make_zmq_socket(
-            ctx=self.ctx_async,
+            ctx=self.ctx,
             path=fault_tolerance_addresses.engine_fault_socket_addr,
             socket_type=zmq.ROUTER,
             bind=True,
         )
         # Port for reporting EngineCore status to service frameworks (LLMD, K8s, Aibrix)
         self.fault_state_pub_socket = make_zmq_socket(
-            ctx=self.ctx_async,
+            ctx=self.ctx,
             path=fault_tolerance_addresses.fault_state_pub_socket_addr,
             socket_type=zmq.PUB,
             bind=True,
@@ -105,7 +108,7 @@ class ClientSentinel(BaseSentinel):
                     )
 
         except zmq.ZMQError:
-            self.logger("Fault receiver socket closed, stopping async monitor.")
+            logger.info("Fault receiver socket closed, stopping async monitor.")
 
     async def _shutdown_after_timeout(self):
         await asyncio.sleep(self.ft_config.engine_recovery_timeout_sec)
@@ -116,11 +119,14 @@ class ClientSentinel(BaseSentinel):
         for engine, status in self.engine_status_dict.items():
             if status["status"] != "healthy":
                 msg = f"Cannot scale elastic EP because engine {engine} is not healthy."
-                self.logger(msg, level="error")
+                logger.error(msg)
                 raise RuntimeError(msg)
 
         # TODO: Elastic EP currently supports only Ray + internal LB.
-        # Refresh behavior should be revisited after MP and other LB modes are supported
+        # The current refresh behavior assumes that ranks have been reassigned to start
+        # from 0 and be contiguous after scale down. This is true for Ray + internal LB
+        # but this logic may need to be revisited when support for MP and other LB modes
+        # are added.
         self.engine_status_dict = {
             engine_index: {"status": "healthy"}
             for engine_index in range(new_data_parallel_size)
@@ -129,5 +135,4 @@ class ClientSentinel(BaseSentinel):
 
     def shutdown(self):
         close_sockets([self.fault_receiver_socket, self.fault_state_pub_socket])
-        self.ctx_async.term()
         super().shutdown()

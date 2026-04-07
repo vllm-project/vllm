@@ -24,18 +24,10 @@ class BaseSentinel(ABC):
         identity: bytes,
     ):
         self.sentinel_dead = False
-        self.ctx = zmq.Context()
+        if not hasattr(self, "ctx"):
+            self.ctx = zmq.Context()
         self.sentinel_tag = sentinel_tag
-        self.logger = self._make_logger()
         self.identity = identity
-
-    def _make_logger(self):
-        def log(msg, *args, level="info", **kwargs):
-            """msg: log message"""
-            prefix = self.sentinel_name
-            getattr(logger, level)(prefix + msg, *args, **kwargs)
-
-        return log
 
     @property
     def sentinel_name(self) -> str:

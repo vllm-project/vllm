@@ -11,6 +11,7 @@ import msgspec.msgpack
 import zmq
 
 from vllm.config import ParallelConfig
+from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
@@ -18,6 +19,8 @@ from vllm.v1.fault_tolerance.utils import FaultInfo
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core import EngineCoreProc
+
+logger = init_logger(__name__)
 
 
 class EngineCoreSentinel(BaseSentinel):
@@ -67,12 +70,12 @@ class EngineCoreSentinel(BaseSentinel):
     def poll_and_report_fault_events(self):
         try:
             engine_exception = self.fault_signal_q.get(timeout=1)
-            self.logger(
-                "Detected exception %s: %s\n Call Stack:\n%s",
+            logger.error(
+                "%s Detected exception %s: %s\n Call Stack:\n%s",
+                self.sentinel_name,
                 type(engine_exception).__name__,
                 engine_exception,
                 "".join(traceback.format_tb(engine_exception.__traceback__)),
-                level="error",
             )
             msg = FaultInfo.from_exception(
                 engine_exception, self.engine_index, EngineStatusType.UNHEALTHY
