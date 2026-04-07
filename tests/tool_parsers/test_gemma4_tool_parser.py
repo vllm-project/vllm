@@ -531,3 +531,73 @@ class TestStreamingExtraction:
         assert "<|" not in args_text, (
             f"Partial delimiter leaked into JSON: {args_text!r}"
         )
+
+    def test_streaming_state_reset_between_requests(self, parser, mock_request):
+        """Parser must reset streaming state between requests.
+
+        Reproduces the bug where the parser instance is reused across API
+        requests in a multi-turn conversation.  After two prior tool calls
+        (e.g. glob then read), current_tool_id is 1.  On the third request
+        (e.g. todowrite), _extract_streaming increments current_tool_id to 2,
+        but the current response text only has 1 regex match at index 0.
+        _handle_tool_call_end does all_matches[2] which is out of range,
+        silently returning None and dropping the parsed arguments.
+
+        The fix is to detect the start of a new request via empty
+        previous_token_ids and call _reset_streaming_state().
+        """
+        # --- Request 1: glob tool call ---
+        chunks_req1 = [
+            "<|tool_call>",
+            "call:glob{",
+            'pattern:<|"|>*.py<|"|>}',
+            "<tool_call|>",
+        ]
+        results_req1 = self._simulate_streaming(parser, mock_request, chunks_req1)
+        name1 = self._collect_function_name(results_req1)
+        args1 = self._collect_arguments(results_req1)
+        assert name1 == "glob"
+        assert args1
+        parsed1 = json.loads(args1)
+        assert parsed1 == {"pattern": "*.py"}
+
+        # --- Request 2: read tool call (same parser instance) ---
+        chunks_req2 = [
+            "<|tool_call>",
+            "call:read{",
+            'file_path:<|"|>main.py<|"|>}',
+            "<tool_call|>",
+        ]
+        results_req2 = self._simulate_streaming(parser, mock_request, chunks_req2)
+        name2 = self._collect_function_name(results_req2)
+        args2 = self._collect_arguments(results_req2)
+        assert name2 == "read"
+        assert args2
+        parsed2 = json.loads(args2)
+        assert parsed2 == {"file_path": "main.py"}
+
+        # --- Request 3: todowrite tool call (same parser instance) ---
+        # Without the per-request reset fix, current_tool_id is now 2 from
+        # the two prior requests, but this response only has 1 match at
+        # index 0.  _handle_tool_call_end would silently fail.
+        chunks_req3 = [
+            "<|tool_call>",
+            "call:todowrite{",
+            'content:<|"|>Buy milk<|"|>}',
+            "<tool_call|>",
+        ]
+        results_req3 = self._simulate_streaming(parser, mock_request, chunks_req3)
+        name3 = self._collect_function_name(results_req3)
+        args3 = self._collect_arguments(results_req3)
+
+        assert name3 == "todowrite", (
+            f"Expected 'todowrite', got {name3!r} — "
+            "stale streaming state caused function name to be lost"
+        )
+        assert args3, (
+            "No arguments streamed for request 3 — "
+            "stale current_tool_id caused _handle_tool_call_end "
+            "to index out of range and silently drop arguments"
+        )
+        parsed3 = json.loads(args3)
+        assert parsed3 == {"content": "Buy milk"}

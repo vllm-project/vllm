@@ -434,6 +434,17 @@ class Gemma4ToolParser(ToolParser):
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
+        # Reset streaming state at the start of each new request.
+        # The parser instance is reused across requests in a multi-turn
+        # conversation, but streaming state (current_tool_id, etc.) is
+        # per-request.  Without this reset, current_tool_id accumulates
+        # across requests and _handle_tool_call_end indexes out of range
+        # into the current response's regex matches, silently dropping
+        # parsed arguments.
+        if not previous_token_ids:
+            self._reset_streaming_state()
+            self.buffered_delta_text = ""
+
         # Buffer delta text to handle multi-token special sequences
         delta_text = self._buffer_delta_text(delta_text)
         # Reconstruct current_text after buffering to stay in sync
