@@ -17,7 +17,8 @@ enum class Fp8KVCacheDataType {
   kFp8E5M2 = 2,
 };
 
-Fp8KVCacheDataType get_fp8_kv_cache_data_type(const std::string& dtype_str) {
+inline Fp8KVCacheDataType get_fp8_kv_cache_data_type(
+    const std::string& dtype_str) {
   // dtype_str refers to CacheDType at vllm.config.cache.CacheDType
   if (dtype_str == "auto" || dtype_str == "float16" ||
       dtype_str == "bfloat16") {
