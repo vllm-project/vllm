@@ -1339,7 +1339,7 @@ class OpenAIServingResponses(OpenAIServing):
         current_content_index = 0
         current_output_index = 0
         current_item_id = ""
-        parser = self.parser(tokenizer) if self.parser else None
+        parser = self.parser(tokenizer, request.tools) if self.parser else None
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
         async for ctx in result_generator:
