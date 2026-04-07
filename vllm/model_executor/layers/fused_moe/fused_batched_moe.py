@@ -31,8 +31,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
-    kInt8DynamicTokenSym,
-    kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -190,7 +188,6 @@ def expert_triton_kernel(
     group_k,
     # Quantization schemes
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
     # Kernel config
@@ -239,7 +236,7 @@ def expert_triton_kernel(
         BLOCK_N,
         BLOCK_K,
         compute_type,
-        use_fp8_w8a8 or use_int8_w8a8,
+        use_fp8_w8a8,
         use_int8_w8a16,
         per_act_token_quant,
     )
@@ -290,7 +287,6 @@ def batched_triton_kernel(
     group_k: tl.constexpr,
     # Quantization schemes
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
     per_act_token_quant: tl.constexpr,
     # Kernel config
@@ -331,7 +327,7 @@ def batched_triton_kernel(
 
     offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N).to(tl.int64)) % N
 
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         a_scale_ptr = a_scale_ptr + expert_id * stride_ase
         b_scale_ptr = b_scale_ptr + expert_id * stride_bse
 
@@ -371,7 +367,6 @@ def batched_triton_kernel(
         group_k,
         # Quantization schemes
         use_fp8_w8a8,
-        use_int8_w8a8,
         use_int8_w8a16,
         per_act_token_quant,
         # Kernel config
@@ -393,7 +388,6 @@ def invoke_moe_batched_triton_kernel(
     B_zp: torch.Tensor,
     # Quantization schemes
     use_fp8_w8a8: bool,
-    use_int8_w8a8: bool,
     use_int8_w8a16: bool,
     use_int4_w4a16: bool,
     config: dict[str, int],
@@ -486,7 +480,6 @@ def invoke_moe_batched_triton_kernel(
         0 if block_shape is None else block_shape[1],
         # Quantization schemes
         use_fp8_w8a8,
-        use_int8_w8a8,
         use_int8_w8a16,
         per_act_token_quant,
         # Kernel config
@@ -901,6 +894,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             max_num_tokens=max_num_tokens,
             num_dispatchers=num_dispatchers,
         )
+        assert not self.quant_config.use_int8_w8a8, "NYI"
         assert not self.quant_config.use_int8_w8a16, "NYI"
         assert not self.quant_config.use_int4_w4a16, "NYI"
         assert self.quant_config.ocp_mx_scheme is None, "NYI"
@@ -934,22 +928,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
-        # Int8 W8A8 requires DP4A / int8 tensor core support (CC >= 7.5 on CUDA,
-        # gfx9 on ROCm).
-        device_supports_int8 = is_rocm_on_gfx9 or (
-            p.is_cuda() and p.has_device_capability((7, 5))
-        )
-
-        INT8_SUPPORTED_W_A = [
-            (kInt8StaticChannelSym, kInt8DynamicTokenSym),
-        ]
-
-        if not device_supports_fp8:
-            return (weight_key, activation_key) in [
-                (None, None),
-                *(INT8_SUPPORTED_W_A if device_supports_int8 else []),
-            ]
-
         SUPPORTED_W_A_FP8 = [
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
@@ -957,11 +935,9 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
-        return (weight_key, activation_key) in [
-            (None, None),
-            *(INT8_SUPPORTED_W_A if device_supports_int8 else []),
-            *SUPPORTED_W_A_FP8,
-        ]
+        return (weight_key, activation_key) == (None, None) or (
+            device_supports_fp8 and (weight_key, activation_key) in SUPPORTED_W_A_FP8
+        )
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -1042,7 +1018,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             torch.bfloat16,
             torch.float8_e4m3fn,
             torch.float8_e4m3fnuz,
-            torch.int8,
         ]
         assert expert_tokens_meta is not None
 
@@ -1074,8 +1049,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             compute_type = tl.float32
         elif hidden_states.dtype == current_platform.fp8_dtype():
             compute_type = tl.bfloat16
-        elif hidden_states.dtype == torch.int8:
-            compute_type = tl.bfloat16
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")
 
@@ -1104,7 +1077,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             B_scale=self.w1_scale,
             B_zp=self.w1_zp,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
+
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,
@@ -1143,7 +1116,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             B_scale=self.w2_scale,
             B_zp=self.w2_zp,
             use_fp8_w8a8=self.quant_config.use_fp8_w8a8,
-            use_int8_w8a8=self.quant_config.use_int8_w8a8,
+
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             config=config,

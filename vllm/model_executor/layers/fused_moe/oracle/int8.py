@@ -32,7 +32,6 @@ logger = init_logger(__name__)
 class Int8MoeBackend(Enum):
     NONE = "NONE"
     TRITON = "TRITON"
-    BATCHED_TRITON = "BATCHED_TRITON"
 
 
 def _get_priority_backends(
@@ -41,7 +40,7 @@ def _get_priority_backends(
     """
     Get available backends in priority order based on platform and config.
     """
-    return [Int8MoeBackend.TRITON, Int8MoeBackend.BATCHED_TRITON]
+    return [Int8MoeBackend.TRITON]
 
 
 def backend_to_kernel_cls(
@@ -53,13 +52,6 @@ def backend_to_kernel_cls(
         )
 
         return [TritonExperts]
-
-    elif backend == Int8MoeBackend.BATCHED_TRITON:
-        from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
-            BatchedTritonExperts,
-        )
-
-        return [BatchedTritonExperts]
 
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
@@ -134,12 +126,6 @@ def select_int8_moe_backend(
     runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_int8_backend(runner_backend)
-        # For batched activation format, use the batched variant.
-        if (
-            activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-            and requested_backend == Int8MoeBackend.TRITON
-        ):
-            requested_backend = Int8MoeBackend.BATCHED_TRITON
         return _return_or_raise(requested_backend)
 
     # Select kernels in order of backend.
