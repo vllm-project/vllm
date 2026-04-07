@@ -54,7 +54,7 @@ NO_REASONING = {
     "output": "This is content",
     "reasoning": None,
     "content": "This is content",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 REASONING_WITH_CHANNEL = {
     "output": "<|channel>This is a reasoning section<channel|>This is the rest",
@@ -84,7 +84,7 @@ EMPTY = {
     "output": "",
     "reasoning": None,
     "content": "",
-    "is_reasoning_end": False,
+    "is_reasoning_end": True,
 }
 NEW_LINE_NONSTREAMING = {
     "output": (

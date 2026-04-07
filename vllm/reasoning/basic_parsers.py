@@ -78,7 +78,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 return False
             if input_ids[i] == end_token_id:
                 return True
-        return False
+        # No reasoning tokens found in the input — reasoning was never
+        # started, so treat it as already ended.  This ensures structured
+        # output constraints are applied when enable_thinking=false.
+        return True
 
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
