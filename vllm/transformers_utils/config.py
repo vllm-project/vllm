@@ -154,6 +154,34 @@ def _mistral_patch_hf_hub_constants() -> Iterator[None]:
         constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
+def _disable_rope_auto_validation() -> None:
+    """Remove ``validate_rope`` from the Transformers v5 class validators.
+
+    In Transformers v5, ``validate_rope`` is automatically invoked during
+    ``PretrainedConfig.__init__()`` via the ``__class_validators__``
+    machinery from ``huggingface_hub``.  Some upstream model configs (e.g.
+    Ernie-4.5) set ``rope_theta`` *after* ``super().__init__()``, which
+    causes the auto-validator to raise a ``KeyError`` before the value is
+    available.
+
+    vLLM calls ``validate_rope()`` **explicitly** in
+    :func:`patch_rope_parameters` after all RoPE fields have been properly
+    propagated, so the auto-validation during ``__init__`` is redundant.
+    Removing it here prevents false-positive failures without losing any
+    validation coverage.
+    """
+    if Version(version("transformers")) < Version("5.0.0"):
+        return
+    validators: list = getattr(PretrainedConfig, "__class_validators__", None) or []
+    for i in range(len(validators) - 1, -1, -1):
+        if getattr(validators[i], "__name__", None) == "validate_rope":
+            validators.pop(i)
+
+
+# One-time suppression at module load.
+_disable_rope_auto_validation()
+
+
 class HFConfigParser(ConfigParserBase):
     def parse(
         self,
@@ -413,6 +441,16 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
             config.partial_rotary_factor = partial_rotary_factor
         # Standardize and validate RoPE parameters
         config.standardize_rope_params()
+        # Some model configs (e.g. Ernie4.5) set rope_theta after
+        # super().__init__(), so the rope_scaling property setter creates
+        # rope_parameters with rope_theta=None before the real value is
+        # assigned.  standardize_rope_params() uses setdefault() which
+        # won't overwrite the stale None.  Propagate the real value here.
+        rp = getattr(config, "rope_parameters", None)
+        if rp is not None and rp.get("rope_theta") is None:
+            _theta = getattr(config, "rope_theta", None)
+            if _theta is not None:
+                rp["rope_theta"] = _theta
         config.validate_rope()
 
     # No RoPE parameters to patch
