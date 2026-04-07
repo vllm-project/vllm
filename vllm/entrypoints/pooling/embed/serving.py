@@ -182,8 +182,8 @@ class ServingEmbedding(PoolingServing):
             media_type=response.media_type,
         )
 
-    @staticmethod
     def _build_cohere_response_from_ctx(
+        self,
         ctx: PoolingServeContext,
     ) -> JSONResponse:
         request = ctx.request
@@ -210,4 +210,4 @@ class ServingEmbedding(PoolingServing):
                 ),
             ),
         )
-        return self.JSONResponse(content=response.model_dump(exclude_none=True))
+        return self.JSONResponseCLS(content=response.model_dump(exclude_none=True))
