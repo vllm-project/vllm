@@ -312,7 +312,7 @@ class SeedOssToolParser(ToolParser):
                 )
 
             tool_calls = [
-                self._parse_xml_function_call(function_call_str, request.tools)
+                self._parse_xml_function_call(function_call_str, self.tools)
                 for function_call_str in function_calls
             ]
 
@@ -566,7 +566,7 @@ class SeedOssToolParser(ToolParser):
                     # Parse to get the complete arguments
                     try:
                         parsed_tool = self._parse_xml_function_call(
-                            func_content, request.tools if request else None
+                            func_content, self.tools
                         )
                         if parsed_tool:
                             # Update existing entry in prev_tool_call_arr with complete arguments

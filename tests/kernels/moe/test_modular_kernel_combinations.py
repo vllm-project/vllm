@@ -15,7 +15,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
 from vllm.utils.import_utils import has_deep_ep, has_deep_gemm
-from vllm.utils.torch_utils import cuda_device_count_stateless, set_random_seed
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from .modular_kernel_tools.common import (
@@ -310,10 +310,10 @@ def test_modular_kernel_combinations_multigpu(
     world_size: int,
     pytestconfig,
 ):
-    if cuda_device_count_stateless() < world_size:
+    if current_platform.device_count() < world_size:
         pytest.skip(
             f"Not enough GPUs available to run, got "
-            f"{cuda_device_count_stateless()} expected "
+            f"{current_platform.device_count()} expected "
             f"{world_size}."
         )
 
