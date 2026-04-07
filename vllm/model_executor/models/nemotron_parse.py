@@ -558,11 +558,18 @@ class RadioWithNeck(nn.Module):
             for name, param in dict(self.named_parameters()).items()
             if not name.startswith("model_encoder")
         }
-        for name, w in weights:
+        for item in weights:
+            # defensive: some weight entries may be malformed; skip those
+            if not (isinstance(item, (list, tuple)) and len(item) >= 2):
+                continue
+            name, w = item[0], item[1]
             if name.startswith("model_encoder"):
                 model_encoder_weights.append((".".join(name.split(".")[1:]), w))
             else:
-                param = adaptor_dict[name]
+                param = adaptor_dict.get(name)
+                if param is None:
+                    # unknown parameter name; skip defensively
+                    continue
                 with torch.no_grad():
                     default_weight_loader(param, w)
 
