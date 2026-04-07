@@ -10,6 +10,8 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
+from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -135,6 +137,7 @@ def _reshape_kv_cache(
                     kv_cache_spec.block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
+                    cache_dtype_str=cache_dtype,
                 )
 
                 # FIXME(woosuk): Add kv_cache_stride_order to all attn backends
@@ -284,26 +287,26 @@ def build_attn_metadata(
             common_attn_metadata.encoder_seq_lens = encoder_seq_lens_gpu
             common_attn_metadata.encoder_seq_lens_cpu = encoder_seq_lens_cpu
 
-        kv_cache_spec = kv_cache_config.kv_cache_groups[i].kv_cache_spec
-        is_mamba_group = isinstance(kv_cache_spec, MambaSpec)
-
         for attn_group in attn_groups[i]:
             attn_metadata_builder = attn_group.get_metadata_builder(0)
             if for_cudagraph_capture:
                 metadata = attn_metadata_builder.build_for_cudagraph_capture(
                     common_attn_metadata
                 )
-            else:
-                extra_kwargs: dict[str, Any] = {}
-                if is_mamba_group:
-                    extra_kwargs["num_accepted_tokens"] = num_accepted_tokens
-                    extra_kwargs["num_decode_draft_tokens_cpu"] = (
-                        num_decode_draft_tokens_cpu
-                    )
+            elif isinstance(
+                attn_metadata_builder,
+                (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder),
+            ):
                 metadata = attn_metadata_builder.build(
                     common_prefix_len=0,
                     common_attn_metadata=common_attn_metadata,
-                    **extra_kwargs,
+                    num_accepted_tokens=num_accepted_tokens,
+                    num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+                )
+            else:
+                metadata = attn_metadata_builder.build(
+                    common_prefix_len=0,
+                    common_attn_metadata=common_attn_metadata,
                 )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
