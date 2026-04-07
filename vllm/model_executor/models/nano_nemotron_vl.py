@@ -637,10 +637,22 @@ class NanoNemotronVLMultiModalProcessor(
                 )
             audio_items = audios.get_all()
             has_audio = [True] * len(videos)
+            logger.info(
+                "Using %d pre-populated audio item(s) from upstream.",
+                len(audio_items),
+            )
         else:
             # Extract audio from video bytes (library usage path).
-            mm_items, audio_items, has_audio = self._extract_audio_from_videos(mm_items)
+            mm_items, audio_items, has_audio = self._extract_audio_from_videos(
+                mm_items
+            )
             inputs.mm_data_items = mm_items
+            logger.info(
+                "Extracted audio from video bytes: %d audio(s), "
+                "has_audio=%s.",
+                len(audio_items),
+                has_audio,
+            )
 
         if not audio_items:
             return super().apply(inputs, timing_ctx)
