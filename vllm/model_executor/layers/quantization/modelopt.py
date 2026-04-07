@@ -9,7 +9,10 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+    init_nvfp4_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -69,9 +72,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
     Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    Nvfp4LinearOp,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -1070,7 +1070,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
-        self.nvfp4_op = Nvfp4LinearOp()
+        self.kernel = init_nvfp4_linear_kernel()
 
     def create_weights(
         self,
@@ -1177,7 +1177,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        self.nvfp4_op.process_weights(layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -1185,7 +1185,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.nvfp4_op.apply(layer=layer, x=x, bias=bias)
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):

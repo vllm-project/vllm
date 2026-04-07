@@ -51,6 +51,27 @@ from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4 import (
+    NvFp4LinearKernel,
+    NvFp4LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
+    CutlassNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
+    FbgemmNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferCutlassNvFp4LinearKernel,
+    FlashInferTrtllmNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.marlin import (
+    MarlinNvFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
@@ -149,6 +170,22 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CPU: [
         Dynamic4bitLinearKernel,
         CPUWNA16LinearKernel,
+    ],
+}
+
+# in priority/performance order (when available)
+_POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        FlashInferCutlassNvFp4LinearKernel,
+        CutlassNvFp4LinearKernel,
+        MarlinNvFp4LinearKernel,
+        FlashInferTrtllmNvFp4LinearKernel,
+        FlashInferCudnnNvFp4LinearKernel,
+        FbgemmNvFp4LinearKernel,
+        EmulationNvFp4LinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        EmulationNvFp4LinearKernel,
     ],
 }
 
@@ -367,6 +404,41 @@ def choose_mp_linear_kernel(
     )
 
 
+def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
+    """Select and instantiate the best NVFP4 linear kernel for the
+    current platform."""
+    config = NvFp4LinearLayerConfig()
+
+    platform = current_platform._enum
+    possible = _POSSIBLE_NVFP4_KERNELS.get(platform, [])
+
+    failure_reasons = []
+    for kernel_cls in possible:
+        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel_cls.__name__} disabled by environment variable"
+            )
+            continue
+
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        can_implement, reason = kernel_cls.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        logger.info_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
+        return kernel_cls(config)
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "NVFP4 linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
+
+
 def register_linear_kernel(
     kernel_class: type,
     platform: PlatformEnum,
@@ -396,6 +468,10 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "nvfp4":
+        if platform not in _POSSIBLE_NVFP4_KERNELS:
+            _POSSIBLE_NVFP4_KERNELS[platform] = []
+        _POSSIBLE_NVFP4_KERNELS[platform].append(kernel_class)
     else:
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
 
@@ -403,6 +479,7 @@ def register_linear_kernel(
 __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
+    "init_nvfp4_linear_kernel",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
     "FP8ScaledMMLinearKernel",
@@ -411,6 +488,8 @@ __all__ = [
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
     "ScaledMMLinearLayerConfig",
+    "NvFp4LinearKernel",
+    "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
@@ -433,4 +512,11 @@ __all__ = [
     "MarlinLinearKernel",
     "XPUW4A8IntLinearKernel",
     "XPUwNa16LinearKernel",
+    "CutlassNvFp4LinearKernel",
+    "EmulationNvFp4LinearKernel",
+    "FbgemmNvFp4LinearKernel",
+    "FlashInferCutlassNvFp4LinearKernel",
+    "FlashInferTrtllmNvFp4LinearKernel",
+    "FlashInferCudnnNvFp4LinearKernel",
+    "MarlinNvFp4LinearKernel",
 ]
