@@ -172,10 +172,21 @@ def _disable_rope_auto_validation() -> None:
     """
     if Version(version("transformers")) < Version("5.0.0"):
         return
-    validators: list = getattr(PretrainedConfig, "__class_validators__", None) or []
-    for i in range(len(validators) - 1, -1, -1):
-        if getattr(validators[i], "__name__", None) == "validate_rope":
-            validators.pop(i)
+    validators = getattr(PretrainedConfig, "__class_validators__", None)
+    if not validators:
+        return
+    # ``__class_validators__`` may be a plain list of callables (current
+    # huggingface_hub) **or** a dict mapping field names to lists of
+    # validators (pydantic-style).  Handle both layouts defensively.
+    groups: list[list] = (
+        list(validators.values()) if isinstance(validators, dict) else [validators]
+    )
+    for group in groups:
+        if not isinstance(group, list):
+            continue
+        for i in range(len(group) - 1, -1, -1):
+            if getattr(group[i], "__name__", None) == "validate_rope":
+                group.pop(i)
 
 
 # One-time suppression at module load.
