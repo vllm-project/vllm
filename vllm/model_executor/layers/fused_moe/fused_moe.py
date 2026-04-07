@@ -46,6 +46,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1938,8 +1940,16 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             or p.is_xpu()
         )
 
+        # Int8 W8A8 is supported on all platforms (no fp8 capability required).
+        INT8_SUPPORTED_W_A = [
+            (kInt8StaticChannelSym, kInt8DynamicTokenSym),
+        ]
+
         if not device_supports_fp8:
-            return (weight_key, activation_key) == (None, None)
+            return (weight_key, activation_key) in [
+                (None, None),
+                *INT8_SUPPORTED_W_A,
+            ]
 
         SUPPORTED_W_A = [
             (None, None),
@@ -1948,6 +1958,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             (kFp8StaticTensorSym, kFp8DynamicTokenSym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            *INT8_SUPPORTED_W_A,
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
