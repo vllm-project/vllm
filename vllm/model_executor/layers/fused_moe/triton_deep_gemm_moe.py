@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.utils.deep_gemm import (
+    get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
 
@@ -81,6 +82,16 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         w2: torch.Tensor,
     ) -> mk.FusedMoEExpertsModular:
         if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
+            # Check that each expert gets enough tokens to fill at least one
+            # full BLOCK_M tile. Below this threshold, DeepGemm's persistent
+            # kernel wastes compute on padding and Triton is faster.
+            M = hidden_states.size(0)
+            E = w1.size(0)
+            top_k = self.moe_config.experts_per_token
+            block_m = get_mk_alignment_for_contiguous_layout()[0]
+            tokens_per_expert = M * top_k / E
+            if tokens_per_expert < block_m:
+                return self.fallback_experts
             return self.experts
         else:
             return self.fallback_experts
