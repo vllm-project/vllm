@@ -138,8 +138,6 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
             del layer._parameters["weight_scale"]
             replace_parameter(layer, "weight_scale_inv", weight_scale_data)
         else:
-            # Transpose no longer needed after
-            # https://github.com/vllm-project/vllm/pull/38092/
             if self.strategy == QuantizationStrategy.TENSOR:
                 # For fused modules with per-tensor scales, expand each scale
                 # to its shard's channels.
