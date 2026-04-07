@@ -5,7 +5,6 @@ steps:
     depends_on: []
     device: amd_cpu
     no_plugin: true
-    soft_fail: true
     commands:
     - >
       docker build
