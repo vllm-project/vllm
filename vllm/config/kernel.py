@@ -31,6 +31,9 @@ class IrOpPriorityConfig:
     rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.rms_norm"""
 
+    rms_norm_gated: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.rms_norm_gated"""
+
     def compute_hash(self) -> str:
         """
         Produces a hash unique to the pass configuration.

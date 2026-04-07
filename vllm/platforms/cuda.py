@@ -570,7 +570,11 @@ class CudaPlatformBase(Platform):
         if envs.VLLM_USE_OINK_OPS:
             rms_norm = ["oink"] + default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        rms_norm_gated = ["triton", "native"]
+
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, rms_norm_gated=rms_norm_gated
+        )
 
 
 # NVML utils

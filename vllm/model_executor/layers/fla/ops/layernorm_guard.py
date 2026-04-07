@@ -17,6 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
+from torch.library import wrap_triton
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
@@ -57,12 +58,6 @@ def rms_norm_ref(
     return out.to(dtype)
 
 
-@triton.heuristics(
-    {
-        "HAS_BIAS": lambda args: args["B"] is not None,
-        "HAS_Z": lambda args: args["Z"] is not None,
-    }
-)
 @triton.jit
 def layer_norm_fwd_kernel(
     X,  # pointer to the input
@@ -82,6 +77,7 @@ def layer_norm_fwd_kernel(
     ROWS_PER_BLOCK: tl.constexpr,
     HAS_BIAS: tl.constexpr,
     HAS_Z: tl.constexpr,
+    STORE_MEAN: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
     ACTIVATION: tl.constexpr,
@@ -121,10 +117,11 @@ def layer_norm_fwd_kernel(
     # Compute mean and variance per row (reduce along axis 1)
     if not IS_RMS_NORM:
         mean = tl.sum(x, axis=1) / N  # Shape: [ROWS_PER_BLOCK]
-        # Store mean for each row
-        mean_offsets = group * M + rows
-        mean_mask = rows < M
-        tl.store(Mean + mean_offsets, mean, mask=mean_mask)
+        if STORE_MEAN:
+            # Store mean for each row
+            mean_offsets = group * M + rows
+            mean_mask = rows < M
+            tl.store(Mean + mean_offsets, mean, mask=mean_mask)
         # Broadcast mean back to 2D for subtraction
         xbar = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xbar * xbar, axis=1) / N  # Shape: [ROWS_PER_BLOCK]
@@ -182,7 +179,7 @@ def layer_norm_fwd(
     eps: float,
     z: torch.Tensor = None,
     out: torch.Tensor = None,
-    group_size: int = None,
+    group_size: int | None = None,
     norm_before_gate: bool = True,
     is_rms_norm: bool = False,
     activation: str = "swish",
@@ -207,11 +204,8 @@ def layer_norm_fwd(
     else:
         out = torch.empty_like(x)
     assert out.stride(-1) == 1
-    mean = (
-        torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
-        if not is_rms_norm
-        else None
-    )
+    store_mean = not is_rms_norm
+    mean = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
     rstd = torch.empty((ngroups * M,), dtype=torch.float32, device=x.device)
     # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
@@ -224,7 +218,17 @@ def layer_norm_fwd(
     rows_per_block = calc_rows_per_block(M, x.device)
     # Update grid to use rows_per_block
     grid = (cdiv(M, rows_per_block), ngroups)
-    layer_norm_fwd_kernel[grid](
+
+    has_bias = bias is not None
+    has_z = z is not None
+
+    if bias is None:
+        bias = torch.empty((N,), dtype=weight.dtype, device=x.device)
+
+    if z is None:
+        z = torch.empty_like(x)
+
+    wrap_triton(layer_norm_fwd_kernel)[grid](
         x,
         out,
         weight,
@@ -234,14 +238,15 @@ def layer_norm_fwd(
         rstd,
         x.stride(0),
         out.stride(0),
-        z.stride(0) if z is not None else 0,
+        z.stride(0),
         M,
         group_size,
         eps,
         BLOCK_N=BLOCK_N,
         ROWS_PER_BLOCK=rows_per_block,
-        HAS_BIAS=bias is not None,
-        HAS_Z=z is not None,
+        HAS_BIAS=has_bias,
+        HAS_Z=has_z,
+        STORE_MEAN=store_mean,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
         num_warps=num_warps,
