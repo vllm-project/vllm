@@ -1,15 +1,22 @@
 repos:
   - repo: local
     hooks:
+      - id: cargo-autoinherit
+        name: Normalize Cargo manifests with autoinherit
+        entry: cargo autoinherit --prefer-simple-dotted
+        language: system
+        pass_filenames: false
+        require_serial: true
+        files: '(^|/)Cargo\.toml$'
       - id: cargo-sort
-        name: cargo sort --workspace
+        name: Sort Cargo manifest sections
         entry: cargo sort --workspace
         language: system
         pass_filenames: false
         require_serial: true
         files: '(^|/)Cargo\.toml$'
       - id: cargo-fmt
-        name: cargo fmt
+        name: Format Rust code with cargo fmt
         entry: cargo fmt
         language: system
         pass_filenames: false

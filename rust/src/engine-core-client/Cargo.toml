@@ -21,6 +21,7 @@ serde_default.workspace = true
 serde_json.workspace = true
 serde_repr.workspace = true
 serde_tuple.workspace = true
+task-local.workspace = true
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 thiserror-ext.workspace = true

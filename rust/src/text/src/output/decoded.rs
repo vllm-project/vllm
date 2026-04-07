@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use futures::Stream;
+use futures::{Stream, StreamExt};
 use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
 use tracing::info;
+use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput};
 
@@ -84,7 +85,7 @@ pub enum DecodedTextEvent {
 pub async fn decoded_text_event_stream(
     request_id: String,
     tokenizer: DynTokenizer,
-    raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>>,
+    mut raw_stream: impl Stream<Item = vllm_llm::Result<GenerateOutput>> + Unpin,
     mut decode_options: TextDecodeOptions,
     intermediate: bool,
 ) {
@@ -94,8 +95,7 @@ pub async fn decoded_text_event_stream(
     let mut output_token_count: usize = 0;
     let mut logprobs: Option<DecodedLogprobs> = None;
 
-    #[for_await]
-    for next in raw_stream {
+    while let Some(next) = raw_stream.next().await {
         let output = next?;
 
         // If it's the first output, init states and yield `Start` event.
@@ -144,6 +144,7 @@ pub async fn decoded_text_event_stream(
 
         let kv_transfer_params = output.kv_transfer_params;
         let mut finish_reason = output.finish_reason;
+        let mut stop_str_matched = false;
         let suppress_terminal_stop_token = finish_reason.as_ref().is_some_and(|r| r.is_stop())
             && !decode_options.include_stop_str_in_output;
         let decodable_token_ids = if suppress_terminal_stop_token {
@@ -174,6 +175,8 @@ pub async fn decoded_text_event_stream(
                 };
                 finish_reason = Some(FinishReason::Stop(Some(StopReason::Text(stop_str))));
                 truncate_tokens_to = Some(tok_idx + 1);
+                stop_str_matched = true;
+
                 break;
             }
 
@@ -247,6 +250,12 @@ pub async fn decoded_text_event_stream(
                 "request finished with terminal output"
             );
 
+            // Intentionally drop the stream with explicit cause, so that the engine core can
+            // distinguish between such normal completion vs an unexpected early drop.
+            if stop_str_matched {
+                AbortCause::StopStringMatched.drop_as(raw_stream);
+            }
+
             yield DecodedTextEvent::TextDelta {
                 delta: text,
                 token_ids,
@@ -294,9 +303,12 @@ fn matches_stop_string(stops: &[String], output: &str, new_bytes: usize) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
 
-    use futures::stream;
+    use futures::{Stream, stream};
+    use vllm_engine_core_client::AbortCause;
     use vllm_llm::GenerateOutput;
 
     use super::*;
@@ -356,7 +368,59 @@ mod tests {
         }
     }
 
+    struct DropRecordingStream {
+        next: Option<vllm_llm::Result<GenerateOutput>>,
+        dropped_cause: Arc<Mutex<Option<AbortCause>>>,
+    }
+
+    impl Stream for DropRecordingStream {
+        type Item = vllm_llm::Result<GenerateOutput>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.next.take())
+        }
+    }
+
+    impl Drop for DropRecordingStream {
+        fn drop(&mut self) {
+            *self.dropped_cause.lock().unwrap() = Some(AbortCause::current());
+        }
+    }
+
     // --- stop string stream tests ---
+
+    #[tokio::test]
+    async fn stream_stop_string_sets_task_local_abort_cause_on_raw_stream_drop() {
+        let prompt: Arc<[u32]> = Arc::from([]);
+        let dropped_cause = Arc::new(Mutex::new(None));
+        let raw_stream = DropRecordingStream {
+            next: Some(Ok(GenerateOutput::for_test(
+                Some(prompt),
+                ascii_tokens("hello"),
+                Some(FinishReason::Length),
+            ))),
+            dropped_cause: Arc::clone(&dropped_cause),
+        };
+        let tokenizer: DynTokenizer = Arc::new(ByteTokenizer);
+
+        let output = decoded_text_event_stream(
+            "test".into(),
+            tokenizer,
+            raw_stream,
+            opts(&["ll"], 0),
+            false,
+        )
+        .collect_output()
+        .await
+        .unwrap();
+
+        assert_eq!(output.text, "he");
+        assert!(output.finish_reason.is_stop());
+        assert_eq!(
+            *dropped_cause.lock().unwrap(),
+            Some(AbortCause::StopStringMatched)
+        );
+    }
 
     #[tokio::test]
     async fn stream_stop_string_truncates_at_match() {

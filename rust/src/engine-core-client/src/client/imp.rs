@@ -12,6 +12,7 @@ use zeromq::RouterSendHalf;
 
 use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, UtilityRegistry};
 use crate::client::stream::EngineCoreStreamOutput;
+use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::record_scheduler_stats;
 use crate::protocol::{
@@ -218,15 +219,26 @@ impl ClientInner {
 /// properly terminated.
 pub(crate) async fn run_abort_loop(
     inner: Arc<ClientInner>,
-    mut abort_rx: mpsc::UnboundedReceiver<String>,
+    mut abort_rx: mpsc::UnboundedReceiver<AbortRequest>,
 ) {
     // TODO: receive and abort requests in batch
-    while let Some(request_id) = abort_rx.recv().await {
+    while let Some(AbortRequest { request_id, cause }) = abort_rx.recv().await {
         let Some(engine_id) = inner.take_auto_abort_target(&request_id) else {
             debug!(request_id, "skip auto-abort for inactive request");
             continue;
         };
-        info!(request_id, "auto-aborting request due to dropped stream");
+
+        match cause {
+            AbortCause::DroppedStream => {
+                info!(request_id, "auto-aborting request due to dropped stream")
+            }
+            AbortCause::StopStringMatched => {
+                debug!(
+                    request_id,
+                    "auto-aborting request due to stop string matched"
+                )
+            }
+        }
 
         if let Err(error) = inner
             .do_abort_requests(&engine_id, slice::from_ref(&request_id))

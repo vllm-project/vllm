@@ -7,8 +7,8 @@ use enum_as_inner::EnumAsInner;
 use futures::stream::FusedStream;
 use futures::{Stream, StreamExt as _, pin_mut};
 use serde::{Deserialize, Serialize};
-use vllm_engine_core_client::EngineCoreOutputStream;
 use vllm_engine_core_client::protocol::{EngineCoreFinishReason, Logprobs, StopReason};
+use vllm_engine_core_client::{AbortCause, EngineCoreOutputStream};
 
 use crate::error::Result;
 use crate::request_metrics::{RequestMetricsTracker, current_unix_timestamp_secs};
@@ -263,12 +263,18 @@ impl Drop for GenerateOutputStream {
             return;
         }
 
-        // If the user drops a live generate stream, `EngineCoreOutputStream::Drop` will trigger an
-        // engine-side abort. Record the matching terminal request metrics here so frontend-driven
-        // aborts are still visible as `finished_reason="abort"` instead of disappearing from
-        // observability entirely.
+        // If the user or the upper layer drops a live generate stream,
+        // `EngineCoreOutputStream::Drop` will trigger an engine-side abort. Record the
+        // matching terminal request metrics here so frontend-driven aborts are still
+        // visible as `finished_reason=...` instead of disappearing from observability
+        // entirely.
+        let finish_reason = match AbortCause::current() {
+            AbortCause::DroppedStream => FinishReason::Abort,
+            AbortCause::StopStringMatched => FinishReason::Stop(None),
+        };
+
         self.request_metrics
-            .record_finished(current_unix_timestamp_secs(), FinishReason::Abort);
+            .record_finished(current_unix_timestamp_secs(), finish_reason);
     }
 }
 

@@ -8,9 +8,10 @@ use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use crate::client::AbortRequest;
 use crate::client::state::OutputReceiver;
 use crate::protocol::EngineCoreOutput;
-use crate::{Error, Result};
+use crate::{AbortCause, Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -43,7 +44,7 @@ impl Deref for EngineCoreStreamOutput {
 /// final output object whose `finish_reason` is non-`None`.
 pub struct EngineCoreOutputStream {
     request_id: String,
-    abort_tx: mpsc::UnboundedSender<String>,
+    abort_tx: mpsc::UnboundedSender<AbortRequest>,
     state: State,
     rx: OutputReceiver,
 }
@@ -51,7 +52,7 @@ pub struct EngineCoreOutputStream {
 impl EngineCoreOutputStream {
     pub(crate) fn new(
         request_id: String,
-        abort_tx: mpsc::UnboundedSender<String>,
+        abort_tx: mpsc::UnboundedSender<AbortRequest>,
         rx: OutputReceiver,
     ) -> Self {
         Self {
@@ -128,7 +129,12 @@ impl Drop for EngineCoreOutputStream {
             return;
         }
 
-        if self.abort_tx.send(self.request_id.clone()).is_err() {
+        let abort_req = AbortRequest {
+            request_id: self.request_id.clone(),
+            cause: AbortCause::current(),
+        };
+
+        if self.abort_tx.send(abort_req).is_err() {
             warn!(
                 request_id = self.request_id,
                 "auto-abort worker already shut down; skip auto-abort"

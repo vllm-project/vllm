@@ -140,6 +140,40 @@ impl EngineCoreClientConfig {
     }
 }
 
+/// The reason a request stream is being aborted when its output stream is dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AbortCause {
+    /// The consumer dropped the stream before the request reached a terminal engine output.
+    #[default]
+    DroppedStream,
+    /// The frontend matched a stop string locally and intentionally stopped consuming the stream.
+    StopStringMatched,
+}
+
+task_local::task_local! {
+    static ABORT_CAUSE: AbortCause;
+}
+
+impl AbortCause {
+    /// Return the abort cause currently associated with this task, or [`AbortCause::DroppedStream`]
+    /// by default.
+    pub fn current() -> Self {
+        ABORT_CAUSE.try_get().unwrap_or_default()
+    }
+
+    /// Drop one value while marking the drop as happening for this abort cause.
+    pub fn drop_as<T>(self, value: T) {
+        ABORT_CAUSE.sync_scope(self, move || drop(value));
+    }
+}
+
+/// Internal auto-abort work item sent from stream `Drop` handlers to the abort worker.
+#[derive(Debug, Clone)]
+pub(crate) struct AbortRequest {
+    request_id: String,
+    cause: AbortCause,
+}
+
 /// Default ZMQ-based implementation that talks directly to a Python `EngineCoreProc`.
 pub struct EngineCoreClient {
     config: EngineCoreClientConfig,
@@ -148,7 +182,7 @@ pub struct EngineCoreClient {
     engines: Vec<ConnectedEngine>,
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
-    abort_tx: mpsc::UnboundedSender<String>,
+    abort_tx: mpsc::UnboundedSender<AbortRequest>,
 
     // Background tasks
     output_task: AbortOnDropHandle<()>,

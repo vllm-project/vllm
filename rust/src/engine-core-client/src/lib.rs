@@ -11,7 +11,7 @@ pub mod test_utils;
 mod transport;
 
 pub use client::{
-    CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
+    AbortCause, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
     EngineCoreStreamOutput, TransportMode,
 };
 pub use error::{Error, Result};
