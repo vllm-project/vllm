@@ -49,9 +49,7 @@ from vllm.entrypoints.chat_utils import (
     load_chat_template,
 )
 from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
-from vllm.entrypoints.pooling.scoring.io_processor import (
-    ScoringIOProcessor,
-)
+from vllm.entrypoints.pooling.scoring.io_processor import ScoringIOProcessor
 from vllm.entrypoints.pooling.scoring.typing import ScoreInput
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
 from vllm.entrypoints.utils import log_non_default_args

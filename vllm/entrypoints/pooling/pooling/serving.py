@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.serving import PoolingServingBase
 from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorRequest,
     PoolingBytesResponse,
     PoolingResponse,
     PoolingResponseData,
@@ -59,14 +60,49 @@ class ServingPooling(PoolingServingBase):
         raw_request: Request | None = None,
     ) -> Response:
         ctx = await self._init_ctx(request, raw_request)
-        await self.io_processor.pre_process_online_async(ctx)
 
-        if ctx.pooling_params is None:
-            ctx.pooling_params = self.io_processor.create_pooling_params(request)
+        if request.task is None:
+            request.task = self.pooling_task
+
+        if getattr(request, "dimensions", None) is not None:
+            raise ValueError("dimensions is currently not supported")
+
+        # plugin task uses io_processor.parse_request to verify inputs
+        if request.task != "plugin" and request.task != self.pooling_task:
+            if request.task not in self.supported_tasks:
+                raise ValueError(
+                    f"Unsupported task: {request.task!r} "
+                    f"Supported tasks: {self.supported_tasks}"
+                )
+            else:
+                logger.warning_once(
+                    "Pooling multitask support is deprecated and will be removed "
+                    "in v0.20. When the default pooling task is not what you want, you "
+                    "need to manually specify it via --pooler-config.task %s. ",
+                    request.task,
+                )
+
+        if isinstance(request, IOProcessorRequest):
+            if "plugin" not in self.io_processors:
+                raise ValueError(
+                    "No IOProcessor plugin installed. Please refer "
+                    "to the documentation and to the "
+                    "'prithvi_geospatial_mae_io_processor' "
+                    "offline inference example for more details."
+                )
+
+            io_processor = self.io_processors["plugin"]
+        else:
+            io_processor = self.io_processors[request.task]
+            await io_processor.pre_process_online_async(ctx)
+
+            if ctx.pooling_params is None:
+                ctx.pooling_params = io_processor.create_pooling_params(request)
 
         await self._prepare_generators(ctx)
         await self._collect_batch(ctx)
-        await self.io_processor.post_process_online_async(ctx)
+
+        await io_processor.post_process_online_async(ctx)
         return await self._build_response(ctx)
 
     async def _build_response(

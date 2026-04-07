@@ -49,11 +49,11 @@ class PoolingIOProcessor:
             chat_template_config.trust_request_chat_template
         )
 
-    def create_pooling_params(self, request):
-        return request.to_pooling_params()
-
     #######################################
     # online APIs
+
+    def create_pooling_params(self, request):
+        return request.to_pooling_params()
 
     def pre_process_online(self, ctx: PoolingServeContext):
         request = ctx.request
