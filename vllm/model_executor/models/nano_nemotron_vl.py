@@ -655,11 +655,11 @@ class NanoNemotronVLMultiModalProcessor(
         tag = "<video>"
         head, *rest = prompt.split(tag)
         rebuilt = [head]
-        for i, suffix in enumerate(rest):
+        for append_audio, part in zip(has_audio, rest, strict=True):
             rebuilt.append(tag)
-            if i < len(has_audio) and has_audio[i]:
+            if append_audio:
                 rebuilt.append(AUDIO_CONTEXT)
-            rebuilt.append(suffix)
+            rebuilt.append(part)
         prompt = "".join(rebuilt)
 
         inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
