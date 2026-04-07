@@ -214,15 +214,7 @@ def test_ngram_gpu_default_with_async_scheduling(
         async_scheduling=async_scheduling,
     )
     # Assert the resolved async_scheduling config matches what was requested.
-    if (
-        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
-        != async_scheduling
-    ):  # noqa
-        raise AsyncSchedulingNotEnabledError(
-            f"Expected async_scheduling={async_scheduling}, got "
-            f"{spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling}"
-            " See https://github.com/vllm-project/vllm/issues/38929"
-        )
+    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling == async_scheduling
     evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
     del spec_llm
     cleanup_dist_env_and_memory()
@@ -475,12 +467,7 @@ def _run_eagle_correctness(
             attention_config=attention_config,
         )
         # EAGLE/EAGLE3 auto-enables async scheduling; assert it is active.
-        if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
-            raise AsyncSchedulingNotEnabledError(
-                "Expected async_scheduling=True for EAGLE spec decode, "
-                f"got False. method={method}"
-                " See https://github.com/vllm-project/vllm/issues/38929"
-            )
+        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
@@ -785,12 +772,7 @@ def test_mtp_correctness(
             attention_backend=attn_backend,
         )
         # MTP auto-enables async scheduling; assert it is active.
-        if not spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling:
-            raise AsyncSchedulingNotEnabledError(
-                "Expected async_scheduling=True for MTP spec decode, "
-                f"got False. method={method}"
-                " See https://github.com/vllm-project/vllm/issues/38929"
-            )
+        assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
         evaluate_llm_for_gsm8k(
             spec_llm, expected_accuracy_threshold=expected_accuracy_threshold
         )
