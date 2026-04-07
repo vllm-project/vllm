@@ -977,10 +977,11 @@ class EngineCoreProc(EngineCore):
             bind=False,
         ) as handshake_socket:
             # Register engine with front-end.
-            addresses = self.startup_handshake(
-                handshake_socket, local_client, headless, parallel_config_to_update
-            )
             try:
+                addresses = self.startup_handshake(
+                    handshake_socket, local_client, headless,
+                    parallel_config_to_update
+                )
                 yield addresses
             except Exception as e:
                 # Send failure notification to frontend (best-effort).
