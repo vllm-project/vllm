@@ -1129,3 +1129,46 @@ def test_backend_correctness(
         summary = f"{len(failures)} backend(s) failed: {', '.join(backend_names)}"
         detailed_msg = "\n".join(failures)
         pytest.fail(f"{summary}\n{detailed_msg}")
+
+
+@pytest.mark.parametrize("model", ["deepseek-ai/DeepSeek-V2-Lite"])
+def test_mla_numerical_accuracy_compile_cuda_graphs(model):
+    """
+    End-to-end test for vLLM compilation with VLLM_MLA_EXPOSED_SPLIT. Expected
+    result was generated with same parameters, but with VLLM_MLA_EXPOSED_SPLIT
+    = 0.
+    """
+    import os
+
+    from vllm import LLM, SamplingParams
+    from vllm.config.compilation import (
+        CompilationConfig,
+        CompilationMode,
+        CUDAGraphMode,
+    )
+
+    os.environ["VLLM_MLA_EXPOSED_SPLIT"] = "1"
+    prompts = ["The capital of France is"]
+
+    sampling_params = SamplingParams(max_tokens=20, temperature=0, seed=42)
+
+    llm_exposed = LLM(
+        model=model,
+        max_model_len=256,
+        trust_remote_code=True,
+        disable_log_stats=True,
+        gpu_memory_utilization=0.5,  # Reduced to allow sequential runs
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+            use_inductor_graph_partition=True,
+        ),
+    )
+
+    actual_result = llm_exposed.generate(prompts, sampling_params)
+    expected_result = (
+        " Paris, which is also the largest city in the country."
+        " The city is located on the Seine River"
+    )
+    assert len(actual_result) == 1
+    assert actual_result[0].outputs[0].text == expected_result

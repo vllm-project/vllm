@@ -25,7 +25,6 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _is_torch_equal_or_newer,
     is_torch_equal,
-    is_torch_equal_or_newer,
 )
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
@@ -638,7 +637,7 @@ def test_inductor_asserts_user_override(monkeypatch):
 
 
 @pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.9.0.dev") or current_platform.is_cpu(),
+    not _is_torch_equal_or_newer("2.9.0.dev") or current_platform.is_cpu(),
     reason="Combo kernels only configured on torch>=2.9 and non-CPU",
 )
 def test_mla_exposed_split_disables_combo_kernels(monkeypatch):

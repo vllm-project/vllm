@@ -326,6 +326,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
+
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             calculate_kv_scales = cache_config.calculate_kv_scales
@@ -416,11 +417,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.q_pad_num_heads = getattr(self.impl, "q_pad_num_heads", None)
         self._decode_fn = getattr(self.impl, "_forward_decode", self.impl.forward_mqa)
         self.use_direct_call = not current_platform.opaque_attention_op()
-        self.exposed_split = (
-            envs.VLLM_MLA_EXPOSED_SPLIT
-            and not self.use_direct_call
-            and self.attn_backend.accept_output_buffer
-        )
+        self.exposed_split = envs.VLLM_MLA_EXPOSED_SPLIT and not self.use_direct_call
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -534,18 +531,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return output
         else:
-            encoded = _encode_layer_name(self.layer_name)
-            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed,
-                k_pe,
-                encoded,
-                self.kv_cache_dtype,
-                self._k_scale,
-            )
             # Exposed split path: exposes prefill/decode split to
             # torch.compile for better fusion opportunities on
             # surrounding GEMMs.
-            if envs.VLLM_MLA_EXPOSED_SPLIT and self.attn_backend.accept_output_buffer:
             if self.exposed_split:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 # Exposed path still routes through forward_impl so there is a
@@ -559,8 +547,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     output=output,
                 )
 
-            # Default path: use unified MLA attention ops
-            # Use kv_cache as dummy dependency to prevent DCE
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
@@ -568,25 +554,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self.kv_cache_dtype,
                 self._k_scale,
             )
-            if self.attn_backend.accept_output_buffer:
-                output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
-                torch.ops.vllm.unified_mla_attention_with_output(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    output,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
-                return output
-            else:
-                return torch.ops.vllm.unified_mla_attention(
-                    q,
-                    kv_c_normed,
-                    k_pe,
-                    self.layer_name,
-                    kv_cache_dummy_dep=kv_cache_dummy_dep,
-                )
+            output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+            torch.ops.vllm.unified_mla_attention_with_output(
+                q,
+                kv_c_normed,
+                k_pe,
+                output,
+                self.layer_name,
+                kv_cache_dummy_dep=kv_cache_dummy_dep,
+            )
+            return output
 
     def forward_impl(
         self,
@@ -595,7 +572,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: "MLACommonMetadata | None",
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -953,7 +930,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
             )
         else:
-            # Perform matmul and write back without resize_
             mat = torch.bmm(
                 x, self.W_UV
             )  # (N, B, V) and contiguous because W_UV is contiguous
@@ -1131,39 +1107,6 @@ def _get_mla_context(
     """Shared runtime context lookup for MLA custom ops."""
     attn_metadata, attn_layer, kv_cache, _ = get_attention_context(layer_name)
     return attn_metadata, cast("MLAAttention", attn_layer), kv_cache
-
-
-@maybe_transfer_kv_layer
-def unified_mla_attention(
-    q: torch.Tensor,
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    layer_name: str,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
-) -> torch.Tensor:
-    attn_metadata, layer, kv_cache = _get_mla_context(layer_name)
-    output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
-
-    return output
-
-
-def unified_mla_attention_fake(
-    q: torch.Tensor,
-    kv_c_normed: torch.Tensor,
-    k_pe: torch.Tensor,
-    layer_name: str,
-    kv_cache_dummy_dep: torch.Tensor | None = None,
-) -> torch.Tensor:
-    return torch.empty_like(q).contiguous()
-
-
-direct_register_custom_op(
-    op_name="unified_mla_attention",
-    op_func=unified_mla_attention,
-    mutates_args=[],
-    fake_impl=unified_mla_attention_fake,
-    dispatch_key=current_platform.dispatch_key,
-)
 
 
 def unified_mla_kv_cache_update(

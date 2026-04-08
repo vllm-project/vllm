@@ -648,7 +648,7 @@ def maybe_calc_kv_scales(
     layer_name: LayerNameType,
 ) -> None:
     layer_name = _resolve_layer_name(layer_name)
-    # During profile run or graph compilation, forward_context may not be available
+    # During torch.compile tracing, forward_context is not available
     if not is_forward_context_available():
         return
 
