@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     DeepGemmFp8PrepMixin,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (

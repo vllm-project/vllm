@@ -168,7 +168,7 @@ def backend_to_kernel_cls(
         return [FlashInferExperts]
 
     elif backend == Fp8MoeBackend.DEEPGEMM:
-        from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
             DeepGemmExperts,
         )
         from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
