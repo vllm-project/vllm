@@ -15,8 +15,9 @@
 
 # set -xe
 
-# Find the git repository root directory
-GIT_ROOT=$(git rev-parse --show-toplevel)
+# Resolve the repository root from the script location instead of `.git`.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
 # Model to test
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"

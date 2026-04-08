@@ -628,6 +628,31 @@ def _identity_increment(event):
     return event
 
 
+def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
+    """Set up serving.parser so that it returns a mock parser instance
+    with a reasoning parser that returns the given delta_sequence.
+
+    The mock has reasoning_parser set (truthy) but tool_parser as None,
+    so the parser's parse_delta enters the reasoning-only branch.
+    """
+    call_count = 0
+
+    def mock_parse_delta(**kwargs):
+        nonlocal call_count
+        if call_count >= len(delta_sequence):
+            return None
+        result = delta_sequence[call_count]
+        call_count += 1
+        return result
+
+    mock_parser_instance = MagicMock()
+    mock_parser_instance.reasoning_parser = MagicMock()  # truthy
+    mock_parser_instance.tool_parser = None
+    mock_parser_instance.parse_delta = mock_parse_delta
+    mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
+    serving.parser = MagicMock(return_value=mock_parser_instance)
+
+
 class TestStreamingReasoningToContentTransition:
     """Tests for _process_simple_streaming_events reasoning-to-content
     transition, specifically the fix for mixed deltas that carry both
@@ -646,27 +671,13 @@ class TestStreamingReasoningToContentTransition:
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 
-        # Sequence of DeltaMessages the mock reasoning parser will return
+        # Sequence of DeltaMessages the mock orchestrator will return
         delta_sequence = [
             DeltaMessage(reasoning="thinking..."),
             DeltaMessage(reasoning=" end", content="hello"),  # mixed delta
             DeltaMessage(content=" world"),
         ]
-        call_count = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        # Mock the reasoning parser on the serving instance
-        mock_parser = MagicMock()
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
         # Create contexts for each streaming chunk
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -734,20 +745,7 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="thinking"),
             DeltaMessage(content="answer"),
         ]
-        call_count = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser = MagicMock()
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -809,20 +807,7 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="step 1"),
             DeltaMessage(reasoning=" step 2"),
         ]
-        call_count = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser = MagicMock()
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = mock_extract_reasoning_streaming
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),

@@ -121,7 +121,7 @@ class PassConfig:
     fuse_act_quant: bool = None  # type: ignore[assignment]
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = None  # type: ignore[assignment]
-    """Fuse the custom attention + quant ops."""
+    """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = None  # type: ignore[assignment]
@@ -282,7 +282,7 @@ class PassConfig:
         """
         enabled_fusions = [
             f.name[len("fuse_") :]
-            for f in fields(self)
+            for f in fields(self)  # type: ignore[arg-type]
             if getattr(self, f.name) and f.name.startswith("fuse_")
         ]
 
@@ -711,9 +711,7 @@ class CompilationConfig:
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
-        "vllm::unified_attention",
         "vllm::unified_attention_with_output",
-        "vllm::unified_mla_attention",
         "vllm::unified_mla_attention_with_output",
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",

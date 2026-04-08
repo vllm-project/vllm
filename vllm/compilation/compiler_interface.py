@@ -345,9 +345,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
         # Inductor's pre-grad passes don't do anything for vLLM.
         # The pre-grad passes get run even on cache-hit and negatively impact
         # vllm cold compile times by O(1s)
-        # Can remove this after the following issue gets fixed
+        # Fixed upstream in PyTorch 2.12:
         # https://github.com/pytorch/pytorch/issues/174502
-        if envs.VLLM_ENABLE_PREGRAD_PASSES:
+        if is_torch_equal_or_newer("2.12.0.dev") or envs.VLLM_ENABLE_PREGRAD_PASSES:
             pregrad_ctx: Any = contextlib.nullcontext()
         else:
             pregrad_ctx = patch(
