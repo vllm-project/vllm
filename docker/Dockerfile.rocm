@@ -159,7 +159,7 @@ RUN cd /usr/local/src && \
         --disable-doxygen-doc \
         --enable-optimizations \
         --enable-devel-headers \
-        --with-rocm=/opt/rocm \
+        --with-rocm=${ROCM_PATH} \
         --with-verbs \
         --with-dm \
         --enable-mt && \
@@ -208,7 +208,7 @@ RUN git clone ${ROCSHMEM_REPO} \
  && cd projects/rocshmem/build \
  && cmake .. \
     -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
-    -DROCM_PATH=/opt/rocm \
+    -DROCM_PATH=${ROCM_PATH} \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DUSE_EXTERNAL_MPI=OFF \
  && make -j \
