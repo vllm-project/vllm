@@ -19,9 +19,6 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.cudagraph_utils import (
-    BatchExecutionDescriptor,
-)
 from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
@@ -448,6 +445,7 @@ class EagleSpeculator:
             )
 
         if decode_batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert self.cudagraph_manager is not None
             self.cudagraph_manager.run_fullgraph(decode_batch_desc)
         else:
             self.generate_draft(

@@ -1064,6 +1064,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
+            assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:

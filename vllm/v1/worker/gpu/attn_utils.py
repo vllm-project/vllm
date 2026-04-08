@@ -114,9 +114,13 @@ def init_attn_backend(
                 min_cg_attn_backend = attn_backend.__name__
         attn_groups.append(groups)
 
-    return attn_backends, attn_groups, AttentionCGSupportInfo(
-        min_cg_support=min_cg_support,
-        min_cg_attn_backend=min_cg_attn_backend,
+    return (
+        attn_backends,
+        attn_groups,
+        AttentionCGSupportInfo(
+            min_cg_support=min_cg_support,
+            min_cg_attn_backend=min_cg_attn_backend,
+        ),
     )
 
 
