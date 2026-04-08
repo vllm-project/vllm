@@ -103,7 +103,12 @@ def set_offloader(instance: BaseOffloader) -> None:
     """Set the global offloader instance."""
     global _instance
     _instance = instance
-    logger.info("Offloader set to %s", type(instance).__name__)
+    if isinstance(instance, NoopOffloader):
+        logger.debug_once(
+            "Offloader set to NoopOffloader (no offloading).", scope="local"
+        )
+    else:
+        logger.info_once("Offloader set to %s", type(instance).__name__, scope="local")
 
 
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:

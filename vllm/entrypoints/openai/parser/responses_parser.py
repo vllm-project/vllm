@@ -39,7 +39,7 @@ class ResponsesParser:
         reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
-        tool_parser_cls: Callable[[TokenizerLike], ToolParser] | None,
+        tool_parser_cls: type[ToolParser] | None,
     ):
         self.response_messages: list[ResponseInputOutputItem] = (
             # TODO: initial messages may not be properly typed
@@ -52,7 +52,7 @@ class ResponsesParser:
         self.reasoning_parser_instance = reasoning_parser_cls(tokenizer)
         self.tool_parser_instance = None
         if tool_parser_cls is not None:
-            self.tool_parser_instance = tool_parser_cls(tokenizer)
+            self.tool_parser_instance = tool_parser_cls(tokenizer, request.tools)
 
         # Store the last finish_reason to determine response status
         self.finish_reason: str | None = None
@@ -61,10 +61,10 @@ class ResponsesParser:
         # Store the finish_reason from the output
         self.finish_reason = output.finish_reason
 
-        reasoning_content, content = self.reasoning_parser_instance.extract_reasoning(
+        reasoning, content = self.reasoning_parser_instance.extract_reasoning(
             output.text, request=self.request
         )
-        if reasoning_content:
+        if reasoning:
             self.response_messages.append(
                 ResponseReasoningItem(
                     type="reasoning",
@@ -73,7 +73,7 @@ class ResponsesParser:
                     content=[
                         Content(
                             type="reasoning_text",
-                            text=reasoning_content,
+                            text=reasoning,
                         )
                     ],
                 )

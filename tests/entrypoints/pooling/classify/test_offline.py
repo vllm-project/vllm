@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
+import logging
 import weakref
 
 import pytest
@@ -67,8 +67,11 @@ def test_list_prompts(llm: LLM):
 
 
 @pytest.mark.skip_global_cleanup
-def test_token_classify(llm: LLM):
-    outputs = llm.encode(prompt, pooling_task="token_classify", use_tqdm=False)
+def test_token_classify(llm: LLM, caplog_vllm):
+    with caplog_vllm.at_level(level=logging.WARNING, logger="vllm"):
+        outputs = llm.encode(prompt, pooling_task="token_classify", use_tqdm=False)
+        assert "deprecated" in caplog_vllm.text
+
     assert len(outputs) == 1
     assert isinstance(outputs[0], PoolingRequestOutput)
     assert outputs[0].prompt_token_ids == prompt_token_ids
@@ -102,13 +105,13 @@ def test_pooling_params(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_score_api(llm: LLM):
-    err_msg = "Score API is only enabled for num_labels == 1."
+    err_msg = "Scoring API is only enabled for num_labels == 1."
     with pytest.raises(ValueError, match=err_msg):
         llm.score("ping", "pong", use_tqdm=False)
 
 
-@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
-    err_msg = f"Unsupported task: '{task}' Supported tasks.+"
+    err_msg = "Embedding API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)

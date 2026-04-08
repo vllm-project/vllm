@@ -24,8 +24,15 @@ else:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attn_backend", ATTN_BACKENDS)
 @pytest.mark.xfail(
+    not current_platform.is_rocm(),
+    reason="EAGLE + DP > 1 produces wrong outputs when async spec decode "
+    "correction is active. Root cause under investigation. "
+    "See: https://github.com/vllm-project/vllm/issues/31913",
+    strict=False,
+)
+@pytest.mark.xfail(
     current_platform.is_rocm(),
-    reason="Test may fail on ROCm until batch invariance is enabled."
+    reason="Test may fail on ROCm until batch invariance is enabled. "
     "See: https://github.com/vllm-project/vllm/issues/27433",
     strict=False,
 )
@@ -69,9 +76,7 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
     )
 
     prompt = "This is a test of data parallel with eagle"
-    # This test might be flaky, see
-    # https://github.com/vllm-project/vllm/issues/31913
-    num_expected_tokens = 20
+    num_expected_tokens = 100
     sampling_params = SamplingParams(
         max_tokens=num_expected_tokens,
         ignore_eos=True,

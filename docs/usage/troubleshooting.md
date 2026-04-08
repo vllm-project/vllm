@@ -91,11 +91,11 @@ If GPU/CPU communication cannot be established, you can use the following Python
     import torch
     import torch.distributed as dist
     dist.init_process_group(backend="nccl")
-    local_rank = dist.get_rank() % torch.cuda.device_count()
-    torch.cuda.set_device(local_rank)
+    local_rank = dist.get_rank() % torch.accelerator.device_count()
+    torch.accelerator.set_device_index(local_rank)
     data = torch.FloatTensor([1,] * 128).to("cuda")
     dist.all_reduce(data, op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     value = data.mean().item()
     world_size = dist.get_world_size()
     assert value == world_size, f"Expected {world_size}, got {value}"
@@ -155,26 +155,24 @@ If you are testing with a single node, adjust `--nproc-per-node` to the number o
 NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 ```
 
-If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run:
+If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address and port of the master node (e.g., `10.0.0.1:29400`), reachable from all nodes. Then, run:
 
 ```bash
 NCCL_DEBUG=TRACE torchrun --nnodes 2 \
     --nproc-per-node=2 \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR test.py
+    --rdzv_backend=static \
+    --rdzv_endpoint=$MASTER_ADDR \
+    --node-rank $NODE_RANK test.py
 ```
+
+Set `MASTER_ADDR` to the IP address and port of the master node (e.g., `10.0.0.1:29400`), reachable from all nodes. Set `NODE_RANK` to `0` on the master node and `1`, `2`, ... on the workers. Adjust `--nproc-per-node` and `--nnodes` according to your setup.
+
+!!! note
+    We use `--rdzv_backend=static` instead of `c10d` because the `c10d` rendezvous backend can fail with DNS resolution errors in multi-node setups (see [pytorch/pytorch#85300](https://github.com/pytorch/pytorch/issues/85300)). The `static` backend avoids this by requiring explicit node ranks.
 
 If the script runs successfully, you should see the message `sanity check is successful!`.
 
 If the test script hangs or crashes, usually it means the hardware/drivers are broken in some sense. You should try to contact your system administrator or hardware vendor for further assistance. As a common workaround, you can try to tune some NCCL environment variables, such as `export NCCL_P2P_DISABLE=1` to see if it helps. Please check [their documentation](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html) for more information. Please only use these environment variables as a temporary workaround, as they might affect the performance of the system. The best solution is still to fix the hardware/drivers so that the test script can run successfully.
-
-!!! note
-    A multi-node environment is more complicated than a single-node one. If you see errors such as `torch.distributed.DistNetworkError`, it is likely that the network/DNS setup is incorrect. In that case, you can manually assign node rank and specify the IP via command line arguments:
-
-    - In the first node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 0 --master_addr $MASTER_ADDR test.py`.
-    - In the second node, run `NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --node-rank 1 --master_addr $MASTER_ADDR test.py`.
-
-    Adjust `--nproc-per-node`, `--nnodes`, and `--node-rank` according to your setup, being sure to execute different commands (with different `--node-rank`) on different nodes.
 
 ## Python multiprocessing
 
@@ -339,7 +337,7 @@ import vllm
 import torch
 
 print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"CUDA device count: {torch.cuda.device_count()}")
+print(f"CUDA device count: {torch.accelerator.device_count()}")
 EOF
 ```
 

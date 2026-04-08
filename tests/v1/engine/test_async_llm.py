@@ -17,9 +17,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import (
-    ErrorResponse,
-)
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs import PromptType
@@ -511,11 +508,25 @@ async def test_header_dp_rank_argument():
             base_model_paths=BASE_MODEL_PATHS,
         )
 
+        # Create render serving instance (required by OpenAIServingChat)
+        from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+
+        serving_render = OpenAIServingRender(
+            model_config=engine.model_config,
+            renderer=engine.renderer,
+            io_processor=engine.io_processor,
+            model_registry=models.registry,
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+        )
+
         # Create serving chat instance
         serving_chat = OpenAIServingChat(
             engine_client=engine,
             models=models,
             response_role="assistant",
+            openai_serving_render=serving_render,
             chat_template=None,
             chat_template_content_format="auto",
             request_logger=None,
@@ -542,11 +553,9 @@ async def test_header_dp_rank_argument():
         # Test 2: Out-of-range DP rank (1)
         mock_raw_request.headers = {"X-data-parallel-rank": "1"}
 
-        # should return ErrorResponse for out-of-range rank
-        response2 = await serving_chat.create_chat_completion(req, mock_raw_request)
-        assert isinstance(response2, ErrorResponse), (
-            "Expected an ErrorResponse for out-of-range DP rank"
-        )
+        # should raise ValueError for out-of-range rank
+        with pytest.raises(ValueError):
+            await serving_chat.create_chat_completion(req, mock_raw_request)
 
 
 @pytest.mark.asyncio

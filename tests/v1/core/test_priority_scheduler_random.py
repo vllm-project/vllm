@@ -140,7 +140,7 @@ def _mock_draft_token_ids(
     return DraftTokenIds(req_ids=request_ids, draft_token_ids=sampled_token_ids)
 
 
-def _chech_valid_scheduler_output(
+def _check_valid_scheduler_output(
     scheduler_output: SchedulerOutput,
     seen_request_ids: set[str],
     seen_mm_hashes: set[str],
@@ -242,7 +242,7 @@ def test_priority_scheduling_blast(
                 )
                 scheduler.add_request(req)
         scheduler_output = scheduler.schedule()
-        _chech_valid_scheduler_output(
+        _check_valid_scheduler_output(
             scheduler_output, seen_request_ids, seen_mm_hashes
         )
         model_output = _mock_execute_model(

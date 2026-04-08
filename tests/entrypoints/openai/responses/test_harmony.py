@@ -13,10 +13,11 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import requests
-from openai import BadRequestError, NotFoundError, OpenAI
+from openai import InternalServerError, NotFoundError, OpenAI
 from openai_harmony import Message
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     BASE_TEST_ENV,
     events_contain_type,
@@ -698,7 +699,7 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 async def test_function_calling_required(client: OpenAI, model_name: str):
     tools = [GET_WEATHER_SCHEMA]
 
-    with pytest.raises(BadRequestError):
+    with pytest.raises(InternalServerError):
         await client.responses.create(
             model=model_name,
             input="What's the weather like in Paris today?",

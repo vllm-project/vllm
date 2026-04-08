@@ -179,7 +179,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             torch.ops.vllm.all_reduce.default,
-            torch.ops._C.scaled_fp4_quant.default,
+            torch.ops._C.scaled_fp4_quant.out,
         ]
 
 
@@ -262,7 +262,7 @@ def all_reduce_fusion_pass_on_test_model(
     set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
