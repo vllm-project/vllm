@@ -6,13 +6,19 @@ Includes the store worker, transfer threads, lookup server,
 and MooncakeDistributedStore integration.
 """
 
+import ipaddress
 import json
 import os
 import queue
+import socket
 import threading
 from collections import defaultdict
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
+from urllib.request import urlopen
 
 import regex as re
 import torch
@@ -45,46 +51,45 @@ from vllm.v1.serial_utils import MsgpackDecoder
 
 logger = init_logger(__name__)
 
-DEFAULT_GLOBAL_SEGMENT_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
-DEFAULT_LOCAL_BUFFER_SIZE = 4 * 1024 * 1024 * 1024  # 4 GiB
+DEFAULT_REQUESTER_LOCAL_BUFFER_SIZE = 128 * 1024 * 1024  # 128 MiB
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE = 1280 * 1024 * 1024
 DISK_OFFLOAD_USABLE_BUDGET_RATIO = 0.9
+DEFAULT_MOONCAKE_MASTER_ADMIN_PORT = 9003
+PREFERRED_SEGMENT_DISCOVERY_TIMEOUT_SECS = 1.0
+GET_ALL_SEGMENTS_PATH = "/get_all_segments"
 _DIRECT_IO_ALIGNMENT = 4096
 _DIRECT_IO_PADDING_BYTES = 2 * _DIRECT_IO_ALIGNMENT
 
 
 @dataclass
 class MooncakeStoreConfig:
-    """Configuration for MooncakeDistributedStore."""
+    """Requester-facing configuration for MooncakeDistributedStore."""
 
     metadata_server: str
-    global_segment_size: int
-    local_buffer_size: int
+    requester_local_buffer_size: int
     protocol: str
     device_name: str
     master_server_address: str
-    enable_offload: bool = False
 
     @staticmethod
     def from_file(file_path: str) -> "MooncakeStoreConfig":
         with open(file_path) as file:
             config = json.load(file)
-        enable_offload = config.get("enable_offload", False) or os.getenv(
-            "MOONCAKE_ENABLE_OFFLOAD", ""
-        ).lower() in ("1", "true")
         return MooncakeStoreConfig(
-            metadata_server=config.get("metadata_server", ""),
-            global_segment_size=_parse_size(
-                config.get("global_segment_size", DEFAULT_GLOBAL_SEGMENT_SIZE)
+            metadata_server=_get_config_or_env_value(
+                config, "metadata_server", "MOONCAKE_TE_META_DATA_SERVER", ""
             ),
-            local_buffer_size=_parse_size(
-                config.get("local_buffer_size", DEFAULT_LOCAL_BUFFER_SIZE)
+            requester_local_buffer_size=_get_requester_local_buffer_size(config),
+            protocol=_get_config_or_env_value(
+                config, "protocol", "MOONCAKE_PROTOCOL", "tcp"
             ),
-            protocol=config.get("protocol", "tcp"),
-            device_name=config.get("device_name", ""),
-            master_server_address=config.get("master_server_address", ""),
-            enable_offload=enable_offload,
+            device_name=_get_config_or_env_value(
+                config, "device_name", "MOONCAKE_DEVICE", ""
+            ),
+            master_server_address=_get_config_or_env_value(
+                config, "master_server_address", "MOONCAKE_MASTER", ""
+            ),
         )
 
     @staticmethod
@@ -97,13 +102,216 @@ class MooncakeStoreConfig:
         return MooncakeStoreConfig.from_file(config_path)
 
 
-def _get_disk_offload_buffer_budget_bytes(enable_offload: bool) -> int | None:
-    if not enable_offload:
-        return None
+def _get_config_or_env_value(
+    config: Mapping[str, Any], key: str, env_var: str, default: Any
+) -> Any:
+    env_value = os.getenv(env_var)
+    if env_value not in (None, ""):
+        return env_value
+    return config.get(key, default)
+
+
+def _get_requester_local_buffer_size(config: Mapping[str, Any]) -> int:
+    value = config.get("local_buffer_size")
+    if value is None:
+        return DEFAULT_REQUESTER_LOCAL_BUFFER_SIZE
+    return _parse_size(value)
+
+
+def _get_kv_connector_extra_config(vllm_config: VllmConfig) -> Mapping[str, Any]:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return {}
+    return kv_transfer_config.kv_connector_extra_config
+
+
+def _get_kv_connector_extra_config_value(
+    vllm_config: VllmConfig, key: str, default: Any = None
+) -> Any:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return default
+    return kv_transfer_config.get_from_extra_config(key, default)
+
+
+def _get_disk_offload_buffer_budget_bytes() -> int:
     value = os.getenv("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES")
     if value is None:
         return DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE
     return _parse_size(value)
+
+
+def _normalize_string_override(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+def _get_host_from_address(address: str | None) -> str | None:
+    if address is None:
+        return None
+    normalized = address.strip()
+    if not normalized:
+        return None
+    parsed = urlsplit(normalized if "://" in normalized else f"//{normalized}")
+    return parsed.hostname
+
+
+def _format_http_host(host: str) -> str:
+    return f"[{host}]" if ":" in host and not host.startswith("[") else host
+
+
+def _is_ip_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _derive_master_admin_endpoint(master_server_address: str | None) -> str | None:
+    host = _get_host_from_address(master_server_address)
+    if host is None:
+        return None
+    return (
+        f"http://{_format_http_host(host)}:{DEFAULT_MOONCAKE_MASTER_ADMIN_PORT}"
+        f"{GET_ALL_SEGMENTS_PATH}"
+    )
+
+
+def _get_master_admin_endpoint(
+    extra_config: Mapping[str, Any], master_server_address: str | None
+) -> str | None:
+    override = _normalize_string_override(extra_config.get("master_admin_endpoint"))
+    if override is not None:
+        return override
+    return _derive_master_admin_endpoint(master_server_address)
+
+
+def _get_local_hostname_candidates() -> set[str]:
+    hostnames: set[str] = set()
+    for candidate in (
+        os.getenv("MOONCAKE_LOCAL_HOSTNAME"),
+        socket.gethostname(),
+        socket.getfqdn(),
+    ):
+        host = _get_host_from_address(candidate)
+        if host is not None and not _is_ip_address(host):
+            hostnames.add(host)
+    return hostnames
+
+
+def _parse_segment_lines(payload: str) -> list[str] | None:
+    segments = [line.strip() for line in payload.splitlines() if line.strip()]
+    if any(_get_host_from_address(segment) is None for segment in segments):
+        return None
+    return segments
+
+
+def _match_local_segment(
+    segments: list[str], local_ip: str, local_hostnames: set[str]
+) -> tuple[str | None, str | None]:
+    exact_ip_matches = [
+        segment for segment in segments if _get_host_from_address(segment) == local_ip
+    ]
+    if len(exact_ip_matches) == 1:
+        return exact_ip_matches[0], None
+    if len(exact_ip_matches) > 1:
+        return (
+            None,
+            "Mooncake preferred-segment discovery found multiple exact IP "
+            f"matches for {local_ip}",
+        )
+
+    hostname_matches = [
+        segment
+        for segment in segments
+        if _get_host_from_address(segment) in local_hostnames
+    ]
+    if len(hostname_matches) == 1:
+        return hostname_matches[0], None
+    if len(hostname_matches) > 1:
+        return (
+            None,
+            "Mooncake preferred-segment discovery found multiple hostname "
+            f"matches for {sorted(local_hostnames)}",
+        )
+    return (
+        None,
+        "Mooncake preferred-segment discovery found no unique local match "
+        f"for {local_ip}",
+    )
+
+
+def _discover_preferred_segment(
+    admin_endpoint: str,
+    local_ip: str,
+    local_hostnames: set[str],
+    *,
+    urlopen_impl: Any = urlopen,
+) -> tuple[str | None, str | None]:
+    try:
+        with urlopen_impl(  # noqa: S310
+            admin_endpoint,
+            timeout=PREFERRED_SEGMENT_DISCOVERY_TIMEOUT_SECS,
+        ) as response:
+            payload = response.read().decode("utf-8")
+    except (HTTPError, URLError, OSError, TimeoutError, UnicodeDecodeError) as exc:
+        return (
+            None,
+            "Mooncake preferred-segment discovery failed to fetch "
+            f"{admin_endpoint}: {exc}",
+        )
+
+    segments = _parse_segment_lines(payload)
+    if segments is None:
+        return (
+            None,
+            "Mooncake preferred-segment discovery received malformed segment "
+            f"data from {admin_endpoint}",
+        )
+    if not segments:
+        return (
+            None,
+            "Mooncake preferred-segment discovery received no segments from "
+            f"{admin_endpoint}",
+        )
+    return _match_local_segment(segments, local_ip, local_hostnames)
+
+
+def _resolve_preferred_segment(
+    extra_config: Mapping[str, Any],
+    master_server_address: str | None,
+    local_ip: str,
+    local_hostnames: set[str],
+    *,
+    urlopen_impl: Any = urlopen,
+) -> tuple[str | None, str | None]:
+    preferred_segment = _normalize_string_override(
+        extra_config.get("preferred_segment")
+    )
+    if preferred_segment is not None:
+        return preferred_segment, None
+    if extra_config.get("preferred_segment") is not None:
+        return (
+            None,
+            "Mooncake preferred_segment override must be a non-empty string",
+        )
+
+    admin_endpoint = _get_master_admin_endpoint(extra_config, master_server_address)
+    if admin_endpoint is None:
+        return (
+            None,
+            "Mooncake preferred-segment discovery has no admin endpoint; "
+            "continuing without locality hint",
+        )
+    return _discover_preferred_segment(
+        admin_endpoint,
+        local_ip,
+        local_hostnames,
+        urlopen_impl=urlopen_impl,
+    )
 
 
 def _parse_size(value: Any) -> int:
@@ -282,6 +490,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         kv_role: str,
         ready_event: threading.Event,
         enable_kv_event: bool = False,
+        replicate_config: Any | None = None,
     ):
         super().__init__(
             store,
@@ -295,6 +504,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
         self.kv_role = kv_role
         self.stored_requests: defaultdict[str, int] = defaultdict(int)
         self.enable_kv_event = enable_kv_event
+        self.replicate_config = replicate_config
 
         # Pause store requests when CPU/disk offloading is under pressure.
         self._store_pressure_active = False
@@ -432,7 +642,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
             current_event.synchronize()
 
         try:
-            res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            if self.replicate_config is None:
+                res = self.store.batch_put_from_multi_buffers(keys, addrs, sizes)
+            else:
+                res = self.store.batch_put_from_multi_buffers(
+                    keys,
+                    addrs,
+                    sizes,
+                    self.replicate_config,
+                )
             failed = [i for i, v in enumerate(res) if v < 0]
             if failed:
                 # Compute total bytes attempted for this batch
@@ -619,7 +837,10 @@ class MooncakeStoreWorker:
 
     def __init__(self, vllm_config: VllmConfig):
         try:
-            from mooncake.store import MooncakeDistributedStore  # type: ignore
+            from mooncake.store import (  # type: ignore  # noqa: E501
+                MooncakeDistributedStore,
+                ReplicateConfig,
+            )
         except ImportError as e:
             raise ImportError(
                 "Please install mooncake by following the instructions at "
@@ -686,28 +907,37 @@ class MooncakeStoreWorker:
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
-
-        local_seg = get_ip()
-        config_dict = {
-            "local_hostname": local_seg,
-            "metadata_server": store_config.metadata_server,
-            "global_segment_size": str(store_config.global_segment_size),
-            "local_buffer_size": str(store_config.local_buffer_size),
-            "protocol": store_config.protocol,
-            "rdma_devices": store_config.device_name,
-            "master_server_addr": store_config.master_server_address,
-        }
-        if store_config.enable_offload:
-            config_dict["enable_offload"] = "true"
-        ret = self.store.setup(config_dict)
+        local_ip = get_ip()
+        ret = self.store.setup(
+            local_ip,
+            store_config.metadata_server,
+            0,
+            store_config.requester_local_buffer_size,
+            store_config.protocol,
+            store_config.device_name,
+            store_config.master_server_address,
+        )
         if ret != 0:
             msg = "Initialize MooncakeDistributedStore failed."
             logger.error(msg)
             raise RuntimeError(msg)
 
-        self.disk_offload_buffer_budget_bytes = _get_disk_offload_buffer_budget_bytes(
-            store_config.enable_offload
+        self._preferred_segment_fallback_logged = False
+        preferred_segment, warning = _resolve_preferred_segment(
+            _get_kv_connector_extra_config(vllm_config),
+            store_config.master_server_address,
+            local_ip,
+            _get_local_hostname_candidates(),
         )
+        if warning is not None:
+            self._log_preferred_segment_fallback(warning)
+        self.preferred_segment = preferred_segment
+        self.store_replicate_config = None
+        if preferred_segment is not None:
+            self.store_replicate_config = ReplicateConfig()
+            self.store_replicate_config.preferred_segment = preferred_segment
+
+        self.disk_offload_buffer_budget_bytes = _get_disk_offload_buffer_budget_bytes()
 
         kv_event_config = vllm_config.kv_events_config
         self.enable_kv_events = False
@@ -717,6 +947,12 @@ class MooncakeStoreWorker:
         self.kv_send_thread: KVCacheStoreSendingThread | None = None
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
+
+    def _log_preferred_segment_fallback(self, message: str) -> None:
+        if self._preferred_segment_fallback_logged:
+            return
+        logger.warning("%s", message)
+        self._preferred_segment_fallback_logged = True
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.
@@ -820,6 +1056,7 @@ class MooncakeStoreWorker:
                 self.kv_role,
                 ready_event_sending,
                 self.enable_kv_events,
+                getattr(self, "store_replicate_config", None),
             )
             self.kv_send_thread.start()
 
