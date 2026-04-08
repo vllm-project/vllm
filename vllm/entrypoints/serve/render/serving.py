@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 from openai_harmony import Message as OpenAIMessage
 
@@ -566,16 +566,16 @@ class OpenAIServingRender:
                     )
                     raise NotImplementedError(msg)
                 tokenizer = renderer.get_tokenizer()
-                request = tool_parser(tokenizer, request.tools).adjust_request(
-                    request=request
-                )
+                request = tool_parser(
+                    tokenizer, cast(Any, request.tools)
+                ).adjust_request(request=request)
 
         if self.reasoning_parser is not None:
             tokenizer = renderer.get_tokenizer()
             request_chat_kwargs = getattr(request, "chat_template_kwargs", None) or {}
-            reasoning_parser = self.reasoning_parser(
+            parser_instance = self.reasoning_parser(
                 tokenizer, chat_template_kwargs=request_chat_kwargs
             )
-            request = reasoning_parser.adjust_request(request)
+            request = parser_instance.adjust_request(request)
 
         return conversation, [engine_input]

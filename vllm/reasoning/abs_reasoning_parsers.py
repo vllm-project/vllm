@@ -163,12 +163,6 @@ class ReasoningParser:
         previously been parsed and extracted (see constructor)
         """
 
-    def adjust_request(
-        self, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Adjust request parameters; override in subclasses as needed."""
-        return request
-
     def prepare_structured_tag(
         self,
         original_tag: str | None,

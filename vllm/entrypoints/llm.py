@@ -1697,8 +1697,6 @@ class LLM:
         seq_params = self._params_to_seq(params, len(seq_convs))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
 
-
-
         return self._render_and_run_requests(
             prompts=(
                 self._preprocess_chat_one(
@@ -1723,7 +1721,6 @@ class LLM:
             lora_requests=seq_lora_requests,
             use_tqdm=use_tqdm,
         )
-
 
     def _render_and_run_requests(
         self,

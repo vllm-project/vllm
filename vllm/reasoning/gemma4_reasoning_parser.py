@@ -56,13 +56,6 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
 
-    def adjust_request(
-        self, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Disable special-token stripping to preserve boundary tokens."""
-        request.skip_special_tokens = False
-        return request
-
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
