@@ -25,7 +25,8 @@ from vllm.tool_parsers import ToolParser, ToolParserManager
 # ---------------------------------------------------------------------------
 # Import helpers from the parser module under test
 # ---------------------------------------------------------------------------
-from gemma4_tool_parser import (
+from vllm.tool_parsers.gemma4_tool_parser import (
+    Gemma4ToolParser,
     _parse_gemma4_args,
     _parse_gemma4_array,
     _parse_gemma4_value,
