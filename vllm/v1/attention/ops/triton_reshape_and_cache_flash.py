@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import warnings
+
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -729,7 +731,17 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
     inferred from the cache tensor dtype.
     """
     if kv_quant_mode is None:
-        # Legacy callers (e.g. tests) that don't pass the mode.
+        # Legacy callers (e.g. tests) that don't pass the mode.  This path
+        # cannot disambiguate INT4 vs INT2 (both store as torch.uint8) and
+        # will be removed in a future release — pass ``kv_quant_mode``
+        # explicitly.
+        warnings.warn(
+            "triton_reshape_and_cache_flash_per_token_head_quant: calling "
+            "without `kv_quant_mode` is deprecated and will be removed in a "
+            "future release.  Pass the KVQuantMode explicitly.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         cache_dtype = key_cache.dtype
         if cache_dtype == FP8_DTYPE:
             kv_quant_mode = KVQuantMode.FP8_PER_TOKEN_HEAD

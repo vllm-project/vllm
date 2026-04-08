@@ -46,6 +46,38 @@ class KVQuantMode(IntEnum):
         """True for any per-token-head quantization mode."""
         return self >= 2
 
+    @property
+    def packing_factor(self) -> int:
+        """Number of quantized values stored in a single byte of cache.
+
+        - INT2: 4 values per byte (2 bits each).
+        - INT4: 2 values per byte (4 bits each).
+        - All other modes (INT8, FP8, ...): 1 value per byte.
+
+        Used as the single source of truth for the head-size shrink applied
+        by packed quantization modes — both ``KVCacheSpec`` and the attention
+        backends route through :meth:`packed_head_size`.
+        """
+        if self == KVQuantMode.INT2_PER_TOKEN_HEAD:
+            return 4
+        if self == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            return 2
+        return 1
+
+    def packed_head_size(self, head_size: int) -> int:
+        """Return the storage head size after packing.
+
+        The original (logical) head dimension is divided by
+        :attr:`packing_factor`.  ``head_size`` must be a multiple of the
+        packing factor.
+        """
+        factor = self.packing_factor
+        assert head_size % factor == 0, (
+            f"head_size={head_size} is not divisible by packing factor "
+            f"{factor} required by {self.name}"
+        )
+        return head_size // factor
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
@@ -139,21 +171,13 @@ class AttentionSpec(KVCacheSpec):
             return self.page_size_padded
         return real_page_size
 
-    def _effective_head_size(self, hs: int) -> int:
-        """Return the storage head size: halved for INT4, quartered for INT2."""
-        if self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-            return hs // 2
-        if self.kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
-            return hs // 4
-        return hs
-
     @property
     def real_page_size_bytes(self) -> int:
         return (
             2
             * self.block_size
             * self.num_kv_heads
-            * self._effective_head_size(self.head_size)
+            * self.kv_quant_mode.packed_head_size(self.head_size)
             * get_dtype_size(self.dtype)
         )
 
@@ -255,8 +279,8 @@ class FullAttentionSpec(AttentionSpec):
             self.block_size
             * self.num_kv_heads
             * (
-                self._effective_head_size(self.head_size)
-                + self._effective_head_size(self.head_size_v)
+                self.kv_quant_mode.packed_head_size(self.head_size)
+                + self.kv_quant_mode.packed_head_size(self.head_size_v)
             )
             * get_dtype_size(self.dtype)
         )
@@ -276,7 +300,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         return (
             self.block_size
             * self.num_kv_heads
-            * self._effective_head_size(self.head_size)
+            * self.kv_quant_mode.packed_head_size(self.head_size)
             * get_dtype_size(self.dtype)
         )
 
