@@ -10,8 +10,8 @@ from ...utils import EmbedModelInfo
 MODELS = [
     EmbedModelInfo("nomic-ai/nomic-embed-text-v1",
                    # Fixme:
-                   #  Update nomic-embed code to support the latest HF version
-                   #  and remove revision set.
+                   #  Update nomic-embed code to support the latest
+                   #  HF version and remove revision set.
                    revision="720244025c1a7e15661a174c63cce63c8218e52b"),
     # EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
     # EmbedModelInfo("nomic-ai/CodeRankEmbed"),
