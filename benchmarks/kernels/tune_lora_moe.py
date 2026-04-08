@@ -162,7 +162,6 @@ def _make_tensors(
     num_slices,
     dtype,
     device,
-    max_split_k=1,
     active_loras=None,
     routing="uniform",
     mul_routed_weight=False,
@@ -214,9 +213,6 @@ def _make_tensors(
         )
         for _ in range(num_slices)
     ]
-    a_cache = torch.empty(
-        max_split_k, num_slices, M, top_k, lora_rank, dtype=dtype, device=device
-    )
     expand_out = torch.zeros(
         M, top_k, intermediate_size * num_slices, dtype=dtype, device=device
     )
@@ -225,7 +221,6 @@ def _make_tensors(
         "qcurr": qcurr,
         "lora_a": lora_a,
         "lora_b": lora_b,
-        "a_cache": a_cache,
         "expand_out": expand_out,
         "token_lora_mapping": token_lora_mapping,
         "adapter_enabled": adapter_enabled,
@@ -482,7 +477,6 @@ def tune_fused(
     print(f"  Expand search: {len(expand_space)} configs")
     print(f"  Shared BLOCK_SIZE_M: {block_m_values}")
 
-    max_split_k = max(c["split_k"] for c in shrink_space)
     shrink_best_all = {}
     expand_best_all = {}
 
@@ -500,7 +494,6 @@ def tune_fused(
             num_slices,
             dtype,
             device,
-            max_split_k=max_split_k,
             active_loras=active_loras,
             routing=routing,
             mul_routed_weight=mul_routed_weight,
@@ -831,7 +824,6 @@ def benchmark_configs(args):
         print(f"  {'bs':>6} | {'lat_us':>10} | shrink | expand")
         print("  " + "-" * 70)
 
-        msk = 16
         for bs in args.batch_sizes:
             sc = _load_config(
                 sf,
@@ -863,7 +855,6 @@ def benchmark_configs(args):
                 ns,
                 torch.bfloat16,
                 device,
-                max_split_k=msk,
                 active_loras=args.active_loras,
                 routing=args.routing,
                 mul_routed_weight=mul_rw,
