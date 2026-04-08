@@ -320,15 +320,21 @@ class RMSNorm(CustomOp):
                     )
                     return x, residual
 
-        weight = self.weight.data if self.has_weight else torch.ones(
-            x.shape[-1], device=x.device, dtype=x.dtype)
+        # When has_weight is False, fall back to forward_native which
+        # handles weightless norms via forward_static without allocating
+        # a dummy ones tensor on every call.
+        if not self.has_weight:
+            return self.forward_native(x, residual)
+
         if residual is not None:
             return fused_add_rms_norm(
-                x, residual, weight, self.variance_epsilon
+                x, residual, self.weight.data, self.variance_epsilon
             )
         else:
             assert envs.VLLM_BATCH_INVARIANT
-            return rms_norm_batch_invariant(x, weight, self.variance_epsilon)
+            return rms_norm_batch_invariant(
+                x, self.weight.data, self.variance_epsilon
+            )
 
     def forward_hip(
         self,
@@ -346,15 +352,21 @@ class RMSNorm(CustomOp):
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
-        weight = self.weight.data if self.has_weight else torch.ones(
-            x.shape[-1], device=x.device, dtype=x.dtype)
+        # When has_weight is False, fall back to forward_native which
+        # handles weightless norms via forward_static without allocating
+        # a dummy ones tensor on every call.
+        if not self.has_weight:
+            return self.forward_native(x, residual)
+
         if residual is not None:
             return self.rocm_norm_func_with_add(
-                x, residual, weight, self.variance_epsilon
+                x, residual, self.weight.data, self.variance_epsilon
             )
         else:
             assert envs.VLLM_BATCH_INVARIANT
-            return rms_norm_batch_invariant(x, weight, self.variance_epsilon)
+            return rms_norm_batch_invariant(
+                x, self.weight.data, self.variance_epsilon
+            )
 
     def forward_xpu(
         self,
