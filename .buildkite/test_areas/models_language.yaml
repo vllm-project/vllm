@@ -57,7 +57,7 @@ steps:
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1xGPU
       depends_on:
       - image-build-amd
       commands:
@@ -85,7 +85,7 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model'
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1xGPU
       depends_on:
       - image-build-amd
 
