@@ -720,10 +720,10 @@ class SpecDecodeBaseProposer:
                 # (Padded) Inputs from the target model
                 target_token_ids_ptr=target_token_ids,
                 target_positions_ptr=target_positions,
-                next_token_ids_ptr=next_token_ids,
+                next_token_ids_ptr=next_token_ids,  # sampled tokens, one per request
                 # Outputs to the drafting buffers
                 out_input_ids_ptr=self.input_ids,
-                out_positions_ptr=self.positions,
+                out_positions_ptr=self.positions,  # Doesn't support mrope for now
                 out_is_rejected_token_mask_ptr=self.is_rejected_token_mask,
                 out_is_masked_token_mask_ptr=self.is_masked_token_mask,
                 out_new_token_indices_ptr=token_indices_to_sample,
@@ -734,6 +734,7 @@ class SpecDecodeBaseProposer:
                 padding_token_id=0,
                 parallel_drafting_token_id=self.parallel_drafting_token_id,
                 # Sizing info
+                # Note that we can deduce batch_size for free from the grid size
                 total_input_tokens=total_num_input_tokens,
                 num_padding_slots_per_request=self.extra_slots_per_request,
                 shift_input_ids=self.pass_hidden_states_to_model,

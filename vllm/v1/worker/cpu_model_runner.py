@@ -25,7 +25,7 @@ class CPUModelRunner(GPUModelRunner):
             super().__init__(vllm_config, device)
 
         assert device == torch.device("cpu")
-        # Note: speculative decoding is now supported on CPU with PyTorch fallbacks
+        # Note: speculative decoding is now supported on CPU with C++ native impls
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
@@ -160,10 +160,6 @@ class CPUModelRunner(GPUModelRunner):
         # CPU attention assigns -INF to logits at invalid positions,
         # so stale KV cache data never affects computation.
         pass
-
-    def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
-        # Note: For CPU backend, dp padding is not required for now.
-        return 0, None
 
     # =========================================================================
     # CPU-safe overrides for speculative decoding methods

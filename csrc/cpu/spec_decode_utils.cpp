@@ -1,5 +1,5 @@
-#include <torch/extension.h>
-#include <omp.h>
+#include "cpu_types.hpp"
+
 #include <algorithm>
 
 namespace cpu_utils {
