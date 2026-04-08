@@ -269,3 +269,78 @@ def test_marlin_vs_trtllm_mxint4_moe_kimik2(monkeypatch, m, n, k, e, topk, group
     # Note: Different quantization schemes (UINT4b8 vs signed MXINT4) cause
     # some differences
     torch.testing.assert_close(marlin_output, trtllm_output, atol=0.3, rtol=6.0)
+
+
+@pytest.mark.skipif(not TRTLLM_GEN_AVAILABLE, reason="Skip for non SM100")
+@pytest.mark.parametrize("m", [1, 33])
+@pytest.mark.parametrize("n", [1024])
+@pytest.mark.parametrize("k", [512])
+@pytest.mark.parametrize("e", [64])
+@pytest.mark.parametrize("topk", [4])
+@torch.inference_mode()
+def test_flashinfer_trtllm_mxint4_moe_wrapper(m, n, k, e, topk):
+    """Test the flashinfer_trtllm_mxint4_moe wrapper against BF16 reference."""
+    pytest.importorskip("flashinfer")
+    from flashinfer import RoutingMethodType
+
+    from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
+        grouped_topk,
+    )
+    from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
+        flashinfer_trtllm_mxint4_moe,
+    )
+
+    torch.cuda.manual_seed(0)
+    dtype = torch.bfloat16
+
+    a = torch.randn((m, k), device="cuda", dtype=dtype) * 0.5
+    router_logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
+    w1_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) * 0.1
+    w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=dtype) * 0.1
+
+    w1_int4, w1_scales = mxint4_quantize_moe_weights(w1_bf16)
+    w2_int4, w2_scales = mxint4_quantize_moe_weights(w2_bf16)
+
+    prepared = prepare_static_weights_for_trtllm_mxint4_moe(
+        gemm1_weights=w1_int4,
+        gemm1_scales=w1_scales,
+        gemm2_weights=w2_int4,
+        gemm2_scales=w2_scales,
+    )
+
+    out = flashinfer_trtllm_mxint4_moe(
+        x=a,
+        router_logits=router_logits,
+        w13_weight_packed=prepared["gemm1_weights"],
+        w13_weight_scale=prepared["gemm1_scales"],
+        w2_weight_packed=prepared["gemm2_weights"],
+        w2_weight_scale=prepared["gemm2_scales"],
+        global_num_experts=e,
+        top_k=topk,
+        intermediate_size_per_partition=n,
+        local_num_experts=e,
+        ep_rank=0,
+        routing_method_type=RoutingMethodType.TopK,
+    )
+
+    assert out.shape == (m, k)
+    assert out.dtype == dtype
+
+    # BF16 reference using same routing
+    topk_weights, topk_ids = grouped_topk(
+        hidden_states=a,
+        gating_output=router_logits,
+        topk=topk,
+        renormalize=False,
+    )
+    bf16_output = torch.zeros((m, k), device="cuda", dtype=dtype)
+    for token_idx in range(m):
+        for expert_rank in range(topk):
+            eid = topk_ids[token_idx, expert_rank].item()
+            w = topk_weights[token_idx, expert_rank].item()
+            up_gate = a[token_idx] @ w1_bf16[eid].T
+            gate, up = up_gate.chunk(2, dim=0)
+            expert_out = (torch.nn.functional.silu(gate) * up) @ w2_bf16[eid].T
+            bf16_output[token_idx] += w * expert_out
+
+    torch.testing.assert_close(out, bf16_output, atol=0.3, rtol=1.0)
