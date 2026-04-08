@@ -103,9 +103,8 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Force ``skip_special_tokens=False`` so that ``<|channel>`` and
-        ``<channel|>`` delimiters survive detokenization and can be used
-        by :meth:`extract_reasoning` on the non-streaming path.
+        """Force ``skip_special_tokens=False`` only when thinking is enabled, 
+        so that ``<|channel>`` and ``<channel|>`` delimiters survive detokenization.
 
         This mirrors the approach used by
         :meth:`Gemma4ToolParser.adjust_request` for tool-call delimiters.
@@ -115,7 +114,9 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         )
 
         if isinstance(request, ChatCompletionRequest):
-            request.skip_special_tokens = False
+            chat_kwargs = request.chat_template_kwargs or {}
+            if chat_kwargs.get("enable_thinking", False):
+                request.skip_special_tokens = False
         return request
 
     # ------------------------------------------------------------------
