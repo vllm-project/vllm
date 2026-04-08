@@ -496,6 +496,15 @@ class DelegatingParser(Parser):
         # No tool calls
         return [], content
 
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        if self._reasoning_parser is not None:
+            request = self._reasoning_parser.adjust_request(request)
+        if self._tool_parser is not None:
+            request = self._tool_parser.adjust_request(request)
+        return request
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
