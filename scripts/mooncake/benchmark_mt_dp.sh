@@ -31,10 +31,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MODEL="${1:-meta-llama/Llama-3.1-8B-Instruct}"
+# MODEL="${1:-Qwen/Qwen3-30B-A3B}"
 INPUT_LEN="${2:-70000}"
 OUTPUT_LEN="${3:-200}"
-NUM_PROMPTS="${4:-200}"
-CPU_OFFLOAD_GIB="${CPU_OFFLOAD_GIB:-600}"
+NUM_PROMPTS="${4:-70}"
+CPU_OFFLOAD_GIB="${CPU_OFFLOAD_GIB:-300}"
 DISK_OFFLOAD_GIB="${DISK_OFFLOAD_GIB:-2000}"
 PORT="${PORT:-8192}"
 RESULT_DIR="${RESULT_DIR:-./bench_results}"
@@ -42,18 +43,25 @@ BACKENDS="${BACKENDS:-baseline,mooncake}"
 
 MULTI_TURN_NUM_TURNS="${MULTI_TURN_NUM_TURNS:-3}"
 MULTI_TURN_CONCURRENCY="${MULTI_TURN_CONCURRENCY:-16}"
-MULTI_TURN_DELAY_MS="${MULTI_TURN_DELAY_MS:-500}"
+MULTI_TURN_DELAY_MS="${MULTI_TURN_DELAY_MS:-30000}"
 GLOBAL_PREFIX_RATIO="${GLOBAL_PREFIX_RATIO:-0.1}"
 CONV_PREFIX_RATIO="${CONV_PREFIX_RATIO:-0.8}"
+
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 
 mkdir -p "$RESULT_DIR"
 
 SERVER_COMMON=(
     --model "$MODEL"
+    # -tp 4
+    -dp 2
     --disable-hybrid-kv-cache-manager
     --port "$PORT"
+    --gpu-memory-utilization 0.5
     --no-enable-log-requests
-    --attention-backend FLASHINFER
+    --load-format dummy
+    --attention-backend auto
 )
 if [[ "$MODEL" == *"Qwen3.5"* ]]; then
     SERVER_COMMON+=(

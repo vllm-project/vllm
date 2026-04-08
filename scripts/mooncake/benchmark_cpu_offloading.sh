@@ -98,6 +98,11 @@ kill_server() {
 }
 trap kill_server EXIT
 
+mooncake_owner_reminder() {
+    echo "  Mooncake backend expects an external owner to be running before vLLM starts."
+    echo "  setup_vllm_env.sh only configures requester-side environment."
+}
+
 run_one() {
     local label="$1"
     local result_file="$2"
@@ -106,7 +111,9 @@ run_one() {
 
     echo ""
     echo ">>> Starting server: $label"
-    echo "Command: vllm serve ${SERVER_COMMON[@]} ${server_extra[@]}"
+    printf 'Command: vllm serve'
+    printf ' %q' "${SERVER_COMMON[@]}" "${server_extra[@]}"
+    printf '\n'
     vllm serve \
         "${SERVER_COMMON[@]}" "${server_extra[@]}" &
     SERVER_PID=$!
@@ -165,6 +172,7 @@ for backend in "${BACKEND_LIST[@]}"; do
                 SETUP_ARGS+=(--disk-size "$DISK_OFFLOAD_GIB")
             fi
             source "${SCRIPT_DIR}/setup_vllm_env.sh" "${SETUP_ARGS[@]}"
+            mooncake_owner_reminder
             run_one "With CPU offloading (mooncake)" "mooncake.json" \
                 --kv-transfer-config "{\"kv_connector\":\"MooncakeStoreConnector\",\"kv_role\":\"kv_both\",\"kv_connector_extra_config\":{\"load_async\":true}}"
             ;;
@@ -176,4 +184,4 @@ for backend in "${BACKEND_LIST[@]}"; do
 done
 
 # ── Compare all available results ───────────────────────────────
-python3 "${SCRIPT_DIR}/compare_results.py" "$RESULT_DIR"
+python "${SCRIPT_DIR}/compare_results.py" "$RESULT_DIR"

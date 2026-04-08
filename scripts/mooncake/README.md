@@ -46,6 +46,12 @@ You should see `Hello, Mooncake Store!` printed. Stop the master with Ctrl-C.
 
 ## Running Benchmarks
 
+Mooncake benchmarks in this branch use an external-owner topology:
+
+- each vLLM rank runs as a requester-only embedded real client
+- one standalone owner real client per node owns CPU memory and disk offload
+- the requester scripts do not launch or configure the owner process
+
 ### 1. Start the Master Server
 
 ```bash
@@ -84,33 +90,39 @@ Edit `scripts/mooncake/mooncake_config.json`:
 ```
 
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback but performs poorly.
-- Adjust `global_segment_size` and `local_buffer_size` based on available memory.
-    - global_segment_size: Memory contributed to the distributed pool
-    - local_buffer_size: Private buffer for this node's own operations
-    - For now we use a single node so they don't differ much
-    - **These sizes are per GPU (per rank), not for the entire node.** For example, with 4 GPUs and `global_segment_size` set to `80GB`, each rank allocates 80 GB of CPU memory, totaling 320 GB across the node.
-- Note: the benchmark script automatically updates `global_segment_size` and `local_buffer_size` to match `CPU_OFFLOAD_GIB`. The `CPU_OFFLOAD_GIB` and `DISK_OFFLOAD_GIB` env vars in the benchmark scripts are also per GPU (per rank).
+- `global_segment_size` and `local_buffer_size` belong to the owner process, not requester ranks.
+- The requester helper no longer edits `global_segment_size` or enables requester offload ownership.
+- The requester still uses `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` as a batching hint.
+- Start one owner per node before launching vLLM requester ranks.
+- If you want disk offload, the owner process must be launched with disk support separately.
+
+Owner launch contract:
+
+- fixed owner RPC port: `50052`
+- start the owner with `--host=<node-ip>:<segment-port>`
+- start the owner with `--port=50052`
+- use the owner’s advertised segment string as the locality target for requester ranks
+- the owner’s registered segment name is what requester discovery compares against
 
 ### 3. Environment Setup (setup_vllm_env.sh)
 
-Before running benchmarks with the mooncake backend, source `setup_vllm_env.sh` to configure all necessary environment variables. The benchmark scripts do this automatically, but you can also use it directly:
+Before running benchmarks with the Mooncake backend, source `setup_vllm_env.sh` to configure requester-side environment variables. The benchmark scripts do this automatically, but you can also use it directly:
 
 ```bash
-# CPU offloading only (80 GB)
+# Requester-only setup with an 80 GB local-buffer hint
 source scripts/mooncake/setup_vllm_env.sh --cpu-mem-size 80
 
-# CPU + disk offloading (80 GB CPU, 400 GB disk)
+# Requester-only setup, disk offload is owned externally
 source scripts/mooncake/setup_vllm_env.sh --cpu-mem-size 80 --disk-size 400
-
-# Custom disk path
-source scripts/mooncake/setup_vllm_env.sh --cpu-mem-size 80 --disk-size 400 --disk-path /mnt/data/mooncake_offload
 ```
 
 This script:
 
-- Sets `MOONCAKE_CONFIG_PATH` and updates `global_segment_size` in the config JSON
+- Sets `MOONCAKE_CONFIG_PATH` if it is not already set
 - Enables `MC_TCP_ENABLE_CONNECTION_POOL`
-- When `--disk-size` is given, sets all disk offloading env vars (`MOONCAKE_ENABLE_OFFLOAD`, `MOONCAKE_OFFLOAD_FILE_STORAGE_PATH`, eviction policy, io_uring, etc.)
+- Sets `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`
+- Leaves Mooncake ownership and disk offload to the external owner service
+- Accepts `--disk-size` for compatibility, but does not configure requester ownership from it
 
 ### 4a. Single-Turn Benchmark (benchmark_cpu_offloading.sh)
 
@@ -129,6 +141,14 @@ Supported backends (comma-separated via `BACKENDS`):
 - `native` - Built-in vLLM KV offloading (`--kv-offloading-backend native`)
 - `simple` - Simple native offload (`VLLM_USE_SIMPLE_KV_OFFLOAD=1` + native backend)
 - `mooncake` - MooncakeStoreConnector via `--kv-transfer-config`
+
+Mooncake benchmark expectations:
+
+- start the owner service before launching the benchmark
+- source `setup_vllm_env.sh` only for requester-side environment setup
+- use `kv_connector_extra_config` for connector-specific overrides
+- set `preferred_segment` explicitly in `kv_connector_extra_config` when you want to pin locality
+- if you omit `preferred_segment`, requester startup uses best-effort admin discovery through `/get_all_segments`
 
 Environment variables:
 
@@ -172,6 +192,8 @@ Additional environment variables:
 - `MULTI_TURN_DELAY_MS` - Delay between turns in ms (default: 500)
 - `GLOBAL_PREFIX_RATIO` - Fraction of input as global prefix (default: 0.1)
 - `CONV_PREFIX_RATIO` - Fraction of input as conversation prefix (default: 0.8)
+
+For Mooncake runs, the owner must already be running when the benchmark starts. The benchmark scripts only set requester-side config and do not launch owner processes.
 
 ### 5. Compare Results (compare_results.py)
 
