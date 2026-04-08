@@ -604,7 +604,7 @@ mcp==1.27.0
     # via -r requirements/common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.10.0
+mistral-common==1.11.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/common.txt

@@ -93,9 +93,8 @@ class FilterReusedOffloadingManager(OffloadingManager):
         ]
 
         # Delegate to the backing manager with only the eligible hashes.
-        # Passing an empty list is intentional and safe — both
-        # LRUOffloadingManager and ARCOffloadingManager handle it correctly,
-        # returning a PrepareStoreOutput with empty lists.
+        # Passing an empty list is intentional and safe — CPUOffloadingManager
+        # handles it correctly, returning a PrepareStoreOutput with empty lists.
         return self._backing.prepare_store(eligible)
 
     # ------------------------------------------------------------------
