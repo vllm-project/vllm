@@ -92,9 +92,6 @@ class OffloadingConnectorScheduler:
         num_blocks = request.num_tokens // self.offloaded_block_size
 
         assert len(request.block_hashes) // self.block_size_factor == num_blocks
-        block_hashes = self._get_block_hashes(request)
-
-        self.manager.touch(block_hashes)
 
         full_block_tokens = self.offloaded_block_size * num_blocks
         if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
@@ -235,9 +232,6 @@ class OffloadingConnectorScheduler:
                 continue
             block_hashes_to_store = set(store_output.block_hashes_to_store)
 
-            block_hashes = self._get_block_hashes(req, end_idx=num_blocks)
-            self.manager.touch(block_hashes)
-
             new_block_hashes = self._get_block_hashes(
                 req, start_idx=start_block_idx, end_idx=num_blocks
             )
@@ -328,6 +322,13 @@ class OffloadingConnectorScheduler:
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
         self._next_stored_block_idx.pop(req_id, None)
+
+        # Touch blocks in prefix order so earlier blocks are most protected
+        # and later blocks evict first (preserving prefix dependency).
+        num_blocks = request.num_tokens // self.offloaded_block_size
+        if num_blocks > 0:
+            block_hashes = self._get_block_hashes(request, end_idx=num_blocks)
+            self.manager.touch(block_hashes)
 
         request_being_stored = req_id in self._reqs_being_stored
         return request_being_stored, None

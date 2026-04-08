@@ -103,11 +103,12 @@ class OffloadingManager(ABC):
 
     def touch(self, block_hashes: Iterable[BlockHash]):
         """
-        Mark the given blocks as recently used.
-        This could in practice mean moving them to the end of an LRU list.
+        Mark the given blocks as recently used in prefix order.
+        Implementations should process keys in reverse so that the first
+        key (earliest prefix block) ends up as MRU (last to evict).
 
         Args:
-            block_hashes: the hashes identifying the blocks.
+            block_hashes: the hashes identifying the blocks, in prefix order.
         """
         return
 
