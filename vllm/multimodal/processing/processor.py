@@ -1716,6 +1716,15 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             decoder_prompt_text = None
             decoder_prompt_ids = decoder_prompt_raw
 
+        # Ensure decoder_start_token_id is prepended, consistent with
+        # build_enc_dec_inputs / _prepare_decoder_input_ids_for_generation
+        hf_config = self.info.get_hf_config()
+        dec_start_id = getattr(hf_config, "decoder_start_token_id", None)
+        if dec_start_id is not None and (
+            len(decoder_prompt_ids) == 0 or decoder_prompt_ids[0] != dec_start_id
+        ):
+            decoder_prompt_ids = [dec_start_id] + decoder_prompt_ids
+
         return mm_enc_dec_input(
             encoder_inputs,
             decoder_prompt_ids,
