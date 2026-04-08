@@ -22,12 +22,13 @@ class TokenPoolerHead(nn.Module, ABC):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         raise NotImplementedError
 
+    @abstractmethod
     def forward_chunk(
         self,
         pooled_data: TokenPoolingMethodOutputItem,
         pooling_param: PoolingParams,
     ) -> TokenPoolerHeadOutputItem:
-        return pooled_data
+        raise NotImplementedError
 
     def forward(
         self,

@@ -41,6 +41,19 @@ REFERENCE_1_VS_N = [
 TOL = 0.01
 
 
+def test_offline(vllm_runner):
+    with vllm_runner(model_name, runner="pooling") as llm_runner:
+        llm = llm_runner.get_llm()
+        _test_offline_1_v_1(llm)
+        _test_offline_1_v_n(llm)
+        _test_offline_n_v_n(llm)
+
+
+def test_online():
+    with RemoteOpenAIServer(model_name, ["--runner", "pooling"]) as server:
+        _test_online_1_v_1(server)
+
+
 def _test_offline_1_v_1(llm):
     # test llm.score
     outputs = llm.score(query, documents[0])
@@ -99,14 +112,6 @@ def _test_offline_n_v_n(llm):
 
         scores = F.cosine_similarity(query_embeds, doc_embeds)
         assert scores[0] == pytest.approx(expected, abs=TOL)
-
-
-def test_offline(vllm_runner):
-    with vllm_runner(model_name, runner="pooling") as llm_runner:
-        llm = llm_runner.get_llm()
-        _test_offline_1_v_1(llm)
-        _test_offline_1_v_n(llm)
-        _test_offline_n_v_n(llm)
 
 
 def _get_scores(server, query, document):
@@ -202,8 +207,3 @@ def _test_online_n_v_n(server):
         scores = F.cosine_similarity(query_embeds, doc_embeds)
         assert scores[0] == pytest.approx(expected, abs=TOL)
     """
-
-
-def test_online():
-    with RemoteOpenAIServer(model_name, ["--runner", "pooling"]) as server:
-        _test_online_1_v_1(server)

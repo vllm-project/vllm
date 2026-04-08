@@ -33,17 +33,13 @@ class TokenPoolingMethod(nn.Module, ABC):
 
 
 class AllPool(TokenPoolingMethod):
-    def __init__(self, requires_token_ids: bool = False):
+    def __init__(self):
         super().__init__()
 
         vllm_config = get_current_vllm_config()
         scheduler_config = vllm_config.scheduler_config
 
         self.enable_chunked_prefill = scheduler_config.enable_chunked_prefill
-        self.requires_token_ids = requires_token_ids
-
-    def get_pooling_updates(self, task: PoolingTask) -> PoolingParamsUpdate:
-        return PoolingParamsUpdate(requires_token_ids=self.requires_token_ids)
 
     def forward(
         self,
@@ -104,7 +100,7 @@ class StepPool(AllPool):
         ):
             # for unfinished chunked prefill
             if data is None:
-                pass
+                pooled_data.append(None)
             else:
                 step_tag_id = pooling_param.step_tag_id
                 returned_token_ids = pooling_param.returned_token_ids

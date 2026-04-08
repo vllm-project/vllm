@@ -15,10 +15,8 @@ from vllm.v1.pool.metadata import PoolingMetadata
 
 from ..layers.pooler import DispatchPooler
 from ..layers.pooler.tokwise import (
-    AllPool,
+    StepPool,
     TokenPooler,
-    TokenPoolerHead,
-    TokenPoolerHeadOutputItem,
     TokenPoolingMethodOutputItem,
 )
 from .interfaces import SupportsLateInteraction
@@ -53,8 +51,7 @@ class JinaForRanking(nn.Module, SupportsLateInteraction):
         self.pooler = DispatchPooler(
             {
                 "token_embed": TokenPooler(
-                    pooling=AllPool(requires_token_ids=True),
-                    head=JinaForRankingPoolerHead(projector=self.projector),
+                    pooling=JinaForRankingPool(self.projector),
                 )
             }
         )
@@ -75,13 +72,12 @@ class JinaForRanking(nn.Module, SupportsLateInteraction):
         return hidden_states
 
 
-class JinaForRankingPoolerHead(TokenPoolerHead):
+class JinaForRankingPool(StepPool):
     def __init__(self, projector: nn.Sequential):
         super().__init__()
 
         self.doc_token_id = 151670
         self.query_token_id = 151671
-
         self.projector = projector
 
     def get_supported_tasks(self) -> set[PoolingTask]:
@@ -89,26 +85,26 @@ class JinaForRankingPoolerHead(TokenPoolerHead):
 
     def forward(
         self,
-        pooled_data: list[TokenPoolingMethodOutputItem],
+        hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
-    ) -> list[TokenPoolerHeadOutputItem]:
-        pooling_params = pooling_metadata.pooling_params
-        assert len(pooled_data) == len(pooling_params)
+    ) -> list[TokenPoolingMethodOutputItem]:
+        pooled_data_lst = super().forward(hidden_states, pooling_metadata)
+        prompt_token_ids = pooling_metadata.get_prompt_token_ids()
 
-        embeds_list = []
-        for b in range(len(pooled_data)):
-            hidden_states = pooled_data[b]
-            input_ids = pooling_metadata.prompt_token_ids_cpu[b]
+        embeds_list = list[torch.Tensor | None]()
+        for data, token_ids in zip(pooled_data_lst, prompt_token_ids):
+            # for unfinished chunked prefill
+            if data is None:
+                embeds_list.append(None)
+            else:
+                docs_indexes = torch.where(torch.eq(token_ids, self.doc_token_id))[0]
+                query_indexes = torch.where(torch.eq(token_ids, self.query_token_id))[0]
 
-            docs_indexes = torch.where(torch.eq(input_ids, self.doc_token_id))[0]
-
-            query_indexes = torch.where(torch.eq(input_ids, self.query_token_id))[0]
-
-            # The JinaForRanking model concatenates docs first, then query.
-            # Let's stay consistent with this novel design.
-            indexes = torch.cat([docs_indexes, query_indexes])
-            embeds = self.projector(hidden_states[indexes])
-            embeds_list.append(embeds)
+                # The JinaForRanking model concatenates docs first, then query.
+                # Let's stay consistent with this novel design.
+                indexes = torch.cat([docs_indexes, query_indexes])
+                embeds = self.projector(data[indexes])
+                embeds_list.append(embeds)
 
         return embeds_list
 
