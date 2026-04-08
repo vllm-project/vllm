@@ -18,9 +18,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    make_marlin_moe_kernel,
-)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEMethodBase,
@@ -29,7 +26,8 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.wna16 import (
     WNA16MoEBackend,
-    process_weights_for_wna16_backend,
+    convert_to_wna16_moe_kernel_format,
+    make_wna16_moe_kernel,
     select_wna16_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearMethodBase, set_weight_attrs
@@ -686,7 +684,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
-        process_weights_for_wna16_backend(
+        convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
@@ -710,30 +708,11 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         if self.moe_quant_config is None:
             return
 
-        w13_g_idx = (
-            getattr(layer, "w13_g_idx", None) if self.quant_config.desc_act else None
-        )
-        w2_g_idx = (
-            getattr(layer, "w2_g_idx", None) if self.quant_config.desc_act else None
-        )
-        w13_g_idx_sort_indices = (
-            getattr(layer, "w13_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None
-        )
-        w2_g_idx_sort_indices = (
-            getattr(layer, "w2_g_idx_sort_indices", None)
-            if self.quant_config.desc_act
-            else None
-        )
-
-        self.moe_kernel = make_marlin_moe_kernel(
+        self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
-            w13_g_idx=w13_g_idx,
-            w2_g_idx=w2_g_idx,
-            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            expert_cls=self.expert_cls,
+            layer=layer,
             is_k_full=self.is_k_full,
             routing_tables=layer._maybe_init_expert_routing_tables(),
             shared_experts=layer.shared_experts,

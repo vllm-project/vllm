@@ -8,7 +8,15 @@ import torch
 import vllm._custom_ops as ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
+from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
+    BatchedMarlinExperts,
+    MarlinExperts,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
@@ -136,6 +144,79 @@ def select_wna16_moe_backend(
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
     return WNA16MoEBackend.NONE, None
+
+
+def make_wna16_moe_kernel(
+    moe_quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
+    expert_cls: type[mk.FusedMoEExperts],
+    layer: torch.nn.Module,
+    is_k_full: bool,
+    routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: torch.nn.Module | None = None,
+) -> mk.FusedMoEKernel:
+    # Currently, we only support MarlinExperts and BatchedMarlinExperts
+    assert expert_cls in (MarlinExperts, BatchedMarlinExperts)
+
+    w13_g_idx = getattr(layer, "w13_g_idx", None) if moe_quant_config.desc_act else None
+    w2_g_idx = getattr(layer, "w2_g_idx", None) if moe_quant_config.desc_act else None
+    w13_g_idx_sort_indices = (
+        getattr(layer, "w13_g_idx_sort_indices", None)
+        if moe_quant_config.desc_act
+        else None
+    )
+    w2_g_idx_sort_indices = (
+        getattr(layer, "w2_g_idx_sort_indices", None)
+        if moe_quant_config.desc_act
+        else None
+    )
+
+    from vllm.model_executor.layers.fused_moe.all2all_utils import (
+        maybe_make_prepare_finalize,
+    )
+
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=routing_tables,
+        allow_new_interface=True,
+    )
+    assert prepare_finalize is not None
+    assert isinstance(prepare_finalize, mk.FusedMoEPrepareAndFinalizeModular)
+
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        assert expert_cls == BatchedMarlinExperts
+        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens is not None
+        experts: mk.FusedMoEExperts = BatchedMarlinExperts(
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+            w13_g_idx=w13_g_idx,
+            w2_g_idx=w2_g_idx,
+            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            is_k_full=is_k_full,
+        )
+    else:
+        assert expert_cls == MarlinExperts
+        experts = MarlinExperts(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+            w13_g_idx=w13_g_idx,
+            w2_g_idx=w2_g_idx,
+            w13_g_idx_sort_indices=w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=w2_g_idx_sort_indices,
+            is_k_full=is_k_full,
+        )
+
+    return mk.FusedMoEKernel(
+        prepare_finalize,
+        experts,
+        shared_experts=shared_experts,
+        inplace=not moe_config.disable_inplace,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -277,10 +358,10 @@ def _process_weights_marlin(
         layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
 
 
-def process_weights_for_wna16_backend(
+def convert_to_wna16_moe_kernel_format(
     backend: WNA16MoEBackend,
     layer: torch.nn.Module,
-    quant_config: "GPTQMarlinConfig",
+    quant_config: QuantizationConfig,
     input_dtype: torch.dtype | None,
 ) -> None:
     """Dispatch weight post-processing to the appropriate per-backend handler.
@@ -291,9 +372,8 @@ def process_weights_for_wna16_backend(
     Args:
         backend: the selected ``WNA16MoEBackend``.
         layer: the ``FusedMoE`` layer whose parameters are being prepared.
-        quant_config: the ``GPTQMarlinConfig`` for this layer.
-        input_dtype: optional activation dtype (e.g. ``torch.int8``,
-            ``torch.float8_e4m3fn``).
+        quant_config: the ``QuantizationConfig`` for this layer.
+        input_dtype: optional activation dtype, usually should be 16 bit.
     """
     if backend == WNA16MoEBackend.NONE:
         # No modular-kernel support; weights are used as-is by the legacy
@@ -304,7 +384,8 @@ def process_weights_for_wna16_backend(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
+        assert isinstance(quant_config, GPTQMarlinConfig)
         _process_weights_marlin(layer, quant_config, input_dtype)
 
     else:
-        raise ValueError(f"Unsupported GPTQ-Marlin MoE backend: {backend.value}")
+        raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
