@@ -4,22 +4,15 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
 from itertools import islice
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.entrypoints.openai.responses.protocol import (
-        ResponsesRequest,
-    )
-else:
-    ChatCompletionRequest = Any
-    ResponsesRequest = Any
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class BaseThinkingReasoningParser(ReasoningParser):
@@ -58,13 +51,15 @@ class BaseThinkingReasoningParser(ReasoningParser):
         if not self.start_token or not self.end_token:
             raise ValueError("start_token and end_token must be defined in subclasses")
 
-        self.start_token_id = self.vocab.get(self.start_token)
-        self.end_token_id = self.vocab.get(self.end_token)
-        if self.start_token_id is None or self.end_token_id is None:
+        start_token_id = self.vocab.get(self.start_token)
+        end_token_id = self.vocab.get(self.end_token)
+        if start_token_id is None or end_token_id is None:
             raise RuntimeError(
                 f"{self.__class__.__name__} reasoning parser could not locate "
                 "think start/end tokens in the tokenizer!"
             )
+        self.start_token_id: int = start_token_id
+        self.end_token_id: int = end_token_id
 
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
@@ -152,7 +147,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             return DeltaMessage(content=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.

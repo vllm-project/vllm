@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
@@ -157,6 +158,24 @@ def new_chunked_local_attention_spec(
     )
 
 
+def new_mamba_spec(
+    block_size=16,
+    shapes=((2, 512), (3, 32, 32)),
+    dtypes=(torch.float32, torch.float32),
+    num_speculative_blocks=2,
+    mamba_cache_mode="none",
+    page_size_padded=None,
+):
+    return MambaSpec(
+        block_size=block_size,
+        shapes=shapes,
+        dtypes=dtypes,
+        page_size_padded=page_size_padded,
+        mamba_cache_mode=mamba_cache_mode,
+        num_speculative_blocks=num_speculative_blocks,
+    )
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils
@@ -200,6 +219,18 @@ def test_kv_cache_block():
 
     block.reset_hash()
     assert block.block_hash is None
+
+
+def test_kv_cache_block_uses_slots():
+    block = KVCacheBlock(block_id=0)
+
+    # Slots eliminate per-instance __dict__, saving ~264 bytes per block.
+    # At 100K+ blocks this avoids tens of MB of overhead and GC pressure.
+    assert not hasattr(block, "__dict__")
+
+    # Verify that slots actually prevent dynamic attribute assignment.
+    with pytest.raises(AttributeError):
+        block.unexpected_field = True
 
 
 def test_free_kv_cache_block_queue_initialization():
@@ -308,7 +339,7 @@ def test_free_kv_cache_block_queue_append_n():
 
     # Create an empty FreeKVCacheBlockQueue
     invalid_queue = FreeKVCacheBlockQueue([])
-    # set prev_free_block to None and this will cause assertation in append_n
+    # set prev_free_block to None and this will cause assertion in append_n
     invalid_queue.fake_free_list_tail.prev_free_block = None
     with pytest.raises(AssertionError):
         # Append 1 block
@@ -416,12 +447,12 @@ def test_generate_block_hash_extra_keys():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 5, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", 0),)
     assert next_mm_idx == 1
 
     # Test with partial overlap
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 3, 8, 0)
-    assert extra_keys == ("hash1",)
+    assert extra_keys == (("hash1", -3),)
     assert next_mm_idx == 1
 
     # Test with no overlap
@@ -431,7 +462,7 @@ def test_generate_block_hash_extra_keys():
 
     # Test with multiple extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request, 0, 15, 0)
-    assert extra_keys == ("hash1", "hash2")
+    assert extra_keys == (("hash1", 0), ("hash2", 10))
     assert next_mm_idx == 2
 
 
@@ -482,7 +513,7 @@ def test_generate_block_hash_extra_keys_cache_salt():
 
     # Test with no extra keys
     extra_keys, next_mm_idx = generate_block_hash_extra_keys(request_mm, 0, 5, 0)
-    assert extra_keys == ("hash1", "salt")
+    assert extra_keys == (("hash1", 0), "salt")
     assert next_mm_idx == 1
 
 
@@ -606,8 +637,10 @@ def test_request_block_hasher(hash_fn):
 
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
-    assert block_hashes[0] == hash_fn((kv_cache_utils.NONE_HASH, (0, 1, 2), ("hash1",)))
-    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), ("hash2",)))
+    assert block_hashes[0] == hash_fn(
+        (kv_cache_utils.NONE_HASH, (0, 1, 2), (("hash1", 0),))
+    )
+    assert block_hashes[1] == hash_fn((block_hashes[0], (3, 4, 5), (("hash2", 0),)))
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
@@ -1942,7 +1975,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            ("hash1", block1_embeds_hash),
+            (("hash1", 0), block1_embeds_hash),
         )
     )
     assert block_hashes[0] == expected_hash1
@@ -1954,7 +1987,7 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            ("hash2", block2_embeds_hash),
+            (("hash2", 0), block2_embeds_hash),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -1996,6 +2029,28 @@ def test_auto_fit_max_model_len():
     # Should be reduced to fit in memory
     assert vllm_config.model_config.max_model_len < 1024
     assert vllm_config.model_config.max_model_len > 0
+
+
+def test_auto_fit_max_model_len_with_hybrid():
+    """Test that auto-fit works with hybrid KV cache specs."""
+    # Create config with original_max_model_len=-1 to trigger auto-fit
+    model_config = ModelConfig(max_model_len=8192)
+    # Simulate the user passing -1 by setting original_max_model_len
+    model_config.original_max_model_len = -1
+    vllm_config = VllmConfig(model_config=model_config)
+
+    mem_per_block_per_layer = 16 * 2 * 64 * 4 * 2  # 16KB per block per layer
+    gamma = 2
+    kv_cache_specs = {
+        "layer_1": new_mamba_spec(num_speculative_blocks=gamma),
+        "layer_2": new_kv_cache_spec(),
+    }
+
+    available_memory = mem_per_block_per_layer * (1024 // 16 + 1 + gamma)
+    _kv_cache_configs = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs], [available_memory]
+    )
+    assert vllm_config.model_config.max_model_len == 1024
 
 
 def test_auto_fit_max_model_len_not_triggered():

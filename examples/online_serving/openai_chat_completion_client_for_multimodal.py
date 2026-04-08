@@ -20,9 +20,9 @@ run the script with
 python openai_chat_completion_client_for_multimodal.py --chat-type audio
 """
 
-import base64
 import os
 
+import pybase64 as base64
 import requests
 from openai import OpenAI
 from utils import get_first_model

@@ -3,7 +3,6 @@
 # Copyright 2025 Bytedance Ltd. and/or its affiliates.
 """BAGEL processor for image and text inputs."""
 
-from transformers import AutoProcessor
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
@@ -79,6 +78,3 @@ class BagelProcessor(ProcessorMixin):
         tokenizer_input_names = self.tokenizer.model_input_names
         image_processor_input_names = self.image_processor.model_input_names
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names))
-
-
-AutoProcessor.register("BagelProcessor", BagelProcessor)

@@ -23,8 +23,14 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 def get_test_models():
     """Get list of models to test based on PyTorch version"""
-    # TODO "Qwen/Qwen3-4B-Instruct-2507" fails Fix issue and support it.
-    return ["gpt2", "Qwen/Qwen2-7B-Instruct", "meta-llama/Llama-3.1-8B"]
+    models = [
+        "gpt2",
+        "Qwen/Qwen2-7B-Instruct",
+        "meta-llama/Llama-3.1-8B",
+    ]
+    if is_torch_equal_or_newer("2.12.0"):
+        models.append("Qwen/Qwen3-4B-Instruct-2507")
+    return models
 
 
 @pytest.mark.parametrize("model_name", get_test_models())
@@ -100,7 +106,7 @@ def test_dynamic_shapes_compilation(
     del model
     gc.collect()
     torch.accelerator.empty_cache()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     print("GPU memory cleared")
 
 

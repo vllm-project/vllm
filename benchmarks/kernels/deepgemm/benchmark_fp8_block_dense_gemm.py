@@ -35,7 +35,7 @@ def benchmark_shape(
     B = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
 
     # Reference result in BF16
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     C_ref = A @ B.t()
 
     # Pre-quantize B for all implementations
@@ -121,14 +121,14 @@ def benchmark_shape(
         # Warmup
         for _ in range(warmup):
             func()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
 
         # Timing loop
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start = time.time()
         for _ in range(repeat):
             func()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         end = time.time()
 
         # Calculate timing and TFLOPS

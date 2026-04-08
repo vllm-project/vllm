@@ -13,7 +13,6 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-import os
 from typing import TypeVar
 
 import torch
@@ -49,6 +48,7 @@ from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
     MarlinLinearKernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
+    XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
@@ -71,6 +71,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
+    MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
     ChannelWiseTorchFP8ScaledMMLinearKernel,
@@ -104,6 +107,7 @@ _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]]
 # in priority/performance order (when available)
 _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
     PlatformEnum.CUDA: [
+        MarlinFP8ScaledMMLinearKernel,
         FlashInferFP8ScaledMMLinearKernel,
         CutlassFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
@@ -139,6 +143,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         ExllamaLinearKernel,
     ],
     PlatformEnum.XPU: [
+        XPUW4A8IntLinearKernel,
         XPUwNa16LinearKernel,
     ],
     PlatformEnum.CPU: [
@@ -154,8 +159,7 @@ _KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
 def is_supported_and_can_implement_kernel(
     kernel: type[_KernelT], config: _KernelConfigT, compute_capability: int | None
 ) -> tuple[bool, str]:
-    # TODO: Fetch `VLLM_DISABLED_KERNELS` from vllm.envs instead.
-    if kernel.__name__ in os.environ.get("VLLM_DISABLED_KERNELS", "").split(","):
+    if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
         return False, f" {kernel.__name__} is disabled by environment variable"
 
     if compute_capability is None:
@@ -363,10 +367,44 @@ def choose_mp_linear_kernel(
     )
 
 
+def register_linear_kernel(
+    kernel_class: type,
+    platform: PlatformEnum,
+    kernel_type: str = "mp",
+) -> None:
+    """
+    Register a new linear kernel class to be considered in kernel selection.
+
+    Args:
+        kernel_class (type): The kernel class to register.
+        platform (PlatformEnum): The platform for which this kernel is applicable.
+        kernel_type (str): The type of the kernel, either "mp", "int8", or "fp8".
+            Defaults to "mp".
+
+    Raises:
+        ValueError: If the kernel_type is not recognized.
+    """
+    if kernel_type == "mp":
+        if platform not in _POSSIBLE_KERNELS:
+            _POSSIBLE_KERNELS[platform] = []
+        _POSSIBLE_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "int8":
+        if platform not in _POSSIBLE_INT8_KERNELS:
+            _POSSIBLE_INT8_KERNELS[platform] = []
+        _POSSIBLE_INT8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "fp8":
+        if platform not in _POSSIBLE_FP8_KERNELS:
+            _POSSIBLE_FP8_KERNELS[platform] = []
+        _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    else:
+        raise ValueError(f"Unrecognized kernel type: {kernel_type}")
+
+
 __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "choose_mp_linear_kernel",
+    "register_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
     "ScaledMMLinearKernel",
@@ -393,5 +431,6 @@ __all__ = [
     "ExllamaLinearKernel",
     "MacheteLinearKernel",
     "MarlinLinearKernel",
+    "XPUW4A8IntLinearKernel",
     "XPUwNa16LinearKernel",
 ]

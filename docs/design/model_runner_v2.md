@@ -50,7 +50,7 @@ V1 was not originally designed with async scheduling in mind, and support requir
 
 ## 3. Removing Async Barrier
 
-A key requirement for async execution is that CPU operations remain non-blocking. Both explicit sync (for example, `torch.cuda.synchronize`) and implicit sync (for example, unpinned `.to("cuda")`) must be avoided.
+A key requirement for async execution is that CPU operations remain non-blocking. Both explicit sync (for example, `torch.accelerator.synchronize`) and implicit sync (for example, unpinned `.to("cuda")`) must be avoided.
 
 However, async execution can introduce race conditions when CPU and GPU concurrently touch the same memory.
 

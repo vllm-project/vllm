@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
 from pathlib import Path
 from unittest.mock import patch
 
+import librosa
 import numpy as np
+import pybase64 as base64
 import pytest
 
 from vllm.multimodal.media import AudioMediaIO
+
+from ...conftest import AudioTestAssets
 
 pytestmark = pytest.mark.cpu_test
 
@@ -21,40 +24,32 @@ def dummy_audio():
 
 
 @pytest.fixture
-def dummy_audio_bytes():
-    return b"FAKEAUDIOBYTES"
+def dummy_audio_bytes(audio_assets: AudioTestAssets):
+    with open(audio_assets[0].get_local_path(), "rb") as f:
+        return f.read()
 
 
 def test_audio_media_io_load_bytes(dummy_audio_bytes):
     audio_io = AudioMediaIO()
-    with patch("librosa.load") as mock_load:
-        mock_load.return_value = (np.array([0.1, 0.2]), 16000)
-        out = audio_io.load_bytes(dummy_audio_bytes)
-        mock_load.assert_called_once()
-        assert isinstance(out[0], np.ndarray)
-        assert out[1] == 16000
+    out = audio_io.load_bytes(dummy_audio_bytes)
+    assert isinstance(out[0], np.ndarray)
+    assert out[1] == 16000
 
 
 def test_audio_media_io_load_base64(dummy_audio_bytes):
     audio_io = AudioMediaIO()
     encoded = base64.b64encode(dummy_audio_bytes).decode("utf-8")
-    with patch.object(AudioMediaIO, "load_bytes") as mock_load_bytes:
-        mock_load_bytes.return_value = (np.array([0.1, 0.2]), 16000)
-        out = audio_io.load_base64("audio/wav", encoded)
-        mock_load_bytes.assert_called_once()
-        assert isinstance(out[0], np.ndarray)
-        assert out[1] == 16000
+    out = audio_io.load_base64("audio/wav", encoded)
+    assert isinstance(out[0], np.ndarray)
+    assert out[1] == 16000
 
 
-def test_audio_media_io_load_file():
+def test_audio_media_io_load_file(audio_assets: AudioTestAssets):
     audio_io = AudioMediaIO()
-    path = Path("/fake/path.wav")
-    with patch("librosa.load") as mock_load:
-        mock_load.return_value = (np.array([0.1, 0.2]), 16000)
-        out = audio_io.load_file(path)
-        mock_load.assert_called_once_with(path, sr=None)
-        assert isinstance(out[0], np.ndarray)
-        assert out[1] == 16000
+    path = audio_assets[0].get_local_path()
+    out = audio_io.load_file(path)
+    assert isinstance(out[0], np.ndarray)
+    assert out[1] == 16000
 
 
 def test_audio_media_io_encode_base64(dummy_audio):
@@ -71,3 +66,13 @@ def test_audio_media_io_encode_base64(dummy_audio):
         decoded = base64.b64decode(out)
         assert decoded == b"dummy_wav_data"
         mock_write.assert_called_once()
+
+
+def test_audio_media_io_from_video(video_assets):
+    audio_io = AudioMediaIO()
+    video_path = video_assets[0].video_path
+    with open(video_path, "rb") as f:
+        audio, sr = audio_io.load_bytes(f.read())
+    audio_ref, sr_ref = librosa.load(video_path, sr=None)
+    assert sr == sr_ref
+    np.testing.assert_allclose(audio_ref, audio, atol=1e-4)

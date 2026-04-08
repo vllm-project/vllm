@@ -219,7 +219,7 @@ def _run_top_k_per_row_decode_test(
         top_k,
     )
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     # Run reference implementation
     torch_indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")

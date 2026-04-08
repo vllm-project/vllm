@@ -9,6 +9,7 @@ from transformers import PretrainedConfig
 from vllm.config.lora import LoRAConfig
 from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.distributed.utils import divide
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -155,9 +156,9 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        if type(source_layer) is ColumnParallelLinear:
+        if type(source_layer) is maybe_get_oot_by_class(ColumnParallelLinear):
             return True
-        if type(source_layer) is MergedColumnParallelLinear:
+        if type(source_layer) is maybe_get_oot_by_class(MergedColumnParallelLinear):
             if len(packed_modules_list) != 1:
                 return False
             # Exclude layers with 3+ output sizes - those are handled by
@@ -606,7 +607,7 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
     ) -> bool:
         # Support MergedColumnParallelLinear with 3 or more slices
         # (2 slices are handled by MergedColumnParallelLinearWithLoRA)
-        if type(source_layer) is not MergedColumnParallelLinear:
+        if type(source_layer) is not maybe_get_oot_by_class(MergedColumnParallelLinear):
             return False
 
         # If packed_modules_list has 3+ items, use this class

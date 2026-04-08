@@ -1,28 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import copy
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
 from vllm.inputs import (
-    EmbedsInputs,
+    EmbedsInput,
     EmbedsPrompt,
-    EncoderDecoderInputs,
-    ProcessorInputs,
-    SingletonInputs,
+    EncoderDecoderInput,
+    EngineInput,
+    MultiModalDataDict,
+    MultiModalInput,
+    MultiModalUUIDDict,
+    SingletonInput,
     TextPrompt,
-    TokenInputs,
+    TokensInput,
     TokensPrompt,
+    build_enc_dec_input,
+    embeds_input,
+    tokens_input,
 )
-from vllm.inputs.data import build_enc_dec_inputs, embeds_inputs, token_inputs
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalUUIDItems,
+    parse_mm_uuids,
+)
+from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
+from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import (
+    AsyncMicrobatchTokenizer,
+    make_async,
+)
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -45,14 +65,6 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
-    from vllm.multimodal.cache import BaseMultiModalProcessorCache
-    from vllm.multimodal.inputs import (
-        MultiModalDataDict,
-        MultiModalInputs,
-        MultiModalUUIDDict,
-    )
-    from vllm.multimodal.parse import MultiModalDataItems, MultiModalUUIDItems
-    from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
 
@@ -61,43 +73,70 @@ _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
 class BaseRenderer(ABC, Generic[_T]):
-    @classmethod
-    @abstractmethod
-    def from_config(
-        cls,
-        config: "VllmConfig",
-        tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
-        raise NotImplementedError
-
     def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
         self.config = config
         self.model_config = config.model_config
+        self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
+
+        # Shared thread pool executor for blocking tokenizer and
+        # multimodal preprocessing operations.  The multimodal processor
+        # receives a deep-copied tokenizer (see #36557) so it is safe to
+        # run tokenization and MM preprocessing concurrently.
+        pool_workers = config.model_config.renderer_num_workers
+        self._executor = ThreadPoolExecutor(max_workers=pool_workers)
+
+        # Multimodal preprocessing is always offloaded to the thread pool
+        # to keep the asyncio event loop responsive under concurrent load.
+        self._mm_executor: Executor = self._executor
 
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
         self.mm_processor: BaseMultiModalProcessor | None = None
+        self._readonly_mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
+        self._clear_mm_cache_async = make_async(
+            self.clear_mm_cache, executor=self._executor
+        )
+        self._process_multimodal_async = make_async(
+            self._process_multimodal, executor=self._mm_executor
+        )
         if config.model_config.is_multimodal_model:
-            from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
-            from vllm.multimodal.registry import MultiModalTimingRegistry
-
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
+
+            # Deep-copy the tokenizer so the multimodal processor gets its
+            # own Rust tokenizer backend.  Without this, concurrent access
+            # from AsyncMicrobatchTokenizer and call_hf_processor causes
+            # "RuntimeError: Already borrowed" from the Rust RefCell.
+            # See: https://github.com/huggingface/tokenizers/issues/537
+            mm_tokenizer = copy.deepcopy(tokenizer)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    tokenizer=tokenizer,
+                    tokenizer=mm_tokenizer,
                     cache=mm_processor_cache,
                 )
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
+
+            # A second processor with its own processor-only cache.
+            # Used by the tokenize endpoint so that tokenize-only
+            # requests don't pollute the sender cache.
+            ro_cache = mm_registry.processor_only_cache_from_config(config)
+            if ro_cache is not None:
+                ro_tokenizer = copy.deepcopy(tokenizer)
+                with set_default_torch_num_threads():
+                    self._readonly_mm_processor = mm_registry.create_processor(
+                        config.model_config,
+                        tokenizer=ro_tokenizer,
+                        cache=ro_cache,
+                    )
 
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core
@@ -115,7 +154,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
         if self._async_tokenizer is None:
-            self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
+            self._async_tokenizer = AsyncMicrobatchTokenizer(
+                self.get_tokenizer(), executor=self._executor
+            )
 
         return self._async_tokenizer
 
@@ -157,10 +198,73 @@ class BaseRenderer(ABC, Generic[_T]):
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
 
+    def warmup(self, chat_params: ChatParams) -> None:
+        """
+        Warm up this renderer to avoid first-request latency.
+
+        For chat requests:
+        - Jinja2 template compilation
+        """
+        from vllm.entrypoints.chat_utils import ChatTemplateResolutionError
+
+        try:
+            logger.debug("Warming up chat template processing...")
+            start_time = time.perf_counter()
+
+            self.render_chat([[{"role": "user", "content": "warmup"}]], chat_params)
+
+            elapsed = time.perf_counter() - start_time
+            logger.debug("Chat template warmup completed in %.3fs", elapsed)
+        except ChatTemplateResolutionError:
+            logger.debug("This model does not support chat template.")
+        except Exception:
+            logger.warning("Chat template warmup failed", exc_info=True)
+
+        if self.mm_processor:
+            from vllm.multimodal.processing import TimingContext
+
+            model_config = self.model_config
+            mm_config = model_config.get_multimodal_config()
+            processor = self.mm_processor
+            mm_limits = processor.info.allowed_mm_limits
+
+            try:
+                logger.debug("Warming up multi-modal processing...")
+                start_time = time.perf_counter()
+
+                processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
+                    seq_len=model_config.max_model_len,
+                    mm_counts=dict.fromkeys(mm_limits, 1),
+                    mm_options=mm_config.limit_per_prompt,
+                )
+                _ = processor.apply(
+                    processor_inputs, timing_ctx=TimingContext(enabled=False)
+                )
+
+                elapsed = time.perf_counter() - start_time
+                logger.info("Multi-modal warmup completed in %.3fs", elapsed)
+            except Exception:
+                logger.warning("Multi-modal warmup failed")
+            finally:
+                self.clear_mm_cache()
+
+    async def clear_mm_cache_async(self) -> None:
+        """Serialize clear_mm_cache through the shared executor to avoid
+        races with concurrent process_inputs on the mm_processor_cache."""
+        await self._clear_mm_cache_async()
+
     def shutdown(self) -> None:
         mm_processor_cache = self.mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.close()
+
+        if executor := getattr(self, "_executor", None):
+            executor.shutdown(wait=False)
+
+        if (
+            mm_executor := getattr(self, "_mm_executor", None)
+        ) is not None and mm_executor is not executor:
+            mm_executor.shutdown(wait=False)
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -465,9 +569,9 @@ class BaseRenderer(ABC, Generic[_T]):
     # Step 4: Convert to engine inputs
     def _validate_mm_uuids(
         self,
-        mm_data: "MultiModalDataDict",
-        mm_data_items: "MultiModalDataItems",
-        mm_uuid_items: "MultiModalUUIDItems",
+        mm_data: MultiModalDataDict,
+        mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems,
     ) -> None:
         # NOTE: Keys corresponding to `None` in `mm_data` don't appear in
         # `mm_data_items`
@@ -501,11 +605,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _process_mm_uuids(
         self,
-        mm_data: "MultiModalDataDict",
-        mm_data_items: "MultiModalDataItems",
-        mm_uuid_items: "MultiModalUUIDItems",
+        mm_data: MultiModalDataDict,
+        mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems,
         mm_req_id: str,
-    ):
+    ) -> MultiModalUUIDItems:
         model_config = self.model_config
 
         # NOTE: When users explicitly turn off BOTH prefix caching and input
@@ -531,17 +635,19 @@ class BaseRenderer(ABC, Generic[_T]):
     def _process_multimodal(
         self,
         prompt: list[int] | str,
-        mm_data: "MultiModalDataDict",
-        mm_uuids: "MultiModalUUIDDict | None",
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
-    ) -> "MultiModalInputs":
-        from vllm.multimodal.parse import parse_mm_uuids
-        from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
+        *,
+        skip_mm_cache: bool = False,
+    ) -> "MultiModalInput":
+        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
 
-        mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
-
-        mm_processor = self.get_mm_processor()
+        if skip_mm_cache and self._readonly_mm_processor is not None:
+            mm_processor = self._readonly_mm_processor
+        else:
+            mm_processor = self.get_mm_processor()
 
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
@@ -569,32 +675,35 @@ class BaseRenderer(ABC, Generic[_T]):
     def _process_tokens(
         self,
         prompt: TokensPrompt,
-    ) -> "TokenInputs | MultiModalInputs":
+        *,
+        skip_mm_cache: bool = False,
+    ) -> TokensInput | MultiModalInput:
+        """Process token inputs, with multimodal preprocessing offloaded
+        to the shared thread pool in the async variant.
+        """
         prompt_token_ids = prompt["prompt_token_ids"]
 
-        inputs: TokenInputs | MultiModalInputs
+        engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
-            inputs = self._process_multimodal(
+            engine_input = self._process_multimodal(
                 prompt_token_ids,
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
                 tokenization_kwargs=None,  # Tokenization already done in Step 2
                 mm_uuids=prompt.get("multi_modal_uuids"),
+                skip_mm_cache=skip_mm_cache,
             )
         else:
-            inputs = token_inputs(prompt_token_ids)
+            engine_input = tokens_input(prompt_token_ids)
 
         if prompt_text := prompt.get("prompt"):
-            inputs["prompt"] = prompt_text
+            engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
-            inputs["cache_salt"] = cache_salt
+            engine_input["cache_salt"] = cache_salt
 
-        return inputs
+        return engine_input
 
-    def _process_embeds(
-        self,
-        prompt: EmbedsPrompt,
-    ) -> EmbedsInputs:
+    def _process_embeds(self, prompt: EmbedsPrompt) -> EmbedsInput:
         if not self.model_config.enable_prompt_embeds:
             raise ValueError(
                 "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
@@ -617,47 +726,154 @@ class BaseRenderer(ABC, Generic[_T]):
         # hidden device transfer in the critical path of generation.
         prompt_embeds = prompt_embeds.cpu()
 
-        return embeds_inputs(
+        return embeds_input(
             prompt_embeds=prompt_embeds,
             cache_salt=prompt.get("cache_salt"),
         )
 
+    async def _process_tokens_async(
+        self,
+        prompt: TokensPrompt,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> TokensInput | MultiModalInput:
+        prompt_token_ids = prompt["prompt_token_ids"]
+
+        engine_input: TokensInput | MultiModalInput
+        if multi_modal_data := prompt.get("multi_modal_data"):
+            engine_input = await self._process_multimodal_async(
+                prompt_token_ids,
+                multi_modal_data,
+                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                tokenization_kwargs=None,
+                mm_uuids=prompt.get("multi_modal_uuids"),
+                skip_mm_cache=skip_mm_cache,
+            )
+        else:
+            engine_input = tokens_input(prompt_token_ids)
+
+        if prompt_text := prompt.get("prompt"):
+            engine_input["prompt"] = prompt_text
+        if cache_salt := prompt.get("cache_salt"):
+            engine_input["cache_salt"] = cache_salt
+
+        return engine_input
+
     def _process_singleton(
         self,
         prompt: SingletonTokPrompt,
-    ) -> SingletonInputs:
+        *,
+        skip_mm_cache: bool = False,
+    ) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        return self._process_tokens(prompt)  # type: ignore[arg-type]
+        return self._process_tokens(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
+
+    async def _process_singleton_async(
+        self,
+        prompt: SingletonTokPrompt,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> SingletonInput:
+        if "prompt_embeds" in prompt:
+            return self._process_embeds(prompt)  # type: ignore[arg-type]
+
+        return await self._process_tokens_async(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
 
     def _process_enc_dec(
         self,
         prompt: EncoderDecoderTokPrompt,
-    ) -> EncoderDecoderInputs:
+        *,
+        skip_mm_cache: bool = False,
+    ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
-        return build_enc_dec_inputs(
-            encoder_inputs=self._process_singleton(enc_prompt),
-            decoder_inputs=(
-                None if dec_prompt is None else self._process_singleton(dec_prompt)
+        skip_decoder_start_token = False
+        if self.mm_processor is not None:
+            from vllm.multimodal.processing import EncDecMultiModalProcessor
+
+            if isinstance(self.mm_processor, EncDecMultiModalProcessor):
+                skip_decoder_start_token = self.mm_processor.skip_decoder_start_token
+
+        return build_enc_dec_input(
+            encoder_input=self._process_singleton(
+                enc_prompt, skip_mm_cache=skip_mm_cache
             ),
+            decoder_input=(
+                None
+                if dec_prompt is None
+                else self._process_singleton(dec_prompt, skip_mm_cache=skip_mm_cache)
+            ),
+            decoder_start_token_id=self.get_dec_start_token_id(),
+            skip_decoder_start_token=skip_decoder_start_token,
+        )
+
+    async def _process_enc_dec_async(
+        self,
+        prompt: EncoderDecoderTokPrompt,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> EncoderDecoderInput:
+        enc_prompt = prompt["encoder_prompt"]
+        dec_prompt = prompt["decoder_prompt"]
+
+        encoder_input, decoder_input = await asyncio.gather(
+            self._process_singleton_async(enc_prompt, skip_mm_cache=skip_mm_cache),
+            (
+                asyncio.sleep(0)
+                if dec_prompt is None
+                else self._process_singleton_async(
+                    dec_prompt, skip_mm_cache=skip_mm_cache
+                )
+            ),
+        )
+
+        return build_enc_dec_input(
+            encoder_input=encoder_input,
+            decoder_input=decoder_input,
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
 
     def process_for_engine(
-        self, prompt: TokPrompt, arrival_time: float
-    ) -> ProcessorInputs:
-        engine_prompt: ProcessorInputs
+        self,
+        prompt: TokPrompt,
+        arrival_time: float,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> EngineInput:
+        engine_input: EngineInput
         if "encoder_prompt" in prompt:
-            engine_prompt = self._process_enc_dec(prompt)  # type: ignore[arg-type]
+            engine_input = self._process_enc_dec(prompt, skip_mm_cache=skip_mm_cache)  # type: ignore[arg-type]
         else:
-            engine_prompt = self._process_singleton(prompt)
+            engine_input = self._process_singleton(prompt, skip_mm_cache=skip_mm_cache)
 
-        engine_prompt["arrival_time"] = arrival_time
+        engine_input["arrival_time"] = arrival_time
 
-        return engine_prompt
+        return engine_input
+
+    async def process_for_engine_async(
+        self,
+        prompt: TokPrompt,
+        arrival_time: float,
+        *,
+        skip_mm_cache: bool = False,
+    ) -> EngineInput:
+        engine_input: EngineInput
+        if "encoder_prompt" in prompt:
+            engine_input = await self._process_enc_dec_async(
+                prompt,  # type: ignore[arg-type]
+                skip_mm_cache=skip_mm_cache,
+            )
+        else:
+            engine_input = await self._process_singleton_async(
+                prompt, skip_mm_cache=skip_mm_cache
+            )
+
+        engine_input["arrival_time"] = arrival_time
+
+        return engine_input
 
     # Top-level methods
     def render_cmpl(
@@ -666,6 +882,7 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
+        skip_mm_cache: bool = False,
     ):
         arrival_time = time.time()
 
@@ -677,7 +894,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
+        return [
+            self.process_for_engine(prompt, arrival_time, skip_mm_cache=skip_mm_cache)
+            for prompt in tok_prompts
+        ]
 
     async def render_cmpl_async(
         self,
@@ -685,6 +905,7 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
+        skip_mm_cache: bool = False,
     ):
         arrival_time = time.time()
 
@@ -696,7 +917,14 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
+        return await asyncio.gather(
+            *(
+                self.process_for_engine_async(
+                    p, arrival_time, skip_mm_cache=skip_mm_cache
+                )
+                for p in tok_prompts
+            )
+        )
 
     def render_chat(
         self,
@@ -705,6 +933,7 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
+        skip_mm_cache: bool = False,
     ):
         arrival_time = time.time()
 
@@ -727,7 +956,8 @@ class BaseRenderer(ABC, Generic[_T]):
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
-            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
+            self.process_for_engine(prompt, arrival_time, skip_mm_cache=skip_mm_cache)
+            for prompt in tok_prompts
         ]
 
         return out_conversations, eng_prompts
@@ -739,6 +969,7 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
+        skip_mm_cache: bool = False,
     ):
         arrival_time = time.time()
 
@@ -760,8 +991,13 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        eng_prompts = [
-            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
-        ]
+        eng_prompts = await asyncio.gather(
+            *(
+                self.process_for_engine_async(
+                    p, arrival_time, skip_mm_cache=skip_mm_cache
+                )
+                for p in tok_prompts
+            )
+        )
 
         return out_conversations, eng_prompts

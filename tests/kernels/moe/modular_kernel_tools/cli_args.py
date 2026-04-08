@@ -82,11 +82,6 @@ def make_config_arg_parser(description: str):
         "--num-experts", type=int, default=32, help="Global num experts"
     )
     parser.add_argument("--topk", nargs="+", type=int, default=[4, 1], help="num topk")
-    parser.add_argument(
-        "--fused-moe-chunk-size",
-        type=int,
-        help="Fused moe chunk size used for the non-batched fused experts impl.",
-    )
 
     # Quant args
     parser.add_argument(
@@ -158,7 +153,6 @@ def make_config(args: argparse.Namespace) -> Config:
         quant_config=quant_config,
         prepare_finalize_type=args.pf_type,
         fused_experts_type=args.experts_type,
-        fused_moe_chunk_size=args.fused_moe_chunk_size,
         world_size=args.world_size,
         torch_trace_dir_path=args.torch_trace_dir_path,
     )

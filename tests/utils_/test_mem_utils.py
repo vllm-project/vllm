@@ -29,7 +29,7 @@ def test_memory_profiling():
     def measure_current_non_torch():
         free, total = torch.cuda.mem_get_info()
         current_used = total - free
-        current_torch = torch.cuda.memory_reserved()
+        current_torch = torch.accelerator.memory_reserved()
         current_non_torch = current_used - current_torch
         return current_non_torch
 

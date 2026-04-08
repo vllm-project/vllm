@@ -5,10 +5,10 @@ from typing import Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
+from transformers import PretrainedConfig
 
-from vllm._custom_ops import (
-    cpu_gemm_wna16,
-)
+import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -133,7 +133,12 @@ class CPUAWQConfig(QuantizationConfig):
                 self.modules_to_not_convert
             )
 
-    def maybe_update_config(self, model_name: str, revision: str | None = None):
+    def maybe_update_config(
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
         if self.modules_to_not_convert:
             return
 
@@ -224,7 +229,14 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.register_parameter("scales", scales)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        torch.set_printoptions(profile="full", linewidth=5000, sci_mode=False)
+        layer.use_w4a8 = envs.VLLM_CPU_INT4_W4A8 and torch.cpu._is_amx_tile_supported()
+        if layer.use_w4a8:
+            self._process_weights_sglang_int4(layer)
+        else:
+            self._process_weights_woq(layer)
+
+    def _process_weights_woq(self, layer: torch.nn.Module) -> None:
+        """Original WOQ int4 repack path."""
         packed_weight = layer.qweight.data
         packed_zeros = layer.qzeros.data
         group_num = packed_zeros.size(0)
@@ -260,8 +272,6 @@ class CPUAWQLinearMethod(LinearMethodBase):
         )
 
         zeros = pack_cols(zeros, bits, group_num, output_size).contiguous()
-        # make 16 output channel as a block and transpose to
-        # the make the block contigous
         weight = pack_cols(weight, bits, input_size, output_size)
         weight = (
             weight.view(input_size, -1, 16 // pack_factor)
@@ -272,13 +282,40 @@ class CPUAWQLinearMethod(LinearMethodBase):
         layer.qweight.data = weight
         layer.qzeros.data = zeros
 
+    def _process_weights_sglang_int4(self, layer: torch.nn.Module) -> None:
+        """SGLang INT4 W4A8 path: pack int4 weights with VNNI reordering."""
+        packed_weight = layer.qweight.data
+        packed_zeros = layer.qzeros.data
+        scales = layer.scales.data
+        blocked_w, blocked_zp, blocked_s = torch.ops._C.convert_weight_packed_scale_zp(
+            packed_weight, packed_zeros, scales
+        )
+
+        layer.packed_weight = blocked_w
+        layer.packed_qzeros = blocked_zp
+        layer.packed_scales = blocked_s
+        layer.qweight = None
+        layer.qzeros = None
+        layer.scales = None
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        x = cpu_gemm_wna16(
+        if layer.use_w4a8:
+            return self._apply_sglang_int4(layer, x, bias)
+        return self._apply_woq(layer, x, bias)
+
+    def _apply_woq(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Original WOQ int4 GEMM path."""
+        x = ops.cpu_gemm_wna16(
             input=x,
             q_weight=layer.qweight,
             scales=layer.scales,
@@ -290,9 +327,29 @@ class CPUAWQLinearMethod(LinearMethodBase):
         )
         return x
 
+    def _apply_sglang_int4(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """SGLang INT4 W4A8 GEMM path."""
+        x_shape = x.shape
+        x_2d = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
+
+        out = torch.ops._C.int4_scaled_mm_cpu(
+            x_2d,
+            layer.packed_weight,
+            layer.packed_qzeros,
+            layer.packed_scales,
+            bias,
+        )
+        out = out.reshape(x_shape[:-1] + (out.size(-1),)) if len(x_shape) > 2 else out
+        return out
+
 
 def _get_isa_hint(dtype: torch.dtype) -> str:
-    supports_amx = torch._C._cpu._is_amx_tile_supported()
+    supports_amx = torch.cpu._is_amx_tile_supported()
     if supports_amx and dtype in (torch.bfloat16,):
         return "amx"
     else:
