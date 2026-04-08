@@ -43,7 +43,7 @@ repos:
         requirements/test/cuda.in, -c, requirements/common.txt,
         -o, requirements/test/cuda.txt,
         --index-strategy, unsafe-best-match,
-        --torch-backend, cu129,
+        --torch-backend, cu130,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
