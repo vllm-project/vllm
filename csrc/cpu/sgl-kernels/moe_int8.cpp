@@ -23,7 +23,10 @@ inline void copy_stub(scalar_t* __restrict__ out, const scalar_t* __restrict__ i
 template <>
 inline void copy_stub<uint8_t>(uint8_t* __restrict__ out, const uint8_t* __restrict__ input, int64_t size) {
   // size might be 64x + 32
-  std::memcpy(out, input, size * sizeof(uint8_t));
+  // Validate size to prevent negative values being cast to huge size_t values
+  // and to guard against integer overflow in size calculations.
+  TORCH_CHECK(size >= 0, "copy_stub: size must be non-negative, got ", size);
+  std::memcpy(out, input, static_cast<size_t>(size));
 }
 
 template <typename scalar_t>
