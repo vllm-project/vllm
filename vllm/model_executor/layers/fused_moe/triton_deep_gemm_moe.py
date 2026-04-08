@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.utils.deep_gemm import (
+    DeepGemmQuantScaleFMT,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
