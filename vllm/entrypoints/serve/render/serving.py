@@ -53,6 +53,7 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tool_parsers import ToolParser
+from vllm.reasoning import ReasoningParser
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
@@ -569,5 +570,14 @@ class OpenAIServingRender:
                 request = tool_parser(tokenizer, request.tools).adjust_request(
                     request=request
                 )
+
+        if self.reasoning_parser is not None:
+            tokenizer = renderer.get_tokenizer()
+            request_chat_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+            reasoning_parser = self.reasoning_parser(
+                tokenizer,
+                chat_template_kwargs=request_chat_kwargs
+            )
+            request = reasoning_parser.adjust_request(request)
 
         return conversation, [engine_input]

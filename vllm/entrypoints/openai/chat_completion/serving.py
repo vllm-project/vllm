@@ -227,10 +227,6 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
             )
-        # Allow reasoning parsers to adjust request params (e.g. Gemma4
-        # forces skip_special_tokens=False so delimiters survive).
-        if reasoning_parser:
-            request = reasoning_parser.adjust_request(request)
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             return result
