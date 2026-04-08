@@ -12,6 +12,7 @@ import numpy as np
 from vllm import envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
+from vllm.config.score_encoder_cache import get_score_encoder_cache_config
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
@@ -35,6 +36,7 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
+    ScoreEncoderCacheManager,
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -54,7 +56,7 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.metrics.stats import MultiModalCacheStats, PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
@@ -209,6 +211,13 @@ class Scheduler(SchedulerInterface):
             if self.is_encoder_decoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
         )
+
+        if self.log_stats:
+            self.mm_cache_stats = MultiModalCacheStats()
+  
+        if get_score_encoder_cache_config(vllm_config).enabled:
+            self.encoder_cache_manager = ScoreEncoderCacheManager(cache_size=encoder_cache_size, 
+                                                      vllm_config=self.vllm_config)
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -911,6 +920,11 @@ class Scheduler(SchedulerInterface):
             else None
         )
 
+        
+        free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes()
+        promoting_mm_hashes=self.encoder_cache_manager.get_promoting_mm_hashes()
+        cpu_get_encoder_mm_hashes=self.encoder_cache_manager.get_cpu_get_encoder_mm_hashes()
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=cached_reqs_data,
@@ -925,9 +939,15 @@ class Scheduler(SchedulerInterface):
             # It contains the request IDs that are finished in between
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
-            free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            new_block_ids_to_zero=new_block_ids_to_zero,
+            free_encoder_mm_hashes=free_encoder_mm_hashes,
+            promoting_mm_hashes=promoting_mm_hashes,
+            cpu_get_encoder_mm_hashes=cpu_get_encoder_mm_hashes,
         )
+
+        if promoting_mm_hashes or cpu_get_encoder_mm_hashes or free_encoder_mm_hashes:
+            logger.debug(f"[EmbCacheStats] promoting_mm_hashes={promoting_mm_hashes}," \
+                        f"cpu_get_encoder_mm_hashes={cpu_get_encoder_mm_hashes}," \
+                        f"free_encoder_mm_hashes={free_encoder_mm_hashes}")
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
         # 1. Plan the KV cache store
@@ -1153,6 +1173,7 @@ class Scheduler(SchedulerInterface):
         # trackers for accounting at the encoder input level.
         mm_hashes_to_schedule = set()
         num_embeds_to_schedule = 0
+        num_mm_hit = 0
         for i, mm_feature in enumerate(mm_features):
             start_pos = mm_feature.mm_position.offset
             num_encoder_tokens = mm_feature.mm_position.length
@@ -1200,6 +1221,7 @@ class Scheduler(SchedulerInterface):
                 if self.encoder_cache_manager.check_and_update_cache(request, i):
                     # The encoder input is already computed and cached from a
                     # previous step.
+                    num_mm_hit += 1
                     continue
 
             # If no encoder input chunking is allowed, we do not want to
@@ -1267,6 +1289,10 @@ class Scheduler(SchedulerInterface):
             encoder_compute_budget -= num_encoder_embeds
             mm_hashes_to_schedule.add(item_identifier)
             encoder_inputs_to_schedule.append(i)
+
+            if self.log_stats:
+                self.mm_cache_stats.record(num_queries=len(mm_features),
+                                    num_hits=num_mm_hit)
 
         return (
             encoder_inputs_to_schedule,
