@@ -488,14 +488,121 @@ def _hadacore_available() -> bool:
     return _HADACORE_AVAILABLE
 
 
+# ---------------------------------------------------------------------------
+# Triton MMA-based Hadamard transform (portable: CUDA Tensor Cores + ROCm MFMA/WMMA)
+# ---------------------------------------------------------------------------
+# The Sylvester Hadamard matrix has the closed form
+#     H[i, j] = (-1) ** popcount(i & j)
+# so we can build it inside the kernel from ``tl.arange`` (constexpr, zero
+# memory traffic) and compute the WHT as ``out = x @ H`` via ``tl.dot``.
+# ``tl.dot`` is the only Triton primitive that maps to MMA hardware on both
+# CUDA (m16n8k16 / m16n16k16) and ROCm (MFMA on CDNA, WMMA on RDNA3+), so
+# this is what gives us a portable fast path.
+
+
+@triton.jit
+def _hadamard_mma_kernel(
+    x_ptr,
+    out_ptr,
+    n_rows,
+    stride_x_row: tl.int64,
+    stride_x_col: tl.int64,
+    stride_o_row: tl.int64,
+    stride_o_col: tl.int64,
+    BLOCK_M: tl.constexpr,
+    D: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = tl.arange(0, D)
+    row_mask = rows < n_rows
+
+    x = tl.load(
+        x_ptr + rows[:, None] * stride_x_row + cols[None, :] * stride_x_col,
+        mask=row_mask[:, None],
+        other=0.0,
+    )
+
+    # Build H[i,j] = (-1)**popcount(i & j) at compile time.  Parity is the
+    # XOR of all bits of (i & j); we fold it with a 5-step XOR cascade
+    # (covers up to 32-bit values, i.e. D <= 2**15 — same range hadacore
+    # supports).
+    i = tl.arange(0, D)[:, None]
+    j = tl.arange(0, D)[None, :]
+    p = i & j
+    p ^= p >> 16
+    p ^= p >> 8
+    p ^= p >> 4
+    p ^= p >> 2
+    p ^= p >> 1
+    p &= 1
+    H = (1 - 2 * p).to(x.dtype)  # +1 / -1, in caller's dtype
+
+    out = tl.dot(x, H, out_dtype=tl.float32).to(x.dtype)
+
+    tl.store(
+        out_ptr + rows[:, None] * stride_o_row + cols[None, :] * stride_o_col,
+        out,
+        mask=row_mask[:, None],
+    )
+
+
+# ``tl.dot`` requires both operands to be at least 16 along every dim and
+# wants bf16/fp16 inputs to actually hit the MMA hardware path.  Below 16
+# we fall back to the PyTorch butterfly.
+_TRITON_HADAMARD_MIN_D = 16
+_TRITON_HADAMARD_MAX_D = 1 << 15
+
+
+def _triton_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
+    """Run the MMA-based Triton WHT on the last dimension of *x*.
+
+    Returns the unnormalized H × x (matches the caller convention).
+    The caller must have already verified that ``x`` lives on a GPU and
+    that ``D = x.shape[-1]`` is a power of 2 in the supported range.
+    """
+    d = x.shape[-1]
+    orig_shape = x.shape
+    orig_dtype = x.dtype
+
+    # Cast to bf16 for the MMA path; fp32 inputs would silently fall off
+    # the Tensor Core / MFMA fast path.  Precision loss is harmless before
+    # INT2/INT4 quantization.
+    work_dtype = torch.bfloat16 if orig_dtype == torch.float32 else orig_dtype
+    x2d = x.contiguous().to(work_dtype).reshape(-1, d)
+    out2d = torch.empty_like(x2d)
+    n_rows = x2d.shape[0]
+
+    BLOCK_M = 16
+    grid = (triton.cdiv(n_rows, BLOCK_M),)
+    _hadamard_mma_kernel[grid](
+        x2d,
+        out2d,
+        n_rows,
+        x2d.stride(0),
+        x2d.stride(1),
+        out2d.stride(0),
+        out2d.stride(1),
+        BLOCK_M=BLOCK_M,
+        D=d,
+    )
+    return out2d.reshape(orig_shape).to(orig_dtype)
+
+
 def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
     """Unnormalized Walsh-Hadamard Transform along the last dimension.
 
     H_d × x where H_d × H_d = d × I.  Last dim must be a power of 2.
+
+    Three-tier dispatch:
+      1. Hadacore CUDA Tensor Core kernel (sm_80+).
+      2. Triton MMA matmul kernel (CUDA fallback + ROCm MFMA/WMMA path).
+      3. PyTorch butterfly (CPU and any GPU/dtype combo Triton can't take).
     """
     d = x.shape[-1]
     assert d & (d - 1) == 0, f"Requires power-of-2 dim, got {d}"
 
+    # Tier 1 — hadacore on CUDA.
     if _hadacore_available() and 0 < d <= (1 << 15):
         from vllm import _custom_ops as ops
 
@@ -512,7 +619,16 @@ def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
         y_bf16 = ops.hadacore_transform(x_bf16, inplace=True)
         return y_bf16.to(orig_dtype) * rescale
 
-    # PyTorch butterfly fallback (ROCm / XPU / CPU).
+    # Tier 2 — Triton MMA kernel (covers ROCm via MFMA/WMMA codegen, and
+    # also CUDA when hadacore is unavailable).
+    if (
+        x.is_cuda
+        and _TRITON_HADAMARD_MIN_D <= d <= _TRITON_HADAMARD_MAX_D
+        and x.dtype in (torch.float16, torch.bfloat16, torch.float32)
+    ):
+        return _triton_hadamard_transform(x)
+
+    # Tier 3 — PyTorch butterfly (CPU / unsupported dtype / D < 16).
     h = 1
     while h < d:
         xv = x.view(*x.shape[:-1], d // (2 * h), 2, h)
