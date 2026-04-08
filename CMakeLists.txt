@@ -225,8 +225,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
   # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
   #
-  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result -Wno-unused-value")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
 endif()
 
 #
