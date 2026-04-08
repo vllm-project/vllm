@@ -263,7 +263,7 @@ def flashinfer_trtllm_mxint4_moe(
         output=None,
         tune_max_num_tokens=8192,
     )
-    if not isinstance(out, torch.Tensor):
+    if isinstance(out, (tuple, list)):
         out = out[0]
     out = out.to(x.dtype)
 
