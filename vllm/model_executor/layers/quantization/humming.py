@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import math
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
 
 
 try:
+    import humming.ops
     from humming.dtypes import DataType
     from humming.layer import HummingMethod
     from humming.schema import (
@@ -429,6 +431,7 @@ class HummingLinearMethod(LinearMethodBase):
                     output_dim=0,
                     weight_loader=layer.extra_weight_attrs["weight_loader"],
                 )
+                param = layer.weight
                 if shard_id is not None:
                     return layer.weight.weight_loader(param, loaded_weight, shard_id)
                 return layer.weight.weight_loader(param, loaded_weight)
@@ -567,11 +570,12 @@ class HummingLinearMethod(LinearMethodBase):
         )
 
         HummingMethod.transform_humming_layer(layer, already_padded=True)
-        HummingMethod.prepare_default_kernel_configs(
-            layer,
-            use_batch_invariance=envs.VLLM_BATCH_INVARIANT,
-            use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
-        )
+        compute_config = {
+            "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
+            "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
+            "gemm_type": "dense",
+        }
+        self.compute_config = json.dumps(compute_config)
 
     def apply(
         self,
@@ -579,7 +583,7 @@ class HummingLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return HummingMethod.forward_layer(layer, x)
+        return HummingMethod.forward_layer(layer, x, compute_config=self.compute_config)
 
 
 class HummingMoEMethod(FusedMoEMethodBase):
@@ -818,8 +822,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 weight_schema=weight_schema,
                 has_bias=self.moe.has_bias,
                 num_experts=layer.num_experts,
-                top_k=self.moe.experts_per_token,
-                is_moe_down=sublayer_name == "w2",
                 torch_dtype=layer.param_dtype,
                 sublayer_name=sublayer_name,
             )
@@ -829,12 +831,19 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 sublayer_name=sublayer_name,
                 already_padded=True,
             )
-            HummingMethod.prepare_default_kernel_configs(
-                layer,
-                use_batch_invariance=envs.VLLM_BATCH_INVARIANT,
-                use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
-                sublayer_name=sublayer_name,
-            )
+
+        compute_config = {
+            "use_batch_invariant": True,
+            "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
+            "gemm_type": "indexed",
+        }
+        self.compute_config = json.dumps(compute_config)
+        self.moe_block_size_configs = HummingMethod.get_default_moe_block_size_configs(
+            layer=layer,
+            use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
+            use_batch_invariant=True,
+            sublayer_name="w13",
+        )
 
     def apply(
         self,
@@ -844,8 +853,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        sorted_token_ids, expert_ids, num_tokens_padded = humming_moe_align(
-            layer.humming_block_size_configs["w13"],
+        sorted_ids, expert_ids, num_tokens_padded = humming_moe_align(
+            configs=self.moe_block_size_configs,
             topk_ids=topk_ids,
             num_experts=layer.num_experts,
             expert_map=layer.expert_map,
@@ -855,11 +864,12 @@ class HummingMoEMethod(FusedMoEMethodBase):
             layer=layer,
             inputs=x,
             outputs=None,
-            topk_weights=topk_weights,
-            sorted_token_ids=sorted_token_ids,
+            sorted_ids=sorted_ids,
             expert_ids=expert_ids,
             num_tokens_padded=num_tokens_padded,
             sublayer_name="w13",
+            compute_config=self.compute_config,
+            top_k=self.moe.experts_per_token,
         )
 
         input2 = self.apply_activation(layer, output1)
@@ -868,11 +878,12 @@ class HummingMoEMethod(FusedMoEMethodBase):
             layer=layer,
             inputs=input2,
             outputs=None,
-            topk_weights=topk_weights,
-            sorted_token_ids=sorted_token_ids,
+            sorted_ids=sorted_ids,
             expert_ids=expert_ids,
             num_tokens_padded=num_tokens_padded,
             sublayer_name="w2",
-        )
+            compute_config=self.compute_config,
+            top_k=1,
+        ).view(x.size(0), -1, x.size(1))
 
-        return torch.sum(output2, dim=1, out=x)
+        return humming.ops.moe_fused_mul_sum(output2, topk_weights)
