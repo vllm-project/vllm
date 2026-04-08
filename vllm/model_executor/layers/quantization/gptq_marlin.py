@@ -714,6 +714,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             layer=layer,
             is_k_full=self.is_k_full,
+            desc_act=self.quant_config.desc_act,
             routing_tables=layer._maybe_init_expert_routing_tables(),
             shared_experts=layer.shared_experts,
         )

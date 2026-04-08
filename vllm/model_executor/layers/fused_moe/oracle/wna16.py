@@ -152,23 +152,20 @@ def make_wna16_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts] | None,
     layer: torch.nn.Module,
     is_k_full: bool,
+    desc_act: bool = False,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Currently, we only support MarlinExperts and BatchedMarlinExperts
     assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
 
-    w13_g_idx = getattr(layer, "w13_g_idx", None) if moe_quant_config.desc_act else None
-    w2_g_idx = getattr(layer, "w2_g_idx", None) if moe_quant_config.desc_act else None
+    w13_g_idx = getattr(layer, "w13_g_idx", None) if desc_act else None
+    w2_g_idx = getattr(layer, "w2_g_idx", None) if desc_act else None
     w13_g_idx_sort_indices = (
-        getattr(layer, "w13_g_idx_sort_indices", None)
-        if moe_quant_config.desc_act
-        else None
+        getattr(layer, "w13_g_idx_sort_indices", None) if desc_act else None
     )
     w2_g_idx_sort_indices = (
-        getattr(layer, "w2_g_idx_sort_indices", None)
-        if moe_quant_config.desc_act
-        else None
+        getattr(layer, "w2_g_idx_sort_indices", None) if desc_act else None
     )
 
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
