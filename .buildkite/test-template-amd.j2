@@ -352,9 +352,9 @@ plugins:
         {% endif %}
         agents:
           {% if step.agent_pool %}
-          queue: amd_{{ step.agent_pool }}
+          queue: {{ step.agent_pool }}
           {% else %}
-          queue: amd_mi325_1
+          queue: mi250_1xGPU
           {% endif %}
         command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
         env:
