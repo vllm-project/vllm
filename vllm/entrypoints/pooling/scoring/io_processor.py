@@ -444,7 +444,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor):
         docs = self.ensure_str(scoring_data.data_2)
 
         if len(queries) == 1:
-            prompts = self.format_docs_prompts_func(query=queries[0], docs=docs)
+            prompts = [self.format_docs_prompts_func(query=queries[0], docs=docs)]
         else:
             prompts = [
                 self.format_docs_prompts_func(query=q, docs=[d])
