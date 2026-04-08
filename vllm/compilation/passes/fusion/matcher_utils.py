@@ -249,20 +249,11 @@ class MatcherQuantFP8(MatcherCustomOp):
             assert not quant_key.scale.group_shape.is_per_tensor(), (
                 "ROCm aiter fusion pass does not support per tensor quantization"
             )
-            if quant_key.scale.group_shape.is_per_token():
-                self.QUANT_OP = rocm_aiter_ops.get_per_token_quant_op()
-            else:
+            if not quant_key.scale.group_shape.is_per_token():
                 assert quant_key.scale.group_shape.col == 128, (
                     "ROCm aiter fusion pass currently supports "
                     "quantization operation with group_size 128"
                 )
-                if current_platform.is_fp8_fnuz():
-                    self.QUANT_OP = rocm_aiter_ops.get_group_quant_op()
-                else:
-                    self.QUANT_OP = (
-                        torch.ops.vllm.triton_per_token_group_quant_fp8.default
-                    )
-
         else:
             assert quant_key in QUANT_OPS, (
                 f"unsupported quantization scheme {quant_key}"
