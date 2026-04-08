@@ -431,6 +431,7 @@ class MoERunnerBase(MoERunner):
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
         if self._shared_experts is not None:
+            assert shared_experts_input is not None
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def forward(
