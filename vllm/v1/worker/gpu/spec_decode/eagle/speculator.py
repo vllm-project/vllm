@@ -342,6 +342,7 @@ class EagleSpeculator:
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        skip_drafting: bool = False,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -378,10 +379,15 @@ class EagleSpeculator:
             num_tokens_across_dp=num_tokens_across_dp,
             mm_inputs=mm_inputs,
         )
+
+        num_reqs = input_batch.num_reqs
+        if skip_drafting:
+            # Return dummy draft tokens.
+            return self.draft_tokens[:num_reqs]
+
         sample_hidden_states = last_hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states)
 
-        num_reqs = input_batch.num_reqs
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
