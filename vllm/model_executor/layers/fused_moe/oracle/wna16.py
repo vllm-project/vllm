@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import torch
 
@@ -17,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
@@ -26,9 +26,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
-
-if TYPE_CHECKING:
-    from vllm.model_executor.layers.quantization.gptq_marlin import GPTQMarlinConfig
 
 logger = init_logger(__name__)
 
@@ -149,14 +146,14 @@ def select_wna16_moe_backend(
 def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-    expert_cls: type[mk.FusedMoEExperts],
+    experts_cls: type[mk.FusedMoEExperts] | None,
     layer: torch.nn.Module,
     is_k_full: bool,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Currently, we only support MarlinExperts and BatchedMarlinExperts
-    assert expert_cls in (MarlinExperts, BatchedMarlinExperts)
+    assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
 
     w13_g_idx = getattr(layer, "w13_g_idx", None) if moe_quant_config.desc_act else None
     w2_g_idx = getattr(layer, "w2_g_idx", None) if moe_quant_config.desc_act else None
@@ -185,7 +182,7 @@ def make_wna16_moe_kernel(
     assert isinstance(prepare_finalize, mk.FusedMoEPrepareAndFinalizeModular)
 
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-        assert expert_cls == BatchedMarlinExperts
+        assert experts_cls == BatchedMarlinExperts
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
         experts: mk.FusedMoEExperts = BatchedMarlinExperts(
@@ -200,7 +197,7 @@ def make_wna16_moe_kernel(
             is_k_full=is_k_full,
         )
     else:
-        assert expert_cls == MarlinExperts
+        assert experts_cls == MarlinExperts
         experts = MarlinExperts(
             moe_config=moe_config,
             quant_config=moe_quant_config,
@@ -384,7 +381,6 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
-        assert isinstance(quant_config, GPTQMarlinConfig)
         _process_weights_marlin(layer, quant_config, input_dtype)
 
     else:

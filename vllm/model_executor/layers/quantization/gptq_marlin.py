@@ -711,7 +711,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         self.moe_kernel = make_wna16_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
-            expert_cls=self.expert_cls,
+            experts_cls=self.experts_cls,
             layer=layer,
             is_k_full=self.is_k_full,
             routing_tables=layer._maybe_init_expert_routing_tables(),
