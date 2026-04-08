@@ -488,7 +488,7 @@ def _hadacore_available() -> bool:
     return _HADACORE_AVAILABLE
 
 
-# Portable Triton WHT: out = x @ H via tl.dot (Tensor Cores on CUDA, MFMA on ROCm).
+# Portable Triton Hadamard: out = x @ H via tl.dot (Tensor Cores / MFMA).
 
 _HADAMARD_MATRIX_CACHE: dict[tuple[int, torch.dtype, str], torch.Tensor] = {}
 
