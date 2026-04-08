@@ -291,37 +291,46 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         # Dispatch
         dispatch_topk_ids = self._map_global_to_physical_ids(topk_ids)
-
         if current_platform.is_rocm():
-            extra_args = dict()
+            (
+                expert_x,
+                expert_num_tokens,
+                handle,
+                _,
+                hook,
+            ) = self.buffer.low_latency_dispatch(
+                a1,
+                dispatch_topk_ids,
+                self.max_tokens_per_rank,
+                num_experts,
+                use_fp8=self.use_fp8_dispatch,
+                async_finish=False,
+                return_recv_hook=True,
+            )
         else:
-            extra_args = {
-                "round_scale": self.use_ue8m0_dispatch,
-                "use_ue8m0": self.use_ue8m0_dispatch,
-            }
-
-            if use_nvfp4:
-                extra_args["use_nvfp4"] = True
-                if qc_a1_gscale_or_scale is not None:
-                    extra_args["x_global_scale"] = qc_a1_gscale_or_scale
-
-        (
-            expert_x,
-            expert_num_tokens,
-            handle,
-            _,
-            hook,
-        ) = self.buffer.low_latency_dispatch(
-            a1,
-            dispatch_topk_ids,
-            self.max_tokens_per_rank,
-            num_experts,
-            use_fp8=self.use_fp8_dispatch,
-            async_finish=False,
-            return_recv_hook=True,
-            **extra_args,
-        )
-
+            (
+                expert_x,
+                expert_num_tokens,
+                handle,
+                _,
+                hook,
+            ) = self.buffer.low_latency_dispatch(
+                a1,
+                dispatch_topk_ids,
+                self.max_tokens_per_rank,
+                num_experts,
+                use_fp8=self.use_fp8_dispatch,
+                round_scale=self.use_ue8m0_dispatch,
+                use_ue8m0=self.use_ue8m0_dispatch,
+                **(dict(use_nvfp4=True) if use_nvfp4 else dict()),
+                **(
+                    dict(x_global_scale=qc_a1_gscale_or_scale)
+                    if qc_a1_gscale_or_scale is not None and nvfp4_dispatch
+                    else dict()
+                ),
+                async_finish=False,
+                return_recv_hook=True,
+            )
         self.handles[a2a_idx] = handle
 
         return (

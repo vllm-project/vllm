@@ -489,6 +489,7 @@ class FusedMoE(CustomOp):
             # TODO: in_dtype == out_dtype?
             disable_inplace=disable_inplace() or shared_experts is not None,
         )
+
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
                 "Mori needs to be used with aiter fused_moe for now."
