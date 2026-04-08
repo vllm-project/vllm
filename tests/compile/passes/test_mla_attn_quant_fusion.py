@@ -467,11 +467,14 @@ def test_mla_attention_quant_pattern(
     )
 
     # Check quantization ops in the graph
-    quant_op = (
-        torch.ops.aten.reciprocal
-        if "-quant_fp8" in custom_ops_list
-        else QUANT_OPS[quant_key]
-    )
+    if "-quant_fp8" in custom_ops_list:
+        # Custom op disabled → forward_native → IR ops
+        if quant_key.scale.static:
+            quant_op = torch.ops.vllm_ir.static_quant_fp8
+        else:
+            quant_op = torch.ops.vllm_ir.dynamic_quant_fp8
+    else:
+        quant_op = QUANT_OPS[quant_key]
     test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)

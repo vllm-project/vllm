@@ -122,7 +122,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
             torch.ops.vllm.all_reduce.default,
             torch.ops._C.static_scaled_fp8_quant.default
             if self.fp8_linear_layers[0].is_quant_fp8_enabled()
-            else torch.ops.aten.reciprocal.default,
+            else torch.ops.vllm_ir.static_quant_fp8,
         ]
 
 

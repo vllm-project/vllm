@@ -204,7 +204,7 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
         ops.append(
             QUANT_OPS[self.quant_key]
             if self.enable_quant_fp8_custom_op
-            else torch.ops.aten.reciprocal.default
+            else torch.ops.vllm_ir.dynamic_group_quant_fp8
         )
         return ops
 

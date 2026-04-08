@@ -427,11 +427,13 @@ def test_attention_quant_pattern(
     )
 
     # Check quantization ops in the graph before and after fusion
-    quant_op = (
-        torch.ops.aten.reciprocal
-        if "-quant_fp8" in custom_ops_list
-        else QUANT_OPS[quant_key]
-    )
+    if "-quant_fp8" in custom_ops_list:
+        if quant_key.scale.static:
+            quant_op = torch.ops.vllm_ir.static_quant_fp8
+        else:
+            quant_op = torch.ops.vllm_ir.dynamic_quant_fp8
+    else:
+        quant_op = QUANT_OPS[quant_key]
 
     # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
     # Only output quant ops are fused into attention.
