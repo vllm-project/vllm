@@ -144,9 +144,7 @@ class RequestOutput:
     @property
     def kv_transfer_params(self) -> dict[str, Any] | list[dict[str, Any]] | None:
         params_list = [
-            o.kv_transfer_params
-            for o in self.outputs
-            if o.kv_transfer_params
+            o.kv_transfer_params for o in self.outputs if o.kv_transfer_params
         ]
         if len(params_list) == 1:
             # keep backward compatibility for the common case where there is
