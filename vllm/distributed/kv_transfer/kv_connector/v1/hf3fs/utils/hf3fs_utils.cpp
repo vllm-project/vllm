@@ -55,10 +55,10 @@ void read_shm(const torch::Tensor& shm, const torch::Tensor& pin,
     auto& t = dst[i];
     const size_t t_bytes = safe_tensor_bytes(t, "read_shm");
     // Subtraction-form check avoids unsigned integer overflow in the sum.
-    TORCH_CHECK(t_bytes <= pin_bytes - current,
-                "read_shm: tensor[", i, "] copy would exceed pinned memory "
+    TORCH_CHECK(t_bytes <= shm_bytes - current,
+                "read_shm: tensor[", i, "] copy would exceed shared memory "
                 "buffer bounds (current=", current, ", t_bytes=", t_bytes,
-                ", pin_bytes=", pin_bytes, ")");
+                ", shm_bytes=", shm_bytes, ")");
     char* dst_ptr = static_cast<char*>(t.data_ptr());
     cudaMemcpyAsync(dst_ptr, src_ptr + current, t_bytes, cudaMemcpyHostToDevice,
                     stream);
@@ -96,9 +96,11 @@ void write_shm(const std::vector<torch::Tensor> src, torch::Tensor& shm,
   cudaStreamSynchronize(stream);
 
   // Copy from pinned memory to shared memory.
-  // checked_memcpy enforces that shm_bytes <= pin_bytes (src capacity) and
-  // that shm_bytes <= shm_bytes (dst capacity) before performing the copy,
-  // preventing reads beyond the pin buffer and writes beyond the shm buffer.
+  // Validate that the pin (source) buffer contains at least shm_bytes of
+  // data before copying, preventing an out-of-bounds read from pin.
+  TORCH_CHECK(pin_bytes >= shm_bytes,
+              "write_shm: pinned memory buffer (", pin_bytes,
+              " bytes) is smaller than shared memory buffer (", shm_bytes, " bytes)");
   checked_memcpy(shm.data_ptr(), pin.data_ptr(), shm_bytes, shm_bytes,
                  "write_shm memcpy(shm, pin)");
 }

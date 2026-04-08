@@ -132,7 +132,7 @@ struct DeviceComms {
 
       for (int i = 0; i < world_size; i++) {
         if (i != rank) {
-          HIP_CHECK(hipIpcCloseMemHandle(dbuffer_list[i]));
+          HIP_CHECK(hipIpcCloseMemHandle(buffer_list[i]));
         }
       }
 
