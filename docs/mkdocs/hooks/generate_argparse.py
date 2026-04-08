@@ -153,7 +153,7 @@ class MarkdownFormatter(HelpFormatter):
             heading_md = f"{self._argument_heading_prefix} {option_strings}\n\n"
             self._markdown_output.append(heading_md)
 
-            if action.choices or isinstance(action.metavar, (list, tuple)):
+            if action.choices or isinstance(action.metavar, list | tuple):
                 choices_iterable = action.choices or action.metavar
                 choices = f"`{'`, `'.join(str(c) for c in choices_iterable)}`"
                 self._markdown_output.append(f":   Possible choices: {choices}\n\n")

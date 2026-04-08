@@ -239,10 +239,12 @@ def convert_bin_to_safetensor_file(
     sf_size = os.stat(sf_filename).st_size
     pt_size = os.stat(pt_filename).st_size
     if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(f"""The file size different is more than 1%:
+        raise RuntimeError(
+            f"""The file size different is more than 1%:
          - {sf_filename}: {sf_size}
          - {pt_filename}: {pt_size}
-         """)
+         """
+        )
 
     # check if the tensors are the same
     reloaded = load_file(sf_filename)
@@ -294,6 +296,13 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
+        if model_config.quantization_config is not None:
+            raise ValueError(
+                "Setting `quantization_config` for online "
+                "quantization when the model checkpoint already "
+                "has a `quantization_config` is not supported"
+            )
+
         # For modelopt_mixed, config.json's quantization_config may or may
         # not contain the per-layer quantized_layers map.  Newer checkpoints
         # embed it directly; older ones keep it only in hf_quant_config.json.
@@ -317,6 +326,12 @@ def get_quant_config(
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
+            if model_config.quantization_config is not None:
+                raise ValueError(
+                    "Setting `quantization_config` for online "
+                    "quantization when the model checkpoint already "
+                    "has a `quantization_config` is not supported"
+                )
             return quant_cls.from_config_file(quantization_config_file)
         else:
             raise NotImplementedError(
@@ -327,6 +342,12 @@ def get_quant_config(
     quantization_config_json = hf_overrides.get("quantization_config_dict_json", None)
     if quantization_config_json is not None:
         if hasattr(quant_cls, "from_config_dict_json"):
+            if model_config.quantization_config is not None:
+                raise ValueError(
+                    "Setting `quantization_config` for online "
+                    "quantization when the model checkpoint already "
+                    "has a `quantization_config` is not supported"
+                )
             return quant_cls.from_config_dict_json(quantization_config_json)
         else:
             raise NotImplementedError(
@@ -334,6 +355,19 @@ def get_quant_config(
                 "but quant_cls.from_config_dict_json is not implemented in "
                 f"{quant_cls}"
             )
+
+    # Online quantization doesn't read from checkpoint configs — it quantizes
+    # fp16/bf16 weights on the fly during loading.
+    if model_config.quantization_config is not None:
+        from vllm.config.quantization import OnlineQuantizationConfigArgs
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        assert isinstance(
+            model_config.quantization_config, OnlineQuantizationConfigArgs
+        )
+        return OnlineQuantizationConfig(args=model_config.quantization_config)
 
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
@@ -1222,6 +1256,49 @@ def gguf_quant_weights_iterator(
             yield name, param
 
 
+def gguf_quant_weights_iterator_multi(
+    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str]
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """
+    Iterate over the quant weights across multiple GGUF shard files
+    and convert them to torch tensors.
+
+    Like gguf_quant_weights_iterator, we yield all weight types first
+    before yielding any weights data to avoid issues with packed layers
+    that have different quant types.
+    """
+    readers = [gguf.GGUFReader(f) for f in gguf_files]
+
+    # First pass: yield all weight types across all shards
+    for reader in readers:
+        for tensor in reader.tensors:
+            if tensor.name in gguf_to_hf_name_map:
+                weight_type = tensor.tensor_type
+                name = gguf_to_hf_name_map[tensor.name]
+                if weight_type.name not in ("F32", "BF16", "F16"):
+                    weight_type_name = name.replace("weight", "qweight_type")
+                    weight_type = torch.tensor(weight_type)
+                    yield weight_type_name, weight_type
+
+    # Second pass: yield all weight data across all shards
+    for reader in readers:
+        for tensor in reader.tensors:
+            if tensor.name in gguf_to_hf_name_map:
+                weight = tensor.data
+                weight_type = tensor.tensor_type
+                name = gguf_to_hf_name_map[tensor.name]
+                if weight_type.name not in ("F32", "BF16", "F16"):
+                    name = name.replace("weight", "qweight")
+                if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
+                    weight = weight.view(np.uint16)
+                    if reader.byte_order == "S":
+                        weight = weight.byteswap()
+                    param = torch.tensor(weight).view(torch.bfloat16)
+                else:
+                    param = torch.tensor(weight)
+                yield name, param
+
+
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     """convert PySafeSlice object from safetensors to torch.Tensor
 
@@ -1323,65 +1400,61 @@ def initialize_dummy_weights(
     is fixed, the random values generated by this function only depends on
     the parameter's number of elements and its data type.
     """
-
-    # Check if any module uses online quantization with meta device weights.
-    # If so, we'll skip initializing params on meta device since they'll be
-    # handled in `process_weights_after_loading`.
-    def uses_meta_device(module: torch.nn.Module) -> bool:
-        quant_method = getattr(module, "quant_method", None)
-        return getattr(quant_method, "uses_meta_device", False)
-
-    has_online_quant = any(uses_meta_device(m) for m in model.modules())
-
     for param in model.state_dict().values():
-        if has_online_quant and param.device == torch.device("meta"):
-            # For online quantization, weights are created on meta device and
-            # dummy weight init will happen in `process_weights_after_loading`.
-            continue
-
         initialize_single_dummy_weight(param, low, high, seed)
 
 
+@torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
     low: float = -1e-3,
     high: float = 1e-3,
     seed: int = 1234,
 ) -> None:
-    if torch.is_floating_point(param):
-        if current_platform.is_tpu():
-            generator = torch.Generator(device="cpu")
-            generator.manual_seed(seed)
-            # Note: The param.uniform_ function cannot be used in this
-            # context because it demands more TPU HBM than directly copying
-            # from a CPU tensor.
-            # Note: We avoid using torch.rank_like as it doesn't currently
-            # support the generator argument.
-            param.copy_(
-                (high - low)
-                * torch.rand(
-                    param.shape,
-                    generator=generator,
-                    dtype=param.dtype,
-                    layout=param.layout,
-                    requires_grad=param.requires_grad,
-                    device="cpu",
-                )
-                + low
-            )
-            torch._sync(param)
-            return
+    if param.device.type == "meta":
+        return  # deferred to finalize_layerwise_processing (e.g. online quant)
 
-        generator = torch.Generator(device=param.data.device)
+    if not torch.is_floating_point(param):
+        if current_platform.is_rocm():
+            # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left
+            # as torch.empty() by default, giving non-deterministic values
+            # across processes. Zero them for reproducibility.
+            param.zero_()
+        return
+
+    if current_platform.is_tpu():
+        generator = torch.Generator(device="cpu")
         generator.manual_seed(seed)
-        if torch.finfo(param.data.dtype).bits < 16:
-            # uniform_ doesn't support < 16-bit datatypes (FP8)
-            dtype = param.data.dtype
-            tmp_param = param.data.to(torch.float16)
-            tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
-            param.data.copy_(tmp_param)
-        else:
-            param.uniform_(low, high, generator=generator)
+        # Note: The param.uniform_ function cannot be used in this
+        # context because it demands more TPU HBM than directly copying
+        # from a CPU tensor.
+        # Note: We avoid using torch.rank_like as it doesn't currently
+        # support the generator argument.
+        param.copy_(
+            (high - low)
+            * torch.rand(
+                param.shape,
+                generator=generator,
+                dtype=param.dtype,
+                layout=param.layout,
+                requires_grad=param.requires_grad,
+                device="cpu",
+            )
+            + low
+        )
+        torch._sync(param)
+        return
+
+    generator = torch.Generator(device=param.data.device)
+    generator.manual_seed(seed)
+    if torch.finfo(param.data.dtype).bits < 16:
+        # uniform_ doesn't support < 16-bit datatypes (FP8)
+        dtype = param.data.dtype
+        tmp_param = param.data.to(torch.float16)
+        tmp_param = tmp_param.uniform_(low, high, generator=generator).to(dtype)
+        param.data.copy_(tmp_param)
+    else:
+        param.uniform_(low, high, generator=generator)
 
 
 def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> str | None:

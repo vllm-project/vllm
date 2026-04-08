@@ -215,6 +215,17 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
             grid_thws=MultiModalFieldConfig.batched("vision_chunk"),
         )
 
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override to use the text path instead of token path because vision chunk
+        # is not considered
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -358,7 +369,7 @@ class KimiK25ForConditionalGeneration(
         target_dtype = next(self.vision_tower.parameters()).dtype
         pixel_values = pixel_values.to(target_dtype)
         assert isinstance(grid_thws, torch.Tensor), (
-            f"expect grid_thws to be a tensor, get {type(grid_thws)}"
+            f"expect grid_thws to be a tensor, got {type(grid_thws)}"
         )
         # In some cases (e.g. with merger), grid_thws has an extra middle dimension
         grid_thws = grid_thws.reshape(-1, grid_thws.shape[-1])

@@ -60,7 +60,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "ModelOptFp8PbWoLinearMethod",
     "QuarkLinearMethod",
     "ModelOptNvFp4LinearMethod",
-    "PetitNvFp4LinearMethod",
 ]
 
 
@@ -768,6 +767,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 # Special case for Quantization.
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
+                # Add check to adjust the size/offset for FP8 block scales
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.packed_factor
                     shard_offset = shard_offset // param.packed_factor
@@ -904,7 +910,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self.validate_shard_id(loaded_shard_id)
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
             if isinstance(param, PerTensorScaleParameter):
-                param.load_merged_column_weight(loaded_weight=loaded_weight, shard_id=0)
+                if isinstance(loaded_shard_id, tuple):
+                    for idx in loaded_shard_id:
+                        param.load_merged_column_weight(
+                            loaded_weight=loaded_weight, shard_id=idx
+                        )
+                else:
+                    param.load_merged_column_weight(
+                        loaded_weight=loaded_weight, shard_id=0
+                    )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
@@ -1218,6 +1232,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # Special case for Quantized Weights.
                 # If quantized, we need to adjust the offset and size to account
                 # for the packing.
+                # Add check to adjust the size/offset for FP8 block scales
+                if isinstance(param, BlockQuantScaleParameter):
+                    weight_block_size = getattr(self, "weight_block_size", None)
+                    shard_size, shard_offset = adjust_block_scale_shard(
+                        weight_block_size, shard_size, shard_offset
+                    )
+
                 if packed_dim == output_dim:
                     shard_size = shard_size // param.packed_factor
                     shard_offset = shard_offset // param.packed_factor
