@@ -80,19 +80,6 @@ class EngineHandshakeMetadata:
     parallel_config: dict[str, int | str | list[int]]
 
 
-@dataclass
-class EngineCoreReadyResponse:
-    """Sent from EngineCore to each frontend at the end of engine startup.
-
-    Contains post-initialization config that may differ from the original
-    values (e.g. max_model_len after KV cache auto-fitting).
-    """
-
-    num_gpu_blocks: int
-    dp_stats_address: str | None
-    max_model_len: int | None = None
-
-
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown

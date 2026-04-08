@@ -52,6 +52,7 @@ from vllm.v1.engine import (
     EEPNotificationType,
     EngineCoreOutput,
     EngineCoreOutputs,
+    EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
     FinishReason,
@@ -63,7 +64,6 @@ from vllm.v1.engine import (
 )
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
-    EngineCoreReadyResponse,
     EngineHandshakeMetadata,
     EngineZmqAddresses,
     SignalCallback,
