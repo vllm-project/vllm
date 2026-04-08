@@ -179,9 +179,9 @@ class BaseRouter(FusedMoERouter):
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
-        if self._check_eplb_initialized() is None:
+        if self.eplb_state is not None and self._check_eplb_initialized() is None:
             logger.warning_once(
-                "enable_eplb=True but EPLB state is not yet initialized. "
+                "EPLB is enabled but its state is not yet initialized. "
                 "EPLB mapping will be skipped until set_eplb_state() is "
                 "called. This is expected during compilation/profiling."
             )
