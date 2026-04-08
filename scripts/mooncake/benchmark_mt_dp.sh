@@ -54,6 +54,38 @@ fi
 
 mkdir -p "$RESULT_DIR"
 
+if [[ -v MC_TCP_ENABLE_CONNECTION_POOL ]]; then
+    ORIGINAL_MC_TCP_ENABLE_CONNECTION_POOL="$MC_TCP_ENABLE_CONNECTION_POOL"
+    ORIGINAL_MC_TCP_ENABLE_CONNECTION_POOL_SET=1
+else
+    ORIGINAL_MC_TCP_ENABLE_CONNECTION_POOL=""
+    ORIGINAL_MC_TCP_ENABLE_CONNECTION_POOL_SET=0
+fi
+
+if [[ -v MOONCAKE_CONFIG_PATH ]]; then
+    ORIGINAL_MOONCAKE_CONFIG_PATH="$MOONCAKE_CONFIG_PATH"
+    ORIGINAL_MOONCAKE_CONFIG_PATH_SET=1
+else
+    ORIGINAL_MOONCAKE_CONFIG_PATH=""
+    ORIGINAL_MOONCAKE_CONFIG_PATH_SET=0
+fi
+
+if [[ -v MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES ]]; then
+    ORIGINAL_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES="$MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES"
+    ORIGINAL_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES_SET=1
+else
+    ORIGINAL_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES=""
+    ORIGINAL_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES_SET=0
+fi
+
+if [[ -v VLLM_USE_SIMPLE_KV_OFFLOAD ]]; then
+    ORIGINAL_VLLM_USE_SIMPLE_KV_OFFLOAD="$VLLM_USE_SIMPLE_KV_OFFLOAD"
+    ORIGINAL_VLLM_USE_SIMPLE_KV_OFFLOAD_SET=1
+else
+    ORIGINAL_VLLM_USE_SIMPLE_KV_OFFLOAD=""
+    ORIGINAL_VLLM_USE_SIMPLE_KV_OFFLOAD_SET=0
+fi
+
 SERVER_COMMON=(
     --model "$MODEL"
     -dp "$DATA_PARALLEL_SIZE"
@@ -119,6 +151,33 @@ kill_server() {
 }
 trap kill_server EXIT
 
+restore_env_var() {
+    local var_name="$1"
+    local was_set="$2"
+    local value="$3"
+
+    if [[ "$was_set" == "1" ]]; then
+        export "$var_name=$value"
+    else
+        unset "$var_name"
+    fi
+}
+
+reset_backend_env() {
+    restore_env_var "MC_TCP_ENABLE_CONNECTION_POOL" \
+        "$ORIGINAL_MC_TCP_ENABLE_CONNECTION_POOL_SET" \
+        "$ORIGINAL_MC_TCP_ENABLE_CONNECTION_POOL"
+    restore_env_var "MOONCAKE_CONFIG_PATH" \
+        "$ORIGINAL_MOONCAKE_CONFIG_PATH_SET" \
+        "$ORIGINAL_MOONCAKE_CONFIG_PATH"
+    restore_env_var "MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES" \
+        "$ORIGINAL_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES_SET" \
+        "$ORIGINAL_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES"
+    restore_env_var "VLLM_USE_SIMPLE_KV_OFFLOAD" \
+        "$ORIGINAL_VLLM_USE_SIMPLE_KV_OFFLOAD_SET" \
+        "$ORIGINAL_VLLM_USE_SIMPLE_KV_OFFLOAD"
+}
+
 mooncake_owner_reminder() {
     echo "  Mooncake backend expects an external owner to be running before vLLM starts."
     echo "  setup_vllm_env.sh only configures requester-side environment."
@@ -174,6 +233,7 @@ echo "============================================"
 IFS=',' read -ra BACKEND_LIST <<< "$BACKENDS"
 
 for backend in "${BACKEND_LIST[@]}"; do
+    reset_backend_env
     case "$backend" in
         baseline)
             run_one "Baseline (no offloading)" "mt_baseline.json"
