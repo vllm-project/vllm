@@ -22,7 +22,7 @@ from prometheus_client import start_http_server
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 from starlette.datastructures import State
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 from tqdm import tqdm
 from urllib3.util import parse_url
 
@@ -542,7 +542,10 @@ async def run_request(
     except Exception as e:
         response = create_error_response(e)
 
-    if isinstance(response, JSONResponse):
+    # Handle both JSONResponse and ORJSONResponse (used when orjson is installed).
+    # ORJSONResponse inherits from Response directly, not from JSONResponse, so
+    # we check for any non-streaming response that carries a JSON body.
+    if not isinstance(response, StreamingResponse) and hasattr(response, "body"):
         with contextlib.suppress(pydantic.ValidationError):
             response = TypeAdapter(AllResponse | ErrorResponse).validate_python(
                 json.loads(response.body)
