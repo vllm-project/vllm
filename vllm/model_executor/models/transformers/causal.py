@@ -16,6 +16,7 @@
 # limitations under the License.
 """Transformers modeling backend mixin for causal language models."""
 
+import re
 from typing import TYPE_CHECKING
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -41,6 +42,25 @@ class CausalMixin(VllmModelForTextGeneration):
         tie_word_embeddings = self._get_tie_word_embeddings()
         if tie_word_embeddings:
             self.skip_prefixes.append("lm_head.")
+
+        # Audio models (e.g. granite_speech) wrap a full CausalLM as a child.
+        # Unwrap to the base model to avoid duplicate lm_head and logit output.
+        unwrapped_children: list[tuple[str, str]] = []
+        for name, child in list(self.model.named_children()):
+            bmp = getattr(child, "base_model_prefix", "")
+            if hasattr(child, "lm_head") and child.lm_head is not None and bmp:
+                base = getattr(child, bmp, None)
+                if base is not None:
+                    setattr(self.model, name, base)
+                    unwrapped_children.append((name, bmp))
+        if unwrapped_children:
+            # Rebuild the weight mapper so it accounts for the new children.
+            self._create_hf_to_vllm_mapper()
+            # Strip the old base_model_prefix from checkpoint weight names
+            # (e.g. language_model.model.layers -> language_model.layers).
+            for child_name, old_bmp in unwrapped_children:
+                pat = re.compile(rf"^(model\.{child_name})\.{old_bmp}\.")
+                self.hf_to_vllm_mapper.orig_to_new_regex[pat] = r"\1."
 
         if self.pp_group.is_last_rank:
             self.lm_head = ParallelLMHead(
