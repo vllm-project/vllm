@@ -9,7 +9,6 @@ and cache operations) for both cold and warm scenarios:
 """
 
 import argparse
-import dataclasses
 import json
 import multiprocessing
 import os
@@ -67,7 +66,7 @@ def run_startup_in_subprocess(engine_args, result_queue):
         # Measure total startup time
         start_time = time.perf_counter()
 
-        llm = LLM(**dataclasses.asdict(engine_args))
+        llm = LLM.from_engine_args(engine_args)
 
         total_startup_time = time.perf_counter() - start_time
 

@@ -8,7 +8,7 @@ from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
-from vllm.tokenizers.registry import tokenizer_args_from_config
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 cherry_pil_image = ImageAsset("cherry_blossom").pil_image
 stop_pil_image = ImageAsset("stop_sign").pil_image
@@ -29,11 +29,9 @@ def _build_renderer(
         cache_config=CacheConfig(enable_prefix_caching=enable_prefix_caching),
     )
 
-    _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
-
-    return HfRenderer.from_config(
+    return HfRenderer(
         vllm_config,
-        tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
+        cached_tokenizer_from_config(model_config),
     )
 
 
@@ -41,6 +39,16 @@ def test_multi_modal_uuids_length_mismatch_raises():
     renderer = _build_renderer()
 
     mm_data = {"image": [cherry_pil_image, stop_pil_image]}
+
+    # Mismatch: 2 items but only 0 uuids provided
+    mm_uuids = {"image": []}  # type: ignore[var-annotated]
+
+    mm_processor = renderer.get_mm_processor()
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids(mm_uuids)
+
+    with pytest.raises(ValueError, match="must have same length as"):
+        renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1a")
 
     # Mismatch: 2 items but only 1 uuid provided
     mm_uuids = {"image": ["hash_cherry"]}
@@ -50,7 +58,7 @@ def test_multi_modal_uuids_length_mismatch_raises():
     mm_uuid_items = parse_mm_uuids(mm_uuids)
 
     with pytest.raises(ValueError, match="must have same length as"):
-        renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1")
+        renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1b")
 
 
 def test_multi_modal_uuids_missing_modality_raises():
@@ -125,8 +133,8 @@ def test_multi_modal_uuids_accepts_empty(
 
     # While None means cached multi-modal input requiring UUIDs
     # an empty list means no multi-modal input
-    mm_data = {"image": [], "video": []}  # type: ignore[var-annotated]
-    mm_uuids = {"image": [], "video": None}  # type: ignore[var-annotated]
+    mm_data = {"image": [], "video": [], "audio": None}  # type: ignore[var-annotated]
+    mm_uuids = {"image": [], "video": None, "audio": []}  # type: ignore[var-annotated]
 
     mm_processor = renderer.get_mm_processor()
     mm_data_items = mm_processor.info.parse_mm_data(mm_data)

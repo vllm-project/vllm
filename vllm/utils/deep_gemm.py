@@ -23,6 +23,24 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
 
+_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
+    "qwen3_5_text",
+    "qwen3_5_moe_text",
+}
+
+
+def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
+    """Check if DeepGemm should be auto-disabled for this model on Blackwell.
+
+    Returns True if the model is known to have accuracy degradation with
+    DeepGemm's E8M0 scale format on Blackwell GPUs (SM100+).
+    """
+    if model_type is None:
+        return False
+    if not current_platform.is_device_capability_family(100):
+        return False
+    return model_type in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES
+
 
 class DeepGemmQuantScaleFMT(Enum):
     # Float32 scales in Float32 tensor
@@ -70,10 +88,7 @@ def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
-    is_supported_arch = current_platform.is_cuda() and (
-        current_platform.is_device_capability(90)
-        or current_platform.is_device_capability_family(100)
-    )
+    is_supported_arch = current_platform.support_deep_gemm()
     return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
@@ -349,7 +364,7 @@ def _align(x: int, y: int) -> int:
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/v2.1.1/csrc/utils/math.hpp#L19
-def get_tma_aligned_size(x: int, element_size: int):
+def get_tma_aligned_size(x: int, element_size: int) -> int:
     return _align(x, 16 // element_size)
 
 

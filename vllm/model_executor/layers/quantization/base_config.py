@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -17,6 +18,11 @@ else:
 
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
+
+    # Whether this method creates weights on meta device for online quantization.
+    # When True, weights are created on meta device and quantized layer-wise
+    # in process_weights_after_loading, reducing peak memory during loading.
+    uses_meta_device: bool = False
 
     @abstractmethod
     def create_weights(
@@ -163,10 +169,23 @@ class QuantizationConfig(ABC):
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
 
-    def maybe_update_config(self, model_name: str):  # noqa: B027
+    def maybe_update_config(  # noqa: B027
+        self,
+        model_name: str,
+        hf_config: PretrainedConfig | None = None,
+        revision: str | None = None,
+    ):
         """
         Interface to update values after config initialization.
+
+        Args:
+            model_name: The name of the model
+            hf_config: The Hugging Face config of the model
+            revision: The revision of the model
+        Returns:
         """
+        # TODO: revision is never passed currently in vllm.py,
+        # but is used in subclasses, should we remove this parameter?
         pass
 
     def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:

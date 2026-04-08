@@ -11,17 +11,17 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
-- label: LM Eval Large Models (4 GPUs)(A100)
-  device: a100
-  optional: true
-  num_devices: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+# - label: LM Eval Large Models (4 GPUs)(A100)
+#   device: a100
+#   optional: true
+#   num_devices: 4
+#   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+#   source_file_dependencies:
+#   - csrc/
+#   - vllm/model_executor/layers/quantization
+#   commands:
+#   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+#   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: LM Eval Large Models (4 GPUs)(H100)
   device: h100
@@ -44,6 +44,22 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
+
+- label: LM Eval Qwen3.5 Models (B200)
+  timeout_in_minutes: 120
+  device: b200
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/model_executor/models/qwen3_5.py
+  - vllm/model_executor/models/qwen3_5_mtp.py
+  - vllm/transformers_utils/configs/qwen3_5.py
+  - vllm/transformers_utils/configs/qwen3_5_moe.py
+  - vllm/model_executor/models/qwen3_next.py
+  - vllm/model_executor/models/qwen3_next_mtp.py
+  - vllm/model_executor/layers/fla/ops/
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-qwen35-blackwell.txt
 
 - label: LM Eval Large Models (H200)
   timeout_in_minutes: 60
@@ -73,3 +89,30 @@ steps:
   num_devices: 2
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
+
+
+- label: GPQA Eval (GPT-OSS) (H100)
+  timeout_in_minutes: 120
+  device: h100
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
+
+- label: GPQA Eval (GPT-OSS) (B200)
+  timeout_in_minutes: 120
+  device: b200
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt

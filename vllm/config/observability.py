@@ -59,7 +59,7 @@ class ObservabilityConfig:
 
     enable_layerwise_nvtx_tracing: bool = False
     """Enable layerwise NVTX tracing. This traces the execution of each layer or
-    module in the model and attach informations such as input/output shapes to
+    module in the model and attach information such as input/output shapes to
     nvtx range markers. Noted that this doesn't work with CUDA graphs enabled."""
 
     enable_mfu_metrics: bool = False

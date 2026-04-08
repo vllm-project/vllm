@@ -7,7 +7,9 @@
 #include "cuda_utils.h"
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-#include "quantization/vectorization_utils.cuh"
+
+#include "libtorch_stable/quantization/vectorization_utils.cuh"
+#include "concat_mla_q.cuh"
 
 #ifdef USE_ROCM
   #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
@@ -22,6 +24,8 @@
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
 typedef __hip_bfloat16 __nv_bfloat16;
+#else
+  #include <cuda.h>
 #endif
 
 #if defined(__gfx942__)
@@ -69,6 +73,68 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
     cudaMemcpyAsync(dst_ptr + dst_offset, src_ptr + src_offset,
                     block_size_in_bytes, memcpy_type, stream);
   }
+}
+
+void swap_blocks_batch(const torch::Tensor& src_ptrs,
+                       const torch::Tensor& dst_ptrs,
+                       const torch::Tensor& sizes) {
+  TORCH_CHECK(src_ptrs.device().is_cpu(), "src_ptrs must be on CPU");
+  TORCH_CHECK(dst_ptrs.device().is_cpu(), "dst_ptrs must be on CPU");
+  TORCH_CHECK(sizes.device().is_cpu(), "sizes must be on CPU");
+  TORCH_CHECK(src_ptrs.dtype() == torch::kInt64, "src_ptrs must be int64");
+  TORCH_CHECK(dst_ptrs.dtype() == torch::kInt64, "dst_ptrs must be int64");
+  TORCH_CHECK(sizes.dtype() == torch::kInt64, "sizes must be int64");
+
+  const int64_t n = src_ptrs.size(0);
+  TORCH_CHECK(dst_ptrs.size(0) == n, "dst_ptrs length must match src_ptrs");
+  TORCH_CHECK(sizes.size(0) == n, "sizes length must match src_ptrs");
+
+  if (n == 0) return;
+
+  int64_t* src_data = src_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* dst_data = dst_ptrs.mutable_data_ptr<int64_t>();
+  int64_t* size_data = sizes.mutable_data_ptr<int64_t>();
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  // Use cuMemcpyBatchAsync (CUDA 12.8+) to submit all copies in a single
+  // driver call, amortizing per-copy submission overhead.
+  // int64_t and CUdeviceptr/size_t are both 8 bytes on 64-bit platforms,
+  // so we reinterpret_cast the tensor data directly to avoid copies.
+  static_assert(sizeof(CUdeviceptr) == sizeof(int64_t));
+  static_assert(sizeof(size_t) == sizeof(int64_t));
+#if !defined(USE_ROCM) && defined(CUDA_VERSION) && CUDA_VERSION >= 12080
+  CUmemcpyAttributes attr = {};
+  attr.srcAccessOrder = CU_MEMCPY_SRC_ACCESS_ORDER_STREAM;
+  size_t attrs_idx = 0;
+  #if defined(CUDA_VERSION) && CUDA_VERSION >= 13000
+  CUresult result = cuMemcpyBatchAsync(
+      reinterpret_cast<CUdeviceptr*>(dst_data),
+      reinterpret_cast<CUdeviceptr*>(src_data),
+      reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), &attr,
+      &attrs_idx, 1, static_cast<CUstream>(stream));
+  TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed with error ",
+              result);
+  #else
+  size_t fail_idx = 0;
+  CUresult result = cuMemcpyBatchAsync(
+      reinterpret_cast<CUdeviceptr*>(dst_data),
+      reinterpret_cast<CUdeviceptr*>(src_data),
+      reinterpret_cast<size_t*>(size_data), static_cast<size_t>(n), &attr,
+      &attrs_idx, 1, &fail_idx, static_cast<CUstream>(stream));
+  TORCH_CHECK(result == CUDA_SUCCESS, "cuMemcpyBatchAsync failed at index ",
+              fail_idx, " with error ", result);
+  #endif
+#else
+  // Fallback for CUDA < 12.8 and ROCm: individual async copies.
+  // cudaMemcpyDefault lets the driver infer direction from pointer types.
+  for (int64_t i = 0; i < n; i++) {
+    cudaMemcpyAsync(reinterpret_cast<void*>(dst_data[i]),
+                    reinterpret_cast<void*>(src_data[i]),
+                    static_cast<size_t>(size_data[i]), cudaMemcpyDefault,
+                    stream);
+  }
+#endif
 }
 
 namespace vllm {
@@ -918,8 +984,8 @@ __global__ void gather_and_maybe_dequant_cache(
 // SCALAR_T is the data type of the destination tensor.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                        \
-  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,      \
+#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, ENTRY_SZ)              \
+  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, ENTRY_SZ, \
                                        thread_block_size>                     \
       <<<grid, block, 0, stream>>>(                                           \
           reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                   \
@@ -929,6 +995,12 @@ __global__ void gather_and_maybe_dequant_cache(
           block_table_stride, cache_block_stride, cache_entry_stride,         \
           dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()), \
           seq_starts_ptr);
+
+#define CALL_GATHER_CACHE_576(SCALAR_T, CACHE_T, KV_DTYPE) \
+  CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 576)
+
+#define CALL_GATHER_CACHE_320(SCALAR_T, CACHE_T, KV_DTYPE) \
+  CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 320)
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -959,9 +1031,10 @@ void gather_and_maybe_dequant_cache(
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
   }
-  TORCH_CHECK(head_dim == 576,
-              "gather_and_maybe_dequant_cache only support the head_dim to 576 "
-              "for better performance")
+  TORCH_CHECK(
+      head_dim == 320 || head_dim == 576,
+      "gather_and_maybe_dequant_cache only support the head_dim to 320 or 576 "
+      "for better performance")
 
   TORCH_CHECK(src_cache.device() == dst.device(),
               "src_cache and dst must be on the same device");
@@ -986,7 +1059,13 @@ void gather_and_maybe_dequant_cache(
   const int32_t* seq_starts_ptr =
       seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
 
-  DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype, CALL_GATHER_CACHE);
+  if (head_dim == 576) {
+    DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype,
+                               CALL_GATHER_CACHE_576);
+  } else {
+    DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype,
+                               CALL_GATHER_CACHE_320);
+  }
 }
 
 namespace vllm {
@@ -995,75 +1074,67 @@ namespace vllm {
 // Similar to cp_gather_cache but specifically for FP8->BF16 conversion
 __global__ void cp_gather_and_upconvert_fp8_kv_cache(
     const uint8_t* __restrict__ src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 656]
-    __nv_bfloat16* __restrict__ dst,          // [TOT_TOKENS, 576]
-    const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
-    const int32_t* __restrict__ seq_lens,     // [BATCH]
-    const int32_t* __restrict__ workspace_starts,  // [BATCH]
-    const int32_t block_size, const int32_t head_dim,
-    const int64_t block_table_stride, const int64_t cache_block_stride,
-    const int64_t cache_entry_stride, const int64_t dst_entry_stride) {
-  const int64_t bid = blockIdx.x;  // Batch ID
-  const int32_t num_splits = gridDim.y;
-  const int32_t split = blockIdx.y;
-  const int32_t seq_start = workspace_starts[bid];
-  const int32_t seq_len = seq_lens[bid];
-  const int32_t tot_slots = seq_len;
-  const int32_t split_slots = cuda_utils::ceil_div(tot_slots, num_splits);
+    __nv_bfloat16* __restrict__ dst,          // [total_tokens, 576]
+    const int32_t* __restrict__ block_table,  // [num_reqs, BLOCK_INDICES]
+    const int32_t* __restrict__ workspace_starts,  // [num_reqs]
+    const int32_t num_reqs, const int32_t block_size,
+    const int32_t total_tokens, const int64_t block_table_stride,
+    const int64_t cache_block_stride, const int64_t cache_entry_stride,
+    const int64_t dst_entry_stride) {
+  const int flat_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
+  if (flat_warp_id >= total_tokens) return;
+  const int lane_id = threadIdx.x & 31;
 
-  const int32_t split_start = split * split_slots;
-  const int32_t split_end = min((split + 1) * split_slots, tot_slots);
-
-  const bool is_active_split = (split_start < tot_slots);
-
-  if (!is_active_split) return;
-
-  // Adjust the pointer for the block_table for this batch
-  const int32_t batch_offset = bid * block_table_stride;
-  int32_t offset = split_start;
-  int32_t offset_div = offset / block_size;
-  offset = offset % block_size;
-  const int32_t* batch_block_table = block_table + batch_offset;
-
-  // Adjust dst pointer based on the cumulative sequence lengths
-  dst += seq_start * dst_entry_stride;
-
-  const int tid = threadIdx.x;
-
-  // Process each token in this split
-  for (int pid = split_start; pid < split_end; ++pid) {
-    auto block_id = batch_block_table[offset_div];
-    const uint8_t* token_ptr =
-        src_cache + block_id * cache_block_stride + offset * cache_entry_stride;
-    __nv_bfloat16* dst_ptr = dst + pid * dst_entry_stride;
-
-    // FP8 format: 512 bytes fp8 + 16 bytes scales + 128 bytes rope (64 bf16)
-    const uint8_t* no_pe_ptr = token_ptr;
-    const float* scales_ptr = reinterpret_cast<const float*>(token_ptr + 512);
-    const __nv_bfloat16* rope_ptr =
-        reinterpret_cast<const __nv_bfloat16*>(token_ptr + 512 + 16);
-
-    // Parallelize fp8 dequant (512 elements) and rope copy (64 elements)
-    if (tid < 512) {
-      // FP8 dequantization
-      const int tile = tid >> 7;  // each tile is 128 elements
-      const float scale = scales_ptr[tile];
-      const uint8_t val = no_pe_ptr[tid];
-      dst_ptr[tid] =
-          fp8::scaled_convert<__nv_bfloat16, uint8_t,
-                              vllm::Fp8KVCacheDataType::kFp8E4M3>(val, scale);
-    } else if (tid < 576) {
-      // Rope copy (64 bf16 elements)
-      const int rope_idx = tid - 512;
-      dst_ptr[512 + rope_idx] = rope_ptr[rope_idx];
-    }
-
-    // Move to next token
-    offset += 1;
-    if (offset == block_size) {
-      offset_div += 1;
-      offset = 0;
-    }
+  // Binary search to find which request owns this output token
+  int lo = 0, hi = num_reqs - 1;
+  while (lo < hi) {
+    int mid = (lo + hi + 1) >> 1;
+    if (workspace_starts[mid] <= flat_warp_id)
+      lo = mid;
+    else
+      hi = mid - 1;
   }
+  const int req_id = lo;
+
+  // Compute physical token address via block table
+  const int out_token_id = flat_warp_id;
+  const int token_offset = out_token_id - workspace_starts[req_id];
+  const int cache_block_idx = token_offset / block_size;
+  const int offset_in_block = token_offset % block_size;
+  const int physical_block =
+      block_table[req_id * block_table_stride + cache_block_idx];
+
+  const uint8_t* token_ptr = src_cache + physical_block * cache_block_stride +
+                             offset_in_block * cache_entry_stride;
+
+  const int4* nope_src = reinterpret_cast<const int4*>(token_ptr);
+  const int4 fp8_data = nope_src[lane_id];
+
+  const float* scales_ptr = reinterpret_cast<const float*>(token_ptr + 512);
+  const float scale = scales_ptr[lane_id >> 3];
+
+  const uint2 fp8_lo = make_uint2(fp8_data.x, fp8_data.y);
+  const uint2 fp8_hi = make_uint2(fp8_data.z, fp8_data.w);
+#ifdef USE_ROCM
+  const bf16_8_t bf16_lo =
+      fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_lo, scale);
+  const bf16_8_t bf16_hi =
+      fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_hi, scale);
+#else
+  const bf16_8_t bf16_lo =
+      fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_lo, scale, __NV_E4M3);
+  const bf16_8_t bf16_hi =
+      fp8::scaled_vec_conversion<bf16_8_t, uint2>(fp8_hi, scale, __NV_E4M3);
+#endif
+
+  __nv_bfloat16* dst_ptr = dst + out_token_id * dst_entry_stride;
+  int4* nope_dst = reinterpret_cast<int4*>(dst_ptr) + lane_id * 2;
+  nope_dst[0] = *reinterpret_cast<const int4*>(&bf16_lo);
+  nope_dst[1] = *reinterpret_cast<const int4*>(&bf16_hi);
+
+  const int* rope_src = reinterpret_cast<const int*>(token_ptr + 528);
+  int* rope_dst = reinterpret_cast<int*>(dst_ptr + 512);
+  rope_dst[lane_id] = rope_src[lane_id];
 }
 
 template <typename scalar_t>
@@ -1257,15 +1328,16 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     src_ptr = reinterpret_cast<const uint8_t*>(src_cache.data_ptr());
   }
 
-  // Decide on the number of splits based on the batch size
-  int num_splits = batch_size > 128 ? 2 : batch_size > 64 ? 4 : 16;
-  dim3 grid(batch_size, num_splits);
-  dim3 block(576);
+  const int total_tokens = dst.size(0);
+  constexpr int warps_per_block = 8;
+  const int grid_size = (total_tokens + warps_per_block - 1) / warps_per_block;
+  const int block_size_threads = warps_per_block * 32;  // 256 threads
 
-  vllm::cp_gather_and_upconvert_fp8_kv_cache<<<grid, block, 0, stream>>>(
+  vllm::cp_gather_and_upconvert_fp8_kv_cache<<<grid_size, block_size_threads, 0,
+                                               stream>>>(
       src_ptr, reinterpret_cast<__nv_bfloat16*>(dst.data_ptr()),
-      block_table.data_ptr<int32_t>(), seq_lens.data_ptr<int32_t>(),
-      workspace_starts.data_ptr<int32_t>(), block_size, head_dim,
+      block_table.data_ptr<int32_t>(), workspace_starts.data_ptr<int32_t>(),
+      static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,
       dst_entry_stride);
 }
@@ -1364,4 +1436,44 @@ void cp_gather_indexer_k_quant_cache(
   } else {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(32);
   }
+}
+
+// Concatenate ql_nope and q_pe into a contiguous q_out tensor for MLA/DSA.
+// Replaces torch.cat((ql_nope, q_pe), dim=-1).
+void concat_mla_q(torch::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
+                  torch::Tensor& q_pe,     // [num_tokens, num_heads, rope_dim]
+                  torch::Tensor& q_out     // [num_tokens, num_heads, nope_dim +
+                                           // rope_dim]
+) {
+  const int num_tokens = ql_nope.size(0);
+  const int num_heads = ql_nope.size(1);
+  const int nope_dim = ql_nope.size(2);
+  const int rope_dim = q_pe.size(2);
+
+  TORCH_CHECK(nope_dim % 512 == 0, "nope_dim must be a multiple of 512, got ",
+              nope_dim);
+  TORCH_CHECK(rope_dim == 64, "rope_dim must be 64, got ", rope_dim);
+  TORCH_CHECK(q_out.size(2) == nope_dim + rope_dim);
+
+  TORCH_CHECK(ql_nope.stride(2) == 1, "ql_nope must have stride 1 in dim 2");
+  TORCH_CHECK(q_pe.stride(2) == 1, "q_pe must have stride 1 in dim 2");
+  TORCH_CHECK(q_out.stride(2) == 1, "q_out must have stride 1 in dim 2");
+
+  if (num_tokens == 0) return;
+
+  constexpr int warps_per_block = 8;
+  const int total_warps = num_tokens * num_heads;
+  const int grid_size = (total_warps + warps_per_block - 1) / warps_per_block;
+  const int block_size = warps_per_block * 32;
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(ql_nope));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  VLLM_DISPATCH_FLOATING_TYPES(ql_nope.scalar_type(), "concat_mla_q", [&] {
+    vllm::ConcatMLAQKernel<scalar_t, 512><<<grid_size, block_size, 0, stream>>>(
+        q_out.data_ptr<scalar_t>(), ql_nope.data_ptr<scalar_t>(),
+        q_pe.data_ptr<scalar_t>(), num_tokens, num_heads, q_out.stride(0),
+        q_out.stride(1), ql_nope.stride(0), ql_nope.stride(1), q_pe.stride(0),
+        q_pe.stride(1));
+  });
 }

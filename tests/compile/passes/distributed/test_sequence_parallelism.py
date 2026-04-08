@@ -9,7 +9,6 @@ from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer, multi_gpu_test
 from vllm.compilation.passes.fusion.rms_quant_fusion import RMSNormQuantFusionPass
 from vllm.compilation.passes.fusion.sequence_parallelism import SequenceParallelismPass
-from vllm.compilation.passes.fx_utils import find_auto_fn
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
@@ -35,6 +34,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
+
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
@@ -84,13 +85,14 @@ class TestAllReduceRMSNormModel(torch.nn.Module):
         ]
 
     def ops_in_model(self):
-        if RMSNorm.enabled():
-            return [
-                torch.ops._C.rms_norm.default,
+        return (
+            [torch.ops.vllm_ir.rms_norm]
+            + [
                 torch.ops._C.fused_add_rms_norm.default,
             ]
-        else:
-            return []
+            if RMSNorm.enabled()
+            else []
+        )
 
 
 class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
@@ -226,7 +228,7 @@ def sequence_parallelism_pass_on_test_model(
     set_random_seed(0)
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
 
@@ -242,7 +244,6 @@ def sequence_parallelism_pass_on_test_model(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # configure vllm config for SequenceParallelismPass
     custom_ops_list = custom_ops.split(",") if custom_ops else []
@@ -272,6 +273,7 @@ def sequence_parallelism_pass_on_test_model(
     )
 
     with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
         noop_pass = NoOpEliminationPass(vllm_config)
         sequence_parallelism_pass = SequenceParallelismPass(vllm_config)
         cleanup_pass = PostCleanupPass(vllm_config)
@@ -319,4 +321,4 @@ def sequence_parallelism_pass_on_test_model(
             assert backend.op_count(op, before=False) == 4
 
         for op in model.ops_in_model():
-            find_auto_fn(backend.graph_post_pass.nodes, op)
+            assert backend.op_count(op, before=False) > 0

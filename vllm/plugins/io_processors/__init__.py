@@ -6,13 +6,16 @@ import logging
 from vllm.config import VllmConfig
 from vllm.plugins import IO_PROCESSOR_PLUGINS_GROUP, load_plugins_by_group
 from vllm.plugins.io_processors.interface import IOProcessor
+from vllm.renderers import BaseRenderer
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = logging.getLogger(__name__)
 
 
 def get_io_processor(
-    vllm_config: VllmConfig, plugin_from_init: str | None = None
+    vllm_config: VllmConfig,
+    renderer: BaseRenderer,
+    plugin_from_init: str | None = None,
 ) -> IOProcessor | None:
     # Input.Output processors are loaded as plugins under the
     # 'vllm.io_processor_plugins' group. Similar to platform
@@ -63,6 +66,6 @@ def get_io_processor(
             f"Available plugins: {list(loadable_plugins.keys())}"
         )
 
-    activated_plugin_cls = loadable_plugins[model_plugin]
+    activated_plugin_cls = resolve_obj_by_qualname(loadable_plugins[model_plugin])
 
-    return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config)
+    return activated_plugin_cls(vllm_config, renderer)

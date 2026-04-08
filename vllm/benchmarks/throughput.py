@@ -3,7 +3,6 @@
 """Benchmark offline inference throughput."""
 
 import argparse
-import dataclasses
 import json
 import os
 import random
@@ -18,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
+    ASRDataset,
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
@@ -38,9 +38,11 @@ from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.lora.request import LoRARequest
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
 def run_vllm(
@@ -53,7 +55,7 @@ def run_vllm(
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     assert all(
         llm.llm_engine.model_config.max_model_len
         >= (request.prompt_len + request.expected_output_len)
@@ -145,7 +147,7 @@ def run_vllm_chat(
     """
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     assert all(
         llm.llm_engine.model_config.max_model_len
@@ -189,7 +191,6 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     do_profile: bool,
-    disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
     num_warmups: int = 0,
 ) -> float:
@@ -200,7 +201,6 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
         model_config = llm.model_config
         assert all(
@@ -280,17 +280,33 @@ def run_hf(
     trust_remote_code: bool,
     disable_detokenize: bool = False,
     num_warmups: int = 0,
+    dtype: torch.dtype | str | None = torch.float16,
+    enable_torch_compile: bool = False,
 ) -> float:
     assert isinstance(tokenizer, PreTrainedTokenizerBase), (
         "the hf backend only supports HF tokenizers"
     )
+    if isinstance(dtype, torch.dtype):
+        hf_torch_dtype: torch.dtype | str = dtype
+    elif dtype == "auto":
+        hf_torch_dtype = "auto"
+    elif isinstance(dtype, str) and dtype in STR_DTYPE_TO_TORCH_DTYPE:
+        hf_torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
+    elif dtype is None:
+        hf_torch_dtype = torch.float16
+    else:
+        raise ValueError(f"Unsupported dtype for HF backend: {dtype!r}")
     llm = AutoModelForCausalLM.from_pretrained(
-        model, dtype=torch.float16, trust_remote_code=trust_remote_code
+        model,
+        torch_dtype=hf_torch_dtype,
+        trust_remote_code=trust_remote_code,
     )
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
         tokenizer.pad_token = tokenizer.eos_token
-    llm = llm.cuda()
+    llm = llm.to(current_platform.device_type)
+    if enable_torch_compile:
+        llm = torch.compile(llm)
 
     def _run_pass(pbar: tqdm | None = None) -> None:
         batch: list[str] = []
@@ -300,20 +316,25 @@ def run_hf(
             prompt = requests[i].prompt
             prompt_len = requests[i].prompt_len
             output_len = requests[i].expected_output_len
+            # Add the prompt to the batch.
             batch.append(prompt)
             max_prompt_len = max(max_prompt_len, prompt_len)
             max_output_len = max(max_output_len, output_len)
             if len(batch) < max_batch_size and i != len(requests) - 1:
+                # Check if we can add more requests to the batch.
                 next_prompt_len = requests[i + 1].prompt_len
                 next_output_len = requests[i + 1].expected_output_len
                 if (
                     max(max_prompt_len, next_prompt_len)
                     + max(max_output_len, next_output_len)
                 ) <= 2048:
+                    # We can add more requests to the batch.
                     continue
+
+            # Generate the sequences.
             input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
             llm_outputs = llm.generate(
-                input_ids=input_ids.cuda(),
+                input_ids=input_ids.to(current_platform.device_type),
                 do_sample=True,
                 num_return_sequences=n,
                 temperature=1.0,
@@ -322,9 +343,12 @@ def run_hf(
                 max_new_tokens=max_output_len,
             )
             if not disable_detokenize:
+                # Include the decoding time.
                 tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
             if pbar is not None:
                 pbar.update(len(batch))
+
+            # Clear the batch.
             batch = []
             max_prompt_len = 0
             max_output_len = 0
@@ -370,6 +394,7 @@ def get_requests(args, tokenizer):
         "tokenizer": tokenizer,
         "lora_path": args.lora_path,
         "max_loras": args.max_loras,
+        "lora_assignment": getattr(args, "lora_assignment", "random"),
         "num_requests": args.num_prompts,
     }
 
@@ -436,6 +461,12 @@ def get_requests(args, tokenizer):
             dataset_cls = AIMODataset
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = ASRDataset
+            common_kwargs["dataset_subset"] = args.hf_subset
+            common_kwargs["dataset_split"] = args.hf_split
+            sample_kwargs["asr_min_audio_len_sec"] = args.asr_min_audio_len_sec
+            sample_kwargs["asr_max_audio_len_sec"] = args.asr_max_audio_len_sec
     elif args.dataset_name == "prefix_repetition":
         dataset_cls = PrefixRepetitionRandomDataset
         sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
@@ -579,6 +610,7 @@ def validate_args(args):
         elif args.dataset_path in (
             InstructCoderDataset.SUPPORTED_DATASET_PATHS
             | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm", (
                 f"{args.dataset_path} needs to use vllm as the backend."
@@ -759,6 +791,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Maximum batch size for HF backend.",
     )
     parser.add_argument(
+        "--hf-enable-torch-compile",
+        action="store_true",
+        default=False,
+        help="Enable Torch compile for HF backend.",
+    )
+    parser.add_argument(
         "--output-json",
         type=str,
         default=None,
@@ -769,12 +807,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         action="store_true",
         default=False,
         help="Use vLLM async engine rather than LLM class.",
-    )
-    parser.add_argument(
-        "--disable-frontend-multiprocessing",
-        action="store_true",
-        default=False,
-        help="Disable decoupled async engine frontend.",
     )
     parser.add_argument(
         "--disable-detokenize",
@@ -791,6 +823,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.",
+    )
+    parser.add_argument(
+        "--lora-assignment",
+        type=str,
+        default="random",
+        choices=["random", "round-robin"],
+        help="Strategy for assigning LoRA adapters to requests. "
+        "'random' (default) selects a LoRA at random for each request. "
+        "'round-robin' cycles through LoRAs deterministically.",
     )
     parser.add_argument(
         "--prefix-len",
@@ -860,6 +901,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
     add_random_dataset_base_args(parser)
     add_random_multimodal_dataset_args(parser)
 
+    # ASR dataset
+    parser.add_argument(
+        "--asr-min-audio-len-sec",
+        type=float,
+        default=0.0,
+        help="Minimum audio duration in seconds for ASR dataset filtering.",
+    )
+    parser.add_argument(
+        "--asr-max-audio-len-sec",
+        type=float,
+        default=float("inf"),
+        help="Maximum audio duration in seconds for ASR dataset filtering.",
+    )
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
 
@@ -890,7 +945,6 @@ def main(args: argparse.Namespace):
                     requests,
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
-                    disable_frontend_multiprocessing=args.disable_frontend_multiprocessing,
                     disable_detokenize=args.disable_detokenize,
                     do_profile=args.profile,
                     num_warmups=args.num_warmups,
@@ -918,6 +972,8 @@ def main(args: argparse.Namespace):
             args.trust_remote_code,
             args.disable_detokenize,
             num_warmups=args.num_warmups,
+            dtype=args.dtype,
+            enable_torch_compile=args.hf_enable_torch_compile,
         )
     elif args.backend == "vllm-chat":
         elapsed_time, request_outputs = run_vllm_chat(

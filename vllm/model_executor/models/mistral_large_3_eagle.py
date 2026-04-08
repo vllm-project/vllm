@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 from collections.abc import Iterable
 from functools import partial
 
@@ -33,7 +34,9 @@ class EagleMistralLarge3Model(DeepseekV2Model):
     ):
         nn.Module.__init__(self)
 
-        config = vllm_config.model_config.hf_config
+        config = copy.deepcopy(vllm_config.model_config.hf_config)
+        config.first_k_dense_replace += start_layer_id
+
         quant_config = vllm_config.quant_config
         self.config = config
         self.vllm_config = vllm_config
@@ -53,6 +56,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
                 DeepseekV2DecoderLayer(
                     vllm_config=vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{i + start_layer_id}"),
+                    config=config,
                 )
                 for i in range(self.config.num_hidden_layers)
             ]
@@ -70,6 +74,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
             prefix=maybe_prefix(prefix, "fc"),
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )

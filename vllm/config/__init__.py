@@ -24,9 +24,16 @@ from vllm.config.model import (
 )
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
+from vllm.config.offload import (
+    OffloadBackend,
+    OffloadConfig,
+    PrefetchOffloadConfig,
+    UVAOffloadConfig,
+)
 from vllm.config.parallel import EPLBConfig, ParallelConfig
 from vllm.config.pooler import PoolerConfig
 from vllm.config.profiler import ProfilerConfig
+from vllm.config.reasoning import ReasoningConfig
 from vllm.config.scheduler import SchedulerConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.speech_to_text import SpeechToTextConfig
@@ -85,11 +92,18 @@ __all__ = [
     "MultiModalConfig",
     # From vllm.config.observability
     "ObservabilityConfig",
+    # From vllm.config.offload
+    "OffloadBackend",
+    "OffloadConfig",
+    "PrefetchOffloadConfig",
+    "UVAOffloadConfig",
     # From vllm.config.parallel
     "EPLBConfig",
     "ParallelConfig",
     # From vllm.config.pooler
     "PoolerConfig",
+    # From vllm.config.reasoning
+    "ReasoningConfig",
     # From vllm.config.scheduler
     "SchedulerConfig",
     # From vllm.config.speculative
