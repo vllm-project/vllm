@@ -1464,6 +1464,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # - "flashinfer-trtllm": use flashinfer trtllm GEMM backend
     # - "flashinfer-cutlass": use flashinfer cutlass GEMM backend
     # - "marlin": use marlin GEMM backend (for GPUs without native FP4 support)
+    # - "emulation":
+    #     use BF16/FP16 GEMM, dequantizing weights and running QDQ on activations.
+    #     This is only meant for research purposes to run on devices where NVFP4
+    #     GEMM kernels are not available.
     # - <none>: automatically pick an available backend
     "VLLM_NVFP4_GEMM_BACKEND": env_with_choices(
         "VLLM_NVFP4_GEMM_BACKEND",
@@ -1474,6 +1478,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "flashinfer-cutlass",
             "cutlass",
             "marlin",
+            "emulation",
         ],
     ),
     # Controls garbage collection during CUDA graph capture.

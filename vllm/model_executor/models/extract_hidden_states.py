@@ -9,6 +9,7 @@ extract_hidden_states speculative decoding method.
 """
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import ClassVar
 
 import torch
@@ -93,7 +94,6 @@ def basic_cache(
 class CacheOnlyAttentionBackend(AttentionBackend):
     """Attention backend that only caches KV without computing attention."""
 
-    accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -351,6 +351,10 @@ class ExtractHiddenStatesModel(nn.Module):
         )
 
         cache_config = vllm_config.cache_config
+
+        # Hidden states dtype should be independent of KV cache dtype.
+        if cache_config is not None and is_quantized_kv_cache(cache_config.cache_dtype):
+            cache_config = replace(cache_config, cache_dtype="auto")
 
         # Create a single cache-only attention layer
         # Note: We set num_heads <- self.num_hidden_states
