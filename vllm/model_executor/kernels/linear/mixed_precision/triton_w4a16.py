@@ -29,18 +29,6 @@ from vllm.triton_utils import tl, triton
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
-
-def _detect_rdna() -> bool:
-    """Detect RDNA (gfx11xx+) vs CDNA (gfx9xx) at import time."""
-    try:
-        _cc = current_platform.get_device_capability()
-        return _cc is not None and _cc[0] >= 11
-    except Exception:
-        return False
-
-
-_IS_RDNA: bool = _detect_rdna()
-
 TRITON_W4A16_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128, 256]
 TRITON_W4A16_SUPPORTED_QUANT_TYPES = [
     scalar_types.uint4b8,  # symmetric GPTQ (bias=8)
@@ -220,18 +208,25 @@ def triton_w4a16_gemm(
     # Provide a dummy pointer when HAS_ZP=False (Triton requires a valid ptr)
     zeros_ptr = qzeros if has_zp else b_q
 
-    if _IS_RDNA:
-        # Tuned for gfx1151 (Strix Halo, 40 CUs, 32-wide wavefronts).
-        # Smaller BLOCK_N (32-64) gives better occupancy and reduces
-        # register pressure from the interleave+shift unpacking.
-        if M <= 32:
-            BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
-        elif M <= 64:
-            BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1x
+        if on_gfx1x():
+            # Tuned for RDNA 3.5 (gfx1151, 40 CUs, 32-wide wavefronts).
+            if M <= 32:
+                BLOCK_M, BLOCK_N, BLOCK_K = 32, 32, 64
+            elif M <= 64:
+                BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
+            else:
+                BLOCK_M, BLOCK_N, BLOCK_K = 128, 32, 64
         else:
-            BLOCK_M, BLOCK_N, BLOCK_K = 128, 32, 64
+            # Tuned for MI300 (gfx942, 304 CUs, 64-wide wavefronts).
+            if M <= 32:
+                BLOCK_M, BLOCK_N, BLOCK_K = 32, 64, 32
+            elif M <= 64:
+                BLOCK_M, BLOCK_N, BLOCK_K = 64, 64, 32
+            else:
+                BLOCK_M, BLOCK_N, BLOCK_K = 128, 128, 32
     else:
-        # Tuned for MI300 (gfx942, 304 CUs, 64-wide wavefronts).
         if M <= 32:
             BLOCK_M, BLOCK_N, BLOCK_K = 32, 64, 32
         elif M <= 64:
@@ -296,6 +291,14 @@ class TritonW4A16LinearKernel(MPLinearKernel):
 
         if c.act_type not in (torch.float16, torch.bfloat16):
             return False, "Only float16/bfloat16 activations are supported"
+
+        N = c.partition_weight_shape[1]
+        if N % 8 != 0:
+            return (
+                False,
+                f"Output features ({N}) must be divisible by 8 "
+                "(8 int4 values packed per int32)",
+            )
 
         if c.has_g_idx:
             return (
@@ -402,7 +405,7 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         c = self.config
         w_q, w_s, w_zp, _ = self._get_weight_params(layer)
 
-        x_2d = x.reshape(-1, x.shape[-1])
+        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         out_shape = x.shape[:-1] + (c.partition_weight_shape[1],)
 
         K = c.partition_weight_shape[0]
