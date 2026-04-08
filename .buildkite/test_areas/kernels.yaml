@@ -26,6 +26,7 @@ steps:
 - label: Kernels MiniMax Reduce RMS Test (2 GPUs)
   timeout_in_minutes: 15
   num_devices: 2
+  device: h100
   source_file_dependencies:
   - csrc/minimax_reduce_rms_kernel.cu
   - csrc/minimax_reduce_rms_kernel.h
