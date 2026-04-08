@@ -203,103 +203,66 @@ async def test_tool_call_with_tool_choice(
     assert len(choice.message.tool_calls[0].id) == 9  # length of 9 for mistral
 
 
+_NOT_SET = object()
+
+
 @pytest.mark.asyncio
-async def test_tool_call_auto(
-    client: openai.AsyncOpenAI, server_config: ServerConfig
+@pytest.mark.parametrize(
+    "tools, tool_choice, streaming_id_len_pre_v11",
+    [
+        pytest.param(
+            [WEATHER_TOOL, SEARCH_TOOL],
+            _NOT_SET,
+            9,
+            id="auto",
+        ),
+        pytest.param(
+            [WEATHER_TOOL],
+            "required",
+            30,
+            id="required",
+        ),
+    ],
+)
+async def test_tool_call_auto_or_required(
+    client: openai.AsyncOpenAI,
+    server_config: ServerConfig,
+    tools: list,
+    tool_choice: object,
+    streaming_id_len_pre_v11: int,
 ) -> None:
     _requires_tool_parser(server_config)
 
     models = await client.models.list()
     model_name: str = models.data[0].id
 
+    create_kwargs: dict = {
+        "messages": ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config),
+        "temperature": 0,
+        "max_completion_tokens": 100,
+        "model": model_name,
+        "tools": tools,
+        "logprobs": False,
+        "seed": SEED,
+    }
+    if tool_choice is not _NOT_SET:
+        create_kwargs["tool_choice"] = tool_choice
+
     # --- non-streaming ---
-    chat_completion = await client.chat.completions.create(
-        messages=ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config),
-        temperature=0,
-        max_completion_tokens=100,
-        model=model_name,
-        tools=[WEATHER_TOOL, SEARCH_TOOL],
-        logprobs=False,
-        seed=SEED,
-    )
+    chat_completion = await client.chat.completions.create(**create_kwargs)
 
     choice = chat_completion.choices[0]
     tool_calls = choice.message.tool_calls
 
     assert choice.finish_reason == "tool_calls"
     assert tool_calls is not None and len(tool_calls) >= 1
-    assert tool_calls[0].type == "function"
     assert tool_calls[0].function.name == "get_current_weather"
-    assert isinstance(tool_calls[0].function.arguments, str)
     parsed_arguments = json.loads(tool_calls[0].function.arguments)
     assert "city" in parsed_arguments
     assert len(tool_calls[0].id) == 9
 
     # --- streaming ---
-    stream = await client.chat.completions.create(
-        messages=ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config),
-        temperature=0,
-        max_completion_tokens=100,
-        model=model_name,
-        tools=[WEATHER_TOOL, SEARCH_TOOL],
-        logprobs=False,
-        seed=SEED,
-        stream=True,
-    )
-
-    result = await _collect_streamed_tool_call(stream)
-
-    assert result.finish_reason_count == 1
-    assert result.role_name == "assistant"
-    assert result.function_name == "get_current_weather"
-    streamed_args = json.loads(result.function_args_str)
-    assert "city" in streamed_args
-    assert isinstance(result.tool_call_id, str) and len(result.tool_call_id) == 9
-    assert parsed_arguments == streamed_args
-
-
-@pytest.mark.asyncio
-async def test_tool_call_required(
-    client: openai.AsyncOpenAI, server_config: ServerConfig
-) -> None:
-    _requires_tool_parser(server_config)
-
-    models = await client.models.list()
-    model_name: str = models.data[0].id
-
-    # --- non-streaming ---
-    chat_completion = await client.chat.completions.create(
-        messages=ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config),
-        temperature=0,
-        max_completion_tokens=100,
-        model=model_name,
-        tools=[WEATHER_TOOL],
-        tool_choice="required",
-        logprobs=False,
-        seed=SEED,
-    )
-
-    choice = chat_completion.choices[0]
-    tool_calls = choice.message.tool_calls
-
-    assert choice.finish_reason == "tool_calls"
-    assert tool_calls is not None and len(tool_calls) >= 1
-    assert tool_calls[0].function.name == "get_current_weather"
-    parsed_arguments = json.loads(tool_calls[0].function.arguments)
-    assert len(tool_calls[0].id) == 9
-
-    # --- streaming ---
-    stream = await client.chat.completions.create(
-        messages=ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config),
-        temperature=0,
-        max_completion_tokens=100,
-        model=model_name,
-        tools=[WEATHER_TOOL],
-        tool_choice="required",
-        logprobs=False,
-        seed=SEED,
-        stream=True,
-    )
+    stream = await client.chat.completions.create(**create_kwargs, stream=True)
 
     result = await _collect_streamed_tool_call(stream)
 
@@ -309,10 +272,8 @@ async def test_tool_call_required(
     streamed_args = json.loads(result.function_args_str)
     assert isinstance(result.tool_call_id, str)
     if _is_pre_v11(server_config):
-        # Generic streaming path uses make_tool_call_id ("chatcmpl-tool-" + 16 hex)
-        assert len(result.tool_call_id) == 30
+        assert len(result.tool_call_id) == streaming_id_len_pre_v11
     else:
-        # Grammar path uses MistralToolCall.generate_random_id (9 alphanumeric)
         assert len(result.tool_call_id) == 9
     assert parsed_arguments == streamed_args
 

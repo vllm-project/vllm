@@ -1068,59 +1068,65 @@ def test_extract_tool_calls_streaming_one_chunk(
         assert delta_message.content == expected_content
 
 
-def test_fast_detokenization_text_detection(mistral_tool_parser):
-    """Regression: bot_token in text but not token_ids (PR #37209)."""
-    model_output = '[TOOL_CALLS]add{"a": 1, "b": 2}'
-    # Token IDs that do NOT contain bot_token_id.
-    fake_token_ids = list(range(99, 99 + 20))
-
-    # First delta: pure content, no bot token yet
-    delta_message_before = mistral_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text="Hello",
-        delta_text="Hello",
-        previous_token_ids=[],
-        current_token_ids=[99],
-        delta_token_ids=[99],
-        request=_DUMMY_REQUEST,
-    )
-    assert delta_message_before is not None
-    assert delta_message_before.content == "Hello"
-    assert not delta_message_before.tool_calls
-
-    # Second delta: bot token in text but NOT in token_ids
-    delta_message = mistral_tool_parser.extract_tool_calls_streaming(
-        previous_text="Hello",
-        current_text="Hello" + model_output,
-        delta_text=model_output,
-        previous_token_ids=[99],
-        current_token_ids=fake_token_ids,
-        delta_token_ids=fake_token_ids[1:],
-        request=_DUMMY_REQUEST,
-    )
-    assert delta_message is not None
-    assert delta_message.tool_calls is not None
-    assert len(delta_message.tool_calls) == 1
-    assert delta_message.tool_calls[0].function is not None
-    assert delta_message.tool_calls[0].function.name == "add"
-
-
-def test_fast_detokenization_text_detection_pre_v11(
-    mistral_pre_v11_tool_parser,
+@pytest.mark.parametrize(
+    "parser_fixture, model_output, fake_count, two_phase",
+    [
+        pytest.param(
+            "mistral_tool_parser",
+            '[TOOL_CALLS]add{"a": 1, "b": 2}',
+            20,
+            True,
+            id="v11",
+        ),
+        pytest.param(
+            "mistral_pre_v11_tool_parser",
+            '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 1, "b": 2}}]',
+            30,
+            False,
+            id="pre_v11",
+        ),
+    ],
+)
+def test_fast_detokenization_text_detection(
+    parser_fixture, model_output, fake_count, two_phase, request
 ):
-    """Regression: bot_token text detection for pre-v11 tokenizer (PR #37209)."""
-    model_output = '[TOOL_CALLS] [{"name": "add", "arguments":{"a": 1, "b": 2}}]'
-
+    """Regression: bot_token in text but not token_ids (PR #37209)."""
+    parser = request.getfixturevalue(parser_fixture)
     # Token IDs that do NOT contain bot_token_id.
-    fake_token_ids = list(range(99, 99 + 30))
+    fake_token_ids = list(range(99, 99 + fake_count))
 
-    delta_message = mistral_pre_v11_tool_parser.extract_tool_calls_streaming(
-        previous_text="",
-        current_text=model_output,
+    if two_phase:
+        # First delta: pure content, no bot token yet
+        delta_message_before = parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text="Hello",
+            delta_text="Hello",
+            previous_token_ids=[],
+            current_token_ids=[99],
+            delta_token_ids=[99],
+            request=_DUMMY_REQUEST,
+        )
+        assert delta_message_before is not None
+        assert delta_message_before.content == "Hello"
+        assert not delta_message_before.tool_calls
+
+        previous_text = "Hello"
+        current_text = "Hello" + model_output
+        previous_token_ids = [99]
+        delta_token_ids = fake_token_ids[1:]
+    else:
+        previous_text = ""
+        current_text = model_output
+        previous_token_ids = []
+        delta_token_ids = fake_token_ids
+
+    delta_message = parser.extract_tool_calls_streaming(
+        previous_text=previous_text,
+        current_text=current_text,
         delta_text=model_output,
-        previous_token_ids=[],
+        previous_token_ids=previous_token_ids,
         current_token_ids=fake_token_ids,
-        delta_token_ids=fake_token_ids,
+        delta_token_ids=delta_token_ids,
         request=_DUMMY_REQUEST,
     )
     assert delta_message is not None
@@ -1417,56 +1423,51 @@ def test_adjust_request_response_format_generates_grammar(
     assert len(result.structured_outputs.grammar) > 0
 
 
-def test_adjust_request_tool_choice_none_with_json_schema_uses_json_schema_factory(
+@pytest.mark.parametrize(
+    "tool_choice, expected_method, not_called_method",
+    [
+        ("none", "get_lark_for_json_schema", None),
+        ("auto", "get_lark_from_jinja", "get_lark_for_json_schema"),
+    ],
+    ids=["none_uses_json_schema_factory", "auto_uses_jinja_factory"],
+)
+def test_adjust_request_tool_choice_with_json_schema_factory_routing(
     mistral_tool_parser: MistralToolParser,
+    tool_choice: str,
+    expected_method: str,
+    not_called_method: str | None,
 ) -> None:
     request = _make_request(
-        tool_choice="none",
+        tool_choice=tool_choice,
         structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
     )
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
-    with patch.object(
-        factory,
-        "get_lark_for_json_schema",
-        wraps=factory.get_lark_for_json_schema,
-    ) as mock_json_schema:
-        result = mistral_tool_parser.adjust_request(request)
-
-        mock_json_schema.assert_called_once()
-        assert mock_json_schema.call_args.kwargs["json_schema"] == {"type": "object"}
-
-    assert result.structured_outputs is not None
-    assert isinstance(result.structured_outputs.grammar, str)
-    assert len(result.structured_outputs.grammar) > 0
-
-
-def test_adjust_request_tool_choice_auto_with_json_schema_uses_jinja_factory(
-    mistral_tool_parser: MistralToolParser,
-) -> None:
-    request = _make_request(
-        tool_choice="auto",
-        structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
-    )
-    factory = mistral_tool_parser.model_tokenizer.grammar_factory
-
-    with (
-        patch.object(
+    patches = {
+        expected_method: patch.object(
             factory,
-            "get_lark_for_json_schema",
-            wraps=factory.get_lark_for_json_schema,
-        ) as mock_json_schema,
-        patch.object(
+            expected_method,
+            wraps=getattr(factory, expected_method),
+        ),
+    }
+    if not_called_method:
+        patches[not_called_method] = patch.object(
             factory,
-            "get_lark_from_jinja",
-            wraps=factory.get_lark_from_jinja,
-        ) as mock_jinja,
-    ):
-        result = mistral_tool_parser.adjust_request(request)
+            not_called_method,
+            wraps=getattr(factory, not_called_method),
+        )
 
-        mock_jinja.assert_called_once()
-        assert mock_jinja.call_args.kwargs["json_schema"] == {"type": "object"}
-        mock_json_schema.assert_not_called()
+    with patches[expected_method] as mock_expected:
+        ctx = patches[not_called_method] if not_called_method else None
+        if ctx:
+            with ctx as mock_not_called:
+                result = mistral_tool_parser.adjust_request(request)
+                mock_not_called.assert_not_called()
+        else:
+            result = mistral_tool_parser.adjust_request(request)
+
+        mock_expected.assert_called_once()
+        assert mock_expected.call_args.kwargs["json_schema"] == {"type": "object"}
 
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
