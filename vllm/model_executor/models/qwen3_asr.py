@@ -158,7 +158,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = mm_options.get("audio")
+        audio_overrides = (mm_options or {}).get("audio")
 
         return {
             "audio": self._get_dummy_audios(
@@ -560,20 +560,19 @@ class Qwen3ASRForConditionalGeneration(
             system_turn = f"<|im_start|>system\n{safe_prompt}<|im_end|>\n"
 
         safe_prefix = _sanitize_chatml(response_prefix)
-        full_lang_name_to = cls.supported_languages.get(to_language, to_language)
-        if to_language is None:
-            prompt = (
-                f"{system_turn}"
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\n{safe_prefix}"
-            )
+
+        prompt = (
+            f"{system_turn}"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+
+        lang_code = to_language if task_type == "translate" else language
+        if lang_code is not None:
+            full_lang_name = cls.supported_languages.get(lang_code, lang_code)
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}{safe_prefix}"
         else:
-            prompt = (
-                f"{system_turn}"
-                f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
-                f"language {full_lang_name_to}{_ASR_TEXT_TAG}{safe_prefix}"
-            )
+            prompt += safe_prefix
 
         prompt_token_ids = tokenizer.encode(prompt)
 
