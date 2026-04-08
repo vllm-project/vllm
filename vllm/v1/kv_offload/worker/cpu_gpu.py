@@ -176,15 +176,18 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._event_pool: list[torch.Event] = []
 
         # Pre-compute base pointers and block sizes for batch copies.
-        self._src_base_ptrs = np.array(
-            [t.data_ptr() for t in self.src_tensors], dtype=np.int64
-        )
-        self._dst_base_ptrs = np.array(
-            [t.data_ptr() for t in self.dst_tensors], dtype=np.int64
-        )
-        self._block_size_in_bytes_arr = np.array(
-            self.tensor_block_size_in_bytes, dtype=np.int64
-        )
+        # XPU device addresses can exceed signed int64 range, so skip
+        # pre-computing raw pointers there; XPU uses swap_blocks per tensor.
+        if not current_platform.is_xpu():
+            self._src_base_ptrs = np.array(
+                [t.data_ptr() for t in self.src_tensors], dtype=np.uint64
+            )
+            self._dst_base_ptrs = np.array(
+                [t.data_ptr() for t in self.dst_tensors], dtype=np.uint64
+            )
+            self._block_size_in_bytes_arr = np.array(
+                self.tensor_block_size_in_bytes, dtype=np.uint64
+            )
 
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
@@ -212,25 +215,31 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         )
         expand_block_ids(dst_blocks, self.dst_block_size_factor, dst_block_ids)
 
-        # Build flat pointer arrays for all tensors × all block pairs.
-        num_pairs = dst_sub_block_count
-        num_tensors = len(self.src_tensors)
-        total = num_pairs * num_tensors
+        block_mapping = np.stack((src_block_ids, dst_block_ids), axis=1)
+        block_mapping_tensor = torch.from_numpy(block_mapping)
 
-        all_src = np.empty(total, dtype=np.int64)
-        all_dst = np.empty(total, dtype=np.int64)
-        all_sizes = np.empty(total, dtype=np.int64)
+        # XPU currently uses the per-tensor swap_blocks path.
+        use_batch_swap = not current_platform.is_xpu()
+        if use_batch_swap:
+            # Build flat pointer arrays for all tensors x all block pairs.
+            num_pairs = dst_sub_block_count
+            num_tensors = len(self.src_tensors)
+            total = num_pairs * num_tensors
 
-        for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
-            start = t_idx * num_pairs
-            end = start + num_pairs
-            all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
-            all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
-            all_sizes[start:end] = bsz
+            all_src = np.empty(total, dtype=np.uint64)
+            all_dst = np.empty(total, dtype=np.uint64)
+            all_sizes = np.empty(total, dtype=np.uint64)
 
-        batch_src = torch.from_numpy(all_src)
-        batch_dst = torch.from_numpy(all_dst)
-        batch_sizes = torch.from_numpy(all_sizes)
+            for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
+                start = t_idx * num_pairs
+                end = start + num_pairs
+                all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
+                all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
+                all_sizes[start:end] = bsz
+
+            batch_src = torch.from_numpy(all_src)
+            batch_dst = torch.from_numpy(all_dst)
+            batch_sizes = torch.from_numpy(all_sizes)
 
         stream = self._stream_pool.pop() if self._stream_pool else _new_stream()
         start_event = self._event_pool.pop() if self._event_pool else _new_event()
@@ -246,8 +255,21 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             stream.wait_event(last_event)
         with _stream_context(stream):
             start_event.record(stream)
-            if total > 0:
-                ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)
+            if use_batch_swap:
+                if total > 0:
+                    ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)
+            else:
+                for src_tensor, dst_tensor, block_size_in_bytes in zip(
+                    self.src_tensors,
+                    self.dst_tensors,
+                    self.tensor_block_size_in_bytes,
+                ):
+                    ops.swap_blocks(
+                        src_tensor,
+                        dst_tensor,
+                        block_size_in_bytes,
+                        block_mapping_tensor,
+                    )
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
