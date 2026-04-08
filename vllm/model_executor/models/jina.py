@@ -3,7 +3,8 @@
 # Adapted from https://huggingface.co/jinaai/jina-reranker-v3/blob/main/modeling.py
 # ruff: noqa: E501
 
-from typing import TYPE_CHECKING, Sequence, Any
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -24,7 +25,7 @@ from .qwen3 import Qwen3Model
 from .utils import maybe_prefix
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.pooling.scoring.typing import ScoreData
+    pass
 
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):

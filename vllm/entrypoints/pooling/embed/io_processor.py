@@ -24,7 +24,6 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
-from vllm.entrypoints.pooling.scoring.utils import _validate_mm_score_input
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, PoolingServeContext
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
