@@ -436,8 +436,10 @@ class Gemma4ToolParser(ToolParser):
     ) -> DeltaMessage | None:
         # Buffer delta text to handle multi-token special sequences
         delta_text = self._buffer_delta_text(delta_text)
-        # Reconstruct current_text after buffering to stay in sync
-        current_text = previous_text + delta_text
+        # Keep current_text from the upstream stream state. The buffered delta
+        # is only for emission, and must not be stitched back into the
+        # accumulated model text or normal content like "<div>" can be
+        # duplicated into "<<div>" when a tool call just ended.
 
         # If no tool call token seen yet, emit as content
         if self.tool_call_start_token not in current_text:
