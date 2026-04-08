@@ -86,11 +86,12 @@ class TritonOrDeepGemmExperts(FallbackExperts):
             # full BLOCK_M tile. Below this threshold, DeepGemm's persistent
             # kernel wastes compute on padding and Triton is faster.
             M = hidden_states.size(0)
-            E = w1.size(0)
+            E = self.moe_config.num_experts
             top_k = self.moe_config.experts_per_token
             block_m = get_mk_alignment_for_contiguous_layout()[0]
-            tokens_per_expert = M * top_k / E
-            if tokens_per_expert < block_m:
+            # Fallback to Triton only if scales are not packed (Blackwell E8M0)
+            if (M * top_k < block_m * E and 
+                DeepGemmQuantScaleFMT.from_oracle() != DeepGemmQuantScaleFMT.UE8M0):
                 return self.fallback_experts
             return self.experts
         else:
