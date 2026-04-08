@@ -22,7 +22,7 @@ def maybe_execute_in_parallel(
     fn1: Callable[[], Any],
     event0: torch.cuda.Event,
     event1: torch.cuda.Event,
-    aux_stream: torch.cuda.Stream | None = None,
+    aux_stream: torch.Stream | None = None,
 ) -> tuple[Any, Any]:
     """Run two functions potentially in parallel on separate CUDA streams.
 

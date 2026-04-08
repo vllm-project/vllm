@@ -41,8 +41,8 @@ class SimpleCPUOffloadWorker:
         self.num_cpu_blocks: int = 0
 
         # CUDA streams for the async transfers
-        self.load_stream: torch.cuda.Stream | None = None
-        self.store_stream: torch.cuda.Stream | None = None
+        self.load_stream: torch.Stream | None = None
+        self.store_stream: torch.Stream | None = None
 
         self._backend = DmaCopyBackend()
 
@@ -172,9 +172,9 @@ class SimpleCPUOffloadWorker:
             self.cpu_kv_caches[name] = tensor
 
         # Use lowest priority so KV cache I/O yields to compute streams.
-        low_pri, _ = torch.cuda.Stream.priority_range()
-        self.load_stream = torch.cuda.Stream(priority=low_pri)
-        self.store_stream = torch.cuda.Stream(priority=low_pri)
+        low_pri, _ = torch.Stream.priority_range()
+        self.load_stream = torch.Stream(priority=low_pri)
+        self.store_stream = torch.Stream(priority=low_pri)
 
         # Initialize copy backend with caches and streams.
         self._backend.init(
