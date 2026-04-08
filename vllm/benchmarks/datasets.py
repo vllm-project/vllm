@@ -478,6 +478,7 @@ class RandomDataset(BenchmarkDataset):
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
+        use_local_json: str = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # validate total input tokens (prefix + sampled) is at least 1.
@@ -496,9 +497,17 @@ class RandomDataset(BenchmarkDataset):
                 "* (1 - range_ratio) >= 1."
             )
 
-        input_lens, output_lens, offsets = self.get_sampling_params(
-            num_requests, range_ratio, input_len, output_len, tokenizer
-        )
+        # input_lens, output_lens, offsets = self.get_sampling_params(
+        #     num_requests, range_ratio, input_len, output_len, tokenizer
+        # )
+        if use_local_json:
+            input_lens, output_lens, offsets = self.get_local_json_sampling_params(
+                use_local_json, tokenizer
+            )
+        else:
+            input_lens, output_lens, offsets = self.get_sampling_params(
+                num_requests, range_ratio, input_len, output_len, tokenizer
+            )
 
         vocab_size = tokenizer.vocab_size
         prohibited_tokens = tokenizer.all_special_ids
@@ -591,6 +600,24 @@ class RandomDataset(BenchmarkDataset):
                 sign,
             )
         return adjusted_tokens
+
+    def get_local_json_sampling_params(
+        self,
+        use_local_json: str,
+        tokenizer: TokenizerLike,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        with open(use_local_json, "r") as f:
+            requests = json.load(f)
+            input_lens, output_lens = [
+                req[0] for req in requests
+            ], [req[1] for req in requests]
+        num_requests = len(input_lens)
+        input_lens = np.array(input_lens)
+        output_lens = np.array(output_lens)
+        offsets = self._rng.integers(0, tokenizer.vocab_size, size=num_requests)
+        print(f"input_lens: {input_lens}")
+        print(f"output_lens: {output_lens}")
+        return input_lens, output_lens, offsets
 
     def get_sampling_params(
         self,
@@ -1596,6 +1623,12 @@ def add_random_dataset_base_args(
         ),
     )
     parser_or_group.add_argument(
+        "--use-local-json",
+        type=str,
+        default=None,
+        help=("Use local json to direct input lens and output lens."),
+    )
+    parser_or_group.add_argument(
         "--random-batch-size",
         type=int,
         default=1,
@@ -1953,6 +1986,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
+                use_local_json=args.use_local_json,
             ),
             "random-mm": lambda: RandomMultiModalDataset(
                 random_seed=args.seed,

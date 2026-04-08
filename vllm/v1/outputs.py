@@ -157,6 +157,9 @@ class KVConnectorOutput:
     # for a given connector after discovery. Default value entails no change.
     expected_finished_count: int = 0
 
+    req_id_to_cp_size: dict[str, int] = field(default_factory=dict)
+
+
     def is_empty(self):
         return (
             not self.finished_sending

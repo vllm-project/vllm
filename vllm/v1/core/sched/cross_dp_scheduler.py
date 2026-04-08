@@ -274,6 +274,7 @@ class CrossDPScheduler(Scheduler):
         # )
 
         block_ids = self.kv_cache_manager.get_block_ids(request)
+        # logger.info(f"chenxiao--debug block_ids:{block_ids}")
 
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce
@@ -348,7 +349,7 @@ class CrossDPScheduler(Scheduler):
 
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
-            logger.debug("Finished recving KV transfer for request %s", req_id)
+            logger.info("Finished recving KV transfer for request %s", req_id)
             assert req_id in self.requests
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -677,6 +678,7 @@ class CrossDPScheduler(Scheduler):
         req_to_new_blocks: list[dict[str, KVCacheBlocks]] = [{} for _ in range(self.cp_world_size)]
         num_scheduled_tokens: list[dict[str, int]] = [{} for _ in range(self.cp_world_size)]
         cp_rank_scheduled_tokens: list[dict[str, int]] = [{} for _ in range(self.cp_world_size)]
+        req_id_to_cp_size: dict[str, int] = {}
 
         """
         TODO(AoChen): Token budget for each DCP rank is not implemented yet.
@@ -767,7 +769,7 @@ class CrossDPScheduler(Scheduler):
                         num_new_tokens,
                         num_lookahead_tokens=self.num_lookahead_tokens,
                     )
-                    logger.debug(f"new_blocks: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
+                    # logger.info(f"chenxiao--debug new_blocks: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
                     if new_blocks is not None:
                         # The request can be scheduled.
                         break
@@ -1006,7 +1008,7 @@ class CrossDPScheduler(Scheduler):
                     delay_cache_blocks=load_kv_async,
                     num_encoder_tokens=num_encoder_tokens,
                 )
-                logger.debug(f"new_blocks -- 2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}")
+                # logger.info(f"chenxiao--debug new_blocks -- 2: {new_blocks}, request.cp_ranks: {request.cp_ranks}, num_new_tokens: {num_new_tokens}, selected_dp: {selected_dp}")
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
@@ -1016,6 +1018,9 @@ class CrossDPScheduler(Scheduler):
                 # This information is used to determine if a load is
                 # needed for this request.
                 request.cp_ranks = selected_dp
+
+                req_id_to_cp_size[request.request_id] = len(selected_dp)
+
 
                 """
                 TODO(AoChen): update_state_after_alloc(PD disagg) is not implemented yet.
@@ -1064,6 +1069,7 @@ class CrossDPScheduler(Scheduler):
                     )
 
                 blocks = self.kv_cache_manager.get_blocks(request)
+
 
                 for idx, rank in enumerate(request.cp_ranks):
                     if request.status == RequestStatus.WAITING:
@@ -1154,6 +1160,7 @@ class CrossDPScheduler(Scheduler):
             if sum(num_scheduled_tokens[idx].values()) == 0 and len(preempted_reqs[idx]) == 0 and len(self.finished_req_ids[idx]) == 0:
                 scheduler_output = SchedulerOutput.make_empty()
                 scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
+                scheduler_output.req_id_to_cp_size = req_id_to_cp_size
                 total_scheduler_output.append(scheduler_output)
             else:
                 total_scheduler_output.append(
@@ -1175,6 +1182,7 @@ class CrossDPScheduler(Scheduler):
                         cp_rank=idx,
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
                         num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()]),
+                        req_id_to_cp_size=req_id_to_cp_size,
                         none_tokens_in_peer_sched=none_tokens_in_peer_sched
                     )
                 )
@@ -1198,6 +1206,8 @@ class CrossDPScheduler(Scheduler):
                 if scheduler_output is None:
                     continue
                 self._update_after_schedule(scheduler_output)
+
+        # logger.info(f'>>>>>>>> total_scheduler_output: {total_scheduler_output}')
 
         return total_scheduler_output
 

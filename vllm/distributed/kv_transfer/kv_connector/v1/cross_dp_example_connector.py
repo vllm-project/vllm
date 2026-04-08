@@ -168,3 +168,5 @@ class CrossDPExampleConnector(ExampleConnector):
         assert total_need_load == len(self._cross_requests_need_load[scheduler_output.cp_rank])
         self._cross_requests_need_load[scheduler_output.cp_rank].clear()
         return meta
+    def clear_reqs_need_recv(self):
+        return 
