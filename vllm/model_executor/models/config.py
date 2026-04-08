@@ -571,6 +571,19 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             )
 
 
+class Qwen3_5ForCausalLMConfig(Qwen3_5ForConditionalGenerationConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
+        # Strip M-RoPE config inherited from the VLM: text-only mode uses
+        # identical positions across all sections, equivalent to standard RoPE.
+        hf_config = vllm_config.model_config.hf_text_config
+        rope_params = getattr(hf_config, "rope_parameters", None)
+        if rope_params and "mrope_section" in rope_params:
+            rope_params.pop("mrope_section", None)
+            rope_params.pop("mrope_interleaved", None)
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -627,6 +640,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
+    "Qwen3_5ForCausalLM": Qwen3_5ForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
