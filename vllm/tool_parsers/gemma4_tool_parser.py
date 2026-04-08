@@ -436,8 +436,10 @@ class Gemma4ToolParser(ToolParser):
     ) -> DeltaMessage | None:
         # Buffer delta text to handle multi-token special sequences
         delta_text = self._buffer_delta_text(delta_text)
-        # Reconstruct current_text after buffering to stay in sync
-        current_text = previous_text + delta_text
+        # Keep current_text from the upstream stream state. The buffered delta
+        # is only for emission, and must not be stitched back into the
+        # accumulated model text or normal content like "<div>" can be
+        # duplicated into "<<div>" when a tool call just ended.
 
         # If no tool call token seen yet, emit as content
         if self.tool_call_start_token not in current_text:
@@ -675,10 +677,11 @@ class Gemma4ToolParser(ToolParser):
         current_args_json = json.dumps(current_args, ensure_ascii=False)
 
         # Withhold trailing closing characters that may shift as more
-        # tokens arrive. Strip trailing '}', '"', and ']' sequences
-        # to get the "safe prefix".
+        # tokens arrive. Strip trailing '}', '"', ']' and partial
+        # STRING_DELIM fragments ('<', '|', '\\', '>') to get the
+        # "safe prefix".
         safe_json = current_args_json
-        while safe_json and safe_json[-1] in ("}", '"', "]"):
+        while safe_json and safe_json[-1] in ("}", '"', "]", "<", "|", "\\", ">"):
             safe_json = safe_json[:-1]
 
         prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
