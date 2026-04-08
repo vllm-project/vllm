@@ -16,20 +16,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
     NixlKVConnectorStats,
-    NixlPromMetrics,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
-    _NIXL_SUPPORTED_DEVICE,
-    NIXL_CONNECTOR_VERSION,
-    NixlWrapper,
-    zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
     NixlConnectorWorker,
 )
 
 __all__ = [
-    "NIXL_CONNECTOR_VERSION",
     "NixlAgentMetadata",
     "NixlConnector",
     "NixlConnectorMetadata",
@@ -37,9 +29,5 @@ __all__ = [
     "NixlConnectorWorker",
     "NixlHandshakePayload",
     "NixlKVConnectorStats",
-    "NixlPromMetrics",
-    "NixlWrapper",
-    "_NIXL_SUPPORTED_DEVICE",
     "compute_nixl_compatibility_hash",
-    "zmq_ctx",
 ]
