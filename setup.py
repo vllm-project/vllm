@@ -1013,6 +1013,7 @@ package_data = {
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
+        "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
     ]
 }
 
