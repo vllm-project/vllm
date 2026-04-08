@@ -115,7 +115,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
         if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
-            chat_kwargs = request.chat_template_kwargs or {}
+            chat_kwargs = getattr(request, "chat_template_kwargs", None) or {}
             if chat_kwargs.get("enable_thinking", False):
                 request.skip_special_tokens = False
         return request
