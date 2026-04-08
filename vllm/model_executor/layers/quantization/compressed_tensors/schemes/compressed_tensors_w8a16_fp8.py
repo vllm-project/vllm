@@ -12,6 +12,10 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    STRATEGT_TO_PARAMETER_TYPE,
+    STRATEGY_TO_WEIGHT_QUANT_KEY,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
@@ -19,33 +23,15 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTensorSym,
-    kFp8Static128BlockSym,
-    kFp8StaticChannelSym,
     kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
-from vllm.model_executor.parameter import (
-    BlockQuantScaleParameter,
-    ChannelQuantScaleParameter,
-    PerTensorScaleParameter,
-)
+from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import replace_parameter
 
 __all__ = ["CompressedTensorsW8A16Fp8"]
-
-strategy_to_parameter_type = {
-    QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
-    QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
-    QuantizationStrategy.TENSOR: PerTensorScaleParameter,
-}
-
-_STRATEGY_TO_WEIGHT_QUANT_KEY = {
-    QuantizationStrategy.BLOCK: kFp8Static128BlockSym,
-    QuantizationStrategy.CHANNEL: kFp8StaticChannelSym,
-    QuantizationStrategy.TENSOR: kFp8StaticTensorSym,
-}
 
 
 class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
@@ -55,7 +41,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
 
-        weight_quant_key = _STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
+        weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
         activation_quant_key = (
             kFp8StaticTensorSym if is_static_input_scheme else kFp8DynamicTensorSym
         )
@@ -110,7 +96,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
 
         # WEIGHT SCALE
         weight_scale = create_fp8_scale_parameter(
-            strategy_to_parameter_type[self.strategy],
+            STRATEGT_TO_PARAMETER_TYPE[self.strategy],
             output_partition_sizes,
             input_size_per_partition,
             layer.weight_block_size,
