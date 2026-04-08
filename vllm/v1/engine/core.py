@@ -52,6 +52,7 @@ from vllm.v1.engine import (
     EEPNotificationType,
     EngineCoreOutput,
     EngineCoreOutputs,
+    EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
     FinishReason,
@@ -1385,11 +1386,15 @@ class EngineCoreProc(EngineCore):
 
             # Register sockets with poller.
             poller = zmq.Poller()
+            ready_response = EngineCoreReadyResponse(
+                max_model_len=self.vllm_config.model_config.max_model_len,
+            )
+            ready_payload = msgspec.msgpack.encode(ready_response)
             for input_socket in input_sockets:
                 # Send initial message to each input socket - this is required
                 # before the front-end ROUTER socket can send input messages
                 # back to us.
-                input_socket.send(b"")
+                input_socket.send(ready_payload)
                 poller.register(input_socket, zmq.POLLIN)
 
             if coord_socket is not None:
