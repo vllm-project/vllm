@@ -18,9 +18,8 @@ from tests.tool_parsers.utils import (
     run_tool_extraction_streaming,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser, ToolParserManager
+from vllm.tool_parsers import ToolParserManager
 
 # ---------------------------------------------------------------------------
 # Import helpers from the parser module under test
