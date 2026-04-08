@@ -84,13 +84,35 @@ class MiniMaxText01RMSNormTP(CustomOp):
         k_norm: "MiniMaxText01RMSNormTP",
         q: torch.Tensor,
         k: torch.Tensor,
+        skip_all_reduce: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Apply RMSNorm to Q and K tensors.
+
+        Args:
+            q_norm: RMSNorm layer for query.
+            k_norm: RMSNorm layer for key.
+            q: Query tensor of shape [..., num_heads * head_dim].
+            k: Key tensor of shape [..., num_kv_heads * head_dim].
+            skip_all_reduce: If True, skip all-reduce during variance computation.
+                Set to True when Q/K are sharded by head dimension (not TP),
+                since each rank's head partition already has complete variance.
+                Set to False when Q/K are replicated across TP ranks and
+                variance needs to be synchronized.
+
+        Returns:
+            Normalized Q and K tensors.
+        """
         orig_dtype = q.dtype
         q = q.to(torch.float32)
         k = k.to(torch.float32)
         q_var = q.pow(2).mean(dim=-1, keepdim=True)
         k_var = k.pow(2).mean(dim=-1, keepdim=True)
-        if q_norm.tp_world > 1:
+        # All-reduce is only needed when Q/K are replicated across TP ranks.
+        # When Q/K are sharded by head dimension, each rank computes variance
+        # on its own head partition, which is already complete and doesn't
+        # require cross-rank synchronization.
+        if not skip_all_reduce and q_norm.tp_world > 1:
             qk_var = torch.cat([q_var, k_var], dim=-1)
             qk_var = tensor_model_parallel_all_reduce(qk_var) / q_norm.tp_world
             q_var, k_var = qk_var.chunk(2, dim=-1)
