@@ -16,11 +16,12 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
+use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use futures::FutureExt as _;
 use socket2::Socket;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{info, trace};
 use vllm_chat::{ChatLlm, load_model_backends};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -97,6 +98,13 @@ where
     let app = build_router(state.clone());
 
     info!(%bind_address, model = %model, "starting OpenAI server");
+
+    // Set TCP_NODELAY on accepted connections to reduce latency.
+    let listener = listener.tap_io(|tcp_stream| {
+        if let Err(err) = tcp_stream.set_nodelay(true) {
+            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
+        }
+    });
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)

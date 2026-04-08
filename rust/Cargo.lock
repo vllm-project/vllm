@@ -4552,6 +4552,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "vllm-engine-core-client",
  "vllm-server",
 ]

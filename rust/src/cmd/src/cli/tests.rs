@@ -1,4 +1,8 @@
+use std::time::Duration;
+
 use expect_test::expect;
+use vllm_engine_core_client::TransportMode;
+use vllm_server::Config;
 
 use super::{Cli, Command};
 
@@ -601,6 +605,94 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
         "10.99.48.128",
         "--data-parallel-size",
         "4",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://10.99.48.128:29550".to_string());
+
+    let TransportMode::HandshakeOwner {
+        handshake_address,
+        advertised_host,
+        engine_count,
+        ready_timeout,
+        local_input_address,
+        local_output_address,
+    } = &config.transport_mode
+    else {
+        panic!("expected handshake-owned transport");
+    };
+
+    assert_eq!(handshake_address, "tcp://10.99.48.128:29550");
+    assert_eq!(advertised_host, "10.99.48.128");
+    assert_eq!(*engine_count, 4);
+    assert_eq!(*ready_timeout, Duration::from_secs(300));
+    assert!(
+        local_input_address
+            .as_deref()
+            .is_some_and(|address| address.starts_with("ipc://"))
+    );
+    assert!(
+        local_output_address
+            .as_deref()
+            .is_some_and(|address| address.starts_with("ipc://"))
+    );
+    assert_ne!(local_input_address, local_output_address);
+
+    expect![[r#"
+        Config {
+            transport_mode: HandshakeOwner {
+                handshake_address: "tcp://10.99.48.128:29550",
+                advertised_host: "10.99.48.128",
+                engine_count: 4,
+                ready_timeout: 300s,
+                local_input_address: Some(
+                    "<ipc input>",
+                ),
+                local_output_address: Some(
+                    "<ipc output>",
+                ),
+            },
+            coordinator_mode: MaybeInProc,
+            model: "Qwen/Qwen3-0.6B",
+            listener_mode: Bind {
+                host: "127.0.0.1",
+                port: 8000,
+            },
+            tool_call_parser: None,
+            reasoning_parser: None,
+            max_model_len: None,
+            enable_log_requests: false,
+            disable_log_stats: false,
+        }
+    "#]]
+    .assert_debug_eq(&Config {
+        transport_mode: TransportMode::HandshakeOwner {
+            handshake_address: handshake_address.clone(),
+            advertised_host: advertised_host.clone(),
+            engine_count: *engine_count,
+            ready_timeout: *ready_timeout,
+            local_input_address: Some("<ipc input>".to_string()),
+            local_output_address: Some("<ipc output>".to_string()),
+        },
+        ..config.clone()
+    });
+}
+
+#[test]
+fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--data-parallel-address",
+        "10.99.48.128",
+        "--data-parallel-size",
+        "4",
+        "--data-parallel-size-local",
+        "2",
     ])
     .unwrap();
 

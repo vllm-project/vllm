@@ -160,7 +160,7 @@ pub async fn connect_handshake(
     );
     let (input_address, mut input_socket, output_address, output_socket) =
         bind_local_sockets(local_host, local_input_address, local_output_address).await?;
-    debug!(%input_address, %output_address, "bound local transport sockets");
+    info!(%input_address, %output_address, "bound local transport sockets");
 
     let mut coordinator = if enable_inproc_coordinator {
         Some(CoordinatorBootstrap::bind(local_host).await?)

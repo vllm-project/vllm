@@ -27,6 +27,7 @@ time.workspace = true
 tokio = { workspace = true, features = ["process", "signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 vllm-engine-core-client.workspace = true
 vllm-server.workspace = true
 

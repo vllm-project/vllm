@@ -8,12 +8,14 @@ mod serve_validate;
 mod unsupported;
 
 use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand};
 use educe::Educe;
 use serde::Deserialize;
 use thiserror_ext::AsReport as _;
+use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{Config, CoordinatorMode, HttpListenerMode};
 
@@ -164,6 +166,8 @@ impl SharedRuntimeArgs {
         handshake_address: String,
         advertised_host: String,
         engine_count: usize,
+        local_input_address: Option<String>,
+        local_output_address: Option<String>,
     ) -> Config {
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -171,8 +175,8 @@ impl SharedRuntimeArgs {
                 advertised_host,
                 engine_count,
                 ready_timeout: self.ready_timeout(),
-                local_input_address: None,
-                local_output_address: None,
+                local_input_address,
+                local_output_address,
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
@@ -302,12 +306,19 @@ impl ServeArgs {
 
     /// Build the OpenAI-server runtime config used after the managed Python engine starts.
     pub fn to_frontend_config(&self, handshake_address: String) -> Config {
+        // Prefer IPC sockets for local engine input/output.
+        let (local_input_address, local_output_address) = self
+            .frontend_local_only()
+            .then(frontend_ipc_addresses)
+            .unzip();
         self.runtime.clone().into_managed_config(
             self.host.clone(),
             self.port,
             handshake_address,
             self.handshake_host.clone(),
             self.data_parallel_size,
+            local_input_address,
+            local_output_address,
         )
     }
 
@@ -333,6 +344,34 @@ impl ServeArgs {
             python_args,
         }
     }
+
+    fn local_engine_count(&self) -> usize {
+        self.data_parallel_size_local
+            .unwrap_or(self.data_parallel_size)
+    }
+
+    /// Return whether the managed Rust frontend only needs to communicate with colocated engines.
+    fn frontend_local_only(&self) -> bool {
+        self.data_parallel_size_local != Some(0)
+            && self.local_engine_count() == self.data_parallel_size
+    }
+}
+
+/// Allocate fresh IPC endpoints for one managed frontend instance.
+fn frontend_ipc_addresses() -> (String, String) {
+    let preferred_base_path = std::env::var_os("VLLM_RPC_BASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let input_name = format!("vllm-rs-i-{}", Uuid::new_v4().simple());
+    let output_name = format!("vllm-rs-o-{}", Uuid::new_v4().simple());
+
+    let input = preferred_base_path.join(input_name);
+    let output = preferred_base_path.join(output_name);
+
+    (
+        format!("ipc://{}", input.to_string_lossy()),
+        format!("ipc://{}", output.to_string_lossy()),
+    )
 }
 
 #[cfg(test)]
