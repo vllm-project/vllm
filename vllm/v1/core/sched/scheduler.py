@@ -1691,7 +1691,7 @@ class Scheduler(SchedulerInterface):
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
-            else:
+            elif request.use_structured_output:
                 spec_token_end_index = (
                     self.structured_output_manager.spec_token_reasoning_end_index(
                         request, spec_token_ids
@@ -1731,7 +1731,7 @@ class Scheduler(SchedulerInterface):
                 metadata = request.structured_output_request
                 assert metadata is not None and metadata.grammar is not None
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
-            else:
+            elif request.use_structured_output:
                 spec_token_end_index = (
                     self.structured_output_manager.spec_token_reasoning_end_index(
                         request, spec_token_ids

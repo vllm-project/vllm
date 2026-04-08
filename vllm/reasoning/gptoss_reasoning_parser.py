@@ -132,10 +132,10 @@ class GptOssReasoningParser(ReasoningParser):
         lookbehind = len(end_token_ids_prefix) + max_between + len(end_token_ids_suffix)
         prefix_tail = previous_input_ids[-lookbehind:] if lookbehind > 0 else ()
         window = list(prefix_tail)
+        delta_start = len(window)
         window.extend(delta_ids)
 
         idx = self.reasoning_end_index(window)
-        delta_start = len(window) - len(delta_ids)
         return idx - delta_start if idx != -1 else -1
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
