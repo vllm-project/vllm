@@ -298,6 +298,8 @@ if current_platform.is_rocm():
             dtype=value_cache.dtype,
             device="meta",
         )
+        # Hybrid attention+mamba can expose non-contiguous KV cache views,
+        # so the shuffle writer must use the actual view strides.
         new_key_cache = key_cache.view_as(k_cache_template)
         new_value_cache = value_cache.view_as(v_cache_template)
         k_cache_strides = new_key_cache.stride()
@@ -1409,8 +1411,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             assert k_scale is not None and v_scale is not None, (
                 "k_scale and v_scale are required for shuffled update"
             )
-            # TODO: Add correct KV cache handling for hybrid model. KV cache
-            # may not be contiguous if mamba state exists.
             reshape_and_cache_shuffle_triton(
                 key,
                 value,
