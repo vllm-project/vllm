@@ -14,6 +14,11 @@ namespace vec_op {
 // Tag for E5M2 BF16Vec32 constructor (avoids collision with E4M3 float-scale
 // ctor).
 struct fp8_e5m2_tag {};
+// Tags for direct FP8→unscaled BF16 conversion (AMX path, no FP32 round-trip).
+// BF16 value = true_E4M3 * 2^-120 (E4M3) or true_E5M2 * 2^-112 (E5M2).
+// Exponent rebiasing is folded into k/v scales by the caller.
+struct fp8_bf16_e4m3_tag {};
+struct fp8_bf16_e5m2_tag {};
 
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)            \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)    \
@@ -201,6 +206,30 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     reg = _mm512_slli_epi16(_mm512_cvtepu8_epi16(b8), 8);
   }
 
+  // Direct FP8-E4M3 → unscaled BF16 for AMX (no FP32 round-trip).
+  // BF16 value = true_E4M3 * 2^-120; exponent rebiasing folded into k/v scales.
+  explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e4m3_tag) {
+    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    __m512i b16 = _mm512_cvtepu8_epi16(b8);
+    __m512i sign =
+        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x80)), 8);
+    __m512i payload =
+        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x7F)), 4);
+    reg = _mm512_or_si512(sign, payload);
+  }
+
+  // Direct FP8-E5M2 → unscaled BF16 for AMX (no FP32 round-trip).
+  // BF16 value = true_E5M2 * 2^-112; exponent rebiasing folded into k/v scales.
+  explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
+    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    __m512i b16 = _mm512_cvtepu8_epi16(b8);
+    __m512i sign =
+        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x80)), 8);
+    __m512i payload =
+        _mm512_slli_epi16(_mm512_and_si512(b16, _mm512_set1_epi16(0x7F)), 5);
+    reg = _mm512_or_si512(sign, payload);
+  }
+
   void save(void* ptr) const { *reinterpret_cast<__m512i*>(ptr) = reg; }
 };
 #else
@@ -254,6 +283,46 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
     __m128i b8_high = _mm256_extracti128_si256(b8, 1);
     reg_low = _mm256_slli_epi16(_mm256_cvtepu8_epi16(b8_low), 8);
     reg_high = _mm256_slli_epi16(_mm256_cvtepu8_epi16(b8_high), 8);
+  }
+
+  // Direct FP8-E4M3 → unscaled BF16 for AMX (AVX2 path, no FP32 round-trip).
+  // BF16 value = true_E4M3 * 2^-120; exponent rebiasing folded into k/v scales.
+  explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e4m3_tag) {
+    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    __m128i b8_low = _mm256_extracti128_si256(b8, 0);
+    __m128i b8_high = _mm256_extracti128_si256(b8, 1);
+    __m256i b16_low = _mm256_cvtepu8_epi16(b8_low);
+    __m256i b16_high = _mm256_cvtepu8_epi16(b8_high);
+    reg_low = _mm256_or_si256(
+        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x80)),
+                          8),
+        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x7F)),
+                          4));
+    reg_high = _mm256_or_si256(
+        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x80)),
+                          8),
+        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x7F)),
+                          4));
+  }
+
+  // Direct FP8-E5M2 → unscaled BF16 for AMX (AVX2 path, no FP32 round-trip).
+  // BF16 value = true_E5M2 * 2^-112; exponent rebiasing folded into k/v scales.
+  explicit BF16Vec32(const uint8_t* ptr, fp8_bf16_e5m2_tag) {
+    __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
+    __m128i b8_low = _mm256_extracti128_si256(b8, 0);
+    __m128i b8_high = _mm256_extracti128_si256(b8, 1);
+    __m256i b16_low = _mm256_cvtepu8_epi16(b8_low);
+    __m256i b16_high = _mm256_cvtepu8_epi16(b8_high);
+    reg_low = _mm256_or_si256(
+        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x80)),
+                          8),
+        _mm256_slli_epi16(_mm256_and_si256(b16_low, _mm256_set1_epi16(0x7F)),
+                          5));
+    reg_high = _mm256_or_si256(
+        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x80)),
+                          8),
+        _mm256_slli_epi16(_mm256_and_si256(b16_high, _mm256_set1_epi16(0x7F)),
+                          5));
   }
 
   void save(void* ptr) const {

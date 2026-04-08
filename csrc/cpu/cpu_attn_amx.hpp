@@ -383,29 +383,23 @@ class TileGemm224<uint8_t> {
     }
 
     for (int32_t k = 0; k < k_times; ++k) {
-      // Dequantise FP8 → raw BF16 into aligned scratch buffers.
-      // k_scale_2p8 is in the attention scale (logits); v_scale_2p8 is in
-      // final_output.
+      // Direct FP8 → unscaled BF16 into aligned scratch buffers (no FP32
+      // round-trip). BF16 value = true × 2^-120 (E4M3) or × 2^-112 (E5M2).
+      // Exponent rebiasing is folded into k/v scales in execute_attention.
       alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
       alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
       for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
-        vec_op::BF16Vec32 fp8_bits_2 =
-            is_e5m2
-                ? vec_op::BF16Vec32(b_tile_2 + r * 32, vec_op::fp8_e5m2_tag{})
-                : vec_op::BF16Vec32(b_tile_2 + r * 32, 0.0f);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_2, 0))
+        (is_e5m2
+             ? vec_op::BF16Vec32(b_tile_2 + r * 32, vec_op::fp8_bf16_e5m2_tag{})
+             : vec_op::BF16Vec32(b_tile_2 + r * 32,
+                                 vec_op::fp8_bf16_e4m3_tag{}))
             .save(scratch_2 + r * 32);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_2, 1))
-            .save(scratch_2 + r * 32 + 16);
 
-        vec_op::BF16Vec32 fp8_bits_3 =
-            is_e5m2
-                ? vec_op::BF16Vec32(b_tile_3 + r * 32, vec_op::fp8_e5m2_tag{})
-                : vec_op::BF16Vec32(b_tile_3 + r * 32, 0.0f);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_3, 0))
+        (is_e5m2
+             ? vec_op::BF16Vec32(b_tile_3 + r * 32, vec_op::fp8_bf16_e5m2_tag{})
+             : vec_op::BF16Vec32(b_tile_3 + r * 32,
+                                 vec_op::fp8_bf16_e4m3_tag{}))
             .save(scratch_3 + r * 32);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_3, 1))
-            .save(scratch_3 + r * 32 + 16);
       }
 
       _tile_loadd(0, a_tile_0, a_tile_stride);
@@ -528,16 +522,14 @@ class TileGemm122<uint8_t> {
       _tile_zero(7);
     }
 
-    // Dequantise FP8 → raw BF16. k_scale_2p8 is in logits; v_scale_2p8 is in
-    // final_output.
+    // Direct FP8 → unscaled BF16 (no FP32 round-trip).
+    // BF16 value = true × 2^-120 (E4M3) or × 2^-112 (E5M2).
+    // Exponent rebiasing is folded into k/v scales in execute_attention.
     auto deq_tile = [&](uint8_t* src, c10::BFloat16* dst) {
       for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
-        vec_op::BF16Vec32 fp8_bits =
-            is_e5m2 ? vec_op::BF16Vec32(src + r * 32, vec_op::fp8_e5m2_tag{})
-                    : vec_op::BF16Vec32(src + r * 32, 0.0f);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits, 0)).save(dst + r * 32);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits, 1))
-            .save(dst + r * 32 + 16);
+        (is_e5m2 ? vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e5m2_tag{})
+                 : vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e4m3_tag{}))
+            .save(dst + r * 32);
       }
     };
 
@@ -864,11 +856,12 @@ class AttentionImplFP8AMX : public AttentionImpl<ISA::AMX, scalar_t, head_dim> {
     fp8_kv_dtype = input->fp8_kv_dtype;
   }
 
-  // Returns the v_scale_2p8 factor that final_output applies after PV
-  // accumulation.
+  // Returns the v_scale factor that final_output applies after PV accumulation.
+  // Folds the exponent rebiasing correction (2^120 for E4M3, 2^112 for E5M2)
+  // to match the unscaled BF16 representation from direct FP8→BF16 dequant.
   float get_output_v_scale() const noexcept {
-    return (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2) ? v_scale
-                                                          : v_scale * 0x1p8f;
+    return (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2) ? v_scale * 0x1p112f
+                                                          : v_scale * 0x1p120f;
   }
 
   // Override: pack Q as plain BF16; k_scale_2p8 is folded into the attention
@@ -910,13 +903,14 @@ class AttentionImplFP8AMX : public AttentionImpl<ISA::AMX, scalar_t, head_dim> {
 
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
-    // Fold k_scale_2p8 into the attention scale; scale_on_logits=true will
-    // apply it to QK logits, correcting for both KV cache quantization and
-    // the FP8 exponent bias from the FP16-layout dequantization.
-    const float k_scale_2p8 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
-                                  ? k_scale
-                                  : k_scale * 0x1p8f;
-    scale *= k_scale_2p8;
+    // Fold k_scale and exponent rebiasing correction into the attention scale.
+    // scale_on_logits=true applies it to QK logits. The correction factor
+    // (2^120 for E4M3, 2^112 for E5M2) compensates for the unscaled BF16
+    // representation produced by the direct FP8→BF16 dequant in TileGemm.
+    const float k_scale_bf16 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                                   ? k_scale * 0x1p112f
+                                   : k_scale * 0x1p120f;
+    scale *= k_scale_bf16;
     TileGemm224<uint8_t>::set_fp8_dtype(fp8_kv_dtype);
     TileGemm122<uint8_t>::set_fp8_dtype(fp8_kv_dtype);
     if (q_head_num > AMX_TILE_ROW_NUM) {
