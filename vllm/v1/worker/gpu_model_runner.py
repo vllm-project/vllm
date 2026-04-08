@@ -3159,6 +3159,15 @@ class GPUModelRunner(
             model_runner_output.pooler_output = [None] * num_reqs
             return model_runner_output
 
+        if not current_platform.is_cuda_alike():
+            # cpu/xpu runners cannot use the CUDA stream/event-based wrapper.
+            model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
+                raw_pooler_output=raw_pooler_output,
+                finished_mask=finished_mask,
+            )
+            self._sync_device()
+            return model_runner_output
+
         return AsyncGPUPoolingModelRunnerOutput(
             model_runner_output=model_runner_output,
             raw_pooler_output=raw_pooler_output,
