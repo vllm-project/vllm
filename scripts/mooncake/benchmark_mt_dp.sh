@@ -22,7 +22,7 @@
 #   MOONCAKE_CONFIG_PATH  - Path to mooncake config JSON (required for mooncake, auto-skipped if unset)
 #   MULTI_TURN_NUM_TURNS  - Number of turns per conversation  (default: 4)
 #   MULTI_TURN_CONCURRENCY - Concurrent conversations         (default: 8)
-#   MULTI_TURN_DELAY_MS   - Delay between turns in ms         (default: 500)
+#   MULTI_TURN_DELAY_MS   - Delay between turns in ms         (default: 30000)
 #   GLOBAL_PREFIX_RATIO   - Fraction of input as global prefix  (default: 0.1)
 #   CONV_PREFIX_RATIO     - Fraction of input as conversation prefix (default: 0.8)
 
