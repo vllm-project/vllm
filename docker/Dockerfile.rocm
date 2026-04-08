@@ -118,10 +118,10 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # RIXL/UCX build stages
 FROM base AS build_rixl
-ARG RIXL_BRANCH="56346271"
+ARG RIXL_BRANCH="bf4a7214"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
-ARG UCX_BRANCH="06caea93"
-ARG UCX_REPO="https://github.com/ROCm/ucx.git"
+ARG UCX_BRANCH="7009d7a1"
+ARG UCX_REPO="https://github.com/openucx/ucx"
 ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
 ENV RIXL_HOME=/usr/local/rixl
@@ -147,7 +147,7 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
 RUN uv pip install --system meson auditwheel patchelf tomlkit
 
 RUN cd /usr/local/src && \
-    git clone --no-single-branch ${UCX_REPO} &&  \
+    git clone ${UCX_REPO} &&  \
     cd ucx  && \
     git checkout ${UCX_BRANCH} && \
     ./autogen.sh && \
@@ -169,7 +169,7 @@ RUN cd /usr/local/src && \
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 
-RUN git clone --no-single-branch ${RIXL_REPO} /opt/rixl && \
+RUN git clone ${RIXL_REPO} /opt/rixl && \
     cd /opt/rixl && \
     git checkout ${RIXL_BRANCH} && \
     meson setup build --prefix=${RIXL_HOME} \
@@ -391,6 +391,10 @@ COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-pac
 # See: https://github.com/pytorch/pytorch/issues/169857
 ENV MIOPEN_DEBUG_CONV_DIRECT=0
 ENV MIOPEN_DEBUG_CONV_GEMM=0
+
+# Use legacy IPC mode for HSA to avoid GPU memory pinning issues with UCX rocm_ipc
+# See: https://github.com/ROCm/rocm-libraries/issues/6266
+ENV HSA_ENABLE_IPC_MODE_LEGACY=1
 
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code

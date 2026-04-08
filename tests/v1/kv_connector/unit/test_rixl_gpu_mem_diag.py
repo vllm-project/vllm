@@ -158,8 +158,15 @@ def test_gpu_memory_rixl_hma(model_name, sw_size):
     )
     print("=" * 90)
 
-    if drv_leaked > 2000:
-        print(f"\n  WARNING: {drv_leaked:.0f} MB driver-level GPU memory not freed!\n")
+    # Peak driver memory used above baseline
+    drv_peak = snap2["drv_used_mb"] - drv_base
+    leak_pct = (drv_leaked / drv_peak * 100) if drv_peak > 0 else 0
+    max_leak_pct = 10
+    assert leak_pct <= max_leak_pct, (
+        f"{drv_leaked:.0f} MB ({leak_pct:.1f}%) of driver-level GPU memory "
+        f"not freed after NixlConnector shutdown "
+        f"(peak allocation: {drv_peak:.0f} MB, threshold: {max_leak_pct}%)"
+    )
 
 
 @pytest.mark.parametrize("model_name", ["google/gemma-3-1b-it"])
@@ -188,7 +195,7 @@ def test_gpu_memory_no_rixl_baseline(model_name):
     _gpu_snapshot("after LLM()", snap0["alloc_mb"])
 
     llm.generate(["hi " * 500], SamplingParams(max_tokens=1))
-    _gpu_snapshot("after generate()", snap0["alloc_mb"])
+    snap_peak = _gpu_snapshot("after generate()", snap0["alloc_mb"])
 
     llm.llm_engine.engine_core.shutdown()
     del llm
@@ -200,6 +207,16 @@ def test_gpu_memory_no_rixl_baseline(model_name):
     torch.accelerator.empty_cache()
     snap_final = _gpu_snapshot("final", snap0["alloc_mb"])
 
-    drv_leaked = snap_final["drv_used_mb"] - snap0["drv_used_mb"]
+    drv_base = snap0["drv_used_mb"]
+    drv_leaked = snap_final["drv_used_mb"] - drv_base
+    drv_peak = snap_peak["drv_used_mb"] - drv_base
     print(f"\n  Driver leaked (no rixl): {drv_leaked:.0f} MB")
     print("=" * 90)
+
+    leak_pct = (drv_leaked / drv_peak * 100) if drv_peak > 0 else 0
+    max_leak_pct = 10
+    assert leak_pct <= max_leak_pct, (
+        f"{drv_leaked:.0f} MB ({leak_pct:.1f}%) of driver-level GPU memory "
+        f"not freed after baseline shutdown "
+        f"(peak allocation: {drv_peak:.0f} MB, threshold: {max_leak_pct}%)"
+    )
