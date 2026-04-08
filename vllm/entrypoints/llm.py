@@ -1638,6 +1638,17 @@ class LLM:
         seq_params = self._params_to_seq(params, len(seq_convs))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
 
+        # When thinking is enabled or tools are provided, and the model
+        # uses special tokens for structured output (e.g. Gemma4's
+        # <|channel>, <|tool_call>, <|"|>), automatically set
+        # skip_special_tokens=False so these tokens are preserved in
+        # output.text for downstream parsing.
+        needs_parsing = (
+            chat_template_kwargs and chat_template_kwargs.get("enable_thinking")
+        ) or tools
+        if needs_parsing:
+            self._adjust_params_for_parsing(seq_params)
+
         return self._render_and_run_requests(
             prompts=(
                 self._preprocess_chat_one(
@@ -1662,6 +1673,53 @@ class LLM:
             lora_requests=seq_lora_requests,
             use_tqdm=use_tqdm,
         )
+
+    def _adjust_params_for_parsing(
+        self, params: Sequence[SamplingParams | PoolingParams]
+    ) -> None:
+        """Set ``skip_special_tokens=False`` when the model encodes
+        structured output syntax as special tokens.
+
+        Models like Gemma4 register thinking delimiters
+        (``<|channel>``/``<channel|>``) and tool call tokens
+        (``<|tool_call>``/``<tool_call|>``/``<|"|>``) as special tokens.
+        The default ``skip_special_tokens=True`` strips them from
+        ``output.text``, breaking parsing of both reasoning blocks and
+        tool calls.
+
+        This is a no-op for models whose structured tokens are regular
+        text tokens (e.g. DeepSeek's ``<think>``/``</think>``).
+        """
+        # The offline API currently lacks a unified rendering pipeline.
+        # Until the planned Renderer refactor is complete, we hardcode
+        # this token preservation logic specifically for Gemma4 models
+        # to avoid regressions on other models.
+        hf_config = getattr(self.model_config, "hf_config", None)
+        architectures = getattr(hf_config, "architectures", [])
+
+        if any("Gemma4" in arch for arch in architectures):
+            tokenizer = self.renderer.get_tokenizer()
+            vocab = tokenizer.get_vocab()
+            special_ids = set(getattr(tokenizer, "all_special_ids", []))
+
+            # Tokens used for thinking delimiters and tool call syntax
+            # that some models (Gemma4) register as special tokens.
+            structured_tokens = (
+                "<|channel>",
+                "<channel|>",  # thinking delimiters
+                "<|tool_call>",
+                "<tool_call|>",  # tool call delimiters
+                '<|"|>',  # string quoting in tool args
+            )
+            needs_special = any(
+                vocab.get(tok) in special_ids
+                for tok in structured_tokens
+                if tok in vocab
+            )
+            if needs_special:
+                for sp in params:
+                    if isinstance(sp, SamplingParams) and sp.skip_special_tokens:
+                        sp.skip_special_tokens = False
 
     def _render_and_run_requests(
         self,
