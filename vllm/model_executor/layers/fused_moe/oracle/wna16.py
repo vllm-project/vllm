@@ -381,6 +381,15 @@ def convert_to_wna16_moe_kernel_format(
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
+        from vllm.model_executor.layers.quantization.gptq_marlin import (
+            GPTQMarlinConfig,
+        )
+
+        if not isinstance(quant_config, GPTQMarlinConfig):
+            raise TypeError(
+                "Marlin WNA16 MoE backend requires GPTQMarlinConfig, got "
+                f"{type(quant_config).__name__}."
+            )
         _process_weights_marlin(layer, quant_config, input_dtype)
 
     else:
