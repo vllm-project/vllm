@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     DeepGemmExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
@@ -193,6 +193,14 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
     with monkeypatch.context() as mp:
         mp.setenv("VLLM_USE_DEEP_GEMM", "1")
 
+        call_counter = {"cnt": 0}
+        orig_fn = DeepGemmExperts.apply
+
+        def _spy_apply(*args, **kwargs):
+            call_counter["cnt"] += 1
+            return orig_fn(*args, **kwargs)
+
+        monkeypatch.setattr(DeepGemmExperts, "apply", _spy_apply)
         if topk > num_experts:
             pytest.skip(f"topk={topk} > num_experts={num_experts}")
 
@@ -203,4 +211,9 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
             topk=topk,
             num_experts=num_experts,
             block_size=BLOCK_SIZE,
+        )
+
+        assert call_counter["cnt"] == 1, (
+            f"DeepGEMM path was not executed during the test. "
+            f"Call counter: {call_counter['cnt']}"
         )
