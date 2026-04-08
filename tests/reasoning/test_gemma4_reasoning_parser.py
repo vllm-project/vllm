@@ -128,6 +128,13 @@ THOUGHT_PREFIX_DIVERGE = {
     "content": "Done",
     "is_reasoning_end": True,
 }
+# The model isn't reasoning if we're generating tool calls.
+TOOL_CALL_STARTED = {
+    "output": "<|tool_call>",
+    "reasoning": None,
+    "content": "<|tool_call>",
+    "is_reasoning_end": True,
+}
 
 TEST_CASES = [
     pytest.param(False, INVALID_SIMPLE_NONSTREAMING, id="invalid_simple"),
@@ -159,17 +166,12 @@ TEST_CASES = [
     ),
     pytest.param(False, THOUGHT_PREFIX_DIVERGE, id="thought_prefix_diverge"),
     pytest.param(True, THOUGHT_PREFIX_DIVERGE, id="thought_prefix_diverge_streaming"),
+    pytest.param(False, TOOL_CALL_STARTED, id="tool_call_started"),
+    pytest.param(True, TOOL_CALL_STARTED, id="tool_call_started_streaming"),
 ]
 
 
-@pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
-def test_gemma4_reasoning(
-    streaming: bool,
-    param_dict: dict,
-    generic_tokenizer,
-):
-    output = param_dict["output"]
-
+def gemma4_encode_output(generic_tokenizer, output: str) -> list[int]:
     # Resolve token IDs dynamically from the real tokenizer
     vocab = generic_tokenizer.get_vocab()
     start_token_id = vocab["<|channel>"]
@@ -215,6 +217,18 @@ def test_gemma4_reasoning(
     else:
         output_tokens += _encode(output)
 
+    return output_tokens
+
+
+@pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
+def test_gemma4_reasoning(
+    streaming: bool,
+    param_dict: dict,
+    generic_tokenizer,
+):
+    output = param_dict["output"]
+    output_tokens = gemma4_encode_output(generic_tokenizer, output)
+
     parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
         generic_tokenizer
     )
@@ -246,3 +260,16 @@ def test_gemma4_adjust_request(generic_tokenizer):
     result = parser.adjust_request(request)
     assert result.skip_special_tokens is False
     assert result is request
+
+
+def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
+    output = (
+        "<|channel>thought\n1st thought<channel|>1st content<turn|>\n"
+        "<|turn>user\nThanks<|turn>model\n"
+    )
+    output_tokens = gemma4_encode_output(generic_tokenizer, output)
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        generic_tokenizer
+    )
+    is_reasoning_end = parser.is_reasoning_end(output_tokens)
+    assert not is_reasoning_end
