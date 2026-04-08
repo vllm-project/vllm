@@ -1256,6 +1256,7 @@ class Gemma4Model(nn.Module):
         # We build the mapping directly since Gemma4 uses bare param
         # names (no .weight suffix) unlike standard MoE checkpoints.
         num_experts = getattr(self.config, "num_experts", None) or 0
+        # Base weight mappings (AWQ fused format)
         expert_params_mapping = [
             # (param_name, weight_name, expert_id, shard_id)
             (
@@ -1273,6 +1274,29 @@ class Gemma4Model(nn.Module):
                 ("w3", "up_proj"),
             ]
         ]
+        # NVFP4 per-expert scale/packed mappings: checkpoint stores
+        # experts.{id}.{proj}.{suffix} which maps to fused params
+        # like w13_{suffix} or w2_{suffix} on the FusedMoE layer.
+        nvfp4_suffixes = [
+            "weight_packed", "weight_scale",
+            "weight_global_scale", "input_global_scale",
+        ]
+        for expert_id in range(num_experts):
+            for shard_id, proj_name in [
+                ("w1", "gate_proj"),
+                ("w2", "down_proj"),
+                ("w3", "up_proj"),
+            ]:
+                for suffix in nvfp4_suffixes:
+                    param_base = ("experts.w13_"
+                                  if proj_name in ["gate_proj", "up_proj"]
+                                  else "experts.w2_")
+                    expert_params_mapping.append((
+                        param_base + suffix,
+                        f"experts.{expert_id}.{proj_name}.{suffix}",
+                        expert_id,
+                        shard_id,
+                    ))
         params_dict = dict(self.named_parameters())
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))
@@ -1330,19 +1354,28 @@ class Gemma4Model(nn.Module):
                     if is_pp_missing_parameter(moe_name, self):
                         continue
                     param = params_dict[moe_name]
-                    # Expert weights are already in the correct
-                    # orientation for FusedMoE after _weight_iterator:
-                    #   gate/up: [I, H] → w1/w3 expects [I, H]
-                    #   down:    [H, I] → w2 expects [H, I]
-                    assert loaded_weight.dim() == 2, (
-                        f"Expected 2D expert weight for {weight_name}, "
-                        f"got shape {loaded_weight.shape}"
-                    )
+                    # Determine weight_name for FusedMoE loader:
+                    # Base weights: append ".weight"
+                    # NVFP4 scales: use the suffix directly
+                    wn_for_loader = weight_name + ".weight"
+                    is_nvfp4_scale = False
+                    for _sfx in nvfp4_suffixes:
+                        if weight_name.endswith("." + _sfx):
+                            wn_for_loader = weight_name.split(".", 1)[-1]
+                            is_nvfp4_scale = True
+                            break
+                    if not is_nvfp4_scale:
+                        # Base weight must be 2D
+                        assert loaded_weight.dim() == 2, (
+                            f"Expected 2D expert weight for "
+                            f"{weight_name}, "
+                            f"got shape {loaded_weight.shape}"
+                        )
                     weight_loader = param.weight_loader
                     weight_loader(
                         param,
                         loaded_weight,
-                        weight_name + ".weight",
+                        wn_for_loader,
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
@@ -1498,6 +1531,21 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
                         ".experts.down_proj",
                         ".moe.down_proj",
                     )
+
+                # Per-expert NVFP4 weights: checkpoint has
+                # experts.{id}.{proj}.{param} — remap to
+                # moe.experts.{id}.{proj}.{param} for FusedMoE.
+                expert_match = re.match(
+                    r"(.*)\.experts\.(\d+)\."
+                    r"(gate_proj|up_proj|down_proj)\.(.*)",
+                    name,
+                )
+                if expert_match:
+                    prefix, eid, proj, suffix = expert_match.groups()
+                    name = (f"{prefix}.moe.experts.{eid}"
+                            f".{proj}.{suffix}")
+                    yield name, weight
+                    continue
 
                 # MoE expert weights: checkpoint stores as 3D packed
                 # tensors.  Explode into per-expert 2D weights for
