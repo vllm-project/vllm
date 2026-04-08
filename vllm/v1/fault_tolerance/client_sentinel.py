@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import msgspec.msgpack
@@ -8,13 +10,17 @@ import zmq.asyncio
 
 from vllm.logger import init_logger
 from vllm.utils.network_utils import close_sockets, make_zmq_socket
-from vllm.v1.engine import EngineStatusType
+from vllm.v1.engine import EngineCoreOutputs as FTUtilityOutputs
+from vllm.v1.engine import EngineStatusType, UtilityOutput
 from vllm.v1.fault_tolerance.sentinel import BaseSentinel
 from vllm.v1.fault_tolerance.utils import (
     FAULT_STATE_PUB_TOPIC,
     FaultInfo,
+    FaultToleranceRequest,
+    FaultToleranceResult,
     FaultToleranceZmqAddresses,
 )
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, UtilityResult
 
 if TYPE_CHECKING:
     from vllm.v1.engine.core_client import AsyncMPClient
@@ -38,11 +44,15 @@ class ClientSentinel(BaseSentinel):
         self,
         fault_tolerance_addresses: FaultToleranceZmqAddresses,
         client: "AsyncMPClient",
+        call_utility_async: Callable,
+        core_engines: list[bytes],
     ):
         self.ctx = zmq.asyncio.Context()
         super().__init__(None, b"client_sentinel", client)
         parallel_config = client.vllm_config.parallel_config
         self.ft_config = parallel_config.fault_tolerance_config
+        self.engine_identities = core_engines
+        self.call_utility_async = call_utility_async
 
         self.sentinel_dead = False
         self._shutdown_task: asyncio.Task | None = None
@@ -65,6 +75,25 @@ class ClientSentinel(BaseSentinel):
             bind=True,
         )
 
+        # sockets to receive fault tolerance request from clients
+        self.ft_request_sockets = [
+            make_zmq_socket(self.ctx, addr, zmq.DEALER, False, self.identity)
+            for addr in fault_tolerance_addresses.ft_request_addresses
+        ]
+        # sockets to send fault tolerance execution results back to clients
+        self.ft_result_sockets = [
+            make_zmq_socket(
+                self.ctx,
+                addr,
+                zmq.PUSH,
+                linger=4000,
+            )
+            for addr in fault_tolerance_addresses.ft_result_addresses
+        ]
+
+        self.is_faulted = asyncio.Event()
+        self._utility_encoder = MsgpackEncoder()
+
         self.start_rank = parallel_config.data_parallel_index
         dp_size = parallel_config.data_parallel_size
         dp_local_size = parallel_config.data_parallel_size_local
@@ -75,7 +104,44 @@ class ClientSentinel(BaseSentinel):
             engine_index: {"status": "healthy"}
             for engine_index in range(self.start_rank, self.start_rank + num_dp_managed)
         }
+        self.engine_identity_to_index = {
+            identity: index
+            for index, identity in zip(
+                range(self.start_rank, self.start_rank + num_dp_managed),
+                self.engine_identities,
+            )
+        }
         asyncio.create_task(self.run())
+        asyncio.create_task(self.poll_and_execute_cmd())
+
+    async def _send_utility_result(
+        self,
+        client_index: int,
+        call_id: int,
+        result: FaultToleranceResult,
+    ) -> None:
+        # Return the fault-tolerance execution result to the originating client.
+        uo = UtilityOutput(call_id=call_id)
+        uo.result = UtilityResult(result)
+        outputs = FTUtilityOutputs(utility_output=uo)
+        buffers = self._utility_encoder.encode(outputs)
+        await self.ft_result_sockets[client_index].send_multipart(buffers, copy=False)
+
+    async def pause(self, ft_request: FaultToleranceRequest):  # type: ignore[override]
+        """Expected params: timeout, exclude_engine_index (optional)."""
+        exclude_engine_index = ft_request.params.get("exclude_engine_index")
+
+        # Pause all engines except ones already marked dead or being excluded.
+        target_engines = [
+            self.engine_identities[i - self.start_rank]
+            for i, status in self.engine_status_dict.items()
+            if status["status"] != "dead"
+            and (exclude_engine_index is None or i not in exclude_engine_index)
+        ]
+        res = await self._execute_cmd_on_engines(ft_request, target_engines)
+        if res.success:
+            logger.info("vLLM instance is paused and waiting for recovery commands.")
+        return res
 
     @property
     def client(self) -> "AsyncMPClient":
@@ -96,6 +162,42 @@ class ClientSentinel(BaseSentinel):
             (topic, msgspec.msgpack.encode(pub_msg))
         )
 
+    async def _execute_cmd_on_engines(
+        self, ft_request: FaultToleranceRequest, target_engines: list[bytes]
+    ) -> FaultToleranceResult:
+        coroutines = []
+        # dispatch commands to target engines
+        for core_engine in target_engines:
+            coro = self.call_utility_async(
+                "handle_fault", ft_request, engine=core_engine
+            )
+            coroutines.append(coro)
+
+        timeout = ft_request.params["timeout"]
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*coroutines),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            return FaultToleranceResult(
+                request_id=ft_request.request_id,
+                success=False,
+                reason=f"Timed out after {timeout}s waiting for engine responses.",
+            )
+
+        results = [FaultToleranceResult(**res) for res in results]
+        return FaultToleranceResult(
+            request_id=ft_request.request_id,
+            success=all(res.success for res in results),
+            reason="\n".join(
+                f"Engine {self.engine_identity_to_index[engine]}: {res.reason}"
+                for engine, res in zip(target_engines, results)
+                if not res.success
+            )
+            or None,
+        )
+
     async def run(self):
         """Receive fault info from engine and pause engines if happened."""
         try:
@@ -108,17 +210,22 @@ class ClientSentinel(BaseSentinel):
                     "status": status_enum.name.lower()
                 }
                 await self._pub_engine_status()
-                if self._shutdown_task is None:
-                    self._shutdown_task = asyncio.create_task(
-                        self._shutdown_after_timeout()
+                if (
+                    not self.is_faulted.is_set()
+                    and status_enum != EngineStatusType.HEALTHY
+                ):
+                    self.is_faulted.set()
+                    # todo: Timeout for DeepEP/nixl-ep kernel is fixed to 100 seconds
+                    timeout = max(100, self.ft_config.gloo_comm_timeout_sec) + 5
+                    pause_request = FaultToleranceRequest.builder(
+                        request_id=str(uuid.uuid4()),
+                        instruction="pause",
+                        params={"timeout": timeout},
                     )
+                    asyncio.create_task(self.pause(pause_request))
 
         except zmq.ZMQError:
             logger.info("Fault receiver socket closed, stopping async monitor.")
-
-    async def _shutdown_after_timeout(self):
-        await asyncio.sleep(self.ft_config.engine_recovery_timeout_sec)
-        self.client.shutdown()
 
     async def refresh_engine_status(self, new_data_parallel_size: int):
         # Update the engine status dict and publish the new status.
@@ -139,6 +246,35 @@ class ClientSentinel(BaseSentinel):
         }
         await self._pub_engine_status()
 
+    async def poll_and_execute_cmd(self):
+        """Poll and execute fault tolerance commands."""
+        generic_decoder = MsgpackDecoder()
+        # Initialize request sockets.
+        for request_socket in self.ft_request_sockets:
+            await request_socket.send(b"")
+
+        poller = zmq.asyncio.Poller()
+        for sock in self.ft_request_sockets:
+            poller.register(sock, zmq.POLLIN)
+
+        while not self.sentinel_dead:
+            try:
+                events = await poller.poll(timeout=100)
+                if not events:
+                    continue
+                for sock, event in events:
+                    # Receive a client FT request, execute it, and route the result back
+                    _, *msg = await sock.recv_multipart(copy=False)
+                    client_index, call_id, _, ft_args = generic_decoder.decode(msg)
+                    ft_request = FaultToleranceRequest(**ft_args[0])
+                    ft_result = await getattr(self, ft_request.instruction)(ft_request)
+                    await self._send_utility_result(client_index, call_id, ft_result)
+            except zmq.ZMQError:
+                logger.info("Sockets closed, terminating.")
+                self.sentinel_dead = True
+
     def shutdown(self):
+        self.sentinel_dead = True
         close_sockets([self.fault_receiver_socket, self.fault_state_pub_socket])
+        close_sockets(self.ft_request_sockets + self.ft_result_sockets)
         super().shutdown()

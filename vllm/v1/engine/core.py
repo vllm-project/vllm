@@ -62,6 +62,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.exceptions import EngineLoopPausedError
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -74,13 +75,14 @@ from vllm.v1.fault_tolerance.engine_core_sentinel import (
     EngineCoreSentinel,
     fault_tolerant_wrapper,
 )
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import compute_iteration_details
+from vllm.v1.utils import compute_iteration_details, get_engine_client_zmq_addr
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -881,8 +883,15 @@ class EngineCoreProc(EngineCore):
                 assert addresses.fault_tolerance_addresses is not None
                 ft_addresses = addresses.fault_tolerance_addresses
                 engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
+
+                # The ZMQ address between engine_core_sentinel and worker_sentinel.
+                worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
+                vllm_config.parallel_config.fault_tolerance_config.worker_cmd_addr = (
+                    worker_cmd_addr
+                )
                 self.engine_core_sentinel = EngineCoreSentinel(
                     parallel_config=vllm_config.parallel_config,
+                    engine_input_q=self.input_queue,
                     engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
                     engine=self,
@@ -1190,6 +1199,14 @@ class EngineCoreProc(EngineCore):
 
         raise SystemExit
 
+    def _ensure_busy_loop_running(self):
+        if (
+            self.enable_fault_tolerance
+            and self.engine_core_sentinel.stop_busy_loop.is_set()
+        ):
+            raise EngineLoopPausedError("Engine busy loop is paused.")
+        return True
+
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
@@ -1223,9 +1240,10 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
-
+        self._ensure_busy_loop_running()
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+        self._ensure_busy_loop_running()
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1288,6 +1306,7 @@ class EngineCoreProc(EngineCore):
         """Dispatch request from client."""
 
         if request_type == EngineCoreRequestType.WAKEUP:
+            self._ensure_busy_loop_running()
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
@@ -1469,6 +1488,12 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
+                    elif request_type == EngineCoreRequestType.UTILITY:
+                        request = generic_decoder.decode(data_frames)
+                        client_index, call_id, method, args = request
+                        if method == "handle_fault":
+                            self.handle_fault(call_id, client_index, args[0])
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
 
@@ -1548,6 +1573,20 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    def handle_fault(self, call_id: int, client_index: int, args: dict):
+        """Call engine_core_sentinel to perform fault tolerance."""
+        uo = UtilityOutput(call_id=call_id)
+        try:
+            ft_result = self.engine_core_sentinel.handle_fault(
+                FaultToleranceRequest(**args)
+            )
+            uo.result = UtilityResult(ft_result)
+        except Exception as e:
+            logger.exception("Call to handle_fault method failed")
+            uo.failure_message = f"Call to handle_fault method failed: {e}"
+        outputs = EngineCoreOutputs(utility_output=uo)
+        self.output_queue.put_nowait((client_index, outputs))
 
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
@@ -1688,7 +1727,10 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
-        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        dp_group, dp_store = parallel_config.stateless_init_dp_group(
+            return_store=True,
+            fault_tolerance_config=parallel_config.fault_tolerance_config,
+        )
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
@@ -1780,7 +1822,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
+                self._ensure_busy_loop_running()
                 self.execute_dummy_batch()
+                self._ensure_busy_loop_running()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(

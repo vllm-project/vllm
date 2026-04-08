@@ -1047,7 +1047,11 @@ def launch_core_engines(
 
     if vllm_config.parallel_config.enable_fault_tolerance:
         addresses.fault_tolerance_addresses = FaultToleranceZmqAddresses.build(
-            host, dp_size, vllm_config.parallel_config.fault_tolerance_config
+            host,
+            dp_size,
+            addresses.inputs,
+            addresses.outputs,
+            vllm_config.parallel_config.fault_tolerance_config,
         )
 
     if parallel_config.data_parallel_backend == "ray":
