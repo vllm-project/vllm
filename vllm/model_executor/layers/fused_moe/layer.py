@@ -39,7 +39,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
-from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -1486,13 +1485,12 @@ class FusedMoE(CustomOp):
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
         """
-        if isinstance(self.router, BaseRouter):
-            self.router.initialize_eplb_state(
-                expert_load_view[moe_layer_idx],
-                logical_to_physical_map[moe_layer_idx],
-                logical_replica_count[moe_layer_idx],
-                should_record_tensor,
-            )
+        self.router.initialize_eplb_state(
+            expert_load_view[moe_layer_idx],
+            logical_to_physical_map[moe_layer_idx],
+            logical_replica_count[moe_layer_idx],
+            should_record_tensor,
+        )
 
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
