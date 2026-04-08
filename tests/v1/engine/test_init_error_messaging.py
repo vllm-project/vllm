@@ -22,8 +22,12 @@ def test_kv_cache_oom_no_memory():
         )
     }
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc_info:
         check_enough_kv_cache_memory(config, spec, 0)
+
+    message = str(exc_info.value)
+    assert "No available memory for the cache blocks" in message
+    assert "GPU memory" not in message
 
 
 def test_kv_cache_oom_insufficient_memory(monkeypatch):
@@ -50,5 +54,9 @@ def test_kv_cache_oom_insufficient_memory(monkeypatch):
         )
     }
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as exc_info:
         check_enough_kv_cache_memory(config, spec, 1024**3)  # 1 GiB
+
+    message = str(exc_info.value)
+    assert "available KV cache memory" in message
+    assert "GPU memory" not in message
