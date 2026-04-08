@@ -491,6 +491,51 @@ class TestStreamingExtraction:
             assert parsed_args["count"] == 42
             assert parsed_args["active"] is True
 
+    def test_streaming_boolean_split_across_chunks(self, parser, mock_request):
+        """Boolean value split across token boundaries must not corrupt JSON."""
+        chunks = [
+            "<|tool_call>",
+            "call:search{input:{all:" + "true"[:3],
+            "e}}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["input"]["all"] is True
+
+    def test_streaming_false_split_across_chunks(self, parser, mock_request):
+        """Boolean false split across chunks."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{flag:" + "false"[:4],
+            "e}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["flag"] is False
+
+    def test_streaming_number_split_across_chunks(self, parser, mock_request):
+        """Number split across chunks must not change type."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{count:4",
+            "2}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["count"] == 42
+
     def test_streaming_empty_args(self, parser, mock_request):
         """Tool call with no arguments."""
         chunks = [
@@ -530,4 +575,64 @@ class TestStreamingExtraction:
         # Ensure no raw delimiter fragments leaked into the JSON
         assert "<|" not in args_text, (
             f"Partial delimiter leaked into JSON: {args_text!r}"
+        )
+
+    def test_streaming_does_not_duplicate_plain_text_after_tool_call(
+        self, parser, mock_request, monkeypatch
+    ):
+        """Buffered plain text after a tool call must not corrupt current_text."""
+        captured_current_texts: list[str] = []
+        original_extract_streaming = parser._extract_streaming
+
+        def wrapped_extract_streaming(previous_text, current_text, delta_text):
+            captured_current_texts.append(current_text)
+            return original_extract_streaming(previous_text, current_text, delta_text)
+
+        monkeypatch.setattr(parser, "_extract_streaming", wrapped_extract_streaming)
+
+        chunks = [
+            "<|tool_call>",
+            "call:get_weather{",
+            'location:<|"|>Paris<|"|>}',
+            "<tool_call|><",
+            "div>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        content_parts = [
+            delta.content for delta, _ in results if delta is not None and delta.content
+        ]
+        assert "".join(content_parts) == "<div>"
+        assert captured_current_texts[-1].endswith("<tool_call|><div>")
+        assert not captured_current_texts[-1].endswith("<tool_call|><<div>")
+
+    def test_streaming_html_argument_does_not_duplicate_tag_prefixes(
+        self, parser, mock_request
+    ):
+        """HTML content inside tool arguments must not be duplicated."""
+        chunks = [
+            "<|tool_call>",
+            "call:write_file{",
+            'path:<|"|>index.html<|"|>,',
+            'content:<|"|><!DOCTYPE html>\n<',
+            'html lang="zh-CN">\n<',
+            "head>\n    <",
+            'meta charset="UTF-8">\n    <',
+            'meta name="viewport" content="width=device-width">\n',
+            '<|"|>}',
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text
+
+        parsed_args = json.loads(args_text)
+        assert parsed_args["path"] == "index.html"
+        assert (
+            parsed_args["content"] == "<!DOCTYPE html>\n"
+            '<html lang="zh-CN">\n'
+            "<head>\n"
+            '    <meta charset="UTF-8">\n'
+            '    <meta name="viewport" content="width=device-width">\n'
         )
