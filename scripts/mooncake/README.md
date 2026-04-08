@@ -104,6 +104,25 @@ Owner launch contract:
 - use the owner’s advertised segment string as the locality target for requester ranks
 - the owner’s registered segment name is what requester discovery compares against
 
+Owner helper:
+
+```bash
+# Memory only
+bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80
+
+# Memory + disk offload
+bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400
+
+# Background mode
+bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400 --bg
+```
+
+This helper:
+
+- launches `mooncake_client` with the stable owner contract `--host=<node-ip>:50053 --port=50052`
+- sets owner-side disk offload env vars when `--disk-size` is given
+- keeps requester setup separate from owner setup
+
 ### 3. Environment Setup (setup_vllm_env.sh)
 
 Before running benchmarks with the Mooncake backend, source `setup_vllm_env.sh` to configure requester-side environment variables. The benchmark scripts do this automatically, but you can also use it directly:
