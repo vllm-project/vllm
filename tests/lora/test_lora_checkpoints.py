@@ -134,12 +134,10 @@ def test_lora_weights_mapping(baichuan_lora_files):
 
 def test_gemma4_lora_weights_mapping():
     mapper = Gemma4ForCausalLM.hf_to_vllm_mapper
-    name = (
-        "base_model.model.model.language_model.layers.9.mlp.down_proj."
-        "lora_A.weight"
-    )
-    assert ("model.layers.9.mlp.down_proj", True) == parse_fine_tuned_lora_name(
-        name, mapper
+    name = "base_model.model.model.language_model.layers.9.mlp.down_proj.lora_A.weight"
+    assert parse_fine_tuned_lora_name(name, mapper) == (
+        "model.layers.9.mlp.down_proj",
+        True,
     )
 
 
@@ -149,6 +147,7 @@ def test_gemma4_moe_lora_weights_mapping():
         "base_model.model.model.language_model.layers.9.moe.experts."
         "gate_up_proj.lora_B.weight"
     )
-    assert ("model.layers.9.moe.gate_up_proj", False) == parse_fine_tuned_lora_name(
-        name, mapper
+    assert parse_fine_tuned_lora_name(name, mapper) == (
+        "model.layers.9.moe.gate_up_proj",
+        False,
     )
