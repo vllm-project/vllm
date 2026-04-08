@@ -45,8 +45,7 @@ class BlockTables:
             # by some attention backends.
             if block_size <= 128:
                 alignment = 128 // block_size
-                if max_num_blocks % alignment != 0:
-                    max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
+                max_num_blocks = cdiv(max_num_blocks, alignment) * alignment
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
