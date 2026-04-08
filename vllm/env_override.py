@@ -500,7 +500,7 @@ if is_torch_equal("2.9.0"):
 # This mirrors the fix in https://github.com/pytorch/pytorch/pull/177558
 # and can be removed once torch >=2.12 is the minimum supported version.
 
-if not is_torch_equal_or_newer("2.12.0"):
+if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0"):
     import builtins as _builtins
     import pickle
 
