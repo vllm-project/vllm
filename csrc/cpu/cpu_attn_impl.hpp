@@ -880,6 +880,18 @@ auto call_init_from_input(T& impl, const AttentionInput* input, int)
 template <typename T>
 void call_init_from_input(T&, const AttentionInput*, ...) {}
 
+// Returns the per-output v_scale that final_output should apply (FP8 paths).
+// Defaults to 1.0f for non-FP8 implementations.
+template <typename T>
+auto call_get_output_v_scale(T& impl, int)
+    -> decltype(impl.get_output_v_scale()) {
+  return impl.get_output_v_scale();
+}
+template <typename T>
+float call_get_output_v_scale(T&, ...) {
+  return 1.0f;
+}
+
 template <typename attention_impl_t>
 class AttentionMainLoop {
  public:
@@ -1397,6 +1409,7 @@ class AttentionMainLoop {
 
       attention_impl_t attn_impl;
       call_init_from_input(attn_impl, input, 0);
+      const float output_v_scale = call_get_output_v_scale(attn_impl, 0);
 
       // general information
       const int32_t q_head_num = input->num_heads;
@@ -1776,7 +1789,7 @@ class AttentionMainLoop {
                                reinterpret_cast<query_t*>(input->output) +
                                    output_buffer_offset,
                                sum_buffer, actual_q_heads_per_kv,
-                               actual_q_token_num, q_head_num);
+                               actual_q_token_num, q_head_num, output_v_scale);
                 } else {
                   const int32_t stride =
                       actual_q_heads_per_kv * split_kv_q_token_num_threshold;
@@ -1846,7 +1859,7 @@ class AttentionMainLoop {
               split_output_buffer,
               reinterpret_cast<query_t*>(input->output) + output_buffer_offset,
               split_sum_buffer, actual_q_heads_per_kv, curr_output_token_num,
-              q_head_num);
+              q_head_num, output_v_scale);
         }
       }
     }
@@ -1970,8 +1983,8 @@ class AttentionMainLoop {
                     query_t* __restrict__ curr_output_buffer,
                     float* __restrict__ sum_buffer,
                     const int32_t q_heads_per_kv,
-                    const int32_t actual_q_token_num,
-                    const int32_t q_head_num) {
+                    const int32_t actual_q_token_num, const int32_t q_head_num,
+                    const float v_scale = 1.0f) {
     // final output
     using output_vec_t = typename VecTypeTrait<query_t>::vec_t;
 
@@ -1985,7 +1998,7 @@ class AttentionMainLoop {
           curr_partial_output_buffer;
       query_t* __restrict__ curr_output_buffer_iter = curr_output_buffer;
       for (int32_t head_idx = 0; head_idx < q_heads_per_kv; ++head_idx) {
-        vec_op::FP32Vec16 inv_sum_scale_vec(1.0 / *curr_sum_buffer);
+        vec_op::FP32Vec16 inv_sum_scale_vec(v_scale / *curr_sum_buffer);
 
         for (int32_t i = 0; i < group_num_per_head; ++i) {
           vec_op::FP32Vec16 vec(curr_partial_output_buffer_iter);

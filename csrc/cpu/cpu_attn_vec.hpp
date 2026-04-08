@@ -111,40 +111,23 @@ class TileGemm82 {
   }
 };
 // FP8 (E4M3/E5M2) variant of TileGemm82.  KV cache is stored as uint8_t.
-// scale_2p8 (= k/v_scale × 2^8 for E4M3, = k/v_scale for E5M2) is folded
-// into the Q buffer (QK phase) and P buffer (PV phase) by the caller, so
-// gemm_micro uses a no-scale FP32Vec16 constructor, eliminating two
-// _mm512_mul_ps calls per k-iteration.
+// Dequantized FP8 bytes are converted to FP32 without a scale multiply;
+// k_scale is folded into the attention scale (applied to QK logits), and
+// v_scale is applied to the PV output in final_output.
 class TileGemm82FP8 {
  public:
   using prob_t = float;
 
-  static thread_local float s_k_scale;
-  static thread_local float s_v_scale;
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
-  static void set_scales(
-      float k, float v,
+  static void set_fp8_dtype(
       Fp8KVCacheDataType dtype = Fp8KVCacheDataType::kFp8E4M3) noexcept {
-    s_k_scale = k;
-    s_v_scale = v;
     s_fp8_kv_dtype = dtype;
   }
 
-  // Scale the softmax probability buffer (shape [q_head_num, stride]) by
-  // v_scale_2p8 in-place.  Called once per kv-tile after apply_softmax and
-  // before the PV GEMM so that gemm_micro can use the no-scale constructor.
-  static void scale_probs_buffer(float* __restrict__ probs, int32_t q_head_num,
-                                 int32_t token_num, int64_t stride) noexcept {
-    const float vscale = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
-                             ? s_v_scale
-                             : s_v_scale * 0x1p8f;
-    const vec_op::FP32Vec16 scale_vec(vscale);
-    for (int32_t h = 0; h < q_head_num; ++h) {
-      float* row = probs + h * stride;
-      for (int32_t t = 0; t < token_num; t += 16)
-        (vec_op::FP32Vec16(row + t) * scale_vec).save(row + t);
-    }
-  }
+  // v_scale is applied to the PV output in final_output; no-op here.
+  static void scale_probs_buffer(float* __restrict__ /*probs*/,
+                                 int32_t /*q_head_num*/, int32_t /*token_num*/,
+                                 int64_t /*stride*/) noexcept {}
 
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
@@ -211,8 +194,8 @@ class TileGemm82FP8 {
     float* __restrict__ curr_a = a_tile;
     const bool is_e5m2 = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2);
     for (int32_t k = 0; k < dynamic_k_size; ++k) {
-      // Dequantize 32 FP8 bytes to pseudo-FP16 bits; convert to FP32 without
-      // scale multiply — scale has been pre-folded into Q (QK) or P (PV).
+      // Dequantize 32 FP8 bytes to pseudo-FP16 bits and convert to FP32.
+      // k_scale is in the attention scale (logits); v_scale is in final_output.
       vec_op::BF16Vec32 fp16_b_reg =
           is_e5m2 ? vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e5m2_tag{})
                   : vec_op::BF16Vec32(curr_b_0, 0.0f);
@@ -241,8 +224,6 @@ class TileGemm82FP8 {
   }
 };
 
-thread_local float TileGemm82FP8::s_k_scale = 1.0f;
-thread_local float TileGemm82FP8::s_v_scale = 1.0f;
 thread_local Fp8KVCacheDataType TileGemm82FP8::s_fp8_kv_dtype =
     Fp8KVCacheDataType::kFp8E4M3;
 
@@ -381,8 +362,11 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim> {
   }
 };
 // FP8 KV cache specialisation for the VEC (AVX-512) path.
-// Identical to AttentionImpl<ISA::VEC, scalar_t, head_dim> except that
-// kv_cache_t is uint8_t and execute_attention uses TileGemm82FP8.
+// Identical to AttentionImpl<ISA::VEC, scalar_t, head_dim> except:
+//  - kv_cache_t is uint8_t
+//  - scale_on_logits=true: k_scale_2p8 is folded into the attention scale
+//    and applied to QK logits; Q is copied without any scale factor
+//  - v_scale_2p8 is applied to the PV output in final_output
 template <typename scalar_t, int64_t head_dim>
 class AttentionImplFP8VEC : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
   using Base = AttentionImpl<ISA::VEC, scalar_t, head_dim>;
@@ -395,6 +379,8 @@ class AttentionImplFP8VEC : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
   using prob_buffer_t = typename Base::prob_buffer_t;
   // Override: KV cache is stored as uint8 (FP8 E4M3 or E5M2).
   using kv_cache_t = uint8_t;
+  // Override: apply scale to QK logits, not to Q during packing.
+  constexpr static bool scale_on_logits = true;
 
   float k_scale = 1.0f;
   float v_scale = 1.0f;
@@ -406,23 +392,33 @@ class AttentionImplFP8VEC : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
     fp8_kv_dtype = input->fp8_kv_dtype;
   }
 
-  // Override: pre-multiply Q by k_scale_2p8 so that gemm_micro can skip the
-  // per-element scale multiply (no-scale FP32Vec16 constructor is used).
+  // Q is packed as plain FP32; k_scale is folded into the attention scale in
+  // execute_attention and applied to QK logits via scale_on_logits.
   void copy_q_heads_tile(query_t* __restrict__ src,
                          q_buffer_t* __restrict__ q_buffer, const int32_t q_num,
                          const int32_t q_heads_per_kv,
                          const int64_t q_num_stride,
-                         const int64_t q_head_stride, float scale) {
-    const float k_scale_2p8 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
-                                  ? k_scale
-                                  : k_scale * 0x1p8f;
+                         const int64_t q_head_stride, float /*scale*/) {
     Base::copy_q_heads_tile(src, q_buffer, q_num, q_heads_per_kv, q_num_stride,
-                            q_head_stride, scale * k_scale_2p8);
+                            q_head_stride, 1.0f);
+  }
+
+  // Returns the v_scale factor that final_output applies after PV accumulation.
+  float get_output_v_scale() const noexcept {
+    return (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2) ? v_scale
+                                                          : v_scale * 0x1p8f;
   }
 
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
-    TileGemm82FP8::set_scales(k_scale, v_scale, fp8_kv_dtype);
+    // Fold k_scale_2p8 into the attention scale; scale_on_logits=true will
+    // apply it to QK logits, correcting for both KV cache quantization and
+    // the FP8 exponent bias from the FP16-layout dequantization.
+    const float k_scale_2p8 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                                  ? k_scale
+                                  : k_scale * 0x1p8f;
+    scale *= k_scale_2p8;
+    TileGemm82FP8::set_fp8_dtype(fp8_kv_dtype);
     attention<TileGemm82FP8> attention_iteration;
     attention_iteration(CPU_ATTENTION_PARAMS);
   }
