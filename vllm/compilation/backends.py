@@ -806,8 +806,9 @@ class VllmBackend:
     inductor_config: dict[str, Any]
     # Shared size → range-entry index map, eagerly built once at init time.
     # _size_to_range_index[runtime_shape] gives a non-negative index into each
-    # PiecewiseBackend's _range_index_to_entry list. Compile ranges always
-    # cover [1, max_tokens] so every valid in-bounds shape has a valid index.
+    # PiecewiseBackend's _range_index_to_entry list, or -1 if no compile range
+    # covers that size (e.g. shape=0, or configs where endpoints don't reach
+    # max_tokens). Callers must guard against -1 before using the index.
     # Preallocated to max_num_batched_tokens+1 so lookup is a plain list index.
     _size_to_range_index: list[int]
     _num_range_entries: int
@@ -881,10 +882,10 @@ class VllmBackend:
 
         self._num_range_entries = next_idx
 
-        # Map every size in [1, max_tokens] to its range index.
-        # Compile ranges cover the full domain so every valid shape gets a
-        # non-negative index. Iterate in reverse so earlier ranges (lower
-        # index) overwrite later ones, preserving first-match-wins semantics.
+        # Map every size in [1, max_tokens] to its range index (-1 = no match).
+        # In typical production configs compile ranges tile the full [1, max_tokens]
+        # domain, but -1 can remain for shape=0 or configs with gaps. Iterate in
+        # reverse so earlier ranges (lower index) take priority over later ones.
         self._size_to_range_index: list[int] = [-1] * (max_tokens + 1)
         for i in range(len(compile_ranges) - 1, -1, -1):
             cr = compile_ranges[i]

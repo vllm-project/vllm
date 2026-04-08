@@ -381,9 +381,20 @@ class PiecewiseBackend:
             return None
 
         # Two list dereferences: size → index, index → RangeEntry.
+        # Guard against idx < 0: the mapping is initialised with -1 as a
+        # sentinel for "no range covers this size" (e.g. shape=0, or shapes
+        # outside compile-range endpoints in test / non-standard configs).
+        # Without the guard, Python would silently return list[-1] (the last
+        # element), giving a wrong dispatch with no error.
         cache = self.vllm_backend._size_to_range_index
         if 0 <= runtime_shape < len(cache):
-            return self._range_index_to_entry[cache[runtime_shape]]
+            idx = cache[runtime_shape]
+            if idx < 0:
+                return None
+            entry = self._range_index_to_entry[idx]
+            if entry is None:
+                return None
+            return entry
 
         # runtime_shape exceeds preallocated cache (rare — e.g. encoder shapes
         # beyond max_num_batched_tokens). Fall back to a linear scan.
