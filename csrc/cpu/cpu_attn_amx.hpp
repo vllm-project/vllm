@@ -313,38 +313,15 @@ constexpr static int32_t kAmxMinM = 1;
 // loaded into AMX tiles via _tile_stream_loadd.
 // All element-count pointer-arithmetic is identical to the BF16 path; the
 // difference is purely in byte widths (1 byte/FP8 vs 2 bytes/BF16).
+// k_scale_2p8 is folded into the attention scale (applied to QK logits);
+// v_scale_2p8 is applied to the PV output in final_output.
 template <>
 class TileGemm224<uint8_t> {
  public:
-  using prob_t = c10::BFloat16;
-
-  static thread_local float s_k_scale;
-  static thread_local float s_v_scale;
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
-  static void set_scales(
-      float k, float v,
+  static void set_fp8_dtype(
       Fp8KVCacheDataType dtype = Fp8KVCacheDataType::kFp8E4M3) noexcept {
-    s_k_scale = k;
-    s_v_scale = v;
     s_fp8_kv_dtype = dtype;
-  }
-
-  // Scale the softmax probability buffer (BF16) by v_scale_2p8 in-place.
-  // Called once per kv-tile after apply_softmax and before the PV GEMM.
-  static void scale_probs_buffer(c10::BFloat16* __restrict__ probs,
-                                 int32_t q_head_num, int32_t token_num,
-                                 int64_t stride) noexcept {
-    const float vscale = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
-                             ? s_v_scale
-                             : s_v_scale * 0x1p8f;
-    const vec_op::FP32Vec16 scale_vec(vscale);
-    for (int32_t h = 0; h < q_head_num; ++h) {
-      c10::BFloat16* row = probs + h * stride;
-      for (int32_t t = 0; t < token_num; t += 16) {
-        vec_op::BF16Vec16 v(row + t);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(v) * scale_vec).save(row + t);
-      }
-    }
   }
 
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -407,7 +384,8 @@ class TileGemm224<uint8_t> {
 
     for (int32_t k = 0; k < k_times; ++k) {
       // Dequantise FP8 → raw BF16 into aligned scratch buffers.
-      // Scale has been pre-folded into Q (QK) or P (PV) by the caller.
+      // k_scale_2p8 is in the attention scale (logits); v_scale_2p8 is in
+      // final_output.
       alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
       alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
       for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
@@ -473,44 +451,19 @@ class TileGemm224<uint8_t> {
   }
 };
 
-thread_local float TileGemm224<uint8_t>::s_k_scale = 1.0f;
-thread_local float TileGemm224<uint8_t>::s_v_scale = 1.0f;
 thread_local Fp8KVCacheDataType TileGemm224<uint8_t>::s_fp8_kv_dtype =
     Fp8KVCacheDataType::kFp8E4M3;
 
 // FP8 E4M3/E5M2 KV cache specialisation of TileGemm122.
+// k_scale_2p8 is folded into the attention scale (applied to QK logits);
+// v_scale_2p8 is applied to the PV output in final_output.
 template <>
 class TileGemm122<uint8_t> {
  public:
-  using prob_t = c10::BFloat16;
-
-  static thread_local float s_k_scale;
-  static thread_local float s_v_scale;
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
-  static void set_scales(
-      float k, float v,
+  static void set_fp8_dtype(
       Fp8KVCacheDataType dtype = Fp8KVCacheDataType::kFp8E4M3) noexcept {
-    s_k_scale = k;
-    s_v_scale = v;
     s_fp8_kv_dtype = dtype;
-  }
-
-  // Scale the softmax probability buffer (BF16) by v_scale_2p8 in-place.
-  // Called once per kv-tile after apply_softmax and before the PV GEMM.
-  static void scale_probs_buffer(c10::BFloat16* __restrict__ probs,
-                                 int32_t q_head_num, int32_t token_num,
-                                 int64_t stride) noexcept {
-    const float vscale = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
-                             ? s_v_scale
-                             : s_v_scale * 0x1p8f;
-    const vec_op::FP32Vec16 scale_vec(vscale);
-    for (int32_t h = 0; h < q_head_num; ++h) {
-      c10::BFloat16* row = probs + h * stride;
-      for (int32_t t = 0; t < token_num; t += 16) {
-        vec_op::BF16Vec16 v(row + t);
-        vec_op::BF16Vec16(vec_op::FP32Vec16(v) * scale_vec).save(row + t);
-      }
-    }
   }
 
   template <AttentionGemmPhase phase, int32_t k_size>
@@ -575,7 +528,8 @@ class TileGemm122<uint8_t> {
       _tile_zero(7);
     }
 
-    // Dequantise FP8 → raw BF16. Scale pre-folded into Q (QK) or P (PV).
+    // Dequantise FP8 → raw BF16. k_scale_2p8 is in logits; v_scale_2p8 is in
+    // final_output.
     auto deq_tile = [&](uint8_t* src, c10::BFloat16* dst) {
       for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
         vec_op::BF16Vec32 fp8_bits =
@@ -651,8 +605,6 @@ class TileGemm122<uint8_t> {
   }
 };
 
-thread_local float TileGemm122<uint8_t>::s_k_scale = 1.0f;
-thread_local float TileGemm122<uint8_t>::s_v_scale = 1.0f;
 thread_local Fp8KVCacheDataType TileGemm122<uint8_t>::s_fp8_kv_dtype =
     Fp8KVCacheDataType::kFp8E4M3;
 
@@ -912,19 +864,21 @@ class AttentionImplFP8AMX : public AttentionImpl<ISA::AMX, scalar_t, head_dim> {
     fp8_kv_dtype = input->fp8_kv_dtype;
   }
 
-  // Override: pre-multiply Q by k_scale_2p8 during AMX packing so that
-  // deq_tile can use the no-scale FP32Vec16 constructor.
-  // scale_on_logits=true so the attention scale is NOT folded here.
+  // Returns the v_scale_2p8 factor that final_output applies after PV
+  // accumulation.
+  float get_output_v_scale() const noexcept {
+    return (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2) ? v_scale
+                                                          : v_scale * 0x1p8f;
+  }
+
+  // Override: pack Q as plain BF16; k_scale_2p8 is folded into the attention
+  // scale in execute_attention and applied to QK logits via
+  // scale_on_logits=true.
   void copy_q_heads_tile(query_t* __restrict__ src,
                          q_buffer_t* __restrict__ q_buffer, const int32_t q_num,
                          const int32_t q_heads_per_kv,
                          const int64_t q_num_stride,
                          const int64_t q_head_stride, const float /*scale*/) {
-    const float k_scale_2p8 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
-                                  ? k_scale
-                                  : k_scale * 0x1p8f;
-    const vec_op::FP32Vec16 scale_vec(k_scale_2p8);
-
     constexpr int64_t bytes_per_head = Base::HeadDim * sizeof(query_t);
     constexpr int64_t head_size_block_num = bytes_per_head / AMX_TILE_ROW_BYTES;
     constexpr int64_t head_elem_num_per_block =
@@ -940,12 +894,9 @@ class AttentionImplFP8AMX : public AttentionImpl<ISA::AMX, scalar_t, head_dim> {
           const query_t* src_blk = src_iter + blk * head_elem_num_per_block;
           c10::BFloat16* dst_blk = reinterpret_cast<c10::BFloat16*>(
               q_buf_iter + blk * AMX_TILE_BYTES);
-          // Two FP32Vec16 passes cover 32 BF16 elements (= one 64-byte block)
-          vec_op::BF16Vec16 v0(src_blk);
-          vec_op::BF16Vec16(vec_op::FP32Vec16(v0) * scale_vec).save(dst_blk);
-          vec_op::BF16Vec16 v1(src_blk + 16);
-          vec_op::BF16Vec16(vec_op::FP32Vec16(v1) * scale_vec)
-              .save(dst_blk + 16);
+          // Two 16-element copies cover 32 BF16 elements (= one 64-byte block)
+          vec_op::BF16Vec16(src_blk).save(dst_blk);
+          vec_op::BF16Vec16(src_blk + 16).save(dst_blk + 16);
         });
         ++idx;
         q_buf_iter += AMX_TILE_ROW_BYTES;
@@ -959,8 +910,15 @@ class AttentionImplFP8AMX : public AttentionImpl<ISA::AMX, scalar_t, head_dim> {
 
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
-    TileGemm224<uint8_t>::set_scales(k_scale, v_scale, fp8_kv_dtype);
-    TileGemm122<uint8_t>::set_scales(k_scale, v_scale, fp8_kv_dtype);
+    // Fold k_scale_2p8 into the attention scale; scale_on_logits=true will
+    // apply it to QK logits, correcting for both KV cache quantization and
+    // the FP8 exponent bias from the FP16-layout dequantization.
+    const float k_scale_2p8 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                                  ? k_scale
+                                  : k_scale * 0x1p8f;
+    scale *= k_scale_2p8;
+    TileGemm224<uint8_t>::set_fp8_dtype(fp8_kv_dtype);
+    TileGemm122<uint8_t>::set_fp8_dtype(fp8_kv_dtype);
     if (q_head_num > AMX_TILE_ROW_NUM) {
       if (q_head_num != this->current_q_head_num_) {
         this->current_q_head_num_ = q_head_num;

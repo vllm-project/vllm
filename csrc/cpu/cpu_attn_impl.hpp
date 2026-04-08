@@ -759,17 +759,6 @@ class AttentionScheduler {
   int64_t available_cache_size_;
 };
 
-// Detects whether a tile_gemm_t has scale_probs_buffer (FP8 paths).
-// Each FP8 tile_gemm exposes a prob_t alias (float for VEC, BF16 for AMX)
-// so the trait and call site can handle both buffer element types uniformly.
-template <typename T, typename = void>
-struct has_scale_probs_buffer : std::false_type {};
-template <typename T>
-struct has_scale_probs_buffer<
-    T, std::void_t<decltype(T::scale_probs_buffer(
-           static_cast<typename T::prob_t*>(nullptr), 0, 0, int64_t{}))>>
-    : std::true_type {};
-
 struct AttentionInput {
   AttentionMetadata* metadata;
   int32_t num_tokens;
@@ -795,7 +784,7 @@ struct AttentionInput {
   int32_t sliding_window_left;
   int32_t sliding_window_right;
   float softcap;
-  // FP8 KV cache scales (used by AttentionImplFP8VEC; ignored by other impls)
+  // FP8 KV cache scales (used by AttentionImplFP8VEC and AttentionImplFP8AMX)
   float k_scale_fp8 = 1.0f;
   float v_scale_fp8 = 1.0f;
   // FP8 format: E4M3 (default) or E5M2
@@ -1067,20 +1056,6 @@ class AttentionMainLoop {
         apply_softmax(logits_buffer, partial_q_buffer, max_buffer, sum_buffer,
                       kv_tile_token_num, q_head_num, kv_tile_token_num,
                       is_first_iter, use_sink);
-
-        // Pre-scale P by v_scale_2p8 so the PV GEMM can use the no-scale
-        // FP32Vec16 constructor, eliminating _mm512_mul_ps from PV hot loop.
-        // stride_ratio accounts for BF16 probs packed into float logits buffer
-        // (AMX: prob_t=BF16, ratio=2; VEC: prob_t=float, ratio=1).
-        if constexpr (has_scale_probs_buffer<tile_gemm_t>::value) {
-          using spt = typename tile_gemm_t::prob_t;
-          constexpr int64_t stride_ratio =
-              sizeof(logits_buffer_t) / sizeof(spt);
-          tile_gemm_t::scale_probs_buffer(
-              reinterpret_cast<spt*>(logits_buffer), q_head_num,
-              kv_tile_token_num,
-              static_cast<int64_t>(kv_tile_token_num) * stride_ratio);
-        }
 
         // if (debug_info){
         //     print_logits("softmax logits",

@@ -116,18 +116,11 @@ class TileGemm82 {
 // v_scale is applied to the PV output in final_output.
 class TileGemm82FP8 {
  public:
-  using prob_t = float;
-
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
   static void set_fp8_dtype(
       Fp8KVCacheDataType dtype = Fp8KVCacheDataType::kFp8E4M3) noexcept {
     s_fp8_kv_dtype = dtype;
   }
-
-  // v_scale is applied to the PV output in final_output; no-op here.
-  static void scale_probs_buffer(float* __restrict__ /*probs*/,
-                                 int32_t /*q_head_num*/, int32_t /*token_num*/,
-                                 int64_t /*stride*/) noexcept {}
 
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
