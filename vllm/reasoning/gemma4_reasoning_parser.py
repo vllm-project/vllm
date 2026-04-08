@@ -103,7 +103,7 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Force ``skip_special_tokens=False`` only when thinking is enabled, 
+        """Force ``skip_special_tokens=False`` only when thinking is enabled,
         so that ``<|channel>`` and ``<channel|>`` delimiters survive detokenization.
 
         This mirrors the approach used by
