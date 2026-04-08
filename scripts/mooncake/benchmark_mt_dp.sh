@@ -4,7 +4,7 @@
 # then repeats with offloading enabled.
 #
 # Usage:
-#   bash benchmark_multi_turn.sh [MODEL] [INPUT_LEN] [OUTPUT_LEN] [NUM_PROMPTS]
+#   bash benchmark_mt_dp.sh [MODEL] [INPUT_LEN] [OUTPUT_LEN] [NUM_PROMPTS]
 #
 # Supported backends (comma-separated in BACKENDS):
 #   baseline        - No offloading
