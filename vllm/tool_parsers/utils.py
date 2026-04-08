@@ -142,6 +142,20 @@ def _extract_tool_info(
         raise TypeError(f"Unsupported tool type: {type(tool)}")
 
 
+def find_tool_properties(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> dict[str, Any]:
+    """Find a tool by name and return its properties dict, or {}."""
+    if not tools:
+        return {}
+    for tool in tools:
+        name, params = _extract_tool_info(tool)
+        if name == tool_name:
+            return (params or {}).get("properties", {})
+    return {}
+
+
 def _get_tool_schema_from_tool(tool: Tool) -> dict:
     name, params = _extract_tool_info(tool)
     params = params if params else {"type": "object", "properties": {}}

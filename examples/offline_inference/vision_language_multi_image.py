@@ -957,6 +957,24 @@ def load_phi4mm(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+def load_phi4siglip(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "microsoft/Phi-4-reasoning-vision-15B"
+    placeholders = "\n".join("<image>" for _ in image_urls)
+    prompt = f"<|user|>\n{placeholders}\n{question}<|end|>\n<|assistant|>\n"
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_qwen_vl_chat(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "Qwen/Qwen-VL-Chat"
     engine_args = EngineArgs(
@@ -1455,6 +1473,7 @@ model_example_map = {
     "paddleocr_vl": load_paddleocr_vl,
     "phi3_v": load_phi3v,
     "phi4_mm": load_phi4mm,
+    "phi4_siglip": load_phi4siglip,
     "pixtral_hf": load_pixtral_hf,
     "qwen_vl_chat": load_qwen_vl_chat,
     "qwen2_vl": load_qwen2_vl,
