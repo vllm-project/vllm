@@ -22,7 +22,7 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=13.0.0
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
 
@@ -37,7 +37,7 @@ ARG UBUNTU_VERSION=22.04
 # compatibility with other Linux OSes. The main reason for this is that the
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
-ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
@@ -546,17 +546,21 @@ RUN apt-get update -y \
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
+    CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2) && \
     apt-get update -y && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
         cuda-nvcc-${CUDA_VERSION_DASH} \
         cuda-cudart-${CUDA_VERSION_DASH} \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
-        libcublas-${CUDA_VERSION_DASH} \
-        # Fixes nccl_allocator requiring nccl.h at runtime
-        # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-        libnccl-dev && \
+        libcublas-${CUDA_VERSION_DASH} && \
+    # Fixes nccl_allocator requiring nccl.h at runtime
+    # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
+    # NCCL packages don't use the cuda-MAJOR-MINOR naming convention,
+    # so we pin the version to match our CUDA version
+    NCCL_VER=$(apt-cache madison libnccl-dev | grep "+cuda${CUDA_VERSION_SHORT}" | head -1 | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}') && \
+    apt-get install -y --no-install-recommends --allow-change-held-packages libnccl-dev=${NCCL_VER} libnccl2=${NCCL_VER} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
@@ -590,11 +594,33 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.6
+# 0.6.7: CUTLASS 4.4.2 bump, fixes TMA grouped GEMM on SM12x (flashinfer#2798)
+# TODO: bump to 0.6.8 when released for NVFP4/MXFP4 group GEMMs on
+#   SM120/SM121 (RTX 50 / DGX Spark) via flashinfer#2738
+ARG FLASHINFER_VERSION=0.6.7
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --extra-index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
     && flashinfer show-config
+
+# Pre-download FlashInfer TRTLLM BMM headers for air-gapped environments.
+# At runtime, MoE JIT compilation downloads these from edge.urm.nvidia.com
+# which fails without internet. This step caches them at build time.
+RUN python3 <<'PYEOF'
+from flashinfer.jit import env as jit_env
+from flashinfer.jit.cubin_loader import download_trtllm_headers, get_cubin
+from flashinfer.artifacts import ArtifactPath, CheckSumHash
+
+download_trtllm_headers(
+    'bmm',
+    jit_env.FLASHINFER_CUBIN_DIR / 'flashinfer' / 'trtllm' / 'batched_gemm' / 'trtllmGen_bmm_export',
+    f'{ArtifactPath.TRTLLM_GEN_BMM}/include/trtllmGen_bmm_export',
+    ArtifactPath.TRTLLM_GEN_BMM,
+    get_cubin(f'{ArtifactPath.TRTLLM_GEN_BMM}/checksums.txt', CheckSumHash.TRTLLM_GEN_BMM),
+)
+
+print('FlashInfer TRTLLM BMM headers downloaded successfully')
+PYEOF
 
 # ============================================================
 # OPENAI API SERVER DEPENDENCIES
@@ -800,7 +826,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
-            apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+            apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
             uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries

@@ -2,16 +2,9 @@ group: Benchmarks
 depends_on: 
   - image-build
 steps:
-- label: Benchmarks
-  timeout_in_minutes: 20
-  working_dir: "/vllm-workspace/.buildkite"
-  source_file_dependencies:
-  - benchmarks/
-  commands:
-  - bash scripts/run-benchmarks.sh
-
 - label: Benchmarks CLI Test
   timeout_in_minutes: 20
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/

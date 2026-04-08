@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -51,6 +52,14 @@ def sparse_attn_indexer(
             ((total_seq_lens, head_dim), torch.float8_e4m3fn),
             ((total_seq_lens, 4), torch.uint8),
         )
+
+        # Dummy allocation to simulate for peak logits tensor memory during inference.
+        # FP8 elements so elements == bytes
+        max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+        _ = torch.empty(
+            max_logits_elems, dtype=torch.uint8, device=hidden_states.device
+        )
+
         return sparse_attn_indexer_fake(
             hidden_states,
             k_cache_prefix,
@@ -101,13 +110,16 @@ def sparse_attn_indexer(
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            ops.cp_gather_indexer_k_quant_cache(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-            )
+
+            if not chunk.skip_kv_gather:
+                ops.cp_gather_indexer_k_quant_cache(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                )
+
             logits = fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32).flatten()),

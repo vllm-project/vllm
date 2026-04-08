@@ -4,15 +4,18 @@ depends_on:
 steps:
 - label: EPLB Algorithm
   timeout_in_minutes: 15
+  device: h200_18gb
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_algo.py
+  - tests/distributed/test_eplb_utils.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
+  - pytest -v -s distributed/test_eplb_utils.py
 
-- label: EPLB Execution
-  timeout_in_minutes: 20
+- label: EPLB Execution # 17min
+  timeout_in_minutes: 27
   working_dir: "/vllm-workspace/tests"
   num_devices: 4
   source_file_dependencies:

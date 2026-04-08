@@ -37,10 +37,12 @@ ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
 
 
 @overload
+@dataclass_transform(field_specifiers=(PydanticField,))
 def config(cls: type[ConfigT]) -> type[ConfigT]: ...
 
 
 @overload
+@dataclass_transform(field_specifiers=(PydanticField,))
 def config(
     *, config: ConfigDict | None = None, **kwargs: Any
 ) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
@@ -296,7 +298,15 @@ def normalize_value(x):
 
     # PretrainedConfig
     if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        return x.to_json_string()
+        try:
+            return x.to_json_string()
+        except (TypeError, ValueError):
+            # to_json_string() may fail for trust-remote-code configs
+            # with non-JSON-serializable nested objects. Fall back to
+            # normalizing the dict representation recursively.
+            if hasattr(x, "to_dict") and callable(x.to_dict):
+                return normalize_value(x.to_dict())
+            raise
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid
