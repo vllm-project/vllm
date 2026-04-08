@@ -22,7 +22,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.lora.utils import is_moe_model
+from vllm.lora.shared import is_moe_model
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -337,9 +337,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         global_tp_size = get_tensor_model_parallel_world_size()
         global_tp_rank = get_tensor_model_parallel_rank()
-        check_match = (
-            lambda weight_name, module_name: weight_name.removesuffix(".weight")
-            == module_name
+        check_match = lambda weight_name, module_name: (
+            weight_name.removesuffix(".weight") == module_name
         )
         for (
             org_weight_name,
@@ -556,9 +555,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         if quant_config and self.pre_quant:
             self.load_8bit = quant_config.get("load_in_8bit", False)
 
-    def _initialize_loader_state(
-        self, model: nn.Module, model_config: ModelConfig
-    ) -> None:
+    def _initialize_loader_state(self, model: nn.Module) -> None:
         """
         Initialize the loader's internal state based on the model and
         configuration.
@@ -781,7 +778,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         self._verify_model_compatibility(model, model_config)
-        self._initialize_loader_state(model, model_config)
+        self._initialize_loader_state(model)
 
         logger.info(
             "Loading weights with BitsAndBytes quantization. May take a while ..."

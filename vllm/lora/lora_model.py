@@ -9,7 +9,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.lora.lora_weights import LoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
-from vllm.lora.utils import (
+from vllm.lora.shared import (
     get_lora_id,
     is_base_embedding_weights,
     parse_fine_tuned_lora_name,
