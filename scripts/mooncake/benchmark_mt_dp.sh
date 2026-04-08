@@ -14,8 +14,8 @@
 #   mooncake        - MooncakeStoreConnector via --kv-transfer-config
 #
 # Environment variables:
-#   CPU_OFFLOAD_GIB       - CPU offload buffer in GiB   (default: 80)
-#   DISK_OFFLOAD_GIB      - Disk offload quota in GiB   (default: 400)
+#   CPU_OFFLOAD_GIB       - CPU offload buffer in GiB   (default: 300)
+#   DISK_OFFLOAD_GIB      - Disk offload quota in GiB   (default: 2000)
 #   PORT                  - Server port                  (default: 8192)
 #   RESULT_DIR            - Output directory             (default: ./bench_results)
 #   BACKENDS              - Comma-separated backends     (default: baseline,mooncake)
@@ -47,20 +47,20 @@ MULTI_TURN_DELAY_MS="${MULTI_TURN_DELAY_MS:-30000}"
 GLOBAL_PREFIX_RATIO="${GLOBAL_PREFIX_RATIO:-0.1}"
 CONV_PREFIX_RATIO="${CONV_PREFIX_RATIO:-0.8}"
 
-export HF_HUB_OFFLINE=1
-export TRANSFORMERS_OFFLINE=1
+DATA_PARALLEL_SIZE=2
+if [[ "$MODEL" == "nvidia/Qwen3.5-397B-A17B-NVFP4" ]]; then
+    DATA_PARALLEL_SIZE=4
+fi
 
 mkdir -p "$RESULT_DIR"
 
 SERVER_COMMON=(
     --model "$MODEL"
-    # -tp 4
-    -dp 2
+    -dp "$DATA_PARALLEL_SIZE"
     --disable-hybrid-kv-cache-manager
     --port "$PORT"
     --gpu-memory-utilization 0.5
     --no-enable-log-requests
-    --load-format dummy
     --attention-backend auto
 )
 if [[ "$MODEL" == *"Qwen3.5"* ]]; then
@@ -72,7 +72,6 @@ fi
 
 if [[ "$MODEL" == "nvidia/Qwen3.5-397B-A17B-NVFP4" ]]; then
     SERVER_COMMON+=(
-        -dp 4
         --enable-expert-parallel
         --language-model-only
         --reasoning-parser qwen3
