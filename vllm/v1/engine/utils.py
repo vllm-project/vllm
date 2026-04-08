@@ -1231,7 +1231,7 @@ def wait_for_engine_startup(
 
             start_pending[0 if local else 1] -= 1
             engine.state = CoreEngineState.READY
-        elif status == "FAILED" and engine.state == CoreEngineState.CONNECTED:
+        elif status == "FAILED":
             finished = proc_manager.finished_procs() if proc_manager else {}
             raise RuntimeError(
                 "Engine core initialization failed. "
