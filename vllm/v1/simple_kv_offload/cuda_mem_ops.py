@@ -154,7 +154,7 @@ def build_params(
         attrs=attrs,
         attrs_idx=ctypes.c_size_t(0),
         fail_idx=ctypes.c_size_t(0),
-        stream_handle=stream.cuda_stream,
+        stream_handle=stream.native_handle,
     )
 
 
