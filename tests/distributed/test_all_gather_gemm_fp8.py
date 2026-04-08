@@ -97,13 +97,14 @@ def run_shape_test(M, K, N, rank, world_size, device, dist_group, world_group):
 
     scale_a = scale_a.clamp(min=min_val, max=max_val)
     scale_b = scale_b.clamp(min=min_val, max=max_val)
+    compile_fn =torch.compile(torch.ops.vllm.helion_all_gather_fp8_gemm, fullgraph=True)
     # call the HelionOp
     candidate_splits = [1, 2, 4]
     for sp in candidate_splits:
         if M_per_rank % sp != 0:
             continue  # skip invalid splits
         print(f"Testing shape ({M}, {K}, {N}) with split {sp} (tokens per rank: {M_per_rank})")
-        a_out, c = torch.ops.vllm.helion_all_gather_fp8_gemm(
+        a_out, c = compile_fn(
             a_shared,
             b,
             scale_a,

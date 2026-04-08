@@ -317,7 +317,7 @@ def helion_all_gather_fp8_gemm_fake(
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
     world_size: int,
-    group_name: ProcessGroup,
+    group_name: str,
     a_out: torch.Tensor | None = None,
     SPLITS_PER_RANK: int = 1,      
 ) -> tuple[torch.Tensor, torch.Tensor]:
