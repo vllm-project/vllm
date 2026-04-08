@@ -66,7 +66,7 @@ class ParentRequest:
           Child `sampling_params` instance.
         """
         seed = self.sampling_params.seed
-        no_caching = seed is None and self.sampling_params.n > 1
+
         if self.cached_child_sampling_params:
             # Reuse child sampling_params data structure
             return self.cached_child_sampling_params
@@ -81,7 +81,7 @@ class ParentRequest:
                 "kv_transfer_params": kv_transfer[index],
             }
         if seed is None:
-            if not no_caching:
+            if not (kv_transfer and isinstance(kv_transfer, list)):
                 # Cache child sampling_params for later reuse
                 self.cached_child_sampling_params = child_sampling_params
         else:

@@ -140,22 +140,23 @@ class RequestOutput:
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
         self.num_cached_tokens = num_cached_tokens
-        self.kv_transfer_params_list: list[dict[str, Any]] = []
-        for output in outputs:
-            if output.kv_transfer_params:
-                self.kv_transfer_params_list.append(output.kv_transfer_params)
 
     @property
     def kv_transfer_params(self) -> dict[str, Any] | list[dict[str, Any]] | None:
-        if len(self.kv_transfer_params_list) == 1:
+        params_list = [
+            o.kv_transfer_params
+            for o in self.outputs
+            if o.kv_transfer_params
+        ]
+        if len(params_list) == 1:
             # keep backward compatibility for the common case where there is
             # only one output and its kv_transfer_params is a dict
-            return self.kv_transfer_params_list[0]
-        if len(self.kv_transfer_params_list):
+            return params_list[0]
+        if len(params_list) > 1:
             # for the case where there are multiple outputs, we return a list of
             # kv_transfer_params dicts. This is for parallel sampling (n > 1)
             # where each child request may have different kv_transfer_params.
-            return self.kv_transfer_params_list
+            return params_list
         return None
 
     def add(self, next_output: "RequestOutput", aggregate: bool) -> None:
@@ -185,17 +186,9 @@ class RequestOutput:
                     else:
                         # Replace the output with the new one
                         self.outputs[i] = next_completion
-                        if next_completion.kv_transfer_params:
-                            self.kv_transfer_params_list[i] = (
-                                next_completion.kv_transfer_params
-                            )
                     break
             else:
                 self.outputs.append(next_completion)
-                if next_completion.kv_transfer_params:
-                    self.kv_transfer_params_list.append(
-                        next_completion.kv_transfer_params
-                    )
 
     def __repr__(self) -> str:
         return (
