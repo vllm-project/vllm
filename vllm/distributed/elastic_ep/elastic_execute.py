@@ -358,6 +358,15 @@ class ElasticEPScalingExecutor:
         Used for fault-triggered scale-down where a peer rank has died
         and normal collective teardown would hang.  Identical to
         switch_and_prepare but uses abort instead of destroy.
+
+        TODO: Currently abort() is called here in the recovery path,
+        which requires all surviving ranks to reach this point first.
+        If a worker is stuck in a collective (e.g. all2all mid-forward),
+        it can never reach here — deadlock.  A more robust approach is
+        to call abort() from a separate sentinel thread that monitors
+        rank health independently.  The sentinel would abort the local
+        communicators immediately on death detection, unblocking the
+        main thread's hung collective so it can enter recovery.
         """
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size

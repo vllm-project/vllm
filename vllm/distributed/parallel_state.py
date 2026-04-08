@@ -1225,6 +1225,12 @@ def _abort_and_replace_active_groups(
 
     Unlike _replace_active_groups, this uses abort() instead of destroy()
     to avoid hanging when a peer rank has died.
+
+    TODO: This is called from the main worker thread during recovery,
+    which means the worker must not be stuck in a collective to reach
+    here.  For robustness, abort() should be callable from a sentinel
+    thread so that workers stuck in mid-forward collectives can be
+    unblocked immediately on fault detection.
     """
     global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
     for group in (_DP, _EP, _WORLD, _EPLB):
