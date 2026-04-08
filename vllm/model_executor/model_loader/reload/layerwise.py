@@ -264,7 +264,11 @@ def _finalize_attention_layer(
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
     """Load and process attention scale weights (k_scale, v_scale, etc.)
-    during reload."""
+    during reload.
+
+    Assumes dtype/shapes of attention tensors do not change during
+    processing, since we use .data.copy_() to preserve kernel tensor
+    references."""
     quant_method = getattr(layer, "quant_method", None)
     if quant_method is None:
         return
