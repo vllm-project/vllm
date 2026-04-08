@@ -260,6 +260,7 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = True
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_USE_XPU_SAMPLER: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
 
 
@@ -1732,6 +1733,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
+    # whether use xpu specific sample kernel
+    "VLLM_USE_XPU_SAMPLER": lambda: bool(int(os.getenv("VLLM_USE_XPU_SAMPLER", "0"))),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))

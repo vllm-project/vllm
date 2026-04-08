@@ -71,7 +71,10 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_cpu
         elif current_platform.is_xpu():
-            self.forward = self.forward_xpu
+            if envs.VLLM_USE_XPU_SAMPLER:
+                self.forward = self.forward_xpu
+            else:
+                self.forward = self.forward_native
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
             and rocm_aiter_ops.is_enabled()
@@ -240,7 +243,6 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        print(f"use xpu topk_topp_sampler with logprobs_mode={self.logprobs_mode}")
         random_sampled = torch.empty(
             logits.shape[0], dtype=torch.int64, device=logits.device
         )
@@ -250,11 +252,13 @@ class TopKTopPSampler(nn.Module):
             or self.logprobs_mode == "processed_logprobs"
         ):
             logits_to_return = torch.empty_like(logits)
-        print(f"generators: {generators}")
-        # generator = generators[logits.device.index]
-        state = torch.xpu.default_generators[logits.device.index].get_state()
-        seed, _ = state.view(torch.int64)
-        offset = 0
+
+        if len(generators) != logits.shape[0]:
+            generator = torch.xpu.default_generators[logits.device.index]
+        else:
+            generator = generators[logits.device.index]
+        state = generator.get_state()
+        seed, offset = state.view(torch.int64)
         seeds = torch.tensor(
             [seed, offset], dtype=torch.int64, device=torch.device("cpu")
         )
