@@ -30,6 +30,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
+from vllm.utils import numa_utils
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
@@ -1055,6 +1056,8 @@ class EngineCoreProc(EngineCore):
             set_process_title(process_title)
             maybe_init_worker_tracer("vllm.engine_core", "engine_core", process_title)
             decorate_logs()
+            if parallel_config.numa_bind:
+                numa_utils.log_current_affinity_state(process_title)
 
             if data_parallel and vllm_config.kv_transfer_config is not None:
                 # modify the engine_id and append the local_dp_rank to it to ensure
@@ -1255,8 +1258,9 @@ class EngineCoreProc(EngineCore):
                 return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
-            get_result = lambda: (method := getattr(self, method_name)) and method(
-                *self._convert_msgspec_args(method, args)
+            get_result = lambda: (
+                (method := getattr(self, method_name))
+                and method(*self._convert_msgspec_args(method, args))
             )
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
