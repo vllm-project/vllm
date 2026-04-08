@@ -25,6 +25,8 @@ elif current_platform.is_xpu():
 
 logger = init_logger(__name__)
 
+RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+
 
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -51,6 +53,7 @@ def sparse_attn_indexer(
         current_workspace_manager().get_simultaneous(
             ((total_seq_lens, head_dim), torch.float8_e4m3fn),
             ((total_seq_lens, 4), torch.uint8),
+            ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
         )
 
         # Dummy allocation to simulate for peak logits tensor memory during inference.
@@ -157,15 +160,6 @@ def sparse_attn_indexer(
                     topk_tokens,
                 )
 
-            # Compute lengths from row spans
-            # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
-            # torch.ops._C.large_context_topk(
-            #    logits,
-            #    topk_indices,
-            #    lengths,
-            #    chunk.cu_seqlen_ks,  # row_starts
-            # )
-
     if has_decode:
         decode_metadata = attn_metadata.decode
         assert decode_metadata is not None
@@ -204,23 +198,29 @@ def sparse_attn_indexer(
         num_rows = logits.shape[0]
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if decode_metadata.use_large_context_topk:
-            if next_n == 1:
-                lengths = decode_metadata.seq_lens
-            else:
-                # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
-                lengths = (
-                    decode_metadata.seq_lens.unsqueeze(1)
-                    - next_n
-                    + 1
-                    + decode_metadata.offsets
-                ).flatten()
+        if next_n == 1:
+            lengths = decode_metadata.seq_lens
+        else:
+            # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
+            lengths = (
+                decode_metadata.seq_lens.unsqueeze(1)
+                - next_n
+                + 1
+                + decode_metadata.offsets
+            ).flatten()
 
-            torch.ops._C.large_context_topk(
+        if current_platform.is_cuda():
+            workspace_manager = current_workspace_manager()
+            (topk_workspace,) = workspace_manager.get_simultaneous(
+                ((RADIX_TOPK_WORKSPACE_SIZE,), torch.uint8),
+            )
+            torch.ops._C.persistent_topk(
                 logits,
-                topk_indices,
                 lengths,
-                None,
+                topk_indices,
+                topk_workspace,
+                topk_tokens,
+                attn_metadata.max_seq_len,
             )
         else:
             if current_platform.is_xpu():
