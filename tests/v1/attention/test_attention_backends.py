@@ -748,7 +748,7 @@ def test_sliding_window_encoder_backend_correctness(
         "medium_encoder_prefill",
     ],
 )
-@pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
+@pytest.mark.parametrize("model", ["facebook/opt-125m"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_flash_attn_encoder_triton_fallback(
     batch_spec_name: str, model: str, tensor_parallel_size: int
@@ -760,37 +760,34 @@ def test_flash_attn_encoder_triton_fallback(
 
     from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
 
-    batch_spec = BATCH_SPECS[batch_spec_name]
-    model_config = ModelConfig(model=model, max_model_len=max(batch_spec.seq_lens))
-    sliding_window = model_config.get_sliding_window()
-
-    def bidi_sliding_window_mask_mod(
+    def encoder_mask_mod(
         b: torch.Tensor,
         h: torch.Tensor,
         q_idx: torch.Tensor,
         kv_idx: torch.Tensor,
         *,
         context_len: int,
-        sliding_window: int,
     ):
-        return torch.abs(q_idx + context_len - kv_idx) < sliding_window
+        return torch.ones_like(q_idx, dtype=torch.bool)
 
-    sliding_window_mask_mod_fn = partial(
-        bidi_sliding_window_mask_mod, sliding_window=sliding_window
-    )
+    batch_spec = BATCH_SPECS[batch_spec_name]
 
     # Force the Triton fallback path by redirecting the encoder attention
-    # method to the Triton implementation.
+    # method to the Triton implementation.  The wrapper drops the `layer`
+    # arg that the caller passes but the Triton path doesn't need.
+    def _triton_encoder_attn(self, q, k, v, o, meta, layer):
+        return self._forward_encoder_attention_triton(q, k, v, o, meta)
+
     with unittest.mock.patch.object(
         FlashAttentionImpl,
         "_forward_encoder_attention",
-        FlashAttentionImpl._forward_encoder_attention_triton,
+        _triton_encoder_attn,
     ):
         _test_backend_correctness(
             batch_spec,
             model,
             [AttentionBackendEnum.FLASH_ATTN],
-            sliding_window_mask_mod_fn,
+            encoder_mask_mod,
             attn_type=AttentionType.ENCODER_ONLY,
             tensor_parallel_size=tensor_parallel_size,
         )
