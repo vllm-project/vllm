@@ -110,13 +110,15 @@ class TileGemm82 {
     });
   }
 };
-// FP8 (E4M3) variant of TileGemm82.  KV cache is stored as uint8_t;
-// dequantization uses vec_op::FP32Vec16(uint8_t*, scale) defined in
-// cpu_types_x86.hpp, following the same pattern as BF16/FP16 widening.
-// k_scale / v_scale are delivered via thread_local storage so that the
-// static gemm interface is preserved and AttentionMainLoop is unchanged.
+// FP8 (E4M3/E5M2) variant of TileGemm82.  KV cache is stored as uint8_t.
+// scale_2p8 (= k/v_scale × 2^8 for E4M3, = k/v_scale for E5M2) is folded
+// into the Q buffer (QK phase) and P buffer (PV phase) by the caller, so
+// gemm_micro uses a no-scale FP32Vec16 constructor, eliminating two
+// _mm512_mul_ps calls per k-iteration.
 class TileGemm82FP8 {
  public:
+  using prob_t = float;
+
   static thread_local float s_k_scale;
   static thread_local float s_v_scale;
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
@@ -128,6 +130,22 @@ class TileGemm82FP8 {
     s_fp8_kv_dtype = dtype;
   }
 
+  // Scale the softmax probability buffer (shape [q_head_num, stride]) by
+  // v_scale_2p8 in-place.  Called once per kv-tile after apply_softmax and
+  // before the PV GEMM so that gemm_micro can use the no-scale constructor.
+  static void scale_probs_buffer(float* __restrict__ probs, int32_t q_head_num,
+                                 int32_t token_num, int64_t stride) noexcept {
+    const float vscale = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                             ? s_v_scale
+                             : s_v_scale * 0x1p8f;
+    const vec_op::FP32Vec16 scale_vec(vscale);
+    for (int32_t h = 0; h < q_head_num; ++h) {
+      float* row = probs + h * stride;
+      for (int32_t t = 0; t < token_num; t += 16)
+        (vec_op::FP32Vec16(row + t) * scale_vec).save(row + t);
+    }
+  }
+
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 float* __restrict__ a_tile,
@@ -137,31 +155,29 @@ class TileGemm82FP8 {
                                 const int32_t block_size,
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
-    const float scale =
-        (phase == AttentionGemmPhase::QK) ? s_k_scale : s_v_scale;
     switch (m_size) {
       case 1:
         gemm_micro<1>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c, scale);
+                      dynamic_k_size, accum_c);
         break;
       case 2:
         gemm_micro<2>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c, scale);
+                      dynamic_k_size, accum_c);
         break;
       case 3:
       case 4:
         gemm_micro<4>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c, scale);
+                      dynamic_k_size, accum_c);
         break;
       case 5:
       case 6:
         gemm_micro<6>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c, scale);
+                      dynamic_k_size, accum_c);
         break;
       case 7:
       case 8:
         gemm_micro<8>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c, scale);
+                      dynamic_k_size, accum_c);
         break;
     }
   }
@@ -173,7 +189,7 @@ class TileGemm82FP8 {
                          float* __restrict__ c_tile, const int64_t lda,
                          const int64_t ldb, const int64_t ldc,
                          const int32_t block_size, const int32_t dynamic_k_size,
-                         const bool accum_c, const float scale) {
+                         const bool accum_c) {
     static_assert(0 < M && M <= 8);
 
     uint8_t* __restrict__ curr_b_0 = b_tile;
@@ -194,16 +210,14 @@ class TileGemm82FP8 {
 
     float* __restrict__ curr_a = a_tile;
     const bool is_e5m2 = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2);
-    const float scale_2p8 = is_e5m2 ? scale : scale * 0x1p8f;
-    auto fp8_to_bf16vec = [&](const uint8_t* p) -> vec_op::BF16Vec32 {
-      if (is_e5m2) return vec_op::BF16Vec32(p, vec_op::fp8_e5m2_tag{});
-      return vec_op::BF16Vec32(p, scale_2p8);
-    };
     for (int32_t k = 0; k < dynamic_k_size; ++k) {
-      // Dequantize 32 FP8 bytes (two groups of 16) to float32.
-      vec_op::BF16Vec32 fp16_b_reg = fp8_to_bf16vec(curr_b_0);
-      vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, scale_2p8, 0);
-      vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, scale_2p8, 1);
+      // Dequantize 32 FP8 bytes to pseudo-FP16 bits; convert to FP32 without
+      // scale multiply — scale has been pre-folded into Q (QK) or P (PV).
+      vec_op::BF16Vec32 fp16_b_reg =
+          is_e5m2 ? vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e5m2_tag{})
+                  : vec_op::BF16Vec32(curr_b_0, 0.0f);
+      vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, 0);
+      vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, 1);
 
       float* __restrict__ curr_m_a = curr_a;
       vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
@@ -390,6 +404,20 @@ class AttentionImplFP8VEC : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
     k_scale = input->k_scale_fp8;
     v_scale = input->v_scale_fp8;
     fp8_kv_dtype = input->fp8_kv_dtype;
+  }
+
+  // Override: pre-multiply Q by k_scale_2p8 so that gemm_micro can skip the
+  // per-element scale multiply (no-scale FP32Vec16 constructor is used).
+  void copy_q_heads_tile(query_t* __restrict__ src,
+                         q_buffer_t* __restrict__ q_buffer, const int32_t q_num,
+                         const int32_t q_heads_per_kv,
+                         const int64_t q_num_stride,
+                         const int64_t q_head_stride, float scale) {
+    const float k_scale_2p8 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                                  ? k_scale
+                                  : k_scale * 0x1p8f;
+    Base::copy_q_heads_tile(src, q_buffer, q_num, q_heads_per_kv, q_num_stride,
+                            q_head_stride, scale * k_scale_2p8);
   }
 
   template <template <typename tile_gemm_t> typename attention>

@@ -453,6 +453,13 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg = _mm512_mul_ps(_mm512_cvtph_ps(v_half_i), _mm512_set1_ps(scale_2p8));
   }
 
+  // No-scale variant: use when scale has been pre-folded into the other
+  // operand.
+  explicit FP32Vec16(const BF16Vec32& v, int upper) {
+    __m256i v_half_i = _mm512_extracti32x8_epi32(v.reg, upper);
+    reg = _mm512_cvtph_ps(v_half_i);
+  }
+
   explicit FP32Vec16(const FP16Vec16& v) : reg(_mm512_cvtph_ps(v.reg)) {}
 
   explicit FP32Vec16(const FP16Vec8& v) : FP32Vec16(FP32Vec8(v)) {}
@@ -564,6 +571,16 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     __m256 scale_vec = _mm256_set1_ps(scale_2p8);
     reg_low = _mm256_mul_ps(_mm256_cvtph_ps(lo), scale_vec);
     reg_high = _mm256_mul_ps(_mm256_cvtph_ps(hi), scale_vec);
+  }
+
+  // No-scale variant: use when scale has been pre-folded into the other
+  // operand.
+  explicit FP32Vec16(const BF16Vec32& v, int upper) {
+    const __m256i& half = upper ? v.reg_high : v.reg_low;
+    __m128i lo = _mm256_extractf128_si256(half, 0);
+    __m128i hi = _mm256_extractf128_si256(half, 1);
+    reg_low = _mm256_cvtph_ps(lo);
+    reg_high = _mm256_cvtph_ps(hi);
   }
 
   explicit FP32Vec16(const FP16Vec16& v) {

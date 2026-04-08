@@ -316,6 +316,8 @@ constexpr static int32_t kAmxMinM = 1;
 template <>
 class TileGemm224<uint8_t> {
  public:
+  using prob_t = c10::BFloat16;
+
   static thread_local float s_k_scale;
   static thread_local float s_v_scale;
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
@@ -327,6 +329,24 @@ class TileGemm224<uint8_t> {
     s_fp8_kv_dtype = dtype;
   }
 
+  // Scale the softmax probability buffer (BF16) by v_scale_2p8 in-place.
+  // Called once per kv-tile after apply_softmax and before the PV GEMM.
+  static void scale_probs_buffer(c10::BFloat16* __restrict__ probs,
+                                 int32_t q_head_num, int32_t token_num,
+                                 int64_t stride) noexcept {
+    const float vscale = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                             ? s_v_scale
+                             : s_v_scale * 0x1p8f;
+    const vec_op::FP32Vec16 scale_vec(vscale);
+    for (int32_t h = 0; h < q_head_num; ++h) {
+      c10::BFloat16* row = probs + h * stride;
+      for (int32_t t = 0; t < token_num; t += 16) {
+        vec_op::BF16Vec16 v(row + t);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(v) * scale_vec).save(row + t);
+      }
+    }
+  }
+
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 c10::BFloat16* __restrict__ a_tile,
@@ -336,14 +356,7 @@ class TileGemm224<uint8_t> {
                                 const int32_t block_size,
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
-    const float scale =
-        (phase == AttentionGemmPhase::QK) ? s_k_scale : s_v_scale;
     const bool is_e5m2 = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2);
-    const float scale_2p8 = is_e5m2 ? scale : scale * 0x1p8f;
-    auto fp8_to_bf16vec = [&](const uint8_t* p) -> vec_op::BF16Vec32 {
-      if (is_e5m2) return vec_op::BF16Vec32(p, vec_op::fp8_e5m2_tag{});
-      return vec_op::BF16Vec32(p, scale_2p8);
-    };
     // Same 32-element grouping as the BF16 path; FP8 uses 1 byte/element.
     const int32_t k_times = dynamic_k_size / 32;
     constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
@@ -393,26 +406,28 @@ class TileGemm224<uint8_t> {
     }
 
     for (int32_t k = 0; k < k_times; ++k) {
-      // Dequantise FP8 → actual BF16 into aligned scratch buffers so that
-      // _tile_stream_loadd receives valid BF16 data.
+      // Dequantise FP8 → raw BF16 into aligned scratch buffers.
+      // Scale has been pre-folded into Q (QK) or P (PV) by the caller.
       alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
       alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
       for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
-        vec_op::BF16Vec32 fp8_bits_2 = fp8_to_bf16vec(b_tile_2 + r * 32);
-        vec_op::BF16Vec16 bf16_lo_2(
-            vec_op::FP32Vec16(fp8_bits_2, scale_2p8, 0));
-        vec_op::BF16Vec16 bf16_hi_2(
-            vec_op::FP32Vec16(fp8_bits_2, scale_2p8, 1));
-        bf16_lo_2.save(scratch_2 + r * 32);
-        bf16_hi_2.save(scratch_2 + r * 32 + 16);
+        vec_op::BF16Vec32 fp8_bits_2 =
+            is_e5m2
+                ? vec_op::BF16Vec32(b_tile_2 + r * 32, vec_op::fp8_e5m2_tag{})
+                : vec_op::BF16Vec32(b_tile_2 + r * 32, 0.0f);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_2, 0))
+            .save(scratch_2 + r * 32);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_2, 1))
+            .save(scratch_2 + r * 32 + 16);
 
-        vec_op::BF16Vec32 fp8_bits_3 = fp8_to_bf16vec(b_tile_3 + r * 32);
-        vec_op::BF16Vec16 bf16_lo_3(
-            vec_op::FP32Vec16(fp8_bits_3, scale_2p8, 0));
-        vec_op::BF16Vec16 bf16_hi_3(
-            vec_op::FP32Vec16(fp8_bits_3, scale_2p8, 1));
-        bf16_lo_3.save(scratch_3 + r * 32);
-        bf16_hi_3.save(scratch_3 + r * 32 + 16);
+        vec_op::BF16Vec32 fp8_bits_3 =
+            is_e5m2
+                ? vec_op::BF16Vec32(b_tile_3 + r * 32, vec_op::fp8_e5m2_tag{})
+                : vec_op::BF16Vec32(b_tile_3 + r * 32, 0.0f);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_3, 0))
+            .save(scratch_3 + r * 32);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits_3, 1))
+            .save(scratch_3 + r * 32 + 16);
       }
 
       _tile_loadd(0, a_tile_0, a_tile_stride);
@@ -467,6 +482,8 @@ thread_local Fp8KVCacheDataType TileGemm224<uint8_t>::s_fp8_kv_dtype =
 template <>
 class TileGemm122<uint8_t> {
  public:
+  using prob_t = c10::BFloat16;
+
   static thread_local float s_k_scale;
   static thread_local float s_v_scale;
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
@@ -478,6 +495,24 @@ class TileGemm122<uint8_t> {
     s_fp8_kv_dtype = dtype;
   }
 
+  // Scale the softmax probability buffer (BF16) by v_scale_2p8 in-place.
+  // Called once per kv-tile after apply_softmax and before the PV GEMM.
+  static void scale_probs_buffer(c10::BFloat16* __restrict__ probs,
+                                 int32_t q_head_num, int32_t token_num,
+                                 int64_t stride) noexcept {
+    const float vscale = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                             ? s_v_scale
+                             : s_v_scale * 0x1p8f;
+    const vec_op::FP32Vec16 scale_vec(vscale);
+    for (int32_t h = 0; h < q_head_num; ++h) {
+      c10::BFloat16* row = probs + h * stride;
+      for (int32_t t = 0; t < token_num; t += 16) {
+        vec_op::BF16Vec16 v(row + t);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(v) * scale_vec).save(row + t);
+      }
+    }
+  }
+
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 c10::BFloat16* __restrict__ a_tile,
@@ -487,14 +522,7 @@ class TileGemm122<uint8_t> {
                                 const int32_t block_size,
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
-    const float scale =
-        (phase == AttentionGemmPhase::QK) ? s_k_scale : s_v_scale;
     const bool is_e5m2 = (s_fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2);
-    const float scale_2p8 = is_e5m2 ? scale : scale * 0x1p8f;
-    auto fp8_to_bf16vec = [&](const uint8_t* p) -> vec_op::BF16Vec32 {
-      if (is_e5m2) return vec_op::BF16Vec32(p, vec_op::fp8_e5m2_tag{});
-      return vec_op::BF16Vec32(p, scale_2p8);
-    };
     constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
 
     c10::BFloat16* __restrict__ a_tile_0 = a_tile;
@@ -547,13 +575,15 @@ class TileGemm122<uint8_t> {
       _tile_zero(7);
     }
 
+    // Dequantise FP8 → raw BF16. Scale pre-folded into Q (QK) or P (PV).
     auto deq_tile = [&](uint8_t* src, c10::BFloat16* dst) {
       for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
-        vec_op::BF16Vec32 fp8_bits = fp8_to_bf16vec(src + r * 32);
-        vec_op::BF16Vec16 lo(vec_op::FP32Vec16(fp8_bits, scale_2p8, 0));
-        vec_op::BF16Vec16 hi(vec_op::FP32Vec16(fp8_bits, scale_2p8, 1));
-        lo.save(dst + r * 32);
-        hi.save(dst + r * 32 + 16);
+        vec_op::BF16Vec32 fp8_bits =
+            is_e5m2 ? vec_op::BF16Vec32(src + r * 32, vec_op::fp8_e5m2_tag{})
+                    : vec_op::BF16Vec32(src + r * 32, 0.0f);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits, 0)).save(dst + r * 32);
+        vec_op::BF16Vec16(vec_op::FP32Vec16(fp8_bits, 1))
+            .save(dst + r * 32 + 16);
       }
     };
 
@@ -880,6 +910,51 @@ class AttentionImplFP8AMX : public AttentionImpl<ISA::AMX, scalar_t, head_dim> {
     k_scale = input->k_scale_fp8;
     v_scale = input->v_scale_fp8;
     fp8_kv_dtype = input->fp8_kv_dtype;
+  }
+
+  // Override: pre-multiply Q by k_scale_2p8 during AMX packing so that
+  // deq_tile can use the no-scale FP32Vec16 constructor.
+  // scale_on_logits=true so the attention scale is NOT folded here.
+  void copy_q_heads_tile(query_t* __restrict__ src,
+                         q_buffer_t* __restrict__ q_buffer, const int32_t q_num,
+                         const int32_t q_heads_per_kv,
+                         const int64_t q_num_stride,
+                         const int64_t q_head_stride, const float /*scale*/) {
+    const float k_scale_2p8 = (fp8_kv_dtype == Fp8KVCacheDataType::kFp8E5M2)
+                                  ? k_scale
+                                  : k_scale * 0x1p8f;
+    const vec_op::FP32Vec16 scale_vec(k_scale_2p8);
+
+    constexpr int64_t bytes_per_head = Base::HeadDim * sizeof(query_t);
+    constexpr int64_t head_size_block_num = bytes_per_head / AMX_TILE_ROW_BYTES;
+    constexpr int64_t head_elem_num_per_block =
+        AMX_TILE_ROW_BYTES / sizeof(query_t);  // 32 for BF16
+
+    int32_t idx = 0;
+    int8_t* __restrict__ q_buf_iter = reinterpret_cast<int8_t*>(q_buffer);
+    for (int32_t qn = 0; qn < q_num; ++qn, src += q_num_stride) {
+      query_t* __restrict__ src_iter = src;
+      for (int32_t qh = 0; qh < q_heads_per_kv;
+           ++qh, src_iter += q_head_stride) {
+        vec_op::unroll_loop<int32_t, head_size_block_num>([&](int32_t blk) {
+          const query_t* src_blk = src_iter + blk * head_elem_num_per_block;
+          c10::BFloat16* dst_blk = reinterpret_cast<c10::BFloat16*>(
+              q_buf_iter + blk * AMX_TILE_BYTES);
+          // Two FP32Vec16 passes cover 32 BF16 elements (= one 64-byte block)
+          vec_op::BF16Vec16 v0(src_blk);
+          vec_op::BF16Vec16(vec_op::FP32Vec16(v0) * scale_vec).save(dst_blk);
+          vec_op::BF16Vec16 v1(src_blk + 16);
+          vec_op::BF16Vec16(vec_op::FP32Vec16(v1) * scale_vec)
+              .save(dst_blk + 16);
+        });
+        ++idx;
+        q_buf_iter += AMX_TILE_ROW_BYTES;
+        if ((idx & (AMX_TILE_ROW_NUM - 1)) == 0) {
+          q_buf_iter -= AMX_TILE_ROW_NUM * AMX_TILE_ROW_BYTES;
+          q_buf_iter += head_size_block_num * AMX_TILE_BYTES;
+        }
+      }
+    }
   }
 
   template <template <typename tile_gemm_t> typename attention>

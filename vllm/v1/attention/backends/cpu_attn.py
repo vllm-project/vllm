@@ -141,7 +141,12 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         self.block_size = vllm_config.cache_config.block_size
         kv_cache_dtype_str = vllm_config.cache_config.cache_dtype
         self.isa = _get_attn_isa(
-            self.dtype, self.block_size, self.head_dim, kv_cache_dtype_str
+            self.dtype,
+            self.block_size,
+            self.head_dim,
+            kv_cache_dtype_str,
+            self.num_heads,
+            self.num_kv_heads,
         )
         self.is_cross_attention = isinstance(kv_cache_spec, CrossAttentionSpec)
 
@@ -524,6 +529,8 @@ def _get_attn_isa(
     block_size: int,
     head_size: int | None = None,
     kv_cache_dtype: str | None = None,
+    num_heads: int = 1,
+    num_kv_heads: int = 1,
 ) -> str:
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
         return "vec16"
@@ -536,7 +543,12 @@ def _get_attn_isa(
             "FP8 KV cache is only supported on x86 (requires AVX2 or AVX-512)."
         )
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
-        return "amx"
+        # For FP8 KV cache with a low GQA ratio (num_heads / num_kv_heads <= 2),
+        # the AMX dequant overhead outweighs the bandwidth savings; use vec instead.
+        if fp8_kv and (num_heads // num_kv_heads <= 2):
+            return "vec"
+        else:
+            return "amx"
     elif block_size % 32 == 0:
         if supports_arm:
             # support ARM NEON FMLA and BFMMLA (bf16) for block size 32
