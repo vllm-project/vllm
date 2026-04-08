@@ -1435,6 +1435,22 @@ class Scheduler(SchedulerInterface):
                 if finished:
                     kv_transfer_params = self._free_request(request)
 
+                    # For PD disaggregated serving, merge prefill and decode
+                    # routed_experts so the final output contains the complete trace.
+                    # The prefill experts come from request.kv_transfer_params,
+                    # and decode experts from routed_experts captured above.
+                    if routed_experts is not None and request.kv_transfer_params:
+                        prefill_experts_list = request.kv_transfer_params.get(
+                            "routed_experts"
+                        )
+                        if prefill_experts_list is not None:
+                            prefill_experts = np.array(prefill_experts_list)
+                            # In-place merge: copy prefill experts into decode array
+                            routed_experts[: prefill_experts.shape[0]] = prefill_experts
+                        elif kv_transfer_params is not None:
+                            kv_transfer_params["routed_experts"] = (
+                                routed_experts.tolist()
+                            )
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 else:
