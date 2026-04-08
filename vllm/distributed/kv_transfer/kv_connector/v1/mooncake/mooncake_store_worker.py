@@ -189,6 +189,13 @@ def _get_master_admin_endpoint(
     return _derive_master_admin_endpoint(master_server_address)
 
 
+def _get_requester_local_hostname(local_ip: str) -> str:
+    override = _normalize_string_override(os.getenv("MOONCAKE_LOCAL_HOSTNAME"))
+    if override is not None:
+        return override
+    return local_ip
+
+
 def _get_local_hostname_candidates() -> set[str]:
     hostnames: set[str] = set()
     for candidate in (
@@ -908,8 +915,9 @@ class MooncakeStoreWorker:
         store_config = MooncakeStoreConfig.load_from_env()
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
+        local_hostname = _get_requester_local_hostname(local_ip)
         ret = self.store.setup(
-            local_ip,
+            local_hostname,
             store_config.metadata_server,
             0,
             store_config.requester_local_buffer_size,
