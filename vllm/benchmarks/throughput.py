@@ -45,13 +45,35 @@ from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
+def _reset_prefix_cache_after_warmup(llm) -> None:
+    if not llm.reset_prefix_cache():
+        warnings.warn(
+            "reset_prefix_cache() failed after warmup; the timed run may still "
+            "reuse KV blocks from warmup. If metrics look skewed, try "
+            "--no-enable-prefix-caching, wait until pending KV work finishes, "
+            "or omit warmup.",
+            stacklevel=2,
+        )
+
+
+async def _reset_prefix_cache_after_warmup_async(llm) -> None:
+    if not await llm.reset_prefix_cache():
+        warnings.warn(
+            "reset_prefix_cache() failed after warmup; the timed run may still "
+            "reuse KV blocks from warmup. If metrics look skewed, try "
+            "--no-enable-prefix-caching, wait until pending KV work finishes, "
+            "or omit warmup.",
+            stacklevel=2,
+        )
+
+
 def run_vllm(
     requests: list[SampleRequest],
     n: int,
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
-    num_warmups: int = 0,
+    num_iters_warmup: int = 0,
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
@@ -94,7 +116,7 @@ def run_vllm(
 
     use_beam_search = False
 
-    def _run_iter(use_tqdm: bool) -> list[RequestOutput] | None:
+    def run_pass(use_tqdm: bool) -> list[RequestOutput] | None:
         if not use_beam_search:
             return llm.generate(
                 prompts,
@@ -117,15 +139,16 @@ def run_vllm(
         )
         return None
 
-    if num_warmups > 0:
-        print(f"Warming up with {num_warmups} iterations...")
-        for _ in tqdm(range(num_warmups), desc="Warmup iterations"):
-            _run_iter(use_tqdm=False)
+    if num_iters_warmup > 0:
+        print("Warming up...")
+        for _ in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
+            run_pass(use_tqdm=False)
+        _reset_prefix_cache_after_warmup(llm)
 
     start = time.perf_counter()
     if do_profile:
         llm.start_profile()
-    outputs = _run_iter(use_tqdm=True)
+    outputs = run_pass(use_tqdm=True)
     if do_profile:
         llm.stop_profile()
     end = time.perf_counter()
@@ -138,7 +161,7 @@ def run_vllm_chat(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
-    num_warmups: int = 0,
+    num_iters_warmup: int = 0,
 ) -> tuple[float, list[RequestOutput]]:
     """
     Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
@@ -172,10 +195,12 @@ def run_vllm_chat(
                 detokenize=not disable_detokenize,
             )
         )
-    if num_warmups > 0:
-        print(f"Warming up with {num_warmups} iterations...")
-        for _ in tqdm(range(num_warmups), desc="Warmup iterations"):
+    if num_iters_warmup > 0:
+        print("Warming up...")
+        for _ in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
             llm.chat(prompts, sampling_params, use_tqdm=False)
+        _reset_prefix_cache_after_warmup(llm)
+
     start = time.perf_counter()
     if do_profile:
         llm.start_profile()
@@ -192,7 +217,7 @@ async def run_vllm_async(
     engine_args: AsyncEngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
-    num_warmups: int = 0,
+    num_iters_warmup: int = 0,
 ) -> float:
     from vllm import SamplingParams
     from vllm.entrypoints.openai.api_server import (
@@ -256,10 +281,11 @@ async def run_vllm_async(
             async for i, res in all_gens:
                 pass
 
-        if num_warmups > 0:
-            print(f"Warming up with {num_warmups} iterations...")
-            for w in tqdm(range(num_warmups), desc="Warmup iterations"):
-                await _run_batch(f"warmup{w}")
+        if num_iters_warmup > 0:
+            print("Warming up...")
+            for w in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
+                await _run_batch(f"warmup_{w}")
+            await _reset_prefix_cache_after_warmup_async(llm)
 
         start = time.perf_counter()
         if do_profile:
@@ -279,7 +305,7 @@ def run_hf(
     max_batch_size: int,
     trust_remote_code: bool,
     disable_detokenize: bool = False,
-    num_warmups: int = 0,
+    num_iters_warmup: int = 0,
     dtype: torch.dtype | str | None = torch.float16,
     enable_torch_compile: bool = False,
 ) -> float:
@@ -353,9 +379,9 @@ def run_hf(
             max_prompt_len = 0
             max_output_len = 0
 
-    if num_warmups > 0:
+    if num_iters_warmup > 0:
         print("Warming up...")
-        for _ in tqdm(range(num_warmups), desc="Warmup iterations"):
+        for _ in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
             _run_pass(pbar=None)
 
     pbar = tqdm(total=len(requests))
@@ -891,10 +917,18 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "repetition dataset.",
     )
     parser.add_argument(
+        "--num-iters-warmup",
         "--num-warmups",
         type=int,
         default=0,
-        help="Number of warmup requests.",
+        dest="num_iters_warmup",
+        help=(
+            "Number of iterations to run for warmup before the timed run. "
+            "Each iteration processes the full prompt set once (same as the "
+            "measured run). After warmup, the vLLM prefix cache is reset so the "
+            "timed pass does not reuse KV blocks from warmup (see "
+            "LLM.reset_prefix_cache). Alias: --num-warmups."
+        ),
     )
 
     # (random, random-mm, random-rerank)
@@ -947,7 +981,7 @@ def main(args: argparse.Namespace):
                     AsyncEngineArgs.from_cli_args(args),
                     disable_detokenize=args.disable_detokenize,
                     do_profile=args.profile,
-                    num_warmups=args.num_warmups,
+                    num_iters_warmup=args.num_iters_warmup,
                 )
             )
         else:
@@ -957,7 +991,7 @@ def main(args: argparse.Namespace):
                 EngineArgs.from_cli_args(args),
                 disable_detokenize=args.disable_detokenize,
                 do_profile=args.profile,
-                num_warmups=args.num_warmups,
+                num_iters_warmup=args.num_iters_warmup,
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -971,7 +1005,7 @@ def main(args: argparse.Namespace):
             args.hf_max_batch_size,
             args.trust_remote_code,
             args.disable_detokenize,
-            num_warmups=args.num_warmups,
+            num_iters_warmup=args.num_iters_warmup,
             dtype=args.dtype,
             enable_torch_compile=args.hf_enable_torch_compile,
         )
@@ -982,7 +1016,7 @@ def main(args: argparse.Namespace):
             EngineArgs.from_cli_args(args),
             disable_detokenize=args.disable_detokenize,
             do_profile=args.profile,
-            num_warmups=args.num_warmups,
+            num_iters_warmup=args.num_iters_warmup,
         )
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
