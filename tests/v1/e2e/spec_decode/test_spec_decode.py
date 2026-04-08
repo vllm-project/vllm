@@ -214,7 +214,10 @@ def test_ngram_gpu_default_with_async_scheduling(
         async_scheduling=async_scheduling,
     )
     # Assert the resolved async_scheduling config matches what was requested.
-    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling == async_scheduling
+    assert (
+        spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+        == async_scheduling
+    )
     evaluate_llm_for_gsm8k(spec_llm, expected_accuracy_threshold=0.8)
     del spec_llm
     cleanup_dist_env_and_memory()
