@@ -651,6 +651,32 @@ class ParallelConfig:
         return aggregated_has_unfinished
 
     @staticmethod
+    def sync_dp_state(
+        dp_group: ProcessGroup,
+        has_unfinished: bool,
+        pending_pause: bool,
+        dp_size: int,
+    ) -> tuple[bool, bool]:
+        """Combined all-reduce for DP state synchronization.
+
+        Uses a single SUM all-reduce on a 2-element tensor:
+          [0] = 1 if this rank has unfinished work (or pending pause), else 0.
+                SUM > 0 ≡ logical OR across ranks → any rank has work.
+          [1] = 1 if this rank has a pending pause request, else 0.
+                SUM == dp_size ≡ logical AND → all ranks want to pause.
+
+        Returns:
+            (has_unfinished_global, all_paused)
+        """
+        tensor = torch.tensor(
+            [int(has_unfinished), int(pending_pause)],
+            dtype=torch.int32,
+            device="cpu",
+        )
+        torch.distributed.all_reduce(tensor, op=ReduceOp.SUM, group=dp_group)
+        return tensor[0].item() > 0, tensor[1].item() == dp_size
+
+    @staticmethod
     def sync_kv_cache_memory_size(dp_group: ProcessGroup, kv_cache_memory: int) -> int:
         if kv_cache_memory == -1:
             kv_cache_memory = torch.iinfo(torch.int64).max
