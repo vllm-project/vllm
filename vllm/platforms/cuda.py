@@ -664,7 +664,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
             numa_node = pynvml.nvmlDeviceGetNumaNodeId(handle)
             if cls._numa_node_has_cpus(numa_node):
                 return numa_node
-            # On non-CDMM Grace-Blackwell (GB200) systems, each GPU's HBM
+            # On non-CDMM Grace-Blackwell systems (e.g. GB200), each GPU's HBM
             # is a separate NUMA node with no CPUs.  Fall through to
             # CPU-affinity-based detection to find the nearest CPU node.
             logger.debug(
@@ -696,6 +696,7 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def _numa_node_has_cpus(cls, node_id: int) -> bool:
         """Check whether a NUMA node has any CPUs assigned to it."""
         from pathlib import Path
+
         cpulist_file = Path(f"/sys/devices/system/node/node{node_id}/cpulist")
         try:
             return cpulist_file.read_text().strip() != ""
