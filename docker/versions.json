@@ -2,7 +2,7 @@
   "_comment": "Auto-generated from Dockerfile ARGs. Do not edit manually. Run: python tools/generate_versions_json.py",
   "variable": {
     "CUDA_VERSION": {
-      "default": "12.9.1"
+      "default": "13.0.0"
     },
     "PYTHON_VERSION": {
       "default": "3.12"
@@ -11,10 +11,10 @@
       "default": "22.04"
     },
     "BUILD_BASE_IMAGE": {
-      "default": "nvidia/cuda:12.9.1-devel-ubuntu20.04"
+      "default": "nvidia/cuda:13.0.0-devel-ubuntu22.04"
     },
     "FINAL_BASE_IMAGE": {
-      "default": "nvidia/cuda:12.9.1-base-ubuntu22.04"
+      "default": "nvidia/cuda:13.0.0-base-ubuntu22.04"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
