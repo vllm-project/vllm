@@ -552,15 +552,17 @@ class Qwen3ASRForConditionalGeneration(
             )
 
         context = request_prompt or ""
-        full_lang_name_to = cls.supported_languages.get(to_language, to_language)
 
         prompt = (
             f"<|im_start|>system\n{context}<|im_end|>\n"
             f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
             f"<|im_start|>assistant\n"
         )
-        if to_language is not None:
-            prompt += f"language {full_lang_name_to}{_ASR_TEXT_TAG}"
+
+        lang_code = to_language if task_type == "translate" else language
+        if lang_code is not None:
+            full_lang_name = cls.supported_languages.get(lang_code, lang_code)
+            prompt += f"language {full_lang_name}{_ASR_TEXT_TAG}"
 
         prompt_token_ids = tokenizer.encode(prompt)
 
