@@ -194,10 +194,12 @@ def _update_hybrid_attention_layout(
     kv_cache_config: KVCacheConfig,
 ) -> None:
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
-        kv_cache_spec = kv_cache_group_spec.kv_cache_spec
-        if not isinstance(kv_cache_spec, AttentionSpec):
-            continue
         for layer_name in kv_cache_group_spec.layer_names:
+            kv_cache_spec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
+                kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                continue
             kv_cache = kv_caches[layer_name]
             if kv_cache.shape[0] == 2:
                 assert kv_cache.shape[1] != 2, (
