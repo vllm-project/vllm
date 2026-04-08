@@ -22,7 +22,8 @@ GPU_PAGE_SIZES = [512, 1024]
 BLOCK_SIZE_FACTORS = [1, 3]
 NUM_TENSORS = [4]
 SEEDS = [0]
-CUDA_DEVICES = ["xpu:0" if current_platform.is_xpu() else "cuda:0"]
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 
 
@@ -34,7 +35,7 @@ NUM_MAPPINGS = [3]
 @pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
 @pytest.mark.parametrize("num_tensors", NUM_TENSORS)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,

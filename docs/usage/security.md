@@ -66,6 +66,10 @@ Restrict domains that vLLM can access for media URLs by setting
 `--allowed-media-domains` to prevent Server-Side Request Forgery (SSRF) attacks.
 (e.g. `--allowed-media-domains upload.wikimedia.org github.com www.bogotobogo.com`)
 
+This protection applies to both the online serving API (multimodal inputs) and
+the **batch runner** (`vllm run-batch`), where `file_url` values in batch
+transcription/translation requests are validated against the same allowlist.
+
 Without domain restrictions, a malicious user could supply URLs that:
 
 - **Target internal services**: Access internal network endpoints, cloud metadata
