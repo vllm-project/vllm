@@ -9,11 +9,10 @@ void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& valid_sampled_tokens_count,
     const torch::Tensor& query_start_loc_gpu,
     torch::Tensor& token_indices_to_sample,
-    torch::Tensor& num_rejected_tokens_gpu,
-    const int64_t num_reqs) {
-
+    torch::Tensor& num_rejected_tokens_gpu, const int64_t num_reqs) {
   const int64_t* cu_draft_ptr = cu_num_draft_tokens.data_ptr<int64_t>();
-  const int64_t* valid_count_ptr = valid_sampled_tokens_count.data_ptr<int64_t>();
+  const int64_t* valid_count_ptr =
+      valid_sampled_tokens_count.data_ptr<int64_t>();
   const int32_t* query_loc_ptr = query_start_loc_gpu.data_ptr<int32_t>();
   int32_t* indices_out_ptr = token_indices_to_sample.data_ptr<int32_t>();
   int64_t* rejected_out_ptr = num_rejected_tokens_gpu.data_ptr<int64_t>();
@@ -40,13 +39,9 @@ void eagle_prepare_inputs_padded_kernel_impl(
 void eagle_prepare_next_token_padded_kernel_impl(
     const torch::Tensor& sampled_token_ids,
     const torch::Tensor& discard_request_mask,
-    const torch::Tensor& backup_next_token_ids,
-    torch::Tensor& next_token_ids,
-    torch::Tensor& valid_sampled_tokens_count,
-    const int64_t vocab_size,
-    const int64_t num_sampled_tokens_per_req,
-    const int64_t num_reqs) {
-
+    const torch::Tensor& backup_next_token_ids, torch::Tensor& next_token_ids,
+    torch::Tensor& valid_sampled_tokens_count, const int64_t vocab_size,
+    const int64_t num_sampled_tokens_per_req, const int64_t num_reqs) {
   const int64_t* sampled_ids_ptr = sampled_token_ids.data_ptr<int64_t>();
   const bool* discard_mask_ptr = discard_request_mask.data_ptr<bool>();
   const int64_t* backup_ids_ptr = backup_next_token_ids.data_ptr<int64_t>();
@@ -82,15 +77,10 @@ void eagle_prepare_next_token_padded_kernel_impl(
 }
 
 void eagle_step_slot_mapping_metadata_kernel_impl(
-    const torch::Tensor& positions,
-    const torch::Tensor& block_table,
-    torch::Tensor& seq_lens,
-    torch::Tensor& out_clamped_positions,
-    torch::Tensor& out_slot_mapping,
-    const int64_t block_size,
-    const int64_t max_model_len,
-    const int64_t PAD_ID) {
-
+    const torch::Tensor& positions, const torch::Tensor& block_table,
+    torch::Tensor& seq_lens, torch::Tensor& out_clamped_positions,
+    torch::Tensor& out_slot_mapping, const int64_t block_size,
+    const int64_t max_model_len, const int64_t PAD_ID) {
   const int64_t batch_size = positions.size(0);
   const int64_t input_batch_size = out_slot_mapping.size(0);
 
@@ -132,22 +122,16 @@ void eagle_step_slot_mapping_metadata_kernel_impl(
 
 void copy_and_expand_eagle_inputs_kernel_impl(
     const torch::Tensor& target_token_ids,
-    const torch::Tensor& target_positions,
-    const torch::Tensor& next_token_ids,
-    torch::Tensor& out_input_ids,
-    torch::Tensor& out_positions,
+    const torch::Tensor& target_positions, const torch::Tensor& next_token_ids,
+    torch::Tensor& out_input_ids, torch::Tensor& out_positions,
     torch::Tensor& out_is_rejected_token_mask,
     torch::Tensor& out_is_masked_token_mask,
     torch::Tensor& out_new_token_indices,
     torch::Tensor& out_hidden_state_mapping,
-    const torch::Tensor& query_start_loc,
-    const torch::Tensor& query_end_loc,
-    const int64_t padding_token_id,
-    const int64_t parallel_drafting_token_id,
+    const torch::Tensor& query_start_loc, const torch::Tensor& query_end_loc,
+    const int64_t padding_token_id, const int64_t parallel_drafting_token_id,
     const int64_t total_input_tokens,
-    const int64_t num_padding_slots_per_request,
-    const bool shift_input_ids) {
-
+    const int64_t num_padding_slots_per_request, const bool shift_input_ids) {
   const int64_t num_reqs = query_end_loc.size(0);
 
   const int64_t* target_ids_ptr = target_token_ids.data_ptr<int64_t>();
@@ -188,12 +172,11 @@ void copy_and_expand_eagle_inputs_kernel_impl(
       bool is_bonus = j == num_valid_tokens;
       bool is_parallel = (j > num_valid_tokens) &&
                          (j < num_valid_tokens + num_padding_slots_per_request);
-      bool is_rejected =
-          j >= num_valid_tokens + num_padding_slots_per_request;
+      bool is_rejected = j >= num_valid_tokens + num_padding_slots_per_request;
 
-      int64_t in_idx = std::min(
-          static_cast<int64_t>(q_start + input_offset + j),
-          total_input_tokens - 1);
+      int64_t in_idx =
+          std::min(static_cast<int64_t>(q_start + input_offset + j),
+                   total_input_tokens - 1);
 
       int64_t token_id = padding_token_id;
       if (is_valid)
@@ -226,14 +209,10 @@ void copy_and_expand_eagle_inputs_kernel_impl(
 }
 
 void rejection_greedy_sample_kernel_impl(
-    torch::Tensor& output_token_ids,
-    const torch::Tensor& cu_num_draft_tokens,
-    const torch::Tensor& draft_token_ids,
-    const torch::Tensor& target_argmax,
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
+    const torch::Tensor& draft_token_ids, const torch::Tensor& target_argmax,
     const torch::Tensor& bonus_token_ids,
-    const std::optional<torch::Tensor>& is_greedy,
-    const int64_t max_spec_len) {
-
+    const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len) {
   const int64_t batch_size = cu_num_draft_tokens.size(0);
 
   int64_t* out_ptr = output_token_ids.data_ptr<int64_t>();
@@ -251,8 +230,7 @@ void rejection_greedy_sample_kernel_impl(
   for (int64_t req_idx = 0; req_idx < batch_size; ++req_idx) {
     if (greedy_ptr && !greedy_ptr[req_idx]) continue;
 
-    int64_t start_idx =
-        req_idx == 0 ? 0 : cu_draft_ptr[req_idx - 1];
+    int64_t start_idx = req_idx == 0 ? 0 : cu_draft_ptr[req_idx - 1];
     int64_t end_idx = cu_draft_ptr[req_idx];
     int64_t num_draft_tokens = end_idx - start_idx;
 
@@ -275,19 +253,14 @@ void rejection_greedy_sample_kernel_impl(
 }
 
 void rejection_random_sample_kernel_impl(
-    torch::Tensor& output_token_ids,
-    const torch::Tensor& cu_num_draft_tokens,
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& draft_token_ids,
     const std::optional<torch::Tensor>& draft_probs,
-    const torch::Tensor& target_probs,
-    const torch::Tensor& bonus_token_ids,
+    const torch::Tensor& target_probs, const torch::Tensor& bonus_token_ids,
     const torch::Tensor& recovered_token_ids,
     const torch::Tensor& uniform_probs,
-    const std::optional<torch::Tensor>& is_greedy,
-    const int64_t max_spec_len,
-    const int64_t vocab_size,
-    const bool no_draft_probs) {
-
+    const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len,
+    const int64_t vocab_size, const bool no_draft_probs) {
   const int64_t batch_size = cu_num_draft_tokens.size(0);
 
   int64_t* out_ptr = output_token_ids.data_ptr<int64_t>();
@@ -312,8 +285,7 @@ void rejection_random_sample_kernel_impl(
   for (int64_t req_idx = 0; req_idx < batch_size; ++req_idx) {
     if (greedy_ptr && greedy_ptr[req_idx]) continue;
 
-    int64_t start_idx =
-        req_idx == 0 ? 0 : cu_draft_ptr[req_idx - 1];
+    int64_t start_idx = req_idx == 0 ? 0 : cu_draft_ptr[req_idx - 1];
     int64_t end_idx = cu_draft_ptr[req_idx];
     int64_t num_draft_tokens = end_idx - start_idx;
 
@@ -323,9 +295,10 @@ void rejection_random_sample_kernel_impl(
       int64_t draft_id = draft_ids_ptr[token_idx];
 
       float p = target_probs_ptr[token_idx * target_stride + draft_id];
-      float q = no_draft_probs
-                    ? 1.0f
-                    : draft_probs_ptr[token_idx * draft_probs_stride + draft_id];
+      float q =
+          no_draft_probs
+              ? 1.0f
+              : draft_probs_ptr[token_idx * draft_probs_stride + draft_id];
       float uniform_p = uniform_probs_ptr[token_idx];
 
       float ratio = (q > 0.0f) ? (p / q) : 0.0f;
@@ -346,13 +319,9 @@ void rejection_random_sample_kernel_impl(
   }
 }
 
-void expand_kernel_impl(
-    torch::Tensor& output,
-    const torch::Tensor& input,
-    const torch::Tensor& cu_num_tokens,
-    const int64_t replace_from,
-    const int64_t replace_to) {
-
+void expand_kernel_impl(torch::Tensor& output, const torch::Tensor& input,
+                        const torch::Tensor& cu_num_tokens,
+                        const int64_t replace_from, const int64_t replace_to) {
   const int64_t batch_size = cu_num_tokens.size(0);
   const int64_t* cu_tokens_ptr = cu_num_tokens.data_ptr<int64_t>();
 
@@ -361,8 +330,7 @@ void expand_kernel_impl(
 
 #pragma omp parallel for
   for (int64_t req_idx = 0; req_idx < batch_size; ++req_idx) {
-    int64_t start_idx =
-        req_idx == 0 ? 0 : cu_tokens_ptr[req_idx - 1];
+    int64_t start_idx = req_idx == 0 ? 0 : cu_tokens_ptr[req_idx - 1];
     int64_t end_idx = cu_tokens_ptr[req_idx];
     int64_t val = in_ptr[req_idx];
 
@@ -377,15 +345,11 @@ void expand_kernel_impl(
 }
 
 void sample_recovered_tokens_kernel_impl(
-    torch::Tensor& output_token_ids,
-    const torch::Tensor& cu_num_draft_tokens,
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& draft_token_ids,
     const std::optional<torch::Tensor>& draft_probs,
-    const torch::Tensor& target_probs,
-    const torch::Tensor& inv_q,
-    const int64_t vocab_size,
-    const bool no_draft_probs) {
-
+    const torch::Tensor& target_probs, const torch::Tensor& inv_q,
+    const int64_t vocab_size, const bool no_draft_probs) {
   const int64_t batch_size = cu_num_draft_tokens.size(0);
 
   int64_t* out_ptr = output_token_ids.data_ptr<int64_t>();
@@ -403,8 +367,7 @@ void sample_recovered_tokens_kernel_impl(
 
 #pragma omp parallel for
   for (int64_t req_idx = 0; req_idx < batch_size; ++req_idx) {
-    int64_t start_idx =
-        req_idx == 0 ? 0 : cu_draft_ptr[req_idx - 1];
+    int64_t start_idx = req_idx == 0 ? 0 : cu_draft_ptr[req_idx - 1];
     int64_t end_idx = cu_draft_ptr[req_idx];
     int64_t num_draft_tokens = end_idx - start_idx;
 
@@ -417,9 +380,8 @@ void sample_recovered_tokens_kernel_impl(
       const float* token_target_probs =
           target_probs_ptr + token_idx * target_stride;
       const float* token_draft_probs =
-          no_draft_probs
-              ? nullptr
-              : (draft_probs_ptr + token_idx * draft_probs_stride);
+          no_draft_probs ? nullptr
+                         : (draft_probs_ptr + token_idx * draft_probs_stride);
 
       int64_t best_id = 0;
       float best_val = -1.0f;

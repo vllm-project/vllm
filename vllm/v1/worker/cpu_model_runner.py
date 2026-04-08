@@ -133,17 +133,13 @@ class CPUModelRunner(GPUModelRunner):
 
         logger.info("Warming up done.")
 
-    def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
-        """
-        Initialize KV cache for CPU backend, including drafter cache if needed.
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
+        super().initialize_kv_cache(kv_cache_config, is_profiling)
 
-        Args:
-            kv_cache_config: Configuration for the KV cache
-        """
-        # Call parent implementation
-        super().initialize_kv_cache(kv_cache_config)
-
-        # Log CPU-specific confirmation for speculative decoding
         if self.speculative_config:
             if self.speculative_config.use_eagle():
                 logger.info("EAGLE drafter KV cache initialized for CPU backend")

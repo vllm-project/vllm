@@ -144,79 +144,53 @@ void eagle_prepare_inputs_padded_kernel_impl(
     const torch::Tensor& valid_sampled_tokens_count,
     const torch::Tensor& query_start_loc_gpu,
     torch::Tensor& token_indices_to_sample,
-    torch::Tensor& num_rejected_tokens_gpu,
-    const int64_t num_reqs);
+    torch::Tensor& num_rejected_tokens_gpu, const int64_t num_reqs);
 void eagle_prepare_next_token_padded_kernel_impl(
     const torch::Tensor& sampled_token_ids,
     const torch::Tensor& discard_request_mask,
-    const torch::Tensor& backup_next_token_ids,
-    torch::Tensor& next_token_ids,
-    torch::Tensor& valid_sampled_tokens_count,
-    const int64_t vocab_size,
-    const int64_t num_sampled_tokens_per_req,
-    const int64_t num_reqs);
+    const torch::Tensor& backup_next_token_ids, torch::Tensor& next_token_ids,
+    torch::Tensor& valid_sampled_tokens_count, const int64_t vocab_size,
+    const int64_t num_sampled_tokens_per_req, const int64_t num_reqs);
 void eagle_step_slot_mapping_metadata_kernel_impl(
-    const torch::Tensor& positions,
-    const torch::Tensor& block_table,
-    torch::Tensor& seq_lens,
-    torch::Tensor& out_clamped_positions,
-    torch::Tensor& out_slot_mapping,
-    const int64_t block_size,
-    const int64_t max_model_len,
-    const int64_t PAD_ID);
+    const torch::Tensor& positions, const torch::Tensor& block_table,
+    torch::Tensor& seq_lens, torch::Tensor& out_clamped_positions,
+    torch::Tensor& out_slot_mapping, const int64_t block_size,
+    const int64_t max_model_len, const int64_t PAD_ID);
 void copy_and_expand_eagle_inputs_kernel_impl(
     const torch::Tensor& target_token_ids,
-    const torch::Tensor& target_positions,
-    const torch::Tensor& next_token_ids,
-    torch::Tensor& out_input_ids,
-    torch::Tensor& out_positions,
+    const torch::Tensor& target_positions, const torch::Tensor& next_token_ids,
+    torch::Tensor& out_input_ids, torch::Tensor& out_positions,
     torch::Tensor& out_is_rejected_token_mask,
     torch::Tensor& out_is_masked_token_mask,
     torch::Tensor& out_new_token_indices,
     torch::Tensor& out_hidden_state_mapping,
-    const torch::Tensor& query_start_loc,
-    const torch::Tensor& query_end_loc,
-    const int64_t padding_token_id,
-    const int64_t parallel_drafting_token_id,
+    const torch::Tensor& query_start_loc, const torch::Tensor& query_end_loc,
+    const int64_t padding_token_id, const int64_t parallel_drafting_token_id,
     const int64_t total_input_tokens,
-    const int64_t num_padding_slots_per_request,
-    const bool shift_input_ids);
+    const int64_t num_padding_slots_per_request, const bool shift_input_ids);
 void rejection_greedy_sample_kernel_impl(
-    torch::Tensor& output_token_ids,
-    const torch::Tensor& cu_num_draft_tokens,
-    const torch::Tensor& draft_token_ids,
-    const torch::Tensor& target_argmax,
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
+    const torch::Tensor& draft_token_ids, const torch::Tensor& target_argmax,
     const torch::Tensor& bonus_token_ids,
-    const std::optional<torch::Tensor>& is_greedy,
-    const int64_t max_spec_len);
+    const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len);
 void rejection_random_sample_kernel_impl(
-    torch::Tensor& output_token_ids,
-    const torch::Tensor& cu_num_draft_tokens,
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& draft_token_ids,
     const std::optional<torch::Tensor>& draft_probs,
-    const torch::Tensor& target_probs,
-    const torch::Tensor& bonus_token_ids,
+    const torch::Tensor& target_probs, const torch::Tensor& bonus_token_ids,
     const torch::Tensor& recovered_token_ids,
     const torch::Tensor& uniform_probs,
-    const std::optional<torch::Tensor>& is_greedy,
-    const int64_t max_spec_len,
-    const int64_t vocab_size,
-    const bool no_draft_probs);
-void expand_kernel_impl(
-    torch::Tensor& output,
-    const torch::Tensor& input,
-    const torch::Tensor& cu_num_tokens,
-    const int64_t replace_from,
-    const int64_t replace_to);
+    const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len,
+    const int64_t vocab_size, const bool no_draft_probs);
+void expand_kernel_impl(torch::Tensor& output, const torch::Tensor& input,
+                        const torch::Tensor& cu_num_tokens,
+                        const int64_t replace_from, const int64_t replace_to);
 void sample_recovered_tokens_kernel_impl(
-    torch::Tensor& output_token_ids,
-    const torch::Tensor& cu_num_draft_tokens,
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& draft_token_ids,
     const std::optional<torch::Tensor>& draft_probs,
-    const torch::Tensor& target_probs,
-    const torch::Tensor& inv_q,
-    const int64_t vocab_size,
-    const bool no_draft_probs);
+    const torch::Tensor& target_probs, const torch::Tensor& inv_q,
+    const int64_t vocab_size, const bool no_draft_probs);
 }  // namespace cpu_utils
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
