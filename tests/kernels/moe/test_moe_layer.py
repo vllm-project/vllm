@@ -101,6 +101,7 @@ if has_nixl_ep():
 QUANT_METHODS = [
     None,
     "fp8",
+    "fp8_blocked",
     "modelopt_fp8",
     "modelopt_fp4",
 ]
@@ -112,8 +113,8 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "mori":                        {None, "fp8", "modelopt_fp8"},
     "flashinfer_nvlink_two_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
     "flashinfer_nvlink_one_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
-    "deepep_low_latency":          {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
-    "deepep_high_throughput":      {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "deepep_low_latency":          {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"},
+    "deepep_high_throughput":      {None, "fp8_blocked", "modelopt_fp8", "modelopt_fp4"},
     "nixl_ep":                     {None, "fp8", "modelopt_fp8"},
 }
 # fmt: on
@@ -363,9 +364,9 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         )
 
     # routed_input_transform + quantization + high hidden dimensions
-    # TODO: Disable >= 2048 w/fp8 + deepep LL for now due to insane errors.
+    # TODO: Disable >= 2048 due to insane errors.
     if (
-        (config.use_routed_input_transform or config.backend == "deepep_low_latency")
+        config.use_routed_input_transform
         and config.quantization is not None
         and config.k >= 2048
     ):
@@ -516,18 +517,38 @@ class QuantizedWeights:
 def _quantize_fp8_halves(
     w1: torch.Tensor,
     w2: torch.Tensor,
+    block_shape: list[int, int] | None = None,
 ) -> QuantizedWeights:
     """Quantize w13 gate/up halves separately to FP8, producing per-shard scales."""
+
+    w1q_a, w1s_a, _ = moe_quantize_weights(w1, None, fp8_dtype, False, block_shape)
+    w2q, w2s, _ = moe_quantize_weights(w2, None, fp8_dtype, False, block_shape)
+
+    return QuantizedWeights(
+        w13_weight=w1q_a,
+        w2_weight=w2q,
+        w13_weight_scale=w1s_a,
+        w2_weight_scale=w2s,
+    )
+
     half = w1.shape[1] // 2
     w1q_a, w1s_a, _ = moe_quantize_weights(
-        w1[:, :half, :], None, fp8_dtype, False, None
+        w1[:, :half, :],
+        None,
+        fp8_dtype,
+        False,
+        block_shape,
     )
     w1q_b, w1s_b, _ = moe_quantize_weights(
-        w1[:, half:, :], None, fp8_dtype, False, None
+        w1[:, half:, :],
+        None,
+        fp8_dtype,
+        False,
+        block_shape,
     )
     assert w1s_a is not None and w1s_b is not None
 
-    w2q, w2s, _ = moe_quantize_weights(w2, None, fp8_dtype, False, None)
+    w2q, w2s, _ = moe_quantize_weights(w2, None, fp8_dtype, False, block_shape)
     assert w2s is not None
 
     return QuantizedWeights(
@@ -536,7 +557,7 @@ def _quantize_fp8_halves(
         # Each w1s_x is (E, 1, 1) -> reshape to (E, 1), cat to (E, 2)
         w13_weight_scale=torch.cat([w1s_a.view(-1, 1), w1s_b.view(-1, 1)], dim=1),
         # w2s is (E, 1, 1) -> reshape to (E,)
-        w2_weight_scale=w2s.view(-1),
+        w2_weight_scale=w2s,  # .view(-1),
     )
 
 
@@ -545,7 +566,7 @@ def quantization_to_quant_dtype(
 ) -> torch.dtype | str | None:
     if quantization is None:
         return None
-    elif quantization in ["fp8", "modelopt_fp8"]:
+    elif quantization in ["fp8", "fp8_blocked", "modelopt_fp8"]:
         return fp8_dtype
     elif quantization in ["modelopt_fp4"]:
         return "nvfp4"
@@ -566,6 +587,12 @@ def make_quant_config(
 
     if quantization == "fp8":
         return Fp8Config(True), _quantize_fp8_halves(w1, w2)
+
+    if quantization == "fp8_blocked":
+        block_shape = [128, 128]
+        return Fp8Config(True, weight_block_size=block_shape), _quantize_fp8_halves(
+            w1, w2, block_shape
+        )
 
     if quantization == "modelopt_fp8":
         qw = _quantize_fp8_halves(w1, w2)
@@ -1428,8 +1455,8 @@ def _run_one_config(
             atol, rtol = 7.6e-2, 7.6e-2
         else:
             atol, rtol = 3.5e-2, 3.5e-2
-    elif quantization in ("fp8", "modelopt_fp8"):
-        if k >= 2048:
+    elif quantization in ("fp8", "fp8_blocked", "modelopt_fp8"):
+        if False and k >= 2048:
             atol, rtol = 7.6e-2, 7.6e-2
         else:
             atol, rtol = 6e-2, 6e-2
@@ -1666,8 +1693,8 @@ def test_moe_layer(
     test_env = dict()
     test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
     monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
-    if os.environ.get("VLLM_LOGGING_LEVEL") is None:
-        monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
+    # if os.environ.get("VLLM_LOGGING_LEVEL") is None:
+    #    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
     # TODO
     # VLLM_FLASHINFER_MOE_BACKEND=latency
