@@ -101,7 +101,7 @@ class TestHf3fsClientResourceManagement:
             patch("os.ftruncate"),
             patch("os.close"),
             patch("os.fsync"),
-            patch("torch.cuda.Stream", return_value=MagicMock()),
+            patch("torch.Stream", return_value=MagicMock()),
             patch("torch.frombuffer", return_value=MagicMock()),
             patch("torch.empty", return_value=MagicMock()),
         ]
@@ -183,7 +183,7 @@ class TestHf3fsClientResourceManagement:
             patch("os.open", return_value=55),
             patch("os.ftruncate"),
             patch("os.close") as mock_os_close,
-            patch("torch.cuda.Stream", return_value=MagicMock()),
+            patch("torch.Stream", return_value=MagicMock()),
             pytest.raises(RuntimeError, match="mount point not found"),
         ):
             Hf3fsClient(
@@ -219,7 +219,7 @@ class TestHf3fsClientResourceManagement:
                 side_effect=RuntimeError("ioring init failed"),
             ),
             patch(f"{self._MOD}.make_iovec", return_value=MagicMock()),
-            patch("torch.cuda.Stream", return_value=MagicMock()),
+            patch("torch.Stream", return_value=MagicMock()),
             pytest.raises(RuntimeError, match="ioring init failed"),
         ):
             Hf3fsClient(
@@ -250,7 +250,7 @@ class TestHf3fsClientResourceManagement:
             patch("os.open", return_value=77),
             patch("os.ftruncate"),
             patch("os.close"),
-            patch("torch.cuda.Stream", return_value=MagicMock()),
+            patch("torch.Stream", return_value=MagicMock()),
             pytest.raises(RuntimeError, match="early failure"),
         ):
             Hf3fsClient(

@@ -40,7 +40,7 @@ class EplbCommunicator(ABC):
     def execute(self) -> None:
         pass
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
+    def set_stream(self, cuda_stream: torch.Stream | None) -> None:
         self._cuda_stream = cuda_stream
 
     def _log_initialized(self) -> None:
@@ -54,7 +54,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         ep_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        cuda_stream: torch.Stream | None = None,
     ) -> None:
         self._ep_group = ep_group
         self._cuda_stream = cuda_stream
@@ -99,7 +99,7 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        cuda_stream: torch.Stream | None = None,
     ) -> None:
         self._cpu_group = cpu_group
         self._cuda_stream = cuda_stream
@@ -173,7 +173,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         pynccl_comm: PyNcclCommunicator,
-        cuda_stream: torch.cuda.Stream | None = None,
+        cuda_stream: torch.Stream | None = None,
     ) -> None:
         self._pynccl_comm = pynccl_comm
         self._cuda_stream = cuda_stream

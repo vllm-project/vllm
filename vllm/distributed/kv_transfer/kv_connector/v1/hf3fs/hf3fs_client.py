@@ -142,7 +142,7 @@ class Hf3fsClient:
             self.rlock = threading.RLock()
             self.wlock = threading.RLock()
 
-            self.stream = torch.cuda.Stream()
+            self.stream = torch.Stream()
             self.stream_ptr_int = self.stream.cuda_stream
 
         except Exception:

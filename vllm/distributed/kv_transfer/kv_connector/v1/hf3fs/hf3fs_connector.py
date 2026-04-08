@@ -131,8 +131,8 @@ class AsyncOperationManager:
     def _init_cuda_resources(self) -> None:
         """Initialize CUDA streams, events and buffer allocators."""
         # CUDA streams for async operations
-        self._save_stream = torch.cuda.Stream()
-        self._load_stream = torch.cuda.Stream()
+        self._save_stream = torch.Stream()
+        self._load_stream = torch.Stream()
         self._save_event = torch.cuda.Event()
 
         # Buffer allocators for data copying
