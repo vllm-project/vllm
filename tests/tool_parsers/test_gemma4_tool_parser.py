@@ -491,6 +491,51 @@ class TestStreamingExtraction:
             assert parsed_args["count"] == 42
             assert parsed_args["active"] is True
 
+    def test_streaming_boolean_split_across_chunks(self, parser, mock_request):
+        """Boolean value split across token boundaries must not corrupt JSON."""
+        chunks = [
+            "<|tool_call>",
+            "call:search{input:{all:" + "true"[:3],
+            "e}}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["input"]["all"] is True
+
+    def test_streaming_false_split_across_chunks(self, parser, mock_request):
+        """Boolean false split across chunks."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{flag:" + "false"[:4],
+            "e}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["flag"] is False
+
+    def test_streaming_number_split_across_chunks(self, parser, mock_request):
+        """Number split across chunks must not change type."""
+        chunks = [
+            "<|tool_call>",
+            "call:set{count:4",
+            "2}",
+            "<tool_call|>",
+        ]
+
+        results = self._simulate_streaming(parser, mock_request, chunks)
+        args_text = self._collect_arguments(results)
+        assert args_text, "No arguments were streamed"
+        parsed_args = json.loads(args_text)
+        assert parsed_args["count"] == 42
+
     def test_streaming_empty_args(self, parser, mock_request):
         """Tool call with no arguments."""
         chunks = [
