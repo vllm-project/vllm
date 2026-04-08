@@ -151,6 +151,7 @@ def mteb_test_embed_models(
 
     with vllm_runner(
         model_info.name,
+        revision=model_info.revision,
         runner="pooling",
         max_model_len=model_info.max_model_len,
         **vllm_extra_kwargs,
@@ -201,6 +202,7 @@ def mteb_test_embed_models(
     if model_info.mteb_score is None:
         with hf_runner(
             model_info.name,
+            revision=model_info.revision,
             is_sentence_transformer=True,
             dtype=ci_envs.VLLM_CI_HF_DTYPE or model_info.hf_dtype,
         ) as hf_model:
