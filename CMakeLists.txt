@@ -56,8 +56,8 @@ endif()
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.10.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.10.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.11.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.11.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -225,8 +225,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
   # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
   #
-  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result -Wno-unused-value")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
 endif()
 
 #
