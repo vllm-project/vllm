@@ -3,7 +3,7 @@
 # Adapted from https://huggingface.co/jinaai/jina-reranker-v3/blob/main/modeling.py
 # ruff: noqa: E501
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence, Any
 
 import torch
 from torch import nn
@@ -167,7 +167,7 @@ def format_docs_prompts_func(
     return prefix + prompt + suffix
 
 
-def ensure_str(data: list["ScoreData"]) -> list[str]:
+def ensure_str(data: Sequence[Any]) -> list[str]:
     text: list[str] = []
     for prompt in data:
         if not isinstance(prompt, str):

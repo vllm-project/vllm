@@ -564,17 +564,12 @@ class JinaRankingTokenEmbedIOProcessor(TokenEmbedIOProcessor):
 
         self.format_docs_prompts_func = format_docs_prompts_func
         self.ensure_str = ensure_str
-        self.architecture = self.model_config.architecture
-        self.is_multimodal_model = self.model_config.is_multimodal_model
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
             raise ValueError("The JinaForRanking model requires at least 2 inputs.")
 
-        score_input = _validate_mm_score_input(
-            ctx.prompts, self.is_multimodal_model, self.architecture
-        )
-        text_prompts = self.ensure_str(score_input)
+        text_prompts = self.ensure_str(ctx.prompts)
 
         # The JinaForRanking model concatenates docs first, then query.
         # Let's stay consistent with this novel design.
