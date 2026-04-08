@@ -29,6 +29,10 @@ class TestTritonMoeForwardExpertMap:
             torch.tensor([0, -1, 1, -1], device=device) if expert_map_present else None
         )
 
+        from vllm.utils.import_utils import import_triton_kernels
+
+        import_triton_kernels()
+
         with (
             patch("triton_kernels.topk.topk") as mock_topk,
             patch(
