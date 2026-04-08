@@ -499,5 +499,5 @@ class KVCacheConfig:
         # Recycled blocks may hold stale K/V from prior requests; partial-block
         # tail slots can leak NaN/Inf into masked softmax (see #39146).
         return self.has_mamba_layers or any(
-            type(g.kv_cache_spec) is FullAttentionSpec for g in self.kv_cache_groups
+            isinstance(g.kv_cache_spec, FullAttentionSpec) for g in self.kv_cache_groups
         )
