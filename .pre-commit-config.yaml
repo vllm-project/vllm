@@ -40,7 +40,8 @@ repos:
   hooks:
     - id: pip-compile
       args: [
-        requirements/test/cuda.in, -c, requirements/common.txt,
+        requirements/test/cuda.in,
+        -c, requirements/common.txt,
         -o, requirements/test/cuda.txt,
         --index-strategy, unsafe-best-match,
         --torch-backend, cu130,
@@ -52,9 +53,10 @@ repos:
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
-        requirements/test/rocm.in, -o, requirements/test/rocm.txt,
-        --index-strategy, unsafe-best-match,
+        requirements/test/rocm.in,
         -c, requirements/rocm.txt,
+        -o, requirements/test/rocm.txt,
+        --index-strategy, unsafe-best-match,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
         # Exclude torch and CUDA/NVIDIA packages
@@ -87,10 +89,12 @@ repos:
       alias: pip-compile-xpu
       name: pip-compile-xpu
       args: [
-        requirements/test/xpu.in, -o, requirements/test/xpu.txt,
-        --index-strategy, unsafe-best-match,
+        requirements/test/xpu.in,
         -c, requirements/xpu.txt,
+        -o, requirements/test/xpu.txt,
+        --index-strategy, unsafe-best-match,
         --torch-backend, xpu,
+        --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
       files: ^requirements/test/xpu\.(in|txt)$
