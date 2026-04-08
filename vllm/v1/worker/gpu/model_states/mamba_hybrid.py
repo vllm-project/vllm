@@ -61,7 +61,7 @@ class MambaHybridModelState(DefaultModelState):
             assert req_states is not None
             assert scheduled_spec_decode_tokens is not None
             num_decode_draft_tokens_cpu = torch.full(
-                (input_batch.num_reqs_after_padding,),
+                (num_reqs,),
                 -1,
                 dtype=torch.int32,
                 device="cpu",

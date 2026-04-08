@@ -125,9 +125,9 @@ def _reshape_kv_cache(
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[layer_name]
 
-            raw_tensor = kv_cache_raw_tensors[layer_name]
-            assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
-            num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
+            kv_raw_tensor = kv_cache_raw_tensors[layer_name]
+            assert kv_raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
+            num_blocks = kv_raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
             if isinstance(kv_cache_spec, AttentionSpec):
                 has_attn = True
@@ -154,9 +154,9 @@ def _reshape_kv_cache(
                 ]
 
                 dtype = kv_cache_spec.dtype
-                reshaped = raw_tensor.view(dtype)
-                reshaped = reshaped.view(kv_cache_shape)
-                kv_caches[layer_name] = reshaped.permute(*inv_order)
+                kv_tensor_reshaped = kv_raw_tensor.view(dtype)
+                kv_tensor_reshaped = kv_tensor_reshaped.view(kv_cache_shape)
+                kv_caches[layer_name] = kv_tensor_reshaped.permute(*inv_order)
 
             elif isinstance(kv_cache_spec, MambaSpec):
                 has_mamba = True
@@ -170,7 +170,7 @@ def _reshape_kv_cache(
                     target_stride = (num_element_per_page, *stride[1:])
                     assert storage_offset_bytes % dtype_size == 0
                     tensor = torch.as_strided(
-                        raw_tensor.view(dtype),
+                        kv_raw_tensor.view(dtype),
                         size=target_shape,
                         stride=target_stride,
                         storage_offset=storage_offset_bytes // dtype_size,
