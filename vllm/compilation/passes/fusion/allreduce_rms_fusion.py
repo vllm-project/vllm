@@ -12,6 +12,9 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm.ir.ops
+from vllm.compilation.passes.fusion.rms_quant_fusion import (
+    _rms_input_weight_dtype_match,
+)
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -320,7 +323,12 @@ class AllReduceRMSNormPattern(BasePattern):
             return allreduce[3], allreduce[1]
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -459,7 +467,12 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             return allreduce[4], allreduce[1]
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 
@@ -621,7 +634,12 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             return allreduce[4], allreduce[1], allreduce[5]
 
         pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
         )
 
 

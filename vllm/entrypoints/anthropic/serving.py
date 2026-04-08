@@ -170,7 +170,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             else:
                 cls._convert_message_content(msg, openai_msg, openai_messages)
 
-            openai_messages.append(openai_msg)
+            if not (msg.role == "user" and "content" not in openai_msg):
+                openai_messages.append(openai_msg)
 
     @classmethod
     def _convert_message_content(

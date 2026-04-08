@@ -288,6 +288,35 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             max_num_tiles=max_num_tiles,
         )
 
+    def get_dummy_image_size_and_max_tokens(
+        self, mm_counts: Mapping[str, int]
+    ) -> tuple[tuple[int, int], int]:
+        processor = self.get_hf_processor()
+        num_images = mm_counts.get("image", 0)
+
+        if tiler := processor.dynamic_tiler:
+            budget = tiler.max_num_tokens_available(text_prompt_length=num_images)
+            target_width, target_height = (
+                tiler.width_and_height_for_max_num_tokens_available(budget)
+            )
+            return (
+                (target_width, target_height),
+                tiler._get_num_embeddings(target_width, target_height),
+            )
+
+        max_num_tiles = processor.max_num_tiles
+        target_width, target_height = self.get_image_size_with_most_features(
+            max_num_tiles
+        )
+        return (
+            (target_width, target_height),
+            processor.get_num_image_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                max_num_tiles=max_num_tiles,
+            ),
+        )
+
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
@@ -305,6 +334,26 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         max_tubelets_per_video = max_total_tubelets // max(max_videos, 1)
         max_frames_per_video = max_tubelets_per_video * T
         return max(max_frames_per_video, 1)
+
+    def get_mm_max_tokens_per_item(
+        self, seq_len: int, mm_counts: Mapping[str, int]
+    ) -> Mapping[str, int]:
+        mm_max_tokens: dict[str, int] = {}
+
+        if mm_counts.get("image", 0) > 0:
+            _, mm_max_tokens["image"] = self.get_dummy_image_size_and_max_tokens(
+                mm_counts
+            )
+
+        if mm_counts.get("video", 0) > 0:
+            assert self.supports_video
+            mm_max_tokens["video"] = seq_len
+
+        if mm_counts.get("audio", 0) > 0:
+            assert self.supports_audio
+            mm_max_tokens["audio"] = seq_len
+
+        return mm_max_tokens
 
 
 class NanoNemotronVLMultiModalProcessor(
@@ -708,17 +757,10 @@ class NanoNemotronVLDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
+        (target_width, target_height), _ = (
+            self.info.get_dummy_image_size_and_max_tokens(mm_counts)
+        )
         processor = self.info.get_hf_processor()
-        if tiler := processor.dynamic_tiler:
-            budget = tiler.max_num_tokens_available(text_prompt_length=num_images)
-            target_width, target_height = (
-                tiler.width_and_height_for_max_num_tokens_available(budget)
-            )
-        else:
-            max_num_tiles = 12
-            target_width, target_height = self.info.get_image_size_with_most_features(
-                max_num_tiles
-            )
 
         image_overrides = mm_options.get("image")
 
@@ -1239,12 +1281,13 @@ class NemotronH_Nano_VL_V2(
             img_context_token_ids=self._img_context_token_ids,
             video_temporal_patch_size=video_temporal_patch_size,
         )
+        device = video_embeddings.device
 
         # video_repl.full is a list of token IDs
-        repl_token_ids = torch.tensor(video_repl.full)
+        repl_token_ids = torch.tensor(video_repl.full, device=device)
 
         # Get embedding token IDs for image context (use pre-tokenized version)
-        embed_token_ids = torch.tensor(self._img_context_token_ids)
+        embed_token_ids = torch.tensor(self._img_context_token_ids, device=device)
 
         # Create mask for video embedding positions
         is_video_embed = torch.isin(repl_token_ids, embed_token_ids)

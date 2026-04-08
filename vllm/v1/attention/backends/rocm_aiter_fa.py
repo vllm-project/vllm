@@ -228,7 +228,6 @@ if current_platform.is_rocm():
         num_kv_heads,
         BLOCK_SIZE: tl.constexpr,
         QUANT: tl.constexpr,
-        IS_FNUZ: tl.constexpr,
     ):
         tid = tl.program_id(0)
         head_id = tl.program_id(1)
@@ -314,7 +313,6 @@ if current_platform.is_rocm():
             num_kv_heads,
             BLOCK_SIZE=head_size,
             QUANT=QUANT,
-            IS_FNUZ=current_platform.fp8_dtype() == torch.float8_e4m3fnuz,
         )
 
 
@@ -746,7 +744,6 @@ class AiterFlashAttentionMetadataBuilder(
 
 
 class AiterFlashAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -1039,7 +1036,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AiterFlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1058,8 +1055,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
-        assert output is not None, "Output tensor must be provided."
-
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported "

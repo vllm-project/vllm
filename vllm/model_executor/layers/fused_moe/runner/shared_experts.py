@@ -32,19 +32,14 @@ class SharedExpertsOrder(IntEnum):
     # No shared experts.
     NONE = (0,)
 
-    # Get rid of this one?  combine with BEFORE?
-    # Note: this might be important for torch.compile reasons. Can
-    # get rid of it after _moe_forward is undone.
-    EXTERNAL = (1,)
-
     # No overlap - defensively called before MK.
-    NO_OVERLAP = (2,)
+    NO_OVERLAP = (1,)
 
     # Overlapped with dispatch/combine in DP/EP - called by the MK.
-    MK_INTERNAL_OVERLAPPED = (3,)
+    MK_INTERNAL_OVERLAPPED = (2,)
 
     # Overlapped with the gate, router, experts in aux stream.
-    MULTI_STREAM_OVERLAPPED = (4,)
+    MULTI_STREAM_OVERLAPPED = (3,)
 
 
 class SharedExperts:
@@ -93,26 +88,23 @@ class SharedExperts:
                 )
 
     @property
-    def _has_external_experts(self) -> bool:
+    def _use_external_experts(self) -> bool:
+        if self._use_dp_chunking:
+            return False
+
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
         backend = self._moe_config.moe_parallel_config.all2all_backend
-        return not (
-            (
-                self._moe_config.moe_parallel_config.enable_eplb
-                and backend != "allgather_reducescatter"
-            )
-            or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
-        )
+        return (
+            self._moe_config.moe_parallel_config.enable_eplb
+            and backend != "allgather_reducescatter"
+        ) or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
 
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
-        if self._has_external_experts and not self._use_dp_chunking:
-            return SharedExpertsOrder.EXTERNAL
-
         if self._quant_method.mk_owns_shared_expert:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
@@ -204,13 +196,5 @@ class SharedExperts:
             )
         else:
             self._output[self._output_idx] = self._layer(shared_experts_input)
-
-        if order == SharedExpertsOrder.EXTERNAL:
-            # TODO: figure out how to combine this with maybe_reduce_output?
-            # or get rid of it completely.
-            assert self._output[self._output_idx] is not None
-            self._output[self._output_idx] = self._maybe_reduce_shared_out(
-                self._output[self._output_idx]
-            )
 
         assert self._output[self._output_idx] is not None
