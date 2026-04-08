@@ -17,6 +17,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_data i
     ReqMeta,
     RequestTracker,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
+    get_mooncake_dp_engine_index,
+)
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -114,10 +117,7 @@ class MooncakeStoreScheduler:
         if num_external_tokens > 0:
             local_block_ids = blocks.get_block_ids()[0]
 
-        self._unfinished_requests[request.request_id] = (
-            request,
-            local_block_ids,
-        )
+        self._unfinished_requests[request.request_id] = (request, local_block_ids)
         self._unfinished_request_ids.add(request.request_id)
 
         if request.request_id not in self.load_specs:
@@ -153,8 +153,8 @@ class MooncakeStoreScheduler:
             self._unfinished_request_ids.discard(finished_req_id)
             self._preempted_req_ids.discard(finished_req_id)
 
+        self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
         for req_id in scheduler_output.preempted_req_ids:
-            self._preempted_req_ids.update(scheduler_output.preempted_req_ids)
             self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
 
@@ -393,7 +393,7 @@ class LookupKeyClient:
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     """Construct IPC path for ZMQ lookup socket."""
-    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
     base_url = envs.VLLM_RPC_BASE_PATH
     rpc_port = 0
     extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config

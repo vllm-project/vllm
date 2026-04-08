@@ -84,9 +84,12 @@ Edit `scripts/mooncake/mooncake_config.json`:
 ```
 
 - `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback but performs poorly.
-- `global_segment_size`: CPU memory contributed to the distributed pool. Automatically updated by `setup_vllm_env.sh` to match `--cpu-mem-size`.
-- `local_buffer_size`: Private staging buffer for this node's transfer engine. I am not sure about this param, and maybe we don't need to manually set it at all.
-- `device_name`: Leave empty; Mooncake auto-picks RDMA devices when needed.
+- Adjust `global_segment_size` and `local_buffer_size` based on available memory.
+    - global_segment_size: Memory contributed to the distributed pool
+    - local_buffer_size: Private buffer for this node's own operations
+    - For now we use a single node so they don't differ much
+    - **These sizes are per GPU (per rank), not for the entire node.** For example, with 4 GPUs and `global_segment_size` set to `80GB`, each rank allocates 80 GB of CPU memory, totaling 320 GB across the node.
+- Note: the benchmark script automatically updates `global_segment_size` and `local_buffer_size` to match `CPU_OFFLOAD_GIB`. The `CPU_OFFLOAD_GIB` and `DISK_OFFLOAD_GIB` env vars in the benchmark scripts are also per GPU (per rank).
 
 ### 3. Environment Setup (setup_vllm_env.sh)
 
@@ -187,3 +190,23 @@ python scripts/mooncake/compare_results.py ./bench_results --prefix mt_
 ```bash
 bash scripts/mooncake/start_mooncake_master.sh --stop
 ```
+
+## Notes
+
+### Cross-DP External Prefix Cache Hits
+
+When running `MooncakeStoreConnector` with DP, set a fixed
+`PYTHONHASHSEED` before launching vLLM if you want cross-DP external
+prefix cache lookup to work reliably, for example:
+
+```bash
+PYTHONHASHSEED=0 BACKENDS=mooncake-mem \
+bash scripts/mooncake/benchmark_multi_turn.sh
+```
+
+If `PYTHONHASHSEED` is unset, each engine process initializes the root
+prefix-cache hash seed randomly. Identical prompts can then produce
+different block-hash chains on different DP ranks, which means a rank
+may query Mooncake external cache but still report
+`external_prefix_cache_hits=0` even when another DP rank already stored
+the same prefix.

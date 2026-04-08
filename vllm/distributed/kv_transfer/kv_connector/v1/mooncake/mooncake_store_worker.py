@@ -26,18 +26,22 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
-from vllm.logger import init_logger
-from vllm.utils.network_utils import get_ip, make_zmq_socket
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
-from vllm.v1.serial_utils import MsgpackDecoder
-
-from .mooncake_store_data import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     MooncakeStoreConnectorMetadata,
     ReqMeta,
 )
-from .mooncake_store_scheduler import get_zmq_rpc_path_lookup
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_scheduler import (  # noqa: E501
+    get_zmq_rpc_path_lookup,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
+    get_mooncake_dp_engine_index,
+)
+from vllm.logger import init_logger
+from vllm.utils.network_utils import get_ip, make_zmq_socket
+from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
+from vllm.v1.serial_utils import MsgpackDecoder
 
 logger = init_logger(__name__)
 
@@ -626,7 +630,7 @@ class MooncakeStoreWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
 
-        self.dp_rank = parallel_config.data_parallel_rank
+        self.dp_rank = get_mooncake_dp_engine_index(parallel_config)
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -725,7 +729,7 @@ class MooncakeStoreWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register KV cache tensors and start transfer threads."""
-        # TODO(yifan): we haven't supported hybrid HMA yet.
+        # TODO(yifan): we haven't supported HMA yet.
         first_kv_cache = next(iter(kv_caches.values()))
 
         # num_blocks from cache_config is authoritative (set after
