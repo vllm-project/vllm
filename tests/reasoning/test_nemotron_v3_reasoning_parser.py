@@ -7,7 +7,6 @@ import pytest
 import regex as re
 
 from tests.reasoning.utils import run_reasoning_extraction
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "nemotron_v3"
@@ -110,17 +109,11 @@ def test_nemotron_v3_without_thinking_returns_content(
     tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        chat_template_kwargs={"enable_thinking": False},
-    )
+    parser = parser_cls(tokenizer, chat_template_kwargs={"enable_thinking": False})
 
     reasoning, content = run_reasoning_extraction(
         parser,
         ["This is plain content"],
-        request=request,
         streaming=False,
     )
 
@@ -132,17 +125,13 @@ def test_nemotron_v3_force_nonempty_content_returns_content(
     tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        chat_template_kwargs={"force_nonempty_content": True},
+    parser = parser_cls(
+        tokenizer, chat_template_kwargs={"force_nonempty_content": True}
     )
 
     reasoning, content = run_reasoning_extraction(
         parser,
         ["<think>This is plain content"],
-        request=request,
         streaming=False,
     )
 
@@ -154,17 +143,11 @@ def test_nemotron_v3_with_thinking_keeps_truncated_reasoning(
     tokenizer: FakeNemotronTokenizer,
 ):
     parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
-    parser = parser_cls(tokenizer)
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        chat_template_kwargs={"enable_thinking": True},
-    )
+    parser = parser_cls(tokenizer, chat_template_kwargs={"enable_thinking": True})
 
     reasoning, content = run_reasoning_extraction(
         parser,
         ["This is truncated reasoning"],
-        request=request,
         streaming=False,
     )
 

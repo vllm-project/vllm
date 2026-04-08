@@ -2,15 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-    from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers import TokenizerLike
 
 
 class Qwen3ReasoningParser(BaseThinkingReasoningParser):
@@ -51,9 +46,7 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
-    def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> tuple[str | None, str | None]:
+    def extract_reasoning(self, model_output: str) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
 

@@ -9,7 +9,6 @@ from tests.reasoning.utils import (
     run_reasoning_extraction,
     run_reasoning_extraction_streaming,
 )
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "qwen3"
@@ -316,7 +315,6 @@ def test_reasoning_thinking_disabled(
 
     reasoning, content = parser.extract_reasoning(
         model_output=output,
-        request=ChatCompletionRequest(messages=[], model="test-model"),
     )
 
     assert reasoning == expected_reasoning

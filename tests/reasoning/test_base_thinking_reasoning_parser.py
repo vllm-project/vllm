@@ -5,7 +5,6 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
@@ -216,10 +215,9 @@ class TestBaseThinkingReasoningParserExtraction:
     def test_extract_reasoning_with_both_tokens(self, test_tokenizer):
         """Test extraction when both start and end tokens are present."""
         parser = TestThinkingReasoningParser(test_tokenizer)
-        request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "<test:think>This is reasoning</test:think>This is content"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning, content = parser.extract_reasoning(model_output)
 
         assert reasoning == "This is reasoning"
         assert content == "This is content"
@@ -227,10 +225,9 @@ class TestBaseThinkingReasoningParserExtraction:
     def test_extract_reasoning_only_end_token(self, test_tokenizer):
         """Test extraction when only end token is present."""
         parser = TestThinkingReasoningParser(test_tokenizer)
-        request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "This is reasoning</test:think>This is content"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning, content = parser.extract_reasoning(model_output)
 
         assert reasoning == "This is reasoning"
         assert content == "This is content"
@@ -238,10 +235,9 @@ class TestBaseThinkingReasoningParserExtraction:
     def test_extract_reasoning_no_end_token(self, test_tokenizer):
         """Test extraction when no end token is present."""
         parser = TestThinkingReasoningParser(test_tokenizer)
-        request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "This is just content"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning, content = parser.extract_reasoning(model_output)
 
         assert reasoning == "This is just content"
         assert content is None
@@ -249,10 +245,9 @@ class TestBaseThinkingReasoningParserExtraction:
     def test_extract_reasoning_empty_output(self, test_tokenizer):
         """Test extraction with empty output."""
         parser = TestThinkingReasoningParser(test_tokenizer)
-        request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = ""
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning, content = parser.extract_reasoning(model_output)
 
         assert reasoning == ""
         assert content is None
@@ -260,10 +255,9 @@ class TestBaseThinkingReasoningParserExtraction:
     def test_extract_reasoning_only_tokens(self, test_tokenizer):
         """Test extraction with only tokens and no content."""
         parser = TestThinkingReasoningParser(test_tokenizer)
-        request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "<test:think></test:think>"
-        reasoning, content = parser.extract_reasoning(model_output, request)
+        reasoning, content = parser.extract_reasoning(model_output)
 
         assert reasoning == ""
         assert content is None

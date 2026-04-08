@@ -4,7 +4,6 @@
 import pytest
 from transformers import AutoTokenizer
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
 from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
@@ -47,8 +46,7 @@ def test_identity_reasoning_parser_basic(tokenizer):
     assert parser.extract_content_ids(input_ids) == input_ids
 
     # Test extract_reasoning returns (None, model_output)
-    request = ChatCompletionRequest(model="test-model", messages=[], temperature=1.0)
-    reasoning, content = parser.extract_reasoning(input_text, request)
+    reasoning, content = parser.extract_reasoning(input_text)
     assert reasoning is None
     assert content == input_text
 

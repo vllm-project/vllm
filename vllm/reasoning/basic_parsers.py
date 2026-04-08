@@ -4,15 +4,10 @@
 from abc import abstractmethod
 from collections.abc import Iterable, Sequence
 from itertools import islice
-from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class BaseThinkingReasoningParser(ReasoningParser):
@@ -146,9 +141,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # not find thinking start token
             return DeltaMessage(content=delta_text)
 
-    def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> tuple[str | None, str | None]:
+    def extract_reasoning(self, model_output: str) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
 

@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -33,14 +32,12 @@ class StreamingReasoningReconstructor:
 def run_reasoning_extraction(
     reasoning_parser: ReasoningParser,
     model_output: list[str],
-    request: ChatCompletionRequest | None = None,
     streaming: bool = False,
 ) -> tuple[str | None, str | None]:
     if streaming:
         reconstructor = run_reasoning_extraction_streaming(
             reasoning_parser,
             model_output,
-            request,
         )
         return (
             reconstructor.reasoning,
@@ -48,7 +45,7 @@ def run_reasoning_extraction(
         )
     else:
         reasoning, content = run_reasoning_extraction_nonstreaming(
-            reasoning_parser, model_output, request
+            reasoning_parser, model_output
         )
         return reasoning, content
 
@@ -56,7 +53,6 @@ def run_reasoning_extraction(
 def run_reasoning_extraction_mistral(
     reasoning_parser: ReasoningParser,
     model_output: list[int],
-    request: ChatCompletionRequest | None = None,
     streaming: bool = False,
 ) -> tuple[str | None, str | None]:
     assert is_mistral_tokenizer(reasoning_parser.model_tokenizer), type(
@@ -66,7 +62,6 @@ def run_reasoning_extraction_mistral(
         reconstructor = run_reasoning_extraction_streaming_mistral(
             reasoning_parser,
             model_output,
-            request,
         )
         return (
             reconstructor.reasoning,
@@ -77,7 +72,7 @@ def run_reasoning_extraction_mistral(
             model_output
         )
         reasoning, content = run_reasoning_extraction_nonstreaming(
-            reasoning_parser, str_output, request
+            reasoning_parser, str_output
         )
         return reasoning, content
 
@@ -85,20 +80,14 @@ def run_reasoning_extraction_mistral(
 def run_reasoning_extraction_nonstreaming(
     reasoning_parser: ReasoningParser,
     model_output: list[str],
-    request: ChatCompletionRequest | None = None,
 ) -> tuple[str | None, str | None]:
-    request = request or ChatCompletionRequest(messages=[], model="test-model")
-    return reasoning_parser.extract_reasoning(
-        model_output="".join(model_output), request=request
-    )
+    return reasoning_parser.extract_reasoning(model_output="".join(model_output))
 
 
 def run_reasoning_extraction_streaming(
     reasoning_parser: ReasoningParser,
     model_deltas: list[str],
-    request: ChatCompletionRequest | None = None,
 ) -> StreamingReasoningReconstructor:
-    request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingReasoningReconstructor()
     previous_text = ""
     previous_tokens: list[int] = []
@@ -128,12 +117,10 @@ def run_reasoning_extraction_streaming(
 def run_reasoning_extraction_streaming_mistral(
     reasoning_parser: ReasoningParser,
     model_deltas: list[int],
-    request: ChatCompletionRequest | None = None,
 ) -> StreamingReasoningReconstructor:
     assert is_mistral_tokenizer(reasoning_parser.model_tokenizer), type(
         reasoning_parser.model_tokenizer
     )
-    request = request or ChatCompletionRequest(messages=[], model="test-model")
     reconstructor = StreamingReasoningReconstructor()
     previous_text = ""
     previous_tokens: list[int] = []
