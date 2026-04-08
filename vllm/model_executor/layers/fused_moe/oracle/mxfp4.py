@@ -145,7 +145,7 @@ def backend_to_kernel_cls(
         return [XPUExpertsMXFp4]
 
     elif backend == Mxfp4MoeBackend.EMULATION:
-        from vllm.model_executor.layers.fused_moe.ocp_mx_emulation_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
             OCP_MXQuantizationEmulationTritonExperts,
         )
 

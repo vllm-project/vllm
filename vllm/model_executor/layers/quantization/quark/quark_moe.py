@@ -1065,10 +1065,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
     def _setup_emulation_kernel(self, layer: FusedMoE):
         """Setup kernel using emulation backend for OCP MX schemes."""
+        # TODO: this is not needed - just use mxfp4.py backend_to_kernel_cls
         from vllm.model_executor.layers.fused_moe.all2all_utils import (
             maybe_make_prepare_finalize,
         )
-        from vllm.model_executor.layers.fused_moe.ocp_mx_emulation_moe import (
+        from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
             OCP_MXQuantizationEmulationTritonExperts,
         )
 
