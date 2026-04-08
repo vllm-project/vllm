@@ -48,16 +48,7 @@ class KVQuantMode(IntEnum):
 
     @property
     def packing_factor(self) -> int:
-        """Number of quantized values stored in a single byte of cache.
-
-        - INT2: 4 values per byte (2 bits each).
-        - INT4: 2 values per byte (4 bits each).
-        - All other modes (INT8, FP8, ...): 1 value per byte.
-
-        Used as the single source of truth for the head-size shrink applied
-        by packed quantization modes — both ``KVCacheSpec`` and the attention
-        backends route through :meth:`packed_head_size`.
-        """
+        """Number of quantized values stored per cache byte (1 unless packed)."""
         if self == KVQuantMode.INT2_PER_TOKEN_HEAD:
             return 4
         if self == KVQuantMode.INT4_PER_TOKEN_HEAD:
@@ -65,12 +56,7 @@ class KVQuantMode(IntEnum):
         return 1
 
     def packed_head_size(self, head_size: int) -> int:
-        """Return the storage head size after packing.
-
-        The original (logical) head dimension is divided by
-        :attr:`packing_factor`.  ``head_size`` must be a multiple of the
-        packing factor.
-        """
+        """Storage head size after packing: ``head_size // packing_factor``."""
         factor = self.packing_factor
         assert head_size % factor == 0, (
             f"head_size={head_size} is not divisible by packing factor "

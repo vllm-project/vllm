@@ -473,14 +473,46 @@ _LLOYD_MAX_4_CENTROIDS = [-1.5104, -0.4528, 0.4528, 1.5104]
 _LLOYD_MAX_4_BOUNDS = [-0.9816, 0.0, 0.9816]
 
 
+# Hadacore's CUDA impl is only registered when built for sm_80+, but the
+# schema def is unconditional — on ROCm ``hasattr`` is True yet dispatch
+# would crash, so we also gate on ``is_cuda()``.
+_HADACORE_AVAILABLE: bool | None = None
+
+
+def _hadacore_available() -> bool:
+    global _HADACORE_AVAILABLE
+    if _HADACORE_AVAILABLE is None:
+        _HADACORE_AVAILABLE = current_platform.is_cuda() and hasattr(
+            torch.ops._C, "hadacore_transform"
+        )
+    return _HADACORE_AVAILABLE
+
+
 def fast_hadamard_transform(x: torch.Tensor) -> torch.Tensor:
     """Unnormalized Walsh-Hadamard Transform along the last dimension.
 
-    H_d × x where H_d has entries ±1 and H_d × H_d = d × I.
-    The last dimension must be a power of 2.
+    H_d × x where H_d × H_d = d × I.  Last dim must be a power of 2.
     """
     d = x.shape[-1]
     assert d & (d - 1) == 0, f"Requires power-of-2 dim, got {d}"
+
+    if _hadacore_available() and 0 < d <= (1 << 15):
+        from vllm import _custom_ops as ops
+
+        # hadacore returns x @ (H/√d); rescale to the unnormalized H × x
+        # convention the INT2/INT4 scale math is calibrated to.
+        rescale = d**0.5
+        if x.dtype in (torch.float16, torch.bfloat16):
+            y = ops.hadacore_transform(x.contiguous().clone(), inplace=True)
+            return y * rescale
+        # fp32 → bf16 round-trip; precision loss is irrelevant before
+        # INT2/INT4 quantization.
+        orig_dtype = x.dtype
+        x_bf16 = x.contiguous().to(torch.bfloat16)
+        y_bf16 = ops.hadacore_transform(x_bf16, inplace=True)
+        return y_bf16.to(orig_dtype) * rescale
+
+    # PyTorch butterfly fallback (ROCm / XPU / CPU).
     h = 1
     while h < d:
         xv = x.view(*x.shape[:-1], d // (2 * h), 2, h)
