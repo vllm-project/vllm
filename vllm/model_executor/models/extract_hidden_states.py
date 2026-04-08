@@ -94,7 +94,6 @@ def basic_cache(
 class CacheOnlyAttentionBackend(AttentionBackend):
     """Attention backend that only caches KV without computing attention."""
 
-    accept_output_buffer: bool = False
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
