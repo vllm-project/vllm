@@ -78,15 +78,33 @@ def fused_topk(
 
     M, _ = hidden_states.size()
 
-    topk_weights = torch.empty(
-        M, topk, dtype=torch.float32, device=hidden_states.device
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        aiter_topK_meta_data,
     )
-    topk_ids = torch.empty(
-        M,
-        topk,
-        dtype=torch.int32 if indices_type is None else indices_type,
-        device=hidden_states.device,
-    )
+
+    if (
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        and aiter_topK_meta_data is not None
+    ):
+        total_topk_weights, total_topk_ids = aiter_topK_meta_data
+        total_topk_weights_slice = total_topk_weights[:M]
+        total_topk_ids_slice = total_topk_ids[:M]
+        topk_weights, _ = total_topk_weights_slice.split(
+            [topk, total_topk_weights_slice.shape[1] - topk], dim=1
+        )
+        topk_ids, _ = total_topk_ids_slice.split(
+            [topk, total_topk_ids_slice.shape[1] - topk], dim=1
+        )
+    else:
+        topk_weights = torch.empty(
+            M, topk, dtype=torch.float32, device=hidden_states.device
+        )
+        topk_ids = torch.empty(
+            M,
+            topk,
+            dtype=torch.int32 if indices_type is None else indices_type,
+            device=hidden_states.device,
+        )
     token_expert_indices = torch.empty(
         M, topk, dtype=torch.int32, device=hidden_states.device
     )
@@ -95,22 +113,26 @@ def fused_topk(
         topk_func = dispatch_topk_softmax_func(
             use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
         )
-        topk_weights, topk_ids = topk_func(
+        topk_func(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )
-
-        return topk_weights, topk_ids, token_expert_indices
     elif scoring_func == "sigmoid":
         topk_func = dispatch_topk_sigmoid_func(
             use_rocm_aiter=rocm_aiter_ops.is_fused_moe_enabled()
         )
-        topk_weights, topk_ids = topk_func(
+        topk_func(
             topk_weights, topk_ids, token_expert_indices, gating_output, renormalize
         )
-
-        return topk_weights, topk_ids, token_expert_indices
     else:
         raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    if (
+        rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        and aiter_topK_meta_data is not None
+    ):
+        return total_topk_weights_slice, total_topk_ids_slice, token_expert_indices
+
+    return topk_weights, topk_ids, token_expert_indices
 
 
 class FusedTopKRouter(BaseRouter):
