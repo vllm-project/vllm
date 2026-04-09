@@ -50,12 +50,15 @@ inline void deq_fp8_to_fp32(const uint8_t* src, float* dst, int n,
   for (int i = 0; i < n; ++i) dst[i] = fp8e4m3_to_float_scalar(src[i], scale);
 }
 
+// ---------------------------------------------------------------------------
+// AMX reshape impl — parameterised on the quantisation function.
 // Writes key/value into uint8 FP8 KV cache using the AMX tile-friendly layout.
 // K: halfword-packed (2 FP8 per uint16, token_num_per_group=16).
 // V: sub-group packing (token_num_per_sub_group=2, head_elems_per_group=16).
 // block_size must be divisible by 32.
-template <typename scalar_t>
-inline void reshape_and_cache_fp8_amx_typed(
+// ---------------------------------------------------------------------------
+template <typename scalar_t, uint8_t (*quant_fn)(float, float)>
+inline void reshape_and_cache_fp8_amx_impl(
     const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
     uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
     int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
@@ -88,10 +91,8 @@ inline void reshape_and_cache_fp8_amx_typed(
                                         h * kc_stride1) +
             group_idx * halfword_num_per_group + group_offset;
         for (int64_t j = 0; j < halfword_num; ++j) {
-          uint8_t fp8_0 =
-              float_to_fp8e4m3_scalar(static_cast<float>(ksrc[j * 2]), k_inv);
-          uint8_t fp8_1 = float_to_fp8e4m3_scalar(
-              static_cast<float>(ksrc[j * 2 + 1]), k_inv);
+          uint8_t fp8_0 = quant_fn(static_cast<float>(ksrc[j * 2]), k_inv);
+          uint8_t fp8_1 = quant_fn(static_cast<float>(ksrc[j * 2 + 1]), k_inv);
           uint8_t bytes[2] = {fp8_0, fp8_1};
           uint16_t hw;
           std::memcpy(&hw, bytes, 2);
@@ -111,13 +112,27 @@ inline void reshape_and_cache_fp8_amx_typed(
         for (int64_t i = 0; i < group_num; ++i) {
           for (int64_t j = 0; j < head_elems_per_group; ++j)
             vdst[j * token_num_per_sub_group] =
-                float_to_fp8e4m3_scalar(static_cast<float>(vsrc[j]), v_inv);
+                quant_fn(static_cast<float>(vsrc[j]), v_inv);
           vsrc += head_elems_per_group;
           vdst += group_size;
         }
       }
     }
   }
+}
+
+template <typename scalar_t>
+inline void reshape_and_cache_fp8_amx_typed(
+    const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
+    uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
+    int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
+    int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
+    int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
+    float v_inv) {
+  reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e4m3_scalar>(
+      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
+      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
+      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
 }
 
 // ---------------------------------------------------------------------------
@@ -184,11 +199,13 @@ inline void deq_fp8e5m2_to_fp32(const uint8_t* src, float* dst, int n,
 }
 
 // ---------------------------------------------------------------------------
-// E5M2 reshape helpers (VEC layout — identical structure to E4M3 variants)
+// VEC reshape impl — parameterised on the quantisation function.
+// Writes key (column-major) and value (row-major) into uint8 FP8 KV cache.
+// The pragma omp must live outside VLLM_DISPATCH_FLOATING_TYPES because
+// #pragma cannot appear inside variadic macro arguments.
 // ---------------------------------------------------------------------------
-
-template <typename scalar_t>
-inline void reshape_and_cache_fp8_e5m2_typed(
+template <typename scalar_t, uint8_t (*quant_fn)(float, float)>
+inline void reshape_and_cache_fp8_vec_impl(
     const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
     uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
     int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
@@ -208,16 +225,34 @@ inline void reshape_and_cache_fp8_e5m2_typed(
       uint8_t* kdst = key_cache_ptr + block_idx * kc_stride0 + h * kc_stride1 +
                       block_offset;
       for (int64_t i = 0; i < head_dim; ++i)
-        kdst[i * block_size] =
-            float_to_fp8e5m2_scalar(static_cast<float>(ksrc[i]), k_inv);
+        kdst[i * block_size] = quant_fn(static_cast<float>(ksrc[i]), k_inv);
 
       // Value layout: row-major within block (contiguous head_dim bytes)
       const scalar_t* vsrc = value_ptr + tok * v_stride0 + h * v_stride1;
       uint8_t* vdst = value_cache_ptr + block_idx * vc_stride0 +
                       h * vc_stride1 + block_offset * head_dim;
-      quant_to_fp8e5m2<scalar_t>(vsrc, vdst, static_cast<int>(head_dim), v_inv);
+      for (int64_t i = 0; i < head_dim; ++i)
+        vdst[i] = quant_fn(static_cast<float>(vsrc[i]), v_inv);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// E5M2 reshape helpers (VEC layout — identical structure to E4M3 variants)
+// ---------------------------------------------------------------------------
+
+template <typename scalar_t>
+inline void reshape_and_cache_fp8_e5m2_typed(
+    const scalar_t* key_ptr, const scalar_t* value_ptr, uint8_t* key_cache_ptr,
+    uint8_t* value_cache_ptr, const int64_t* slot_ptr, int64_t token_num,
+    int64_t head_num, int64_t head_dim, int64_t block_size, int64_t k_stride0,
+    int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
+    int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
+    float v_inv) {
+  reshape_and_cache_fp8_vec_impl<scalar_t, float_to_fp8e5m2_scalar>(
+      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
+      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
+      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
 }
 
 // AMX-layout E5M2 reshape — same halfword-packed K / sub-group V layout as
@@ -230,62 +265,10 @@ inline void reshape_and_cache_fp8_amx_e5m2_typed(
     int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
     int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
     float v_inv) {
-  constexpr int64_t token_num_per_group = 16;
-  const int64_t halfword_num = head_dim / 2;
-  const int64_t halfword_num_per_group = token_num_per_group * halfword_num;
-  constexpr int64_t head_elems_per_group = 16;
-  constexpr int64_t token_num_per_sub_group = 2;
-  const int64_t group_num = head_dim / head_elems_per_group;
-  const int64_t group_size = block_size * head_elems_per_group;
-
-#pragma omp parallel for collapse(2) schedule(static)
-  for (int64_t tok = 0; tok < token_num; ++tok) {
-    for (int64_t h = 0; h < head_num; ++h) {
-      const int64_t slot = slot_ptr[tok];
-      if (slot < 0) continue;
-      const int64_t block_idx = slot / block_size;
-      const int64_t block_offset = slot % block_size;
-
-      // Key: halfword-packed AMX layout
-      {
-        const scalar_t* ksrc = key_ptr + tok * k_stride0 + h * k_stride1;
-        const int64_t group_idx = block_offset / token_num_per_group;
-        const int64_t group_offset = block_offset % token_num_per_group;
-        uint16_t* kdst =
-            reinterpret_cast<uint16_t*>(key_cache_ptr + block_idx * kc_stride0 +
-                                        h * kc_stride1) +
-            group_idx * halfword_num_per_group + group_offset;
-        for (int64_t j = 0; j < halfword_num; ++j) {
-          uint8_t fp8_0 =
-              float_to_fp8e5m2_scalar(static_cast<float>(ksrc[j * 2]), k_inv);
-          uint8_t fp8_1 = float_to_fp8e5m2_scalar(
-              static_cast<float>(ksrc[j * 2 + 1]), k_inv);
-          uint8_t bytes[2] = {fp8_0, fp8_1};
-          uint16_t hw;
-          std::memcpy(&hw, bytes, 2);
-          kdst[j * token_num_per_group] = hw;
-        }
-      }
-
-      // Value: sub-group packing
-      {
-        const scalar_t* vsrc = value_ptr + tok * v_stride0 + h * v_stride1;
-        const int64_t sub_group_idx = block_offset / token_num_per_sub_group;
-        const int64_t sub_group_offset = block_offset % token_num_per_sub_group;
-        uint8_t* vdst =
-            value_cache_ptr + block_idx * vc_stride0 + h * vc_stride1 +
-            sub_group_idx * token_num_per_sub_group * head_elems_per_group +
-            sub_group_offset;
-        for (int64_t i = 0; i < group_num; ++i) {
-          for (int64_t j = 0; j < head_elems_per_group; ++j)
-            vdst[j * token_num_per_sub_group] =
-                float_to_fp8e5m2_scalar(static_cast<float>(vsrc[j]), v_inv);
-          vsrc += head_elems_per_group;
-          vdst += group_size;
-        }
-      }
-    }
-  }
+  reshape_and_cache_fp8_amx_impl<scalar_t, float_to_fp8e5m2_scalar>(
+      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
+      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
+      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
 }
 
 // Writes key (column-major) and value (row-major) into uint8 FP8 KV cache.
@@ -299,25 +282,8 @@ inline void reshape_and_cache_fp8_typed(
     int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
     int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
     float v_inv) {
-#pragma omp parallel for collapse(2) schedule(static)
-  for (int64_t tok = 0; tok < token_num; ++tok) {
-    for (int64_t h = 0; h < head_num; ++h) {
-      const int64_t slot = slot_ptr[tok];
-      if (slot < 0) continue;
-      const int64_t block_idx = slot / block_size;
-      const int64_t block_offset = slot % block_size;
-
-      const scalar_t* ksrc = key_ptr + tok * k_stride0 + h * k_stride1;
-      uint8_t* kdst = key_cache_ptr + block_idx * kc_stride0 + h * kc_stride1 +
-                      block_offset;
-      for (int64_t i = 0; i < head_dim; ++i)
-        kdst[i * block_size] =
-            float_to_fp8e4m3_scalar(static_cast<float>(ksrc[i]), k_inv);
-
-      const scalar_t* vsrc = value_ptr + tok * v_stride0 + h * v_stride1;
-      uint8_t* vdst = value_cache_ptr + block_idx * vc_stride0 +
-                      h * vc_stride1 + block_offset * head_dim;
-      quant_to_fp8<scalar_t>(vsrc, vdst, static_cast<int>(head_dim), v_inv);
-    }
-  }
+  reshape_and_cache_fp8_vec_impl<scalar_t, float_to_fp8e4m3_scalar>(
+      key_ptr, value_ptr, key_cache_ptr, value_cache_ptr, slot_ptr, token_num,
+      head_num, head_dim, block_size, k_stride0, k_stride1, v_stride0,
+      v_stride1, kc_stride0, kc_stride1, vc_stride0, vc_stride1, k_inv, v_inv);
 }

@@ -162,11 +162,13 @@ void cpu_attn_reshape_and_cache_fp8(
   const int64_t head_dim = key.size(2);
   const int64_t block_size = key_cache.size(2);
 
+  VLLM_DISPATCH_FLOATING_TYPES(
+      key.scalar_type(), "cpu_attn_reshape_and_cache_fp8", [&]() {
+        const bool use_e5m2 =
+            (fp8_dtype == cpu_attention::Fp8KVCacheDataType::kFp8E5M2);
 #if defined(CPU_CAPABILITY_AMXBF16)
-  if (isa == "amx") {
-    VLLM_DISPATCH_FLOATING_TYPES(
-        key.scalar_type(), "cpu_attn_reshape_and_cache_fp8_amx", [&]() {
-          if (fp8_dtype == cpu_attention::Fp8KVCacheDataType::kFp8E5M2) {
+        if (isa == "amx") {
+          if (use_e5m2)
             reshape_and_cache_fp8_amx_e5m2_typed<scalar_t>(
                 key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
                 key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
@@ -174,7 +176,7 @@ void cpu_attn_reshape_and_cache_fp8(
                 block_size, key.stride(0), key.stride(1), value.stride(0),
                 value.stride(1), key_cache.stride(0), key_cache.stride(1),
                 value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
-          } else {
+          else
             reshape_and_cache_fp8_amx_typed<scalar_t>(
                 key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
                 key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
@@ -182,15 +184,10 @@ void cpu_attn_reshape_and_cache_fp8(
                 block_size, key.stride(0), key.stride(1), value.stride(0),
                 value.stride(1), key_cache.stride(0), key_cache.stride(1),
                 value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
-          }
-        });
-    return;
-  }
+          return;
+        }
 #endif
-
-  VLLM_DISPATCH_FLOATING_TYPES(
-      key.scalar_type(), "cpu_attn_reshape_and_cache_fp8", [&]() {
-        if (fp8_dtype == cpu_attention::Fp8KVCacheDataType::kFp8E5M2) {
+        if (use_e5m2)
           reshape_and_cache_fp8_e5m2_typed<scalar_t>(
               key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
               key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
@@ -198,7 +195,7 @@ void cpu_attn_reshape_and_cache_fp8(
               block_size, key.stride(0), key.stride(1), value.stride(0),
               value.stride(1), key_cache.stride(0), key_cache.stride(1),
               value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
-        } else {
+        else
           reshape_and_cache_fp8_typed<scalar_t>(
               key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
               key_cache.data_ptr<uint8_t>(), value_cache.data_ptr<uint8_t>(),
@@ -206,7 +203,6 @@ void cpu_attn_reshape_and_cache_fp8(
               block_size, key.stride(0), key.stride(1), value.stride(0),
               value.stride(1), key_cache.stride(0), key_cache.stride(1),
               value_cache.stride(0), value_cache.stride(1), k_inv, v_inv);
-        }
       });
 }
 
