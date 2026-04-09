@@ -525,6 +525,29 @@ def test_human_readable_model_len():
             parser.parse_args(["--max-model-len", invalid])
 
 
+def test_numa_bind_args():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--numa-bind",
+            "--numa-bind-nodes",
+            "0",
+            "0",
+            "1",
+            "1",
+            "--numa-bind-cpus",
+            "0-3",
+            "4-7",
+            "8-11",
+            "12-15",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.numa_bind is True
+    assert engine_args.numa_bind_nodes == [0, 0, 1, 1]
+    assert engine_args.numa_bind_cpus == ["0-3", "4-7", "8-11", "12-15"]
+
+
 def test_ir_op_priority():
     from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
 
