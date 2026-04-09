@@ -11,7 +11,13 @@ import numpy as np
 import torch
 import torch.nn as nn
 from transformers import ParakeetEncoder as HFParakeetEncoder
-from transformers import ParakeetFeatureExtractor, PretrainedConfig
+from transformers import PretrainedConfig, SequenceFeatureExtractor
+from transformers.audio_utils import mel_filter_bank
+
+# import from *full path* - not `from transformers`, to avoid requires("librosa") check:
+from transformers.models.parakeet.feature_extraction_parakeet import (
+    ParakeetFeatureExtractor,
+)
 
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -106,7 +112,18 @@ class ProjectedParakeet(nn.Module):
 class ParakeetExtractor(ParakeetFeatureExtractor):
     def __init__(self, config: PretrainedConfig) -> None:
         self.config = ExtractorConfig.from_hf_config(config)
-        super().__init__(**asdict(self.config))
+        # Bypass ParakeetFeatureExtractor init, which imports `librosa`:
+        SequenceFeatureExtractor.__init__(self, **asdict(self.config))
+        filter_bank = mel_filter_bank(
+            num_frequency_bins=self.n_fft // 2 + 1,
+            num_mel_filters=self.feature_size,
+            min_frequency=0.0,
+            max_frequency=self.sampling_rate / 2,
+            sampling_rate=self.sampling_rate,
+            norm="slaney",
+            mel_scale="slaney",
+        )
+        self.mel_filters = torch.from_numpy(filter_bank.T).to(torch.float32)
         self._clip_target_samples = int(
             round(self.config.clip_duration_s * self.sampling_rate)
         )

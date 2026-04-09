@@ -49,6 +49,11 @@ class ExtractorConfig:
     clip_duration_s: int = 30
     clip_min_duration_s: float = 0.1
 
+    win_length: int = 400
+    preemphasis: float = 0.97
+    n_fft: int = 512
+    padding_value: float = 0.0
+
     @staticmethod
     def from_hf_config(config: PretrainedConfig) -> "ExtractorConfig":
         assert isinstance(config, PretrainedConfig)
