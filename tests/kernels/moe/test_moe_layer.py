@@ -64,8 +64,10 @@ from vllm.v1.worker.workspace import (
 fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 
 SHAPE_COMBOS = [
-    (1, 128, 256),
-    (32, 1024, 512),
+    # (1, 128, 256),
+    # (32, 1024, 512),
+    (1, 512, 2048),  # should be big enough to exercise DP chunking
+    (22, 1024, 2048),  # should be big enough to exercise DP chunking
     (222, 2048, 2048),  # should be big enough to exercise DP chunking
 ]
 MAX_M = max([x[0] for x in SHAPE_COMBOS])
@@ -365,9 +367,9 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         )
 
     # routed_input_transform + quantization + high hidden dimensions
-    # TODO: Disable >= 2048 w/fp8 + deepep LL for now due to insane errors.
+    # TODO: Disable >= 2048 for now due to insane errors.
     if (
-        (config.use_routed_input_transform or config.backend == "deepep_low_latency")
+        config.use_routed_input_transform
         and config.quantization is not None
         and config.k >= 2048
     ):
