@@ -66,14 +66,25 @@ class ServingPooling(PoolingServingBase):
 
         ctx = await self._init_ctx(request, raw_request)
 
-        if request.task is None:
-            request.task = self.pooling_task
-
         if getattr(request, "dimensions", None) is not None:
             raise ValueError("dimensions is currently not supported")
 
+        if request.task is None:
+            request.task = self.pooling_task
+
+        if isinstance(request, IOProcessorRequest):
+            request.task = "plugin"
+
         assert request.task is not None
         pooling_task = request.task
+
+        if pooling_task == "plugin" and "plugin" not in self.io_processors:
+            raise ValueError(
+                "No IOProcessor plugin installed. Please refer "
+                "to the documentation and to the "
+                "'prithvi_geospatial_mae_io_processor' "
+                "offline inference example for more details."
+            )
 
         # plugin task uses io_processor.parse_request to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
@@ -89,16 +100,6 @@ class ServingPooling(PoolingServingBase):
                     "need to manually specify it via --pooler-config.task %s. ",
                     pooling_task,
                 )
-
-        if pooling_task == "plugin" or isinstance(request, IOProcessorRequest):
-            if "plugin" not in self.io_processors:
-                raise ValueError(
-                    "No IOProcessor plugin installed. Please refer "
-                    "to the documentation and to the "
-                    "'prithvi_geospatial_mae_io_processor' "
-                    "offline inference example for more details."
-                )
-            pooling_task = "plugin"
 
         io_processor = self.io_processors[pooling_task]
         await io_processor.pre_process_online_async(ctx)
