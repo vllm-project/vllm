@@ -51,15 +51,8 @@ inline void deq_fp8_to_fp32(const uint8_t* src, float* dst, int n,
 }
 
 // Writes key/value into uint8 FP8 KV cache using the AMX tile-friendly layout.
-// K: halfword-packed layout (token_num_per_group=16, halfword_num=head_dim/2).
-//    Mirrors the BF16 AMX K layout (2 BF16 per int32 → 2 FP8 per uint16).
-//    Each K tile row = 16 tokens × halfword, stride = token_num_per_group
-//    uint16s. After dequantisation the resulting 32-BF16 row matches the BF16 K
-//    tile row.
+// K: halfword-packed (2 FP8 per uint16, token_num_per_group=16).
 // V: sub-group packing (token_num_per_sub_group=2, head_elems_per_group=16).
-//    Mirrors the BF16 AMX V layout: token_num_per_sub_group = 4/sizeof(BF16)
-//    = 2. FP8 bytes are dequantised to BF16 before loading into AMX tiles, so
-//    the effective element size is BF16 (2 bytes), not FP8 (1 byte).
 // block_size must be divisible by 32.
 template <typename scalar_t>
 inline void reshape_and_cache_fp8_amx_typed(
@@ -69,15 +62,9 @@ inline void reshape_and_cache_fp8_amx_typed(
     int64_t k_stride1, int64_t v_stride0, int64_t v_stride1, int64_t kc_stride0,
     int64_t kc_stride1, int64_t vc_stride0, int64_t vc_stride1, float k_inv,
     float v_inv) {
-  // K layout constants: 2 FP8 per uint16 halfword (= BF16 AMX layout scaled
-  // to 1-byte FP8 elements).  The TileGemm deq loop reads with stride 32
-  // bytes/row, which matches halfword_num * token_num_per_group * 2 bytes.
   constexpr int64_t token_num_per_group = 16;  // AMX_TILE_ROW_NUM
   const int64_t halfword_num = head_dim / 2;   // 2 FP8 per uint16
   const int64_t halfword_num_per_group = token_num_per_group * halfword_num;
-  // V layout constants: token_num_per_sub_group = 4/sizeof(BF16) = 2.
-  // FP8 values are dequantised to BF16 before entering AMX tiles, so this
-  // must equal the BF16 AMX value (2), not the FP8-derived value (4).
   constexpr int64_t head_elems_per_group = 16;
   constexpr int64_t token_num_per_sub_group = 2;  // = 4 / sizeof(BF16)
   const int64_t group_num = head_dim / head_elems_per_group;
@@ -91,9 +78,7 @@ inline void reshape_and_cache_fp8_amx_typed(
       const int64_t block_idx = slot / block_size;
       const int64_t block_offset = slot % block_size;
 
-      // Key: halfword-packed AMX Layout A — 2 FP8 per uint16, stride =
-      // token_num_per_group uint16s between consecutive halfwords.
-      // This mirrors the BF16 K layout (2 BF16 per int32, stride 16 int32s).
+      // Key: halfword-packed, 2 FP8 per uint16
       {
         const scalar_t* ksrc = key_ptr + tok * k_stride0 + h * k_stride1;
         const int64_t group_idx = block_offset / token_num_per_group;

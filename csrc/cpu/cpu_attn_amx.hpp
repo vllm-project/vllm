@@ -303,13 +303,9 @@ class TileGemm122<c10::BFloat16> {
   }
 };
 // FP8 E4M3/E5M2 KV cache specialisation of TileGemm224.
-// The A tile (query buffer) is always BF16; only the B tile (KV cache) is FP8.
-// FP8 bytes are dequantised to BF16 into a stack scratch buffer before being
-// loaded into AMX tiles via _tile_stream_loadd.
-// All element-count pointer-arithmetic is identical to the BF16 path; the
-// difference is purely in byte widths (1 byte/FP8 vs 2 bytes/BF16).
-// k_scale_2p8 is folded into the attention scale (applied to QK logits);
-// v_scale_2p8 is applied to the PV output in final_output.
+// FP8 bytes are dequantised to BF16 in a stack scratch buffer before each
+// _tile_stream_loadd. k_scale is folded into the attention scale; v_scale
+// is applied in final_output.
 template <>
 class TileGemm224<uint8_t> {
  public:
@@ -444,8 +440,8 @@ thread_local Fp8KVCacheDataType TileGemm224<uint8_t>::s_fp8_kv_dtype =
     Fp8KVCacheDataType::kFp8E4M3;
 
 // FP8 E4M3/E5M2 KV cache specialisation of TileGemm122.
-// k_scale_2p8 is folded into the attention scale (applied to QK logits);
-// v_scale_2p8 is applied to the PV output in final_output.
+// k_scale is folded into the attention scale; v_scale is applied in
+// final_output.
 template <>
 class TileGemm122<uint8_t> {
  public:

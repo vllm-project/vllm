@@ -111,9 +111,7 @@ class TileGemm82 {
   }
 };
 // FP8 (E4M3/E5M2) variant of TileGemm82.  KV cache is stored as uint8_t.
-// Dequantized FP8 bytes are converted to FP32 without a scale multiply;
-// k_scale is folded into the attention scale (applied to QK logits), and
-// v_scale is applied to the PV output in final_output.
+// Scale folding is handled by AttentionImplFP8VEC; this class only dequantises.
 class TileGemm82FP8 {
  public:
   static thread_local Fp8KVCacheDataType s_fp8_kv_dtype;
