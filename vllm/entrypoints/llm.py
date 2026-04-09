@@ -1088,6 +1088,9 @@ class LLM:
 
         io_processor = self.pooling_io_processors[pooling_task]
 
+        if pooling_params is None:
+            pooling_params = PoolingParams()
+
         ctx = OfflineInputsContext(
             prompts=prompts,
             pooling_params=pooling_params,
@@ -1096,9 +1099,6 @@ class LLM:
 
         engine_inputs = io_processor.pre_process_offline(ctx)
         n_inputs = len(engine_inputs)
-
-        if ctx.pooling_params is None:
-            ctx.pooling_params = PoolingParams()
 
         params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
 
