@@ -13,8 +13,8 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.kv_cache_interface import KVQuantMode
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
+from vllm.v1.kv_cache_interface import KVQuantMode
 
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
@@ -1008,14 +1008,18 @@ def _get_tile_size(
         tile_size = 32
     else:
         # Default behavior
-        if is_prefill:
-            tile_size = 32
-        else:
-            tile_size = 16 if element_size >= 2 else 32
+        tile_size = 32 if is_prefill else 16 if element_size >= 2 else 32
 
     # Hardware-aware safety check for large head dimensions on older GPUs
-    if tile_size == 32 and head_size >= 512 and get_max_shared_memory_bytes() < 98304:
-        tile_size = 16
+    if tile_size == 32 and head_size >= 512:
+        if current_platform.is_cuda():
+            max_shared_memory = get_max_shared_memory_bytes()
+        else:
+            # Fallback for non-CUDA platforms (e.g., Intel XPU, ROCm)
+            max_shared_memory = 65536
+
+        if max_shared_memory < 98304:
+            tile_size = 16
 
     return tile_size
 
