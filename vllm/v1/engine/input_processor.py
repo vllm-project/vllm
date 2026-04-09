@@ -405,11 +405,11 @@ class InputProcessor:
             decoder_mm_positions = prompt_input["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
-                    embed_length = mm_position.get_num_embeds()
-                    if embed_length > self.mm_encoder_cache_size:
+                    num_embeds = mm_position.get_num_embeds()
+                    if num_embeds > self.mm_encoder_cache_size:
                         raise ValueError(
                             f"The {prompt_type} prompt contains a(n) {modality} item "
-                            f"with length {embed_length}, which exceeds the "
+                            f"with {num_embeds} embedding tokens, which exceeds the "
                             f"pre-allocated encoder cache size "
                             f"{self.mm_encoder_cache_size}. Please reduce the input "
                             f"size or increase the encoder cache size "
