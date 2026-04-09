@@ -6,7 +6,7 @@ from torch import Tensor
 from vllm import ir
 from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import get_tma_aligned_size, is_deep_gemm_e8m0_used
+from vllm.utils.deep_gemm import get_tma_aligned_size
 
 current_platform.import_kernels()
 
@@ -84,35 +84,61 @@ def static_quant_fp8(
     return output
 
 
+_vllm_c_static_group_quant_fp8_args = (
+    lambda x, scale, num_token_padding=None: x.ndim == 2
+)
+"""vllm_c static_group_quant_fp8 requires a 2D input tensor."""
+
+
+@ir.ops.static_group_quant_fp8.register_impl(
+    "vllm_c", supports_args=_vllm_c_static_group_quant_fp8_args, supported=CUDA_ALIKE
+)
+def static_group_quant_fp8(
+    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+) -> Tensor:
+    shape = x.shape
+    if num_token_padding:
+        shape = (max(num_token_padding, x.shape[0]),) + x.shape[1:]
+    output = torch.empty(shape, device=x.device, dtype=_FP8_DTYPE)
+    torch.ops._C.static_scaled_fp8_quant(output, x, scale, None)
+    return output
+
+
+_vllm_c_dynamic_quant_fp8_args = (
+    lambda x, per_token, scale_ub=None, num_token_padding=None: (
+        x.ndim == 2 and (per_token or scale_ub is None)
+    )
+)
+"""vllm_c dynamic_quant_fp8 requires a 2D input tensor."""
+
+
+@ir.ops.dynamic_quant_fp8.register_impl(
+    "vllm_c", supports_args=_vllm_c_dynamic_quant_fp8_args, supported=CUDA_ALIKE
+)
+def dynamic_quant_fp8(
+    x: Tensor,
+    per_token: bool,
+    scale_ub: Tensor | None = None,
+    num_token_padding: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    shape = x.shape
+    if num_token_padding:
+        shape = (max(num_token_padding, x.shape[0]),) + x.shape[1:]
+    output = torch.empty(shape, device=x.device, dtype=_FP8_DTYPE)
+    if per_token:
+        scale = torch.empty((shape[0], 1), device=x.device, dtype=torch.float32)
+        torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, x, scale, scale_ub)
+    else:
+        scale = torch.empty(1, device=x.device, dtype=torch.float32)
+        torch.ops._C.dynamic_scaled_fp8_quant(output, x, scale)
+    return output, scale
+
+
 _vllm_c_group_quant_args = (
     lambda x, group_shape, column_major, use_ue8m0, scale_alignment=1: (
         x.is_contiguous() and x.shape[-1] % group_shape[-1] == 0
     )
 )
-
-
-def _group_quant_fp8_packed(
-    x: Tensor,
-    group_size: int,
-) -> tuple[Tensor, Tensor]:
-    """DeepGEMM packed UE8M0 path: 4 exponent bytes packed per int32,
-    stored with TMA-aligned column-major strides."""
-    hidden_dim = x.shape[-1]
-    mn = x.numel() // hidden_dim
-    num_groups_per_row = hidden_dim // group_size
-    k_num_packed_sf_k = (num_groups_per_row + 3) // 4
-    tma_aligned_mn = ((mn + 3) // 4) * 4
-    x_q = torch.empty_like(x, dtype=_FP8_DTYPE)
-    x_s = torch.empty_strided(
-        (mn, k_num_packed_sf_k),
-        (1, tma_aligned_mn),
-        device=x.device,
-        dtype=torch.int32,
-    )
-    torch.ops._C.per_token_group_fp8_quant_packed(
-        x, x_q, x_s, group_size, 1e-10, _FP8_MIN, _FP8_MAX
-    )
-    return x_q, x_s
 
 
 @ir.ops.dynamic_group_quant_fp8.register_impl(
@@ -129,9 +155,6 @@ def dynamic_group_quant_fp8(
 
     assert x.is_contiguous()
     assert x.shape[-1] % group_size == 0
-
-    if use_ue8m0 and column_major and scale_alignment > 1 and is_deep_gemm_e8m0_used():
-        return _group_quant_fp8_packed(x, group_size)
 
     x_q = torch.empty(x.shape, device=x.device, dtype=_FP8_DTYPE)
     x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)
