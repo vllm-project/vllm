@@ -99,7 +99,8 @@ class PluginWithIOProcessorPlugins(PoolingIOProcessor):
                 output.request_id = ctx.request_id  # type: ignore
 
             ctx.response = output_to_response(output)  # type: ignore
-        ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
+        else:
+            ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
 
     #######################################
     # offline APIs
