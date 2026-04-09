@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 import torch
 from packaging.version import Version
 from pydantic import ConfigDict, Field, model_validator
-from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
@@ -560,14 +559,16 @@ class VllmConfig:
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
             hf_config.architectures = architectures
-        elif (
-            hf_config.architectures is None
-            and hf_config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
-        ):
-            hf_config = copy.deepcopy(hf_config)
-            hf_config.architectures = [
-                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[hf_config.model_type]
-            ]
+        elif hf_config.architectures is None:
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+            )
+
+            if hf_config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+                hf_config = copy.deepcopy(hf_config)
+                hf_config.architectures = [
+                    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[hf_config.model_type]
+                ]
 
         model_config = copy.deepcopy(self.model_config)
 
