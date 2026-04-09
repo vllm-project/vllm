@@ -40,7 +40,7 @@ from vllm.utils.torch_utils import (
 
 def get_layer_from_name(layer_name: str) -> torch.nn.Module:
     forward_context: ForwardContext = get_forward_context()
-    if layer_name == "from_forward_context":
+    if not HAS_OPAQUE_TYPE and layer_name == "from_forward_context":
         all_moe_layers = forward_context.all_moe_layers
         assert all_moe_layers is not None
         moe_layer_index = forward_context.moe_layer_index
