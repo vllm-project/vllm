@@ -221,7 +221,9 @@ fastapi==0.135.2
 fastparquet==2026.3.0
     # via genai-perf
 fastsafetensors==0.2.2
-    # via -r requirements/rocm-test.in
+    # via
+    #   -c requirements/rocm.txt
+    #   -r requirements/rocm-test.in
 filelock==3.25.2
     # via
     #   -c requirements/common.txt
