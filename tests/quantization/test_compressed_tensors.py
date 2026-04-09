@@ -642,12 +642,21 @@ def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
 def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
     """Verify MXFP8 scheme, dtypes, and generation for a MoE model."""
     model_path = "AliEdalati97/Qwen3-30B-A3B-MXFP8"
-    with vllm_runner(model_path, enforce_eager=True) as llm:
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 4},
+    ) as llm:
 
         def check_model(model):
             from vllm.model_executor.layers.fused_moe import FusedMoE
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
                 CompressedTensorsW8A8Mxfp8MoEMethod,
+            )
+            from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+                MXFP8_SCALE_DTYPE,
+                MXFP8_VALUE_DTYPE,
             )
 
             layer = model.model.layers[0]
@@ -655,8 +664,8 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
             qkv = layer.self_attn.qkv_proj
             assert isinstance(qkv.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
-            assert qkv.weight.dtype is torch.float8_e4m3fn
-            assert qkv.weight_scale.dtype is torch.uint8
+            assert qkv.weight.dtype is MXFP8_VALUE_DTYPE
+            assert qkv.weight_scale.dtype is MXFP8_SCALE_DTYPE
 
             experts = layer.mlp.experts
             assert isinstance(experts, FusedMoE)
