@@ -1214,7 +1214,7 @@ class VllmConfig:
                 logger.warning_once(
                     "Auto-initialization of reasoning token IDs failed. "
                     "Please check whether your reasoning parser has implemented "
-                    "the `start_token` and `end_token`."
+                    "the `reasoning_start_str` and `reasoning_end_str`."
                 )
 
         # Hybrid KV cache manager (HMA) runtime rules:
