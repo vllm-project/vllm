@@ -1445,6 +1445,7 @@ def init_distributed_environment(
         # local rank not set, this usually happens in single-node
         # setting, where we can use rank as local rank
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
+
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
         _init_elastic_ep_world(config, local_rank, backend, rank, world_size)
@@ -1690,11 +1691,7 @@ def initialize_model_parallel(
         # using torch.distributed in execution with torch.distributed in EPLB.
         global _EPLB
         assert _EPLB is None, "EPLB group is already initialized"
-        if (
-            config is not None
-            and config.parallel_config is not None
-            and config.parallel_config.enable_eplb
-        ):
+        if config.parallel_config.enable_eplb:
             if enable_elastic_ep:
                 _EPLB = _init_stateless_group(
                     group_ranks,
@@ -1905,6 +1902,17 @@ def destroy_distributed_environment():
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     # Reset environment variable cache
     envs.disable_envs_cache()
+
+    # Reset rocm_aiter_ops class variables to match current os.environ.
+    # These are class-level attributes that persist across tests and are
+    # NOT restored by monkeypatch (which only restores os.environ).
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        rocm_aiter_ops.refresh_env_variables()
+
     # Ensure all objects are not frozen before cleanup
     gc.unfreeze()
 

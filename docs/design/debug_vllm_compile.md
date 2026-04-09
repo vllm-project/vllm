@@ -233,6 +233,26 @@ that may call 1+ triton kernels. On rare (but unfortunate) occasions, it may
 produce an incorrect triton kernel. This may manifest as silent incorrectness,
 CUDA illegal memory accesses, or loud errors.
 
+### Inductor runtime assertions
+
+By default (on torch < 2.12), vLLM disables Inductor's runtime assertions
+(`assert_size_stride`, `assert_alignment`) to avoid ~2ms overhead per forward
+pass on large models. Setting `VLLM_LOGGING_LEVEL=DEBUG` automatically
+re-enables them so debugging sessions get full shape/stride validation:
+
+```sh
+VLLM_LOGGING_LEVEL=DEBUG vllm serve <model>
+```
+
+You can also override them explicitly via `--compilation-config`:
+
+```sh
+vllm serve <model> -cc.inductor_compile_config='{"size_asserts": true, "alignment_asserts": true, "scalar_asserts": true}'
+```
+
+On torch >= 2.12, PyTorch uses an efficient assert-once strategy and these
+flags are no longer suppressed by vLLM.
+
 To debug if TorchInductor is at fault, you can disable it by passing `backend='eager'`
 to the compilation config:
 

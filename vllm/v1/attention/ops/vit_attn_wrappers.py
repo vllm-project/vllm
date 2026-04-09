@@ -292,6 +292,9 @@ def flashinfer_wrapper(
     # RoPE has already made q and k contiguous.
     q, k = q.contiguous(), k.contiguous()
 
+    assert cu_seqlens is not None
+    assert max_seqlen is not None
+    assert sequence_lengths is not None
     assert len(cu_seqlens) % 2 == 0, "cu_seqlens must be divisible by 2"
     cu_seqlength = len(cu_seqlens) // 2
     batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
