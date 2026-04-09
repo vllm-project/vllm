@@ -225,8 +225,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
   # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
   #
-  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result -Wno-unused-value")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
 endif()
 
 #
@@ -299,6 +299,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
   "csrc/quantization/w8a8/fp8/common.cu"
   "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
+  "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -340,8 +341,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/cutlass_extensions/common.cpp"
-    "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu")
+    "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -1222,6 +1222,7 @@ endif()
 
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
+    include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
 
