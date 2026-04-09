@@ -64,9 +64,9 @@ A simplified version of the example (`llama-multinode`) looks like:
 - `spec.replicas: 1` – one `ServingGroup` (one logical model deployment).
 - `roles`:
     - `entryTemplate` – defines **leader** pods that run:
-        - vLLM’s **multi-node cluster bootstrap script** (Ray cluster).
+        - vLLM’s **multi-node cluster bootstrap script**.
         - vLLM **OpenAI-compatible API server**.
-    - `workerTemplate` – defines **worker** pods that join the leader’s Ray cluster.
+    - `workerTemplate` – defines **worker** pods to join the leader’s Ray cluster(Ray backend) or to join same distributed process group(MP backend).
 
 Key points from the example YAML:
 
@@ -78,11 +78,17 @@ Key points from the example YAML:
     - sh
     - -c
     - >
-      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
       vllm serve meta-llama/Llama-3.1-405B-Instruct
-        --port 8080
         --tensor-parallel-size 8
         --pipeline-parallel-size 2
+        --nnodes=2
+        --node-rank=0
+        --master-addr=$(ENTRY_ADDRESS)
+        --port 8080
+      # By default using implicit `--distributed-executor-backend mp`
+      # Previous Ray command:
+      # bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2; \
+      # python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2
   ```
 
 - **Command** (worker):
@@ -92,7 +98,15 @@ Key points from the example YAML:
     - sh
     - -c
     - >
-      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)
+      vllm serve meta-llama/Llama-3.1-405B-Instruct
+        --tensor-parallel-size 8
+        --pipeline-parallel-size 2
+        --nnodes=2
+        --node-rank=1
+        --master-addr=$(ENTRY_ADDRESS)
+        --headless
+      # Previous Ray command:
+      # bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)
   ```
 
 ---
@@ -143,8 +157,9 @@ spec:
                 command:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2; 
-                    vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2"
+                  - "vllm serve meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2 --nnodes 2 --node-rank 0 --master-addr $(ENTRY_ADDRESS) --distributed-executor-backend mp --port 8080"
+                  # Previous Ray command:
+                  # "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=2; python3 -m vllm.entrypoints.openai.api_server --port 8080 --model meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2"
                 resources:
                   limits:
                     nvidia.com/gpu: "8"
@@ -177,7 +192,9 @@ spec:
                 command:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
+                  - "vllm serve meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2 --nnodes 2 --node-rank 1 --master-addr $(ENTRY_ADDRESS) --distributed-executor-backend mp --headless"
+                  # Previous Ray command:
+                  # "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
                 resources:
                   limits:
                     nvidia.com/gpu: "8"

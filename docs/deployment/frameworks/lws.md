@@ -40,8 +40,12 @@ Deploy the following yaml file `lws.yaml`
                 command:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE); 
-                    vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline_parallel_size 2"
+                  - "vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size $(LWS_GROUP_SIZE) --nnodes $(LWS_GROUP_SIZE) --node-rank $(LWS_WORKER_INDEX) --master-addr $(LWS_LEADER_ADDRESS) --port 8080"
+                  #--distributed-executor-backend mp  as default
+                  # Below are previous commands using Ray as distributed-executor-backend
+                  # "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh leader --ray_cluster_size=$(LWS_GROUP_SIZE);
+                  #  vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --port 8080 \
+                  #  --tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend ray"
                 resources:
                   limits:
                     nvidia.com/gpu: "8"
@@ -73,7 +77,9 @@ Deploy the following yaml file `lws.yaml`
                 command:
                   - sh
                   - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
+                  - "vllm serve meta-llama/Meta-Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size $(LWS_GROUP_SIZE) --nnodes $(LWS_GROUP_SIZE) --node-rank $(LWS_WORKER_INDEX) --master-addr $(LWS_LEADER_ADDRESS) --headless"
+                  # Below are previous commands using Ray as distributed-executor-backend
+                  # "bash /vllm-workspace/examples/online_serving/multi-node-serving.sh worker --ray_address=$(LWS_LEADER_ADDRESS)"
                 resources:
                   limits:
                     nvidia.com/gpu: "8"
@@ -87,7 +93,7 @@ Deploy the following yaml file `lws.yaml`
                     value: <your-hf-token>
                 volumeMounts:
                   - mountPath: /dev/shm
-                    name: dshm   
+                    name: dshm
             volumes:
             - name: dshm
               emptyDir:
@@ -131,14 +137,13 @@ vllm-0-1   1/1     Running   0          2s
 Verify that the distributed tensor-parallel inference works:
 
 ```bash
-kubectl logs vllm-0 |grep -i "Loading model weights took" 
+kubectl logs vllm-0 |grep -i "Loading model weights took"
 ```
 
 Should get something similar to this:
 
 ```text
 INFO 05-08 03:20:24 model_runner.py:173] Loading model weights took 0.1189 GB
-(RayWorkerWrapper pid=169, ip=10.20.0.197) INFO 05-08 03:20:28 model_runner.py:173] Loading model weights took 0.1189 GB
 ```
 
 ## Access ClusterIP service
