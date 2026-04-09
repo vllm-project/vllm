@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::OpaqueValue;
 
-/// Decoded engine startup-handshake payload.
+/// Decoded engine startup-handshake payload sent on the handshake socket.
 ///
 /// Original Python payload construction:
-/// <https://github.com/vllm-project/vllm/blob/f22d6e026798a74e6542a52ef776c054f2de572a/vllm/v1/engine/core.py#L961-L981>
+/// <https://github.com/vllm-project/vllm/blob/c8d98f81f6/vllm/v1/engine/core.py#L1000-L1035>
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ReadyMessage {
     #[serde(default)]
@@ -17,11 +17,26 @@ pub struct ReadyMessage {
     #[serde(default)]
     pub headless: Option<bool>,
     #[serde(default)]
-    pub num_gpu_blocks: Option<u64>,
-    #[serde(default)]
-    pub dp_stats_address: Option<String>,
-    #[serde(default)]
     pub parallel_config_hash: Option<String>,
+}
+
+/// Post-initialization configuration sent from each engine on the input socket
+/// registration message, after the handshake completes.
+///
+/// Contains values that may differ from the original config (e.g. `max_model_len`
+/// after KV cache auto-fitting, `num_gpu_blocks` after profiling).
+///
+/// Original Python definition:
+/// <https://github.com/vllm-project/vllm/blob/c8d98f81f6/vllm/v1/engine/__init__.py#L67-L77>
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EngineCoreReadyResponse {
+    /// Engine-reported maximum model context length (auto-fitted after
+    /// KV cache profiling and may differ from the original config value).
+    pub max_model_len: u64,
+    /// Number of GPU blocks available for KV cache on this engine.
+    pub num_gpu_blocks: u64,
+    /// DP coordinator stats publish address, if applicable.
+    pub dp_stats_address: Option<String>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup

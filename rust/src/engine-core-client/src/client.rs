@@ -9,7 +9,7 @@ use tracing::{debug, info, trace};
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result};
-use crate::protocol::handshake::ReadyMessage;
+use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::{EngineCoreRequest, EngineCoreRequestType, EngineCoreUtilityRequest};
 use crate::transport::{self, ConnectedEngine};
 
@@ -359,12 +359,33 @@ impl EngineCoreClient {
             .collect()
     }
 
-    /// Return the READY messages received from all engines during the startup handshake.
-    pub fn ready_messages(&self) -> Vec<&ReadyMessage> {
+    /// Return the ready responses received from all engines on the input socket.
+    pub fn ready_responses(&self) -> Vec<&EngineCoreReadyResponse> {
         self.engines
             .iter()
-            .map(|engine| &engine.ready_message)
+            .filter_map(|engine| engine.ready_response.as_ref())
             .collect()
+    }
+
+    /// Return the total number of GPU blocks summed across all connected engines.
+    pub fn total_num_gpu_blocks(&self) -> u64 {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.ready_response.as_ref())
+            .map(|r| r.num_gpu_blocks)
+            .sum()
+    }
+
+    /// Return the minimum engine-reported `max_model_len` across all engines.
+    ///
+    /// This is the auto-fitted value after KV cache profiling and may differ from
+    /// the originally configured value.
+    pub fn max_model_len(&self) -> Option<u64> {
+        self.engines
+            .iter()
+            .filter_map(|e| e.ready_response.as_ref())
+            .map(|r| r.max_model_len)
+            .min()
     }
 
     /// Get the model name associated with this client used for metrics labeling.

@@ -15,7 +15,9 @@ use zeromq::{PullSocket, RouterSendHalf, RouterSocket, ZmqError, ZmqMessage};
 
 use crate::coordinator::CoordinatorBootstrap;
 use crate::error::{Error, Result, bail_unexpected_handshake_message};
-use crate::protocol::handshake::{HandshakeAddresses, HandshakeInitMessage, ReadyMessage};
+use crate::protocol::handshake::{
+    EngineCoreReadyResponse, HandshakeAddresses, HandshakeInitMessage, ReadyMessage,
+};
 use crate::protocol::{
     EngineCoreOutputs, decode_engine_core_outputs, decode_msgpack, encode_msgpack,
 };
@@ -100,8 +102,9 @@ impl TryFrom<EngineId> for PeerIdentity {
 pub struct ConnectedEngine {
     /// The identity of the connected engine.
     pub engine_id: EngineId,
-    /// The READY message received from the engine during the handshake.
-    pub ready_message: ReadyMessage,
+    /// Post-initialization configuration received from the engine on the input
+    /// socket registration message. `None` until the registration is received.
+    pub ready_response: Option<EngineCoreReadyResponse>,
 }
 
 /// Represents the connected shared transport plus all registered engines after a successful
@@ -127,7 +130,7 @@ pub struct ConnectedTransport {
 #[derive(Clone, Debug, EnumAsInner)]
 enum EngineStartupState {
     HelloReceived,
-    ReadyReceived(ReadyMessage),
+    ReadyReceived,
 }
 
 /// Connect to one or more engines through the startup handshake protocol, returning the shared
@@ -232,7 +235,7 @@ pub async fn connect_handshake(
                     ?handshake_message,
                     "received overlapping READY from engine during HELLO phase"
                 );
-                *state = EngineStartupState::ReadyReceived(handshake_message);
+                *state = EngineStartupState::ReadyReceived;
             }
             other => {
                 bail_unexpected_handshake_message!("unexpected handshake status {other:?}");
@@ -282,7 +285,7 @@ pub async fn connect_handshake(
                     ?handshake_message,
                     "received READY from engine"
                 );
-                *state = EngineStartupState::ReadyReceived(handshake_message);
+                *state = EngineStartupState::ReadyReceived;
             }
             Some("HELLO") => {
                 bail_unexpected_handshake_message!(
@@ -295,18 +298,18 @@ pub async fn connect_handshake(
         }
     }
 
-    // 4. Wait for every engine to connect to the shared input socket and register itself.
-    let engines: Vec<_> = engines
-        .into_iter()
-        .map(|(engine_id, state)| ConnectedEngine {
+    // 4. Wait for every engine to connect to the shared input socket and register itself. The
+    //    `ready_response` is a placeholder; it is populated for each engine by
+    //    `wait_for_input_registrations` below.
+    let mut engines: Vec<_> = engines
+        .into_keys()
+        .map(|engine_id| ConnectedEngine {
             engine_id,
-            ready_message: state
-                .into_ready_received()
-                .expect("startup state must be ready after READY phase completes"),
+            ready_response: None,
         })
         .collect();
 
-    wait_for_input_registrations(&mut input_socket, &engines, ready_timeout).await?;
+    wait_for_input_registrations(&mut input_socket, &mut engines, ready_timeout).await?;
     debug!(
         engine_count = engines.len(),
         "all engines registered on shared input socket"
@@ -349,14 +352,14 @@ pub async fn connect_bootstrapped(
     let output_address = output_socket.bind(output_address).await?.to_string();
 
     // TODO: follow start rank
-    let engines = (0..engine_count)
+    let mut engines = (0..engine_count)
         .map(|index| ConnectedEngine {
             engine_id: EngineId::from((index as u16).to_le_bytes().to_vec()),
-            ready_message: ReadyMessage::default(), // TODO: is this actually used?
+            ready_response: None,
         })
         .collect::<Vec<_>>();
 
-    wait_for_input_registrations(&mut input_socket, &engines, ready_timeout).await?;
+    wait_for_input_registrations(&mut input_socket, &mut engines, ready_timeout).await?;
     info!(
         engine_count = engines.len(),
         "bootstrapped engines connected"
@@ -447,13 +450,14 @@ async fn send_init_message(
 
 /// Receive the input registration message from each engine and validate its identity.
 ///
-/// Each registration contains 2 frames: `[identity, empty-payload]`.
+/// Each registration contains 2 frames: `[identity, ready-payload]` where the payload
+/// is a msgpack-encoded [`EngineCoreReadyResponse`].
 async fn wait_for_input_registrations(
     input_socket: &mut RouterSocket,
-    expected_engines: &[ConnectedEngine],
+    engines: &mut [ConnectedEngine],
     ready_timeout: Duration,
 ) -> Result<()> {
-    let mut pending = expected_engines
+    let mut pending = engines
         .iter()
         .map(|e| e.engine_id.clone())
         .collect::<BTreeSet<_>>();
@@ -479,10 +483,18 @@ async fn wait_for_input_registrations(
                 "received input registration for unexpected engine id {actual_id:?}"
             );
         }
-        if !frames[1].is_empty() {
-            bail_unexpected_handshake_message!(
-                "expected empty payload for engine input registration"
-            );
+
+        let ready_response: EngineCoreReadyResponse = decode_msgpack(&frames[1])?;
+
+        debug!(
+            ?actual_id,
+            ?ready_response,
+            "received input registration from engine"
+        );
+
+        // Store the ready response in the corresponding engine entry.
+        if let Some(engine) = engines.iter_mut().find(|e| e.engine_id == actual_id) {
+            engine.ready_response = Some(ready_response);
         }
     }
 

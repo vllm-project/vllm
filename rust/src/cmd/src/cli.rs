@@ -154,7 +154,6 @@ impl SharedRuntimeArgs {
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
-            max_model_len: self.max_model_len,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
         }
@@ -186,7 +185,6 @@ impl SharedRuntimeArgs {
             listener_mode: HttpListenerMode::Bind { host, port },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
-            max_model_len: self.max_model_len,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
         }

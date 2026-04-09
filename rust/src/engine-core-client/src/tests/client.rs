@@ -171,8 +171,6 @@ fn ready_message(status: &str) -> ReadyMessage {
         status: Some(status.to_string()),
         local: Some(true),
         headless: Some(true),
-        num_gpu_blocks: None,
-        dp_stats_address: None,
         parallel_config_hash: None,
     }
 }
@@ -926,7 +924,7 @@ async fn client_fail_closes_when_main_output_path_receives_dp_control() {
     )
     .await;
     assert_eq!(client.engine_identities()[0], b"engine-0");
-    assert_eq!(client.ready_messages()[0].status.as_deref(), Some("READY"));
+    assert!(client.ready_responses()[0].max_model_len > 0);
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
@@ -1011,7 +1009,7 @@ async fn client_fail_closes_when_main_output_path_receives_mixed_shape_output() 
     )
     .await;
     assert_eq!(client.engine_identities()[0], b"engine-0");
-    assert_eq!(client.ready_messages()[0].status.as_deref(), Some("READY"));
+    assert!(client.ready_responses()[0].max_model_len > 0);
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
     let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
@@ -1852,7 +1850,7 @@ async fn multi_engine_client_shares_transport_and_routes_by_inflight_count() {
         client.engine_identities(),
         vec![b"engine-0".as_slice(), b"engine-1".as_slice()]
     );
-    assert_eq!(client.ready_messages().len(), 2);
+    assert_eq!(client.ready_responses().len(), 2);
     assert_eq!(client.engine_identities()[0], b"engine-0");
 
     let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();

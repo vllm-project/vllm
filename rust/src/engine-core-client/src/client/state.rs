@@ -237,7 +237,7 @@ mod tests {
     fn registry_rejects_duplicate_request_ids() {
         let mut registry = RequestRegistry::new(&[ConnectedEngine {
             engine_id: EngineId::from(b"engine-0"),
-            ready_message: Default::default(),
+            ready_response: None,
         }]);
         registry.register("req-1".to_string(), None).unwrap();
         let error = registry.register("req-1".to_string(), None).unwrap_err();
@@ -251,7 +251,7 @@ mod tests {
     fn registry_removes_finished_request_on_output() {
         let mut registry = RequestRegistry::new(&[ConnectedEngine {
             engine_id: EngineId::from(b"engine-0"),
-            ready_message: Default::default(),
+            ready_response: None,
         }]);
         registry.register("req-1".to_string(), None).unwrap();
 
@@ -269,7 +269,7 @@ mod tests {
     fn registry_closes_all_requests_on_failure() {
         let mut registry = RequestRegistry::new(&[ConnectedEngine {
             engine_id: EngineId::from(b"engine-0"),
-            ready_message: Default::default(),
+            ready_response: None,
         }]);
         registry.register("req-1".to_string(), None).unwrap();
         registry.register("req-2".to_string(), None).unwrap();
@@ -287,11 +287,11 @@ mod tests {
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
                 engine_id: engine_0.clone(),
-                ready_message: Default::default(),
+                ready_response: None,
             },
             ConnectedEngine {
                 engine_id: engine_1.clone(),
-                ready_message: Default::default(),
+                ready_response: None,
             },
         ]);
         let (chosen_0, _) = registry.register("req-1".to_string(), None).unwrap();
@@ -322,15 +322,15 @@ mod tests {
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
                 engine_id: engine_0.clone(),
-                ready_message: Default::default(),
+                ready_response: None,
             },
             ConnectedEngine {
                 engine_id: engine_1.clone(),
-                ready_message: Default::default(),
+                ready_response: None,
             },
             ConnectedEngine {
                 engine_id: engine_2.clone(),
-                ready_message: Default::default(),
+                ready_response: None,
             },
         ]);
 
@@ -354,11 +354,11 @@ mod tests {
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
                 engine_id: engine_0.clone(),
-                ready_message: Default::default(),
+                ready_response: None,
             },
             ConnectedEngine {
                 engine_id: engine_1.clone(),
-                ready_message: Default::default(),
+                ready_response: None,
             },
         ]);
 
@@ -376,11 +376,11 @@ mod tests {
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
                 engine_id: EngineId::from(0usize),
-                ready_message: Default::default(),
+                ready_response: None,
             },
             ConnectedEngine {
                 engine_id: EngineId::from(1usize),
-                ready_message: Default::default(),
+                ready_response: None,
             },
         ]);
 
@@ -399,7 +399,7 @@ mod tests {
         let engine_0 = EngineId::from(0usize);
         let mut registry = RequestRegistry::new(&[ConnectedEngine {
             engine_id: engine_0.clone(),
-            ready_message: Default::default(),
+            ready_response: None,
         }]);
 
         let (chosen, _) = registry.register("req-ok".to_string(), Some(0)).unwrap();

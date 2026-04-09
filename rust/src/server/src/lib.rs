@@ -55,10 +55,14 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     .await
     .context("failed to connect to engine core")?;
 
+    // max_model_len is always obtained from the engine (auto-fitted after KV
+    // cache profiling) rather than from frontend configuration.
+    let max_model_len = client.max_model_len();
+
     let llm = Llm::new(client).with_disable_log_stats(config.disable_log_stats);
     let mut text = TextLlm::new(llm, text_backend);
-    if let Some(max_model_len) = config.max_model_len {
-        text = text.with_max_model_len(max_model_len);
+    if let Some(max_model_len) = max_model_len {
+        text = text.with_max_model_len(max_model_len as u32);
     }
 
     let mut chat = ChatLlm::new(text, chat_backend);

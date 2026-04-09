@@ -668,7 +668,6 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             tool_call_parser: None,
             reasoning_parser: None,
-            max_model_len: None,
             enable_log_requests: false,
             disable_log_stats: false,
         }
@@ -724,7 +723,6 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             tool_call_parser: None,
             reasoning_parser: None,
-            max_model_len: None,
             enable_log_requests: false,
             disable_log_stats: false,
         }
@@ -795,7 +793,6 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             tool_call_parser: None,
             reasoning_parser: None,
-            max_model_len: None,
             enable_log_requests: false,
             disable_log_stats: false,
         }

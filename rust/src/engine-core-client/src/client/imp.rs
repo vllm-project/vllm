@@ -353,7 +353,7 @@ mod tests {
             "test-model".to_string(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),
-                ready_message: Default::default(),
+                ready_response: None,
             }],
         )
     }

@@ -59,7 +59,6 @@ async fn main() -> Result<()> {
         },
         tool_call_parser: None,
         reasoning_parser: None,
-        max_model_len: None,
         enable_log_requests: false,
         disable_log_stats: false,
     };

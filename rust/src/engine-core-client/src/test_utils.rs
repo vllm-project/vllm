@@ -10,7 +10,7 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
 
 use crate::EngineId;
-use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
+use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage, ReadyMessage};
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
 ///
@@ -57,10 +57,18 @@ fn ready_message(status: &str) -> ReadyMessage {
         status: Some(status.to_string()),
         local: Some(true),
         headless: Some(true),
-        num_gpu_blocks: None,
-        dp_stats_address: None,
         parallel_config_hash: None,
     }
+}
+
+/// Construct a default ready response payload for mock engine input registration.
+fn ready_response_payload() -> Vec<u8> {
+    rmp_serde::to_vec_named(&EngineCoreReadyResponse {
+        max_model_len: 4096,
+        num_gpu_blocks: 0,
+        dp_stats_address: None,
+    })
+    .expect("encode ready response payload")
 }
 
 /// Coordinator-side sockets connected by one mock engine when coordinator mode is enabled.
@@ -134,7 +142,7 @@ pub async fn setup_mock_engine_connections(
         .await
         .expect("connect mock engine input socket");
     dealer
-        .send(ZmqMessage::from(Vec::<u8>::new()))
+        .send(ZmqMessage::from(ready_response_payload()))
         .await
         .expect("send mock engine input ready frame");
 
@@ -222,7 +230,7 @@ pub async fn setup_bootstrapped_mock_engine(
         .await
         .expect("connect mock engine input socket");
     dealer
-        .send(ZmqMessage::from(Vec::<u8>::new()))
+        .send(ZmqMessage::from(ready_response_payload()))
         .await
         .expect("send mock engine input ready frame");
 
