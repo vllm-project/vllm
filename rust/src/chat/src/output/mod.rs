@@ -10,6 +10,7 @@ use futures::Stream;
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use subenum::subenum;
 use tool_parser::ParserFactory as ToolParserFactory;
+use tracing::info;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use self::reasoning::reasoning_event_stream;
@@ -173,7 +174,18 @@ pub(crate) fn output_stream(
                 .create_for_model(model_id)
         })
     };
+
+    LOG_ONCE.call_once(|| {
+        // TODO: tool-parser doesn't expose its model type
+        if let Some(reasoning_parser) = &reasoning_parser {
+            let model_type = reasoning_parser.model_type();
+            info!(model_type, "using reasoning parser");
+        }
+    });
+
     let reasoning = reasoning_event_stream(decoded, reasoning_parser);
     let tool = tool_event_stream(reasoning, intermediate, parser_tools, tool_parser);
     Ok(structured_chat_event_stream(tool))
 }
+
+static LOG_ONCE: std::sync::Once = std::sync::Once::new();

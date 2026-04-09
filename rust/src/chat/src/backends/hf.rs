@@ -3,7 +3,7 @@ use std::sync::Arc;
 use smg_tokenizer::SpecialTokens;
 use smg_tokenizer::chat_template::load_chat_template_from_file;
 use thiserror_ext::AsReport as _;
-use tracing::info;
+use tracing::{info, warn};
 use vllm_text::DynTextBackend;
 use vllm_text::backends::hf::{
     HfSpecialTokens, HfTextBackend, ResolvedModelFiles, load_tokenizer_config,
@@ -32,16 +32,30 @@ impl HfChatBackend {
         let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
         let special_tokens = to_chat_template_special_tokens(tokenizer_config.special_tokens);
 
-        // Match the usual HF precedence: tokenizer_config first, then any
-        // adjacent dedicated chat template file.
         let mut template = tokenizer_config.chat_template;
+
+        // If independent chat template file(s) exist and contain non-empty content, they take
+        // priority over template entries in the tokenizer config
         if let Some(chat_template_path) = files.chat_template_path.as_deref() {
-            template = load_chat_template_from_file(
+            let file_template = load_chat_template_from_file(
                 chat_template_path
                     .to_str()
                     .expect("chat template path should be valid UTF-8"),
             )
             .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+
+            if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+                info!(
+                    path = %chat_template_path.display(),
+                    "loaded dedicated chat template file, overriding tokenizer_config chat_template"
+                );
+                template = file_template;
+            } else {
+                warn!(
+                    path = %chat_template_path.display(),
+                    "ignoring empty dedicated chat template file and falling back to tokenizer_config chat_template"
+                );
+            }
         }
         let chat_template = ChatTemplate::new(template, special_tokens)?;
 
