@@ -558,6 +558,20 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         logits_new[:, targets] = logits
         return logits_new
 
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Vocab-parallel argmax without all-gathering full logits.
+
+        Falls back to full logits when draft_id_to_target_id remapping is
+        active, since the draft model predicts over draft_vocab_size while
+        speculative decoding expects target vocab ids.
+        """
+        if self.draft_id_to_target_id is not None:
+            return self.compute_logits(hidden_states).argmax(dim=-1)
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def precompute_and_store_context_kv(
         self,
         context_states: torch.Tensor,
