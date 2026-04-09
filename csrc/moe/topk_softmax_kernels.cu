@@ -442,6 +442,19 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
       }
     }
 
+    // Fix: clamp NaN/Inf values to 0 to prevent duplicate expert IDs.
+    // NaN gating (from degenerate hidden states in CUDA graph padding) causes
+    // softmax to produce all-NaN, which makes the argmax loop always pick
+    // expert 0 for every top-k slot, producing duplicate expert IDs that
+    // crash FlashInfer's three-step MoE sort.
+    // With 0s, the argmax uses index tie-breaking to pick [0,1,2,...,k-1].
+#pragma unroll
+    for (int ii = 0; ii < VPT; ++ii) {
+      if (isnan(row_chunk[ii]) || isinf(row_chunk[ii])) {
+        row_chunk[ii] = 0.f;
+      }
+    }
+
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
 
     // If bias is not null, use biased value for selection
