@@ -282,7 +282,7 @@ class PassConfig:
         """
         enabled_fusions = [
             f.name[len("fuse_") :]
-            for f in fields(self)
+            for f in fields(self)  # type: ignore[arg-type]
             if getattr(self, f.name) and f.name.startswith("fuse_")
         ]
 
@@ -1295,4 +1295,4 @@ class CompilationConfig:
         if self.compile_ranges_endpoints is None:
             return []
         endpoints = sorted(set(self.compile_ranges_endpoints))
-        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]
+        return [Range(s + 1, e) for s, e in zip([0] + endpoints[:-1], endpoints)]  # type: ignore[call-arg]
