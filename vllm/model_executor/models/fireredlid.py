@@ -64,13 +64,9 @@ from .utils import (
     WeightsMapper,
     maybe_prefix,
 )
+from .whisper_utils import ISO639_1_SUPPORTED_LANGS
 
 logger = init_logger(__name__)
-
-
-# ===========================================================================
-# Audio input schema
-# ===========================================================================
 
 
 class FireRedLIDAudioInputs(TensorSchema):
@@ -95,27 +91,7 @@ class FireRedLIDAudioInputs(TensorSchema):
     ]
 
 
-# ===========================================================================
-# Encoder (re-uses shared Conformer building blocks)
-# ===========================================================================
-
-
-class FireRedLIDEncoder(ConformerEncoder):
-    """
-    Conformer encoder for FireRedLID.
-
-    Identical to the shared :class:`ConformerEncoder` used by FireRedASR2.
-    The original FireRedLID checkpoint has dropout layers on embed_output
-    and pos_emb, but they are no-ops in eval mode, so the forward path
-    is equivalent.
-    """
-
-    pass
-
-
-# ===========================================================================
-# Decoder components
-# ===========================================================================
+FireRedLIDEncoder = ConformerEncoder
 
 
 class FireRedLIDPositionalEmbedding(nn.Module):
@@ -138,7 +114,9 @@ class FireRedLIDPositionalEmbedding(nn.Module):
         return self.pe[position_ids]
 
 
-class FireRedLIDSelfAttention(nn.Module):
+class FireRedLIDAttention(nn.Module):
+    """Base attention with shared QKV/FC projections for the LID decoder."""
+
     def __init__(
         self,
         d_model: int,
@@ -187,6 +165,14 @@ class FireRedLIDSelfAttention(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc",
         )
+        self._init_attn(cache_config, quant_config, prefix)
+
+    def _init_attn(self, cache_config, quant_config, prefix: str) -> None:
+        raise NotImplementedError
+
+
+class FireRedLIDSelfAttention(FireRedLIDAttention):
+    def _init_attn(self, cache_config, quant_config, prefix: str) -> None:
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -206,55 +192,8 @@ class FireRedLIDSelfAttention(nn.Module):
         return output
 
 
-class FireRedLIDCrossAttention(nn.Module):
-    def __init__(
-        self,
-        d_model: int,
-        n_head: int,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ):
-        super().__init__()
-        tp_size = get_tensor_model_parallel_world_size()
-        assert n_head % tp_size == 0
-        self.total_num_heads = n_head
-        self.num_heads = n_head // tp_size
-        self.num_kv_heads = max(1, n_head // tp_size)
-        self.head_dim = d_model // n_head
-        self.scaling = self.head_dim**-0.5
-
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-
-        self.w_qs = ColumnParallelLinear(
-            d_model,
-            d_model,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.w_qs",
-        )
-        self.w_ks = ColumnParallelLinear(
-            d_model,
-            d_model,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.w_ks",
-        )
-        self.w_vs = ColumnParallelLinear(
-            d_model,
-            d_model,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.w_vs",
-        )
-        self.fc = RowParallelLinear(
-            d_model,
-            d_model,
-            bias=True,
-            quant_config=quant_config,
-            prefix=f"{prefix}.fc",
-        )
+class FireRedLIDCrossAttention(FireRedLIDAttention):
+    def _init_attn(self, cache_config, quant_config, prefix: str) -> None:
         self.attn = CrossAttention(
             self.num_heads,
             self.head_dim,
@@ -400,11 +339,6 @@ class FireRedLIDDecoder(nn.Module):
         return self.tgt_word_emb(input_ids)
 
 
-# ===========================================================================
-# Composite model
-# ===========================================================================
-
-
 class FireRedLIDModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -430,25 +364,11 @@ class FireRedLIDModel(nn.Module):
         positions: torch.Tensor,
         encoder_outputs: list[torch.Tensor] | None = None,
     ) -> torch.Tensor:
-        # logger.warning("[DEBUG] FireRedLIDModel.forward: input_ids=%s positions=%s",
-        #                input_ids, positions)
-        # if encoder_outputs:
-        #     logger.warning("[DEBUG]   len(encoder_outputs)=%d", len(encoder_outputs))
-        #     for idx, eo in enumerate(encoder_outputs):
-        #         logger.warning("[DEBUG]   encoder_outputs[%d] shape=%s dtype=%s",
-        #                        idx, eo.shape, eo.dtype)
         enc_states = (
             torch.cat(encoder_outputs, dim=0)
             if encoder_outputs and len(encoder_outputs) > 0
             else None
         )
-        # if enc_states is not None:
-        #     logger.warning("[DEBUG]   enc_states(cat) shape=%s mean=%.8f std=%.8f",
-        #                    enc_states.shape,
-        #                    enc_states.float().mean().item(),
-        #                    enc_states.float().std().item())
-        # else:
-        #     logger.warning("[DEBUG]   enc_states is None (no encoder outputs)")
         decoder_outputs = self.decoder(
             input_ids=input_ids,
             positions=positions,
@@ -464,11 +384,6 @@ class FireRedLIDModel(nn.Module):
         """Run the encoder and return padded outputs plus true sequence lengths."""
         enc_output, enc_lengths, _ = self.encoder(speech, speech_lengths)
         return enc_output, enc_lengths
-
-
-# ===========================================================================
-# Processor & multimodal interface
-# ===========================================================================
 
 
 class FireRedLIDProcessingInfo(BaseProcessingInfo):
@@ -603,117 +518,54 @@ class FireRedLIDMultiModalProcessor(
         ]
 
 
-# ===========================================================================
-# Top-level model class
-# ===========================================================================
-
-
-# ---------------------------------------------------------------------------
-# Supported languages for the SupportsTranscription protocol.
-# Only ISO 639-1 codes present in Whisper's LANGUAGES map are listed here;
-# FireRedLID's dialect tokens (mandarin, xinan, wu, …) are output tokens
-# but not valid ISO 639-1 language *request* codes.
-# ---------------------------------------------------------------------------
+# FireRedLID supports a wider set of languages than Whisper's shared list.
+# Only ISO 639-1 codes are listed; FireRedLID's dialect tokens (mandarin,
+# xinan, wu, …) are output tokens but not valid language *request* codes.
 _FIREREDLID_SUPPORTED_LANGUAGES: Mapping[str, str] = {
-    "af": "Afrikaans",
+    **ISO639_1_SUPPORTED_LANGS,
     "am": "Amharic",
-    "ar": "Arabic",
     "as": "Assamese",
-    "az": "Azerbaijani",
     "ba": "Bashkir",
-    "be": "Belarusian",
-    "bg": "Bulgarian",
     "bn": "Bengali",
     "bo": "Tibetan",
     "br": "Breton",
-    "bs": "Bosnian",
-    "ca": "Catalan",
-    "cs": "Czech",
-    "cy": "Welsh",
-    "da": "Danish",
-    "de": "German",
-    "el": "Greek",
-    "en": "English",
-    "es": "Spanish",
-    "et": "Estonian",
     "eu": "Basque",
-    "fa": "Persian",
-    "fi": "Finnish",
     "fo": "Faroese",
-    "fr": "French",
-    "gl": "Galician",
     "gu": "Gujarati",
     "ha": "Hausa",
     "haw": "Hawaiian",
-    "hi": "Hindi",
-    "hr": "Croatian",
     "ht": "Haitian Creole",
-    "hu": "Hungarian",
-    "hy": "Armenian",
-    "id": "Indonesian",
-    "is": "Icelandic",
-    "it": "Italian",
-    "ja": "Japanese",
     "jw": "Javanese",
     "ka": "Georgian",
-    "kk": "Kazakh",
     "km": "Khmer",
-    "kn": "Kannada",
-    "ko": "Korean",
     "la": "Latin",
     "lb": "Luxembourgish",
     "ln": "Lingala",
     "lo": "Lao",
-    "lt": "Lithuanian",
-    "lv": "Latvian",
     "mg": "Malagasy",
-    "mi": "Maori",
-    "mk": "Macedonian",
     "ml": "Malayalam",
     "mn": "Mongolian",
-    "mr": "Marathi",
-    "ms": "Malay",
     "mt": "Maltese",
     "my": "Myanmar",
-    "ne": "Nepali",
-    "nl": "Dutch",
     "nn": "Nynorsk",
-    "no": "Norwegian",
     "oc": "Occitan",
     "pa": "Panjabi",
-    "pl": "Polish",
     "ps": "Pashto",
-    "pt": "Portuguese",
-    "ro": "Romanian",
-    "ru": "Russian",
     "sa": "Sanskrit",
     "sd": "Sindhi",
     "si": "Sinhala",
-    "sk": "Slovak",
-    "sl": "Slovenian",
     "sn": "Shona",
     "so": "Somali",
     "sq": "Albanian",
-    "sr": "Serbian",
     "su": "Sundanese",
-    "sv": "Swedish",
-    "sw": "Swahili",
-    "ta": "Tamil",
     "te": "Telugu",
     "tg": "Tajik",
-    "th": "Thai",
     "tk": "Turkmen",
-    "tl": "Tagalog",
-    "tr": "Turkish",
     "tt": "Tatar",
-    "uk": "Ukrainian",
-    "ur": "Urdu",
     "uz": "Uzbek",
-    "vi": "Vietnamese",
     "yi": "Yiddish",
     "yo": "Yoruba",
     "yue": "Cantonese",
-    "zh": "Chinese",
 }
 
 
@@ -868,10 +720,6 @@ class FireRedLIDForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         logits = self.logits_processor(self.proj_out, hidden_states)
         return logits
-
-    # ------------------------------------------------------------------
-    # SupportsTranscription protocol methods
-    # ------------------------------------------------------------------
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
