@@ -19,7 +19,8 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
-    apt-transport-https ca-certificates wget curl
+    apt-transport-https ca-certificates wget curl \
+    libnuma-dev
 RUN python3 -m pip install --upgrade pip
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
@@ -390,7 +391,21 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 RUN mkdir src && mv vllm src/vllm
 
 # This is a workaround to ensure pytest exits with the correct status code in CI tests.
-RUN echo "import os\n\ndef pytest_sessionfinish(session, exitstatus):\n    os._exit(int(exitstatus))" > /vllm-workspace/conftest.py
+RUN printf '%s\n' \
+    'import os' \
+    '' \
+    '_exit_code = 1' \
+    '' \
+    'def pytest_sessionfinish(session, exitstatus):' \
+    '    global _exit_code' \
+    '    _exit_code = int(exitstatus)' \
+    '' \
+    'def pytest_unconfigure(config):' \
+    '    import sys' \
+    '    sys.stdout.flush()' \
+    '    sys.stderr.flush()' \
+    '    os._exit(_exit_code)' \
+    > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image
