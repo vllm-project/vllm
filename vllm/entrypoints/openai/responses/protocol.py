@@ -106,7 +106,7 @@ def serialize_message(msg):
         return msg.to_dict()
     else:
         # fallback to pydantic dump
-        return msg.model_dump_json(by_alias=True)
+        return msg.model_dump(mode="json", by_alias=True)
 
 
 def serialize_messages(msgs):

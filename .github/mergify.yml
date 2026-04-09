@@ -378,17 +378,17 @@ pull_request_rules:
       add:
         - tool-calling
 
-- name: auto-rebase if approved, ready, and 40 commits behind main
+- name: auto-rebase to keep merge candidate within 1 day behind main
   conditions:
     - base = main
     - label=ready
     - "#approved-reviews-by >= 1"
-    - "#commits-behind >= 40"
+    - "#commits-behind >= 50"
     - -closed
     - -draft
     - -conflict
   actions:
-    rebase: {}
+    update: {}
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
