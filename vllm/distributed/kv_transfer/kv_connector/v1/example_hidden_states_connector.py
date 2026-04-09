@@ -174,7 +174,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         # the default stream (model forward). Thread pool for disk writes.
         self._copy_stream: torch.cuda.Stream | None = None  # lazy init
         self._executor = ThreadPoolExecutor(
-            max_workers=8, thread_name_prefix="vllm-hs-save"
+            max_workers=self._kv_transfer_config.get_from_extra_config("num_writer_threads", 8), thread_name_prefix="vllm-hs-save"
         )
         # (tensors_dict, copy_done_event, filename, req_id) queued by
         # save_kv_layer, submitted to thread pool by wait_for_save.
