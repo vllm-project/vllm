@@ -1,0 +1,58 @@
+{
+  "world_size": 8,
+  "dtype": "int8",
+  "device_name": "NVIDIA_H200",
+  "group_size": 128,
+  "params": {
+    "1048576": {
+      "BLOCK_SIZE": 1024,
+      "num_warps": 4,
+      "time_us": 20.3
+    },
+    "2097152": {
+      "BLOCK_SIZE": 2048,
+      "num_warps": 8,
+      "time_us": 28.5
+    },
+    "4194304": {
+      "BLOCK_SIZE": 2048,
+      "num_warps": 8,
+      "time_us": 45.3
+    },
+    "8388608": {
+      "BLOCK_SIZE": 4096,
+      "num_warps": 32,
+      "time_us": 78.0
+    },
+    "16777216": {
+      "BLOCK_SIZE": 8192,
+      "num_warps": 8,
+      "time_us": 145.4
+    },
+    "33554432": {
+      "BLOCK_SIZE": 8192,
+      "num_warps": 8,
+      "time_us": 266.6
+    },
+    "67108864": {
+      "BLOCK_SIZE": 16384,
+      "num_warps": 16,
+      "time_us": 499.6
+    },
+    "134217728": {
+      "BLOCK_SIZE": 16384,
+      "num_warps": 16,
+      "time_us": 943.2
+    },
+    "268435456": {
+      "BLOCK_SIZE": 16384,
+      "num_warps": 16,
+      "time_us": 1825.5
+    },
+    "536870912": {
+      "BLOCK_SIZE": 16384,
+      "num_warps": 16,
+      "time_us": 3620.8
+    }
+  }
+}

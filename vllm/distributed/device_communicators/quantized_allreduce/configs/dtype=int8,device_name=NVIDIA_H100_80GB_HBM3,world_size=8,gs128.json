@@ -1,0 +1,58 @@
+{
+  "world_size": 8,
+  "dtype": "int8",
+  "device_name": "NVIDIA_H100_80GB_HBM3",
+  "group_size": 128,
+  "params": {
+    "1048576": {
+      "BLOCK_SIZE": 4096,
+      "num_warps": 16,
+      "time_us": 31.6
+    },
+    "2097152": {
+      "BLOCK_SIZE": 8192,
+      "num_warps": 32,
+      "time_us": 42.2
+    },
+    "4194304": {
+      "BLOCK_SIZE": 8192,
+      "num_warps": 32,
+      "time_us": 64.2
+    },
+    "8388608": {
+      "BLOCK_SIZE": 4096,
+      "num_warps": 32,
+      "time_us": 105.1
+    },
+    "16777216": {
+      "BLOCK_SIZE": 8192,
+      "num_warps": 8,
+      "time_us": 170.9
+    },
+    "33554432": {
+      "BLOCK_SIZE": 8192,
+      "num_warps": 8,
+      "time_us": 289.3
+    },
+    "67108864": {
+      "BLOCK_SIZE": 8192,
+      "num_warps": 8,
+      "time_us": 524.1
+    },
+    "134217728": {
+      "BLOCK_SIZE": 16384,
+      "num_warps": 16,
+      "time_us": 983.0
+    },
+    "268435456": {
+      "BLOCK_SIZE": 16384,
+      "num_warps": 16,
+      "time_us": 1862.0
+    },
+    "536870912": {
+      "BLOCK_SIZE": 16384,
+      "num_warps": 16,
+      "time_us": 3661.2
+    }
+  }
+}
