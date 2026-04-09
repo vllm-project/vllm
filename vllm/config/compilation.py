@@ -266,9 +266,9 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_act_padding = False
-        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+        if self.fuse_rope_kvcache and not current_platform.is_cuda_alike():
             logger.warning_once(
-                "KV cache fusion currently only enabled on ROCm. "
+                "KV cache fusion currently only enabled on CUDA/ROCm. "
                 "The fusion will be disabled."
             )
             self.fuse_rope_kvcache = False

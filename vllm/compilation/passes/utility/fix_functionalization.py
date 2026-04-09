@@ -180,6 +180,16 @@ class FixFunctionalizationPass(VllmInductorPass):
                     2: "key",
                 }
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
+            elif (
+                hasattr(torch.ops.vllm, "fused_rope_and_unified_mla_kv_cache_update")
+                and at_target
+                == torch.ops.vllm.fused_rope_and_unified_mla_kv_cache_update.default
+            ):
+                mutated_args = {
+                    1: "q_pe",
+                    2: "k_pe",
+                }
+                self.defunctionalize(graph, node, mutated_args=mutated_args)
             # only used for test_functionalization::TestFunctionWithMutatedArgsAndReturn
             elif (
                 hasattr(torch.ops.vllm, "function_with_mutated_args_and_return")
