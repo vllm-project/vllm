@@ -7,6 +7,7 @@ from typing import Any, cast
 import torch
 from torch.nn import Parameter
 
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
@@ -57,6 +58,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             kFp8StaticTokenSym if per_token_weight else kFp8StaticTensorSym
         )
         self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -175,7 +177,9 @@ class QuarkW8A8Fp8(QuarkScheme):
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
-            out_dtype=torch.get_default_dtype(),
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
             module_name=self.__class__.__name__,
         )
 
