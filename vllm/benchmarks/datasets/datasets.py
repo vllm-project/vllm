@@ -83,6 +83,7 @@ class SampleRequest:
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
+    timestamp: float | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -117,6 +118,9 @@ class BenchmarkDataset(ABC):
         self.random_seed = random_seed if random_seed is not None else self.DEFAULT_SEED
         self.disable_shuffle = disable_shuffle
         self.data: Any | None = None
+
+    def self_timed(self) -> bool:
+        return False
 
     def apply_multimodal_chat_transformation(
         self,
@@ -1398,6 +1402,158 @@ class ShareGPTDataset(BenchmarkDataset):
         )
         return samples
 
+class TimedTrace(BenchmarkDataset):
+    """
+    Implements a base class to replay various time'ed traces.
+    Loads data from a JSON file and generates sample requests
+    based on the timing information in the traces.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        random.seed(self.random_seed)
+        np.random.seed(self.random_seed)
+
+        # Set parameters with defaults from timed_trace_group arguments
+        self.chunk_size = int(kwargs.get("chunk_hash_size"))
+        self.sec_multiplier = float(kwargs.get("sec_multiplier"))
+        self.label_ts = str(kwargs.get("label_timestamp"))
+        self.label_input_length = str(kwargs.get("label_input_length"))
+        self.label_output_length = str(kwargs.get("label_output_length"))
+        self.label_hash_ids = str(kwargs.get("label_hash_ids"))
+        print(
+            f'timed-trace: chunk_size: {self.chunk_size}, sec_multiplier: {self.sec_multiplier}, label_ts: "{self.label_ts}", label_input_length: "{self.label_input_length}", label_output_length: "{self.label_output_length}", label_hash_ids: "{self.label_hash_ids}"'
+        )
+        self._expanded_generated_prompts = {}
+        self.load_data()
+
+    def self_timed(self) -> bool:
+        return True
+
+    def load_data(self) -> None:
+        # check if the file is there
+        if self.dataset_path is None:
+            raise ValueError("dataset_path must be provided for loading data.")
+
+        # load and we will do transformation once we have the Tokenizer available
+        # this is jsonl data format
+        self.data = open(self.dataset_path)
+
+    def _sample_token(self, num_tokens: int, tokenizer: TokenizerLike) -> list[int]:
+        # Initialize vocab only if it doesn't exist yet
+        if not hasattr(self, "vocab"):
+            self.vocab = tokenizer.get_vocab()
+            # Remove the special tokens.
+            self.vocab = {
+                k: v
+                for k, v in self.vocab.items()
+                if k not in tokenizer.all_special_ids
+            }
+
+        sampled_token_ids = random.choices(list(self.vocab.values()), k=num_tokens)
+        return sampled_token_ids
+
+    def _expand_prompt(
+        self,
+        chunked_hashes: list[int],
+        target_input_size: int,
+        tokenizer: TokenizerLike,
+    ) -> list[int]:
+        raw_tokenized_prompt = []
+        for h in chunked_hashes:
+            # Calculate how many tokens to expand for this chunk
+            expanded_size = (
+                self.chunk_size
+                if target_input_size >= self.chunk_size
+                else target_input_size
+            )
+
+            # Cache key includes size for partial chunks at the end
+            key = f"{h}:{expanded_size}"
+
+            if key not in self._expanded_generated_prompts:
+                self._expanded_generated_prompts[key] = self._sample_token(
+                    expanded_size, tokenizer
+                )
+            # once inserted get the tokenized prompt and append to the list
+            raw_tokenized_prompt.extend(self._expanded_generated_prompts[key])
+            target_input_size -= expanded_size
+
+            if target_input_size <= 0:
+                break
+
+        return raw_tokenized_prompt
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        **kwargs,
+    ) -> list:
+        samples: list = []
+        ind = 0
+        assert tokenizer is not None, "Tokenizer must be provided, now is Null"
+
+        for entry in self.data:
+            if len(samples) >= num_requests:
+                break
+
+            # now we create the SampleRequest with timing info
+            entry = json.loads(entry.strip())
+            input_length = entry.get(self.label_input_length)
+            new_output_len = entry.get(self.label_output_length)
+            prompt_ids = self._expand_prompt(
+                entry.get(self.label_hash_ids, []), input_length, tokenizer
+            )
+            prompt = tokenizer.decode(prompt_ids)
+
+            # Get timestamp with proper error handling
+            ts_value = entry.get(self.label_ts)
+            if ts_value is None:
+                raise ValueError(
+                    f"Timestamp field '{self.label_ts}' not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-timestamp to specify the correct field name."
+                )
+            timestamp = float(ts_value) * self.sec_multiplier
+
+            prompt_len = len(prompt_ids)
+
+            samples.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=prompt_len,
+                    expected_output_len=new_output_len,
+                    lora_request=None,
+                    multi_modal_data=None,
+                    request_id=request_id_prefix + str(ind),
+                    timestamp=timestamp,
+                )
+            )
+            ind += 1
+
+        return samples
+
+
+class _ValidateDatasetArgs(argparse.Action):
+    """Argparse action to validate dataset name and path compatibility."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+
+        # Get current values of both dataset_name and dataset_path
+        dataset_name = getattr(namespace, "dataset_name", "random")
+        dataset_path = getattr(namespace, "dataset_path", None)
+
+        # Validate the combination
+        if dataset_name == "random" and dataset_path is not None:
+            parser.error(
+                "Cannot use 'random' dataset with --dataset-path. "
+                "Please specify the appropriate --dataset-name (e.g., "
+                "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+                f"{dataset_path}"
+            )
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
@@ -1431,6 +1587,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "prefix_repetition",
             "spec_bench",
             "speed_bench",
+            "timed_trace",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -1519,6 +1676,44 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=None,
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
+    )
+    # FIXME(atr): I dont know why "timed-trace dataset options" as the name does not work!
+    timed_trace_group = parser.add_argument_group("timed-trace")
+    timed_trace_group.add_argument(
+        "--chunk-hash-size",
+        type=int,
+        default=16,
+        help="Each hash tokens, if present, represent how many token hashes. For example in Moonshot traces it is 512, while Alibaba has 16.",
+    )
+    timed_trace_group.add_argument(
+        "--sec-multiplier",
+        type=float,
+        default=0.001,
+        help="What multipler to use when converting timestamps to seconds. We will multiply timestamps by this.",
+    )
+    timed_trace_group.add_argument(
+        "--label-timestamp",
+        type=str,
+        default="timestamp",
+        help="What label to use to index the timestamp in the trace.",
+    )
+    timed_trace_group.add_argument(
+        "--label-input-length",
+        type=str,
+        default="input_length",
+        help="What label to use to index the input length field in the trace.",
+    )
+    timed_trace_group.add_argument(
+        "--label-output-length",
+        type=str,
+        default="output_length",
+        help="What label to use to index the output length field in the trace.",
+    )
+    timed_trace_group.add_argument(
+        "--label-hash-ids",
+        type=str,
+        default="hash_ids",
+        help="What label to use to index the hash ids for the input prompts.",
     )
 
     blazedit_group = parser.add_argument_group("blazedit dataset options")
@@ -2049,6 +2244,14 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_oversample=args.no_oversample,
             skip_chat_template=args.skip_chat_template,
             **hf_kwargs,
+        )
+
+    elif args.dataset_name == "timed_trace":
+        dataloader = TimedTrace(**vars(args))
+        input_requests = dataloader.sample(
+            num_requests=args.num_prompts,
+            tokenizer=tokenizer,
+            request_id_prefix=args.request_id_prefix,
         )
 
     else:
