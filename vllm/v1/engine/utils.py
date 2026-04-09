@@ -22,6 +22,7 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
@@ -141,13 +142,33 @@ class CoreEngineProcManager:
                 # Adjust device control in DP for non-CUDA platforms
                 # as well as external and ray launchers
                 # For CUDA platforms, we use torch.accelerator.set_device_index()()
+                device_control_context: contextlib.AbstractContextManager[None] = (
+                    contextlib.nullcontext()
+                )
                 if is_dp and (
                     not current_platform.is_cuda_alike()
                     or vllm_config.parallel_config.use_ray
                 ):
-                    with set_device_control_env_var(vllm_config, local_dp_rank):
-                        proc.start()
-                else:
+                    device_control_context = set_device_control_env_var(
+                        vllm_config, local_dp_rank
+                    )
+
+                with (
+                    device_control_context,
+                    numa_utils.configure_subprocess(
+                        # EngineCore itself does not have a TP/PP-local rank.
+                        # When DP is enabled, set_device_control_env_var()
+                        # narrows visible devices to this DP shard first, so
+                        # local_rank=0 means "the first local GPU in this
+                        # shard". The actual TP/PP worker processes spawned by
+                        # the executor are bound separately with their own
+                        # local_rank values.
+                        vllm_config,
+                        local_rank=0,
+                        dp_local_rank=local_dp_rank,
+                        process_kind="EngineCore",
+                    ),
+                ):
                     proc.start()
         finally:
             # Kill other procs if not all are running.
