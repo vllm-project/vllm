@@ -45,12 +45,7 @@ class Lfm2ToolParser(ToolParser):
     Used when --enable-auto-tool-choice --tool-call-parser lfm2 are all set.
     """
 
-    TOOL_CALL_REGEX = re.compile(
-        r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\)"
-        r",\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*"
-        r"([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",
-        re.DOTALL,
-    )
+    TOOL_CALL_REGEX = re.compile(r"\[.*\]$", re.DOTALL)
 
     def __init__(
         self,
