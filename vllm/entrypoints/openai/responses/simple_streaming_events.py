@@ -56,15 +56,11 @@ class SimpleStreamingState:
     current_item_id: str = ""
     current_tool_call_name: str = ""
     current_tool_call_id: str = ""
-    prompt_is_reasoning_end: bool | None = None
     reasoning_ended: bool = False
-    tool_call_text_started: bool = False
     first_tool_call_started: bool = False
     event_stream_started: bool = False
     maybe_important_output_text_spaces: str = ""
     previous_delta_messages: list[DeltaMessage] = field(default_factory=list)
-    previous_text: str = ""
-    previous_token_ids: list[int] = field(default_factory=list)
     started_tool_call_indices: set[int] = field(default_factory=set)
 
 
@@ -73,7 +69,8 @@ def _parse_delta_message(
     output,
     parser: "Parser | None",
     state: SimpleStreamingState,
-) -> tuple[DeltaMessage | None, str, list[int]]:
+    prompt_token_ids: list[int] | None = None,
+) -> DeltaMessage | None:
     """Parse a generation output into a DeltaMessage using unified parser.
 
     Uses parser.parse_delta() as base parsing, then applies additional
@@ -81,8 +78,6 @@ def _parse_delta_message(
     """
     delta_text = output.text
     delta_token_ids = as_list(output.token_ids)
-    current_text = state.previous_text + delta_text
-    current_token_ids = state.previous_token_ids + delta_token_ids
 
     # Base parsing via unified parser
     if parser:
@@ -90,16 +85,15 @@ def _parse_delta_message(
             delta_text=delta_text,
             delta_token_ids=delta_token_ids,
             request=request,  # type: ignore[arg-type]
-            prompt_token_ids=None,
+            prompt_token_ids=prompt_token_ids,
         )
     else:
         delta_message = DeltaMessage(content=output.text)
 
     if delta_message is None:
-        return None, current_text, current_token_ids
+        return None
 
     # Apply additional processing for tool call quirks
-    # (preserved from original _parse_delta_message)
     if parser and parser.tool_parser and delta_message:
         # remove any spurious output text after the first tool call has
         # started streaming
@@ -160,7 +154,7 @@ def _parse_delta_message(
     ):
         delta_message = None
 
-    return delta_message, current_text, current_token_ids
+    return delta_message
 
 
 def _events_add_content_reasoning_item(
@@ -471,12 +465,6 @@ async def process_simple_stream(
                 )
                 raise GenerationError("Internal server error")
 
-        # Initialize prompt_is_reasoning_end on first iteration
-        if parser and parser.reasoning_parser and state.prompt_is_reasoning_end is None:
-            state.prompt_is_reasoning_end = parser.reasoning_parser.is_reasoning_end(
-                output.prompt_token_ids
-            )
-
         # Parse the delta message
         if not output.outputs:
             continue
@@ -492,17 +480,13 @@ async def process_simple_stream(
                 tokenizer,  # type: ignore[arg-type]
                 request.top_logprobs,
             )
-        result = _parse_delta_message(
+        delta_message = _parse_delta_message(
             request=request,
             output=output,
             parser=parser,
             state=state,
+            prompt_token_ids=ctx.last_output.prompt_token_ids,
         )
-        delta_message, current_text, current_token_ids = result
-
-        # Update state
-        state.previous_text = current_text
-        state.previous_token_ids = current_token_ids
 
         if not delta_message:
             continue
