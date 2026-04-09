@@ -7,7 +7,9 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import QuarkScheme
+from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import (
+    QuarkScheme,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     NvFp4LinearBackend,
     apply_nvfp4_linear,
