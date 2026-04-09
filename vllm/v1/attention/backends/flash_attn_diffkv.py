@@ -35,12 +35,12 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        kv_cache_dtype: str | None,
+        kv_cache_dtype: "CacheDType | None",
         block_size: int | None,
         use_mla: bool,
         has_sink: bool,
         use_sparse: bool,
-        device_capability,
+        device_capability: "DeviceCapability",
     ) -> str | None:
         return (
             "FLASH_ATTN_DIFFKV is only supported when selected explicitly by "
