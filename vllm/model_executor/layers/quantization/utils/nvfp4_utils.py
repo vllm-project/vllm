@@ -109,6 +109,13 @@ def select_nvfp4_linear_backend() -> NvFp4LinearBackend:
     Select the best available NVFP4 GEMM backend based on environment
     configuration and platform capabilities.
     """
+    if envs.VLLM_BATCH_INVARIANT:
+        logger.info_once(
+            "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the emulation "
+            "backend for deterministic execution."
+        )
+        return NvFp4LinearBackend.EMULATION
+
     selected_backend: NvFp4LinearBackend | None = None
 
     if envs.VLLM_USE_FBGEMM:
@@ -259,6 +266,8 @@ def apply_nvfp4_linear(
     alpha = layer.alpha
     output_size = layer.output_size_per_partition
     input_size = layer.input_size_per_partition
+    output_dtype = x.dtype
+    output_shape = [*x.shape[:-1], output_size]
 
     if backend == NvFp4LinearBackend.MARLIN:
         return apply_fp4_marlin_linear(
@@ -272,20 +281,19 @@ def apply_nvfp4_linear(
             bias=bias,
         )
     elif backend == NvFp4LinearBackend.EMULATION:
+        x_2d = x.reshape(-1, x.shape[-1])
         out = run_nvfp4_emulations(
-            x=x,
+            x=x_2d,
             input_global_scale=input_global_scale_inv,
             weight=weight,
             weight_scale_swizzled=weight_scale,
             weight_global_scale=weight_global_scale,
             swizzle=swizzle,
         )
+        out = out[:, :output_size]
         if bias is not None:
             out = out + bias
-        return out
-
-    output_dtype = x.dtype
-    output_shape = [*x.shape[:-1], output_size]
+        return out.view(*output_shape)
 
     # Quantize BF16 or FP16 to (FP4 and interleaved block scale)
     x_fp4, x_blockscale = scaled_fp4_quant(
