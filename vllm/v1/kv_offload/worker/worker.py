@@ -69,8 +69,7 @@ class OffloadingHandler(ABC):
             job_ids: The set of job IDs to wait for.
         """
 
-    @abstractmethod
-    def shutdown(self) -> None:
+    def shutdown(self) -> None:  # noqa: B027 -- optional no-op default
         """Shutdown the handler and release any resources."""
 
 
