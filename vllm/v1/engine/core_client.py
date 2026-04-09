@@ -1368,6 +1368,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         # Fault tolerance state.
         self._ft_scaling_in_progress = False
         self._dead_engine_identities: set[EngineIdentity] = set()
+        self._initial_dp_size = len(self.core_engines)
         self._ft_abort_callback: Callable[[list[str]], None] | None = None
         # Capture the event loop for scheduling async scale-down from
         # the monitor thread. May be None if __init__ runs outside an
@@ -1434,10 +1435,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             num_logical_experts = model_config.get_num_experts()
             num_surviving = cur_dp_size - len(self._dead_engine_identities)
             surviving_ep_size = num_surviving * tp_size
-            cur_ep_size = cur_dp_size * tp_size
+            # Per-GPU physical slots are fixed at startup and never change.
+            # Use the initial EP size to compute them, not the current
+            # (already-shrunk) EP size.
+            initial_ep_size = self._initial_dp_size * tp_size
             num_local_physical = (
                 (num_logical_experts + pc.eplb_config.num_redundant_experts)
-                // cur_ep_size
+                // initial_ep_size
             )
             new_total_physical = surviving_ep_size * num_local_physical
             if new_total_physical < num_logical_experts:

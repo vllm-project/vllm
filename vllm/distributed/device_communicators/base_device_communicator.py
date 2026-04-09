@@ -112,6 +112,15 @@ class All2AllManagerBase:
     def destroy(self):
         pass
 
+    def abort(self):
+        """Forcefully abort without waiting for peers.
+
+        No NCCL comms in the base class. Subclasses that introduce NCCL
+        communicators must override this to call ncclCommAbort instead of
+        ncclCommDestroy to avoid hanging when a peer rank has died.
+        """
+        pass
+
 
 class DeviceCommunicatorBase:
     """
