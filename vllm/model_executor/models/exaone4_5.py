@@ -28,6 +28,10 @@ from transformers.models.exaone4_5 import (
 )
 from transformers.models.exaone4_5.configuration_exaone4_5 import Exaone4_5_VisionConfig
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
@@ -183,6 +187,16 @@ class EXAONE4_5_VisionAttention(nn.Module):
         return output
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "x": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class Exaone4_5_VisionBlock(nn.Module):
     def __init__(
         self,
