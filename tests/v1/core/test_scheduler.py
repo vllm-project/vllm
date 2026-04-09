@@ -2152,8 +2152,8 @@ def test_priority_scheduling_avoids_futile_lower_priority_preemption():
       - There are no free blocks.
 
     Because all live blocks are shared with hi1, preempting lo1 and lo2 frees
-    nothing. The only correct behavior is to preempt hi1 directly and leave the
-    lower-priority requests resident.
+    nothing. The only correct behavior is to preempt hi1 directly, leave the
+    lower-priority requests resident, and continue scheduling them.
     """
     block_size = 16
     scheduler = create_scheduler_with_priority(
@@ -2207,15 +2207,17 @@ def test_priority_scheduling_avoids_futile_lower_priority_preemption():
     assert block_pool.get_num_free_blocks() == 0
     assert [block.ref_cnt for block in shared_blocks] == [3, 3]
 
-    _ = scheduler.schedule()
+    scheduler_output = scheduler.schedule()
 
     assert hi1.status == RequestStatus.PREEMPTED
     assert lo1.status == RequestStatus.RUNNING
     assert lo2.status == RequestStatus.RUNNING
     assert [req.request_id for req in scheduler.running] == ["lo1", "lo2"]
-    assert lo1.num_computed_tokens == 31
-    assert lo2.num_computed_tokens == 31
+    assert scheduler_output.num_scheduled_tokens == {"lo1": 1, "lo2": 1}
+    assert lo1.num_computed_tokens == 32
+    assert lo2.num_computed_tokens == 32
     assert block_pool.get_num_free_blocks() == 0
+    assert [block.ref_cnt for block in shared_blocks] == [2, 2]
 
 
 def test_priority_scheduling_no_preemption_when_space_available():
