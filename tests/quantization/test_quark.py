@@ -261,7 +261,7 @@ def test_nvfp4_wikitext_correctness(tp_size: int):
 
     # TODO: rtol should be much smaller! But there is likely a bug in Quark
     # NVFP4 model (MOE down_proj activation scales)
-    rtol = 2
+    rtol = 0.25
 
     config = AccuracyTestConfig(
         model_name=model_name,

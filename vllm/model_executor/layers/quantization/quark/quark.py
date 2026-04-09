@@ -430,7 +430,7 @@ class QuarkConfig(QuantizationConfig):
         is_fp8_per_tensor_input = (
             input_quant[1].get("dtype") == "fp8_e4m3"
             and input_quant[1].get("qscheme") == "per_tensor"
-            and input_quant[1].get("is_dynamic")
+            and not input_quant[1].get("is_dynamic")
         )
 
         return (
@@ -588,14 +588,14 @@ class QuarkConfig(QuantizationConfig):
         weight_config = cast(dict[str, Any], config.get("weight"))
         input_config = cast(dict[str, Any], config.get("input_tensors"))
 
-        if self._is_fp8_w8a8(weight_config, input_config):
+        if self._is_nvfp4(weight_config, input_config):
+            return QuarkNVFP4()
+        elif self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
             if is_fp8_w8a8_supported:
                 return QuarkW8A8Fp8(weight_config, input_config)
-        elif self._is_nvfp4(weight_config, input_config):
-            return QuarkNVFP4()
         elif self._is_static_tensor_w8a8(weight_config, input_config):
             weight_qscheme = cast(str, weight_config.get("qscheme"))
             return QuarkW8A8Int8(
