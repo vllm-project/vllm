@@ -573,10 +573,10 @@ class CudaPlatformBase(Platform):
         return IrOpPriorityConfig.with_default(
             default,
             rms_norm=rms_norm,
-            static_quant_fp8=["native"],
-            static_group_quant_fp8=["native"],
-            dynamic_quant_fp8=["native"],
-            dynamic_group_quant_fp8=["native"],
+            static_quant_fp8=["vllm_c", "native"],
+            static_group_quant_fp8=["vllm_c", "native"],
+            dynamic_quant_fp8=["vllm_c", "native"],
+            dynamic_group_quant_fp8=["vllm_c", "triton", "native"],
         )
 
 

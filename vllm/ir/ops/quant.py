@@ -29,6 +29,19 @@ def _group_broadcast(t: Tensor, shape) -> Tensor:
     return t
 
 
+def _prep_static_scale(scale: Tensor, x: Tensor) -> Tensor:
+    """Normalize a static scale to 2D for group broadcasting.
+    Matches the logic of prep_scale_for_group_broadcast.
+    """
+    if scale.numel() == 1:
+        return scale.reshape(1, 1)
+    if scale.ndim == 1:
+        if scale.shape[0] == x.shape[-1]:
+            return scale.unsqueeze(-2)  # per-channel/per-group: [K] -> [1, K]
+        return scale.unsqueeze(-1)  # per-token: [M] -> [M, 1]
+    return scale
+
+
 def quant_fp8(x: Tensor, scale: Tensor, fp8_dtype: torch.dtype) -> Tensor:
     fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
     out = (
@@ -57,6 +70,7 @@ def static_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
+    scale = _prep_static_scale(scale, x)
     return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding)
 
 
@@ -67,6 +81,7 @@ def static_group_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
+    scale = _prep_static_scale(scale, x)
     return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding)
 
 

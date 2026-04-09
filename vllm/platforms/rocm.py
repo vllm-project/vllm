@@ -948,11 +948,14 @@ class RocmPlatform(Platform):
         )
         # static_group_quant_fp8 has no aiter implementation yet
         quant_fp8 = ["aiter", "native"] if use_aiter_quant else ["native"]
+        dynamic_group_quant_fp8 = (
+            ["triton", "aiter", "native"] if use_aiter_quant else ["triton", "native"]
+        )
 
         return IrOpPriorityConfig(
             rms_norm=rms_norm,
             static_quant_fp8=quant_fp8,
             static_group_quant_fp8=["native"],
             dynamic_quant_fp8=quant_fp8,
-            dynamic_group_quant_fp8=quant_fp8,
+            dynamic_group_quant_fp8=dynamic_group_quant_fp8,
         )

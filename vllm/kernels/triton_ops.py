@@ -138,7 +138,8 @@ def _per_token_group_quant_fp8_colmajor(
 
 _triton_group_quant_args = (
     lambda x, group_shape, column_major, use_ue8m0, fp8_dtype, scale_alignment=1: (
-        x.stride(-1) == 1  # last dimension must be contiguous
+        fp8_dtype != torch.float8_e4m3fnuz  # constexpr min/max are fixed at load time
+        and x.stride(-1) == 1  # last dimension must be contiguous
         and x.shape[-1] % group_shape[-1] == 0
     )
 )
