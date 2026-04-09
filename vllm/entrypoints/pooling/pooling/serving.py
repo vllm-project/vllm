@@ -55,7 +55,7 @@ class ServingPooling(PoolingServingBase):
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
-        self.JSONResponseCLS = get_json_response_cls()
+        self.json_response_cls = get_json_response_cls()
 
     async def __call__(
         self,
@@ -116,6 +116,10 @@ class ServingPooling(PoolingServingBase):
         self,
         ctx: PoolingServeContext,
     ) -> Response:
+        if ctx.response is not None:
+            # for IOProcessorResponse
+            return self.json_response_cls(content=ctx.response.model_dump())
+
         encoding_format = ctx.request.encoding_format
         embed_dtype = ctx.request.embed_dtype
         endianness = ctx.request.endianness
@@ -192,7 +196,7 @@ class ServingPooling(PoolingServingBase):
             data=items,
             usage=usage,
         )
-        return self.JSONResponseCLS(content=response.model_dump())
+        return self.json_response_cls(content=response.model_dump())
 
     def request_output_to_pooling_bytes_response(
         self,

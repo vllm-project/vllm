@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Mapping
 from http import HTTPStatus
 from typing import ClassVar
@@ -35,7 +37,7 @@ from vllm.utils.async_utils import merge_async_iterators
 from .io_processor import PoolingIOProcessor
 
 
-class PoolingServingBase:
+class PoolingServingBase(ABC):
     request_id_prefix: ClassVar[str]
 
     def __init__(
@@ -65,6 +67,7 @@ class PoolingServingBase:
             trust_request_chat_template=trust_request_chat_template,
         )
 
+    @abstractmethod
     async def __call__(
         self,
         request: AnyPoolingRequest,
@@ -171,6 +174,7 @@ class PoolingServingBase:
 
         ctx.final_res_batch = [res for res in final_res_batch if res is not None]
 
+    @abstractmethod
     async def _build_response(
         self,
         ctx: PoolingServeContext,
@@ -338,7 +342,7 @@ class PoolingServingBase:
         )
 
 
-class PoolingServing(PoolingServingBase):
+class PoolingServing(PoolingServingBase, ABC):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -348,6 +352,7 @@ class PoolingServing(PoolingServingBase):
             chat_template_config=self.chat_template_config,
         )
 
+    @abstractmethod
     def init_io_processor(
         self,
         vllm_config: VllmConfig,

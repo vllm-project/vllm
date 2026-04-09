@@ -5,14 +5,19 @@ from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
+from vllm.entrypoints.pooling.pooling.protocol import (
+    IOProcessorRequest,
+    IOProcessorResponse,
+)
 from vllm.entrypoints.pooling.typing import (
     OfflineInputsContext,
     OfflineOutputsContext,
+    PoolingServeContext,
 )
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.plugins.io_processors import get_io_processor
-from vllm.renderers.inputs.preprocess import prompt_to_seq
+from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
 logger = init_logger(__name__)
 
@@ -31,6 +36,69 @@ class PluginIOProcessor(PoolingIOProcessor):
 
         assert io_processor is not None
         self.io_processor = io_processor
+
+    #######################################
+    # online APIs
+
+    def pre_process_online(self, ctx: PoolingServeContext):
+        assert isinstance(ctx.request, IOProcessorRequest)
+
+        validated_prompt = self.io_processor.parse_data(ctx.request.data)
+
+        raw_prompts = self.io_processor.pre_process(
+            prompt=validated_prompt, request_id=ctx.request_id
+        )
+
+        parsed_prompts = [
+            (
+                prompt
+                if isinstance(prompt, bytes)
+                else parse_model_prompt(self.model_config, prompt)
+            )
+            for prompt in prompt_to_seq(raw_prompts)
+        ]
+
+        tok_params = ctx.request.build_tok_params(self.model_config)
+
+        ctx.engine_inputs = self.renderer.render_cmpl(
+            parsed_prompts,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(ctx.request, k, None)) is not None
+            },
+        )
+
+        pooling_params = self.io_processor.merge_pooling_params()
+        if pooling_params.task is None:
+            pooling_params.task = "plugin"
+        ctx.pooling_params = pooling_params
+
+    def post_process_online(
+        self,
+        ctx: PoolingServeContext,
+    ):
+        output = self.io_processor.post_process(
+            ctx.final_res_batch,
+            request_id=ctx.request_id,
+        )
+
+        if callable(
+            output_to_response := getattr(self.io_processor, "output_to_response", None)
+        ):
+            logger.warning_once(
+                "`IOProcessor.output_to_response` is deprecated. To ensure "
+                "consistency between offline and online APIs, "
+                "`IOProcessorResponse` will become a transparent wrapper "
+                "around output data from v0.19 onwards.",
+            )
+
+            if hasattr(output, "request_id") and output.request_id is None:
+                output.request_id = request_id  # type: ignore
+
+            ctx.response = output_to_response(output)  # type: ignore
+        ctx.response = IOProcessorResponse(request_id=ctx.request_id, data=output)
 
     #######################################
     # offline APIs

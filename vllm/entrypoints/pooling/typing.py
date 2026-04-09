@@ -86,6 +86,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     ## for bi-encoder & late-interaction
     n_queries: int | None = None
 
+    ## for IOProcessorResponse
+    response: Any | None = None
+
 
 @dataclass
 class OfflineInputsContext:

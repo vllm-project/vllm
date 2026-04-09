@@ -48,7 +48,7 @@ class ServingEmbedding(PoolingServing):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.JSONResponseCLS = get_json_response_cls()
+        self.json_response_cls = get_json_response_cls()
 
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
@@ -141,7 +141,7 @@ class ServingEmbedding(PoolingServing):
             data=items,
             usage=usage,
         )
-        return self.JSONResponseCLS(content=response.model_dump())
+        return self.json_response_cls(content=response.model_dump())
 
     def _openai_bytes_response(
         self,
@@ -210,4 +210,4 @@ class ServingEmbedding(PoolingServing):
                 ),
             ),
         )
-        return self.JSONResponseCLS(content=response.model_dump(exclude_none=True))
+        return self.json_response_cls(content=response.model_dump(exclude_none=True))
