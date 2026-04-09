@@ -1069,9 +1069,22 @@ class FusedMoE(CustomOp):
                 dim1 = loaded_weight.shape[1]
                 param.data[:, :dim1].copy_(loaded_weight)
             else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                if loaded_weight.dtype != torch.uint8:
+                    raise ValueError(
+                        f"mxfp4 quantization requires pre-quantized uint8 weights, "
+                        f"but got {loaded_weight.dtype} for {weight_name}. "
+                        "On-the-fly quantization for MXFP4 is not supported."
+                    )
+
+                # Check if loaded_weight is 2D (per-expert) or 3D (all experts combined)
+                if loaded_weight.ndim == 2:
+                    dim1 = loaded_weight.shape[0]
+                    dim2 = loaded_weight.shape[1]
+                    param.data[expert_id, :dim1, :dim2].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[1]
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
         quant_method_name = self.quant_method.__class__.__name__
