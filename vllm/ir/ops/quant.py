@@ -25,14 +25,30 @@ def quant_fp8(x: Tensor, scale: Tensor) -> Tensor:
     return out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
 
 
-@register_op
-def static_quant_fp8(x: Tensor, scale: Tensor) -> Tensor:
-    return quant_fp8(x, scale)
+def _pad_token_dim(out: Tensor, num_token_padding: int | None) -> Tensor:
+    # This currently generates an extra Triton kernel in compilation.
+    # Fortunately, we don't use padding if compiling.
+    # TODO(luka): benchmark torch._scaled_mm to hopefully remove padding
+    #  in general.
+    if num_token_padding is not None:
+        padding = max(num_token_padding - out.size(0), 0)
+        if padding > 0:
+            out = F.pad(out, (0, 0, 0, padding), "constant", 0.0)
+    return out
 
 
 @register_op
-def static_group_quant_fp8(x: Tensor, scale: Tensor) -> Tensor:
-    return quant_fp8(x, scale)
+def static_quant_fp8(
+    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+) -> Tensor:
+    return _pad_token_dim(quant_fp8(x, scale), num_token_padding)
+
+
+@register_op
+def static_group_quant_fp8(
+    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+) -> Tensor:
+    return _pad_token_dim(quant_fp8(x, scale), num_token_padding)
 
 
 @register_op
@@ -40,6 +56,7 @@ def dynamic_quant_fp8(
     x: Tensor,
     per_token: bool,
     scale_ub: Tensor | None = None,
+    num_token_padding: int | None = None,
 ) -> tuple[Tensor, Tensor]:
     if per_token:
         x_max, _ = x.abs().max(dim=-1)
@@ -49,7 +66,7 @@ def dynamic_quant_fp8(
     else:
         x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
     scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
-    return quant_fp8(x, scale), scale
+    return _pad_token_dim(quant_fp8(x, scale), num_token_padding), scale
 
 
 @register_op

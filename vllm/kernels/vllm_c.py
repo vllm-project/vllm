@@ -66,6 +66,24 @@ def rms_norm(
     return output
 
 
+_vllm_c_static_quant_fp8_args = lambda x, scale, num_token_padding=None: x.ndim == 2
+"""vllm_c static_quant_fp8 requires a 2D input tensor."""
+
+
+@ir.ops.static_quant_fp8.register_impl(
+    "vllm_c", supports_args=_vllm_c_static_quant_fp8_args, supported=CUDA_ALIKE
+)
+def static_quant_fp8(
+    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+) -> Tensor:
+    shape = x.shape
+    if num_token_padding:
+        shape = (max(num_token_padding, x.shape[0]),) + x.shape[1:]
+    output = torch.empty(shape, device=x.device, dtype=_FP8_DTYPE)
+    torch.ops._C.static_scaled_fp8_quant(output, x, scale, None)
+    return output
+
+
 _vllm_c_group_quant_args = (
     lambda x, group_shape, column_major, use_ue8m0, scale_alignment=1: (
         x.is_contiguous() and x.shape[-1] % group_shape[-1] == 0

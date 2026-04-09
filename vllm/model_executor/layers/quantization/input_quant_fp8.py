@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm import ir
@@ -188,17 +187,13 @@ class QuantFP8(CustomOp):
                 x,
                 per_token=self.use_per_token_if_dynamic,
                 scale_ub=scale_ub,
+                num_token_padding=self.num_token_padding,
             )
         else:
             scale = prep_scale_for_group_broadcast(scale, x, self.group_shape)
-            out = ir.ops.static_quant_fp8(x, scale)
-
-        # This currently generates an extra Triton kernel in compilation.
-        # Fortunately, we don't use padding if compiling.
-        # TODO(luka): benchmark torch._scaled_mm to hopefully remove padding
-        #  in general.
-        if self.num_token_padding is not None:
-            padding = max(self.num_token_padding - out.size(0), 0)
-            out = F.pad(out, (0, 0, 0, padding), "constant", 0.0)
+            if self.is_group_quant:
+                out = ir.ops.static_group_quant_fp8(x, scale, self.num_token_padding)
+            else:
+                out = ir.ops.static_quant_fp8(x, scale, self.num_token_padding)
 
         return out, scale

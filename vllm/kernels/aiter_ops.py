@@ -97,11 +97,13 @@ direct_register_aiter_op(
     fake_impl=_static_per_tensor_quant_fp8_fake,
 )
 
-_static_quant_fp8_16bit_per_tensor = (
-    lambda x, scale: scale.numel() == 1 and x.dtype in (torch.float16, torch.bfloat16)
+_static_quant_fp8_16bit_per_tensor = lambda x, scale, num_token_padding=None: (
+    scale.numel() == 1
+    and x.dtype in (torch.float16, torch.bfloat16)
+    and num_token_padding is None
 )
-"""AITER static_quant_fp8 requires a scalar (per-tensor) scale and 16-bit activations.
-Per-token scales fall through to native."""
+"""AITER static_quant_fp8 requires a scalar (per-tensor) scale, 16-bit activations,
+and no token padding. Per-token scales and padding fall through to native."""
 
 
 @ir.ops.static_quant_fp8.register_impl(
@@ -109,9 +111,12 @@ Per-token scales fall through to native."""
     supports_args=_static_quant_fp8_16bit_per_tensor,
     supported=AITER_SUPPORTED,
 )
-def static_quant_fp8(x: Tensor, scale: Tensor) -> Tensor:
+def static_quant_fp8(
+    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+) -> Tensor:
     assert scale.numel() == 1  # Only per tensor
     assert x.dtype in (torch.float16, torch.bfloat16)
+    assert num_token_padding is None
     return torch.ops.vllm_aiter.static_per_tensor_quant_fp8(x, scale)
 
 
@@ -169,11 +174,14 @@ direct_register_aiter_op(
 
 
 _dynamic_quant_fp8_16bit_no_ub = (
-    lambda x, per_token, scale_ub=None: scale_ub is None
-    and x.dtype in (torch.float16, torch.bfloat16)
+    lambda x, per_token, scale_ub=None, num_token_padding=None: (
+        scale_ub is None
+        and num_token_padding is None
+        and x.dtype in (torch.float16, torch.bfloat16)
+    )
 )
-"""AITER dynamic_quant_fp8 requires float16/bfloat16, contiguous input,
- and no scale upper bound."""
+"""AITER dynamic_quant_fp8 requires float16/bfloat16, no scale upper bound,
+and no token padding."""
 
 
 @ir.ops.dynamic_quant_fp8.register_impl(
@@ -185,8 +193,10 @@ def dynamic_quant_fp8(
     x: Tensor,
     per_token: bool,
     scale_ub: Tensor | None = None,
+    num_token_padding: int | None = None,
 ) -> tuple[Tensor, Tensor]:
     assert scale_ub is None
+    assert num_token_padding is None
     assert x.dtype in (torch.float16, torch.bfloat16)
     if per_token:
         return torch.ops.vllm_aiter.dynamic_per_token_quant_fp8(x)

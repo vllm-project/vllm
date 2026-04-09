@@ -141,7 +141,6 @@ _triton_group_quant_args = (
     lambda x, group_shape, column_major, use_ue8m0, scale_alignment=1: (
         x.stride(-1) == 1  # last dimension must be contiguous
         and x.shape[-1] % group_shape[-1] == 0
-        and (column_major or scale_alignment == 1)  # TMA alignment only valid with colmajor
     )
 )
 
