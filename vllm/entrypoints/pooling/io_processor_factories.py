@@ -44,13 +44,13 @@ def init_pooling_io_processors(
         vllm_config,
         model_config.io_processor_plugin,
     ):
-        from .pooling.io_processor import PluginWithIOProcessor
+        from .pooling.io_processor import PluginWithIOProcessorPlugins
 
-        processors["plugin"] = PluginWithIOProcessor
+        processors["plugin"] = PluginWithIOProcessorPlugins
     elif "plugin" in supported_tasks:
-        from .pooling.io_processor import PluginWithoutIOProcessor
+        from .pooling.io_processor import PluginWithoutIOProcessorPlugins
 
-        processors["plugin"] = PluginWithoutIOProcessor
+        processors["plugin"] = PluginWithoutIOProcessorPlugins
 
     if enable_scoring_api(supported_tasks, model_config):
         score_type = model_config.score_type

@@ -1098,6 +1098,7 @@ class LLM:
 
         engine_inputs = io_processor.pre_process_offline(ctx)
         n_inputs = len(engine_inputs)
+        assert ctx.pooling_params is not None
 
         params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
 

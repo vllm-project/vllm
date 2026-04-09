@@ -16,11 +16,11 @@ from .protocol import IOProcessorRequest, IOProcessorResponse
 logger = init_logger(__name__)
 
 
-class PluginWithoutIOProcessor(PoolingIOProcessor):
+class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
     name = "plugin"
 
 
-class PluginWithIOProcessor(PoolingIOProcessor):
+class PluginWithIOProcessorPlugins(PoolingIOProcessor):
     """IO Processor plugins are a feature that allows pre- and post-processing
     of the model input and output for pooling models."""
 
