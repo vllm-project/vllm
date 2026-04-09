@@ -17,9 +17,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     rocm_aiter_grouped_topk,
 )
-from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
-    xpu_fused_grouped_topk,
-)
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -252,7 +249,7 @@ class GroupedTopk(CustomOp):
         gating_output: torch.Tensor,
         e_score_correction_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return xpu_fused_grouped_topk(
+        return torch.ops.vllm.xpu_ops_fused_grouped_topk(
             hidden_states,
             gating_output,
             self.topk,
@@ -262,7 +259,6 @@ class GroupedTopk(CustomOp):
             self.scoring_func,
             self.routed_scaling_factor,
             e_score_correction_bias,
-            self.num_fused_shared_experts,
         )
 
 

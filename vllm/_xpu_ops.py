@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING,Optional
 
 import torch
 from vllm_xpu_kernels.flash_attn_interface import flash_attn_varlen_func
-from vllm_xpu_kernels.fused_moe_interface import *
+
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -74,33 +74,6 @@ if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
         N = q_weight.size(1)
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
-if hasattr(torch.ops._moe_C, "fused_grouped_topk"):
-
-    @register_fake("_moe_C::fused_grouped_topk")
-    def _fused_grouped_topk_fake(
-        hidden_states: torch.Tensor,
-        gating_output: torch.Tensor,
-        topk: int,
-        renormalize: bool,
-        num_expert_group: int,
-        topk_group: int,
-        scoring_func: str,
-        routed_scaling_factor: float,
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        num_tokens = hidden_states.shape[0]
-        topk_weights = torch.empty(
-            (num_tokens, topk),
-            device=hidden_states.device,
-            dtype=torch.float32,
-        )
-        topk_ids = torch.empty(
-            (num_tokens, topk),
-            device=hidden_states.device,
-            dtype=torch.int32,
-        )
-        return topk_weights, topk_ids
-
 
 def _xpu_ops_deepseek_scaling_rope_impl(
     positions: torch.Tensor,
@@ -127,6 +100,53 @@ def _xpu_ops_deepseek_scaling_rope_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return query, key
 
+def _xpu_ops_fused_grouped_topk_impl(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str,
+    routed_scaling_factor: float,
+    e_score_correction_bias: Optional[torch.Tensor] = None,       
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert hidden_states.size(0) == gating_output.size(0), (
+        "Number of tokens mismatch")
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output
+    else:   
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+    return torch.ops._moe_C.fused_grouped_topk(hidden_states, scores, topk,
+                                  renormalize, num_expert_group, topk_group,
+                                  scoring_func, routed_scaling_factor,
+                                  e_score_correction_bias)
+
+def _xpu_ops_fused_grouped_topk_fake(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str,
+    routed_scaling_factor: float,
+    e_score_correction_bias: Optional[torch.Tensor] = None,       
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = hidden_states.shape[0]
+    topk_weights = torch.empty(
+        (num_tokens, topk),
+        device=hidden_states.device,
+        dtype=torch.float32,
+    )
+    topk_ids = torch.empty(
+        (num_tokens, topk),
+        device=hidden_states.device,
+        dtype=torch.int32,
+    )
+    return topk_weights, topk_ids
 
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
@@ -529,7 +549,13 @@ class xpu_ops:
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
-
+            direct_register_custom_op(
+                op_name="xpu_ops_fused_grouped_topk",
+                op_func=_xpu_ops_fused_grouped_topk_impl,
+                mutates_args=[],
+                fake_impl=_xpu_ops_fused_grouped_topk_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
             _OPS_REGISTERED = True
 
 
