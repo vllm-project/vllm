@@ -744,32 +744,32 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                if self.need_mamba_chunk_invariant_split:
-                    num_new_tokens = self._mamba_chunk_invariant_split(
-                        request,
-                        num_new_tokens,
-                        num_computed_tokens,
-                    )
-                    if num_new_tokens == 0:
-                        # Budget too small for chunk-aligned prefill.
-                        # Unlike _mamba_block_aligned_split which breaks
-                        # (all subsequent requests would also fail), here
-                        # we continue because a later request may still
-                        # be schedulable with the same budget if its
-                        # remaining prompt is short enough to finish.
-                        request_queue.pop_request()
-                        step_skipped_waiting.prepend_request(request)
-                        continue
+                    if self.need_mamba_chunk_invariant_split:
+                        num_new_tokens = self._mamba_chunk_invariant_split(
+                            request,
+                            num_new_tokens,
+                            num_computed_tokens,
+                        )
+                        if num_new_tokens == 0:
+                            # Budget too small for chunk-aligned prefill.
+                            # Unlike _mamba_block_aligned_split which breaks
+                            # (all subsequent requests would also fail), here
+                            # we continue because a later request may still
+                            # be schedulable with the same budget if its
+                            # remaining prompt is short enough to finish.
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
 
-                if self.need_mamba_block_aligned_split:
-                    num_new_tokens = self._mamba_block_aligned_split(
-                        request,
-                        num_new_tokens,
-                        num_new_local_computed_tokens,
-                        num_external_computed_tokens,
-                    )
-                    if num_new_tokens == 0:
-                        break
+                    if self.need_mamba_block_aligned_split:
+                        num_new_tokens = self._mamba_block_aligned_split(
+                            request,
+                            num_new_tokens,
+                            num_new_local_computed_tokens,
+                            num_external_computed_tokens,
+                        )
+                        if num_new_tokens == 0:
+                            break
 
                 # Handles an edge case when P/D Disaggregation
                 # is used with Spec Decoding where an
