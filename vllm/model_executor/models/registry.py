@@ -106,6 +106,10 @@ _TEXT_GENERATION_MODELS = {
     "FalconForCausalLM": ("falcon", "FalconForCausalLM"),
     "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "FalconH1ForCausalLM": ("falcon_h1", "FalconH1ForCausalLM"),
+    "FireRedAudioForConditionalGeneration": (
+        "firered_audio",
+        "FireRedAudioForConditionalGeneration",
+    ),
     "FlexOlmoForCausalLM": ("flex_olmo", "FlexOlmoForCausalLM"),
     "GemmaForCausalLM": ("gemma", "GemmaForCausalLM"),
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
