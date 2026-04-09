@@ -144,9 +144,6 @@ class SiluAndMul(CustomOp):
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         return ir.ops.silu_and_mul(x)
 
-    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
-        return ir.ops.silu_and_mul(x)
-
 
 # --8<-- [start:mul_and_silu]
 @CustomOp.register("mul_and_silu")

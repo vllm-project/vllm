@@ -7,9 +7,7 @@ from ..op import register_op
 
 
 @register_op
-def silu_and_mul(
-    x: Tensor
-) -> Tensor:
+def silu_and_mul(x: Tensor) -> Tensor:
     """Activation function for SwiGLU"""
     d = x.shape[-1] // 2
     return F.silu(x[..., :d]) * x[..., d:]
