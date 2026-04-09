@@ -269,14 +269,23 @@ class Qwen3CoderToolParser(ToolParser):
                 )
             return param_value
 
-    def _parse_xml_function_call(self, function_call_str: str) -> ToolCall | None:
+    def _parse_xml_function_call(
+        self,
+        function_call_str: str,
+        tools: list[Tool] | None = None,
+    ) -> ToolCall | None:
         # Extract function name
         end_index = function_call_str.find(">")
         # If there's no ">" character, this is not a valid xml function call
         if end_index == -1:
             return None
         function_name = function_call_str[:end_index]
-        param_config = find_tool_properties(self.tools, function_name)
+        # Prefer per-request tools (passed in from extract_tool_calls) over
+        # parser-level self.tools so type-aware conversion works when the
+        # parser instance is reused across requests with different schemas.
+        param_config = find_tool_properties(
+            tools if tools else self.tools, function_name
+        )
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         for match_text in self.tool_call_parameter_regex.findall(parameters):
@@ -337,8 +346,11 @@ class Qwen3CoderToolParser(ToolParser):
                     tools_called=False, tool_calls=[], content=model_output
                 )
 
+            request_tools = (
+                request.tools if request is not None and request.tools else None
+            )
             tool_calls = [
-                self._parse_xml_function_call(function_call_str)
+                self._parse_xml_function_call(function_call_str, request_tools)
                 for function_call_str in function_calls
             ]
             # Populate prev_tool_call_arr for serving layer to set finish_reason
@@ -629,8 +641,18 @@ class Qwen3CoderToolParser(ToolParser):
                 self.current_param_name = current_param_name
                 self.accumulated_params[current_param_name] = param_value
 
+                # Prefer the per-request tools (set on the streaming
+                # request) over the parser-level self.tools so that
+                # type-aware conversion works when the parser instance
+                # is reused across requests with different tool schemas.
+                streaming_tools = (
+                    self.streaming_request.tools
+                    if self.streaming_request is not None
+                    and self.streaming_request.tools
+                    else self.tools
+                )
                 param_config = find_tool_properties(
-                    self.tools, self.current_function_name or ""
+                    streaming_tools, self.current_function_name or ""
                 )
 
                 converted_value = self._convert_param_value(
@@ -689,6 +711,10 @@ class Qwen3CoderToolParser(ToolParser):
                     try:
                         parsed_tool = self._parse_xml_function_call(
                             func_content,
+                            self.streaming_request.tools
+                            if self.streaming_request is not None
+                            and self.streaming_request.tools
+                            else None,
                         )
                         if parsed_tool and self.current_tool_index < len(
                             self.prev_tool_call_arr
