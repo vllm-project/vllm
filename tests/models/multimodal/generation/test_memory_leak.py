@@ -38,7 +38,7 @@ SAMPLING_PARAMS = SamplingParams(
 
 def _make_messages(image_url: str) -> list[ChatCompletionMessageParam]:
     # Avoid obscuring memory leaks because of prefix caching
-    random_text = "".join(random.sample(string.ascii_uppercase, RANDOM_PREFIX_LEN))
+    random_text = "".join(random.choices(string.ascii_uppercase, k=RANDOM_PREFIX_LEN))
 
     return [
         {
