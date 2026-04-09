@@ -245,7 +245,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         sort_key: str,
         row_limit: int | None = None,
     ) -> str:
-        if row_limit is None: # use profiler default row limit of 100
+        if row_limit is None:  # use profiler default row limit of 100
             return self.profiler.key_averages().table(sort_by=sort_key)
         return self.profiler.key_averages().table(
             sort_by=sort_key,
@@ -281,14 +281,14 @@ class TorchProfilerWrapper(WorkerProfiler):
                 print(table)
 
         if self.dump_cpu_time_total:
-            table = self._build_profiler_table(sort_key="self_cpu_time_total", row_limit=50)
+            table = self._build_profiler_table(
+                sort_key="self_cpu_time_total", row_limit=50
+            )
             self._write_profiler_table(rank, table)
 
             # only print profiler results on rank 0
             if rank == 0:
                 print(table)
-
-
 
     @override
     def _profiler_step(self) -> bool:
