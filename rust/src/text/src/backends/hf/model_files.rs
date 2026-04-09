@@ -44,14 +44,31 @@ pub struct ResolvedModelFiles {
 }
 
 impl ResolvedModelFiles {
-    /// Resolve tokenizer/config files from the local HF cache first, then fall back to downloading
-    /// the known metadata files from the Hub.
+    /// Resolve tokenizer/config files from a local model directory first when `model_id`
+    /// points to one, otherwise consult the local HF cache and finally the Hub.
     pub async fn new(model_id: &str) -> Result<Self> {
+        if Path::new(model_id).is_dir() {
+            return resolve_local_model_files(Path::new(model_id));
+        }
         if let Some(files) = resolve_cached_model_files(model_id)? {
             return Ok(files);
         }
         resolve_remote_model_files(model_id).await
     }
+}
+
+fn resolve_local_model_files(model_dir: &Path) -> Result<ResolvedModelFiles> {
+    let tokenizer_config_path = local_file_if_exists(model_dir, "tokenizer_config.json");
+    let tokenizer_config = load_tokenizer_config(tokenizer_config_path.as_deref())?;
+    let tokenizer = resolve_local_tokenizer_source(model_dir, &tokenizer_config)?;
+
+    Ok(ResolvedModelFiles {
+        tokenizer,
+        tokenizer_config_path,
+        generation_config_path: local_file_if_exists(model_dir, "generation_config.json"),
+        chat_template_path: discover_chat_template_in_dir(model_dir),
+        config_path: local_file_if_exists(model_dir, "config.json"),
+    })
 }
 
 async fn resolve_remote_model_files(model_id: &str) -> Result<ResolvedModelFiles> {
@@ -195,6 +212,33 @@ fn resolve_cached_tokenizer_source(
     )))
 }
 
+fn resolve_local_tokenizer_source(
+    model_dir: &Path,
+    tokenizer_config: &HfTokenizerConfig,
+) -> Result<TokenizerSource> {
+    let tekken_path = local_file_if_exists(model_dir, "tekken.json");
+    if let Some(tekken_path) = tekken_path {
+        return Ok(TokenizerSource::Tekken(tekken_path));
+    }
+
+    let tokenizer_path = local_file_if_exists(model_dir, "tokenizer.json")
+        .or_else(|| local_file_if_exists(model_dir, "tiktoken.model"))
+        .or_else(|| discover_tiktoken_in_dir(model_dir))
+        .ok_or_else(|| {
+            Error::Tokenizer(format!(
+                "local model directory '{}' does not contain a supported tokenizer file \
+                 (tokenizer.json, tiktoken.model, or *.tiktoken)",
+                model_dir.display()
+            ))
+        })?;
+
+    Ok(resolve_tokenizer_source(
+        tokenizer_path,
+        tokenizer_config.tokenizer_class.as_deref(),
+        None,
+    ))
+}
+
 /// Choose the tokenizer.
 ///
 /// Selection order:
@@ -261,6 +305,11 @@ fn build_api() -> anyhow::Result<Api> {
     Ok(builder.build()?)
 }
 
+fn local_file_if_exists(dir: &Path, filename: &str) -> Option<PathBuf> {
+    let path = dir.join(filename);
+    path.is_file().then_some(path)
+}
+
 /// Find a tiktoken file name among repo siblings, preferring `tiktoken.model`.
 fn find_tiktoken_sibling<'a>(siblings: &std::collections::BTreeSet<&'a str>) -> Option<&'a str> {
     if siblings.contains("tiktoken.model") {
@@ -321,4 +370,41 @@ fn discover_chat_template_in_dir(dir: &std::path::Path) -> Option<PathBuf> {
                 .and_then(|name| name.to_str())
                 .is_some_and(|name| name.ends_with(".jinja"))
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{ResolvedModelFiles, TokenizerSource};
+
+    #[tokio::test]
+    async fn resolved_model_files_prefers_absolute_local_model_dir() {
+        let dir = tempdir().expect("create temp dir");
+        fs::write(dir.path().join("tokenizer.json"), "{}").expect("write tokenizer");
+        fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{"tokenizer_class":"PreTrainedTokenizerFast"}"#,
+        )
+        .expect("write tokenizer config");
+        fs::write(dir.path().join("config.json"), "{}").expect("write config");
+
+        let files = ResolvedModelFiles::new(dir.path().to_str().expect("utf8 path"))
+            .await
+            .expect("resolve local model files");
+
+        match files.tokenizer {
+            TokenizerSource::HuggingFace(path) => {
+                assert_eq!(path, dir.path().join("tokenizer.json"));
+            }
+            other => panic!("expected HuggingFace tokenizer, got {other:?}"),
+        }
+        assert_eq!(files.config_path, Some(dir.path().join("config.json")));
+        assert_eq!(
+            files.tokenizer_config_path,
+            Some(dir.path().join("tokenizer_config.json"))
+        );
+    }
 }

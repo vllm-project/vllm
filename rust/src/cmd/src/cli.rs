@@ -78,7 +78,7 @@ pub enum Command {
 #[educe(Debug)]
 pub struct SharedRuntimeArgs {
     #[serde(rename = "model_tag")]
-    /// Hugging Face model identifier used both for backend loading and public model ID.
+    /// Model identifier or local model directory used for backend loading and public model ID.
     pub model: String,
 
     /// Maximum time to wait for the expected engines to register on the frontend transport.
