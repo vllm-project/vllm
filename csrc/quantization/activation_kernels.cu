@@ -189,10 +189,7 @@ __device__ __forceinline__ void cp_async_wait<0>() {
 }
 
 __device__ __forceinline__ float clip(float v, float mmin, float mmax) {
-#if __CUDACC_VER_MAJOR__ >= 11 && __CUDA_ARCH__ >= 800
   return fminf(mmax, fmaxf(v, mmin));
-#else
-#endif
 }
 
 __device__ __forceinline__ __nv_bfloat16 clip(__nv_bfloat16 v,

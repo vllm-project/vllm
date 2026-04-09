@@ -6,11 +6,9 @@ from collections.abc import Sequence
 from vllm.config import ModelConfig, PoolerConfig, VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.protocol import EmbedRequestMixin
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.outputs import PoolingRequestOutput
-from vllm.plugins.io_processors.interface import (
-    IOProcessor,
-)
+from vllm.plugins.io_processors.interface import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens

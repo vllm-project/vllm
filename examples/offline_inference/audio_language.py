@@ -9,7 +9,6 @@ on HuggingFace model repository.
 """
 
 import os
-from dataclasses import asdict
 from typing import Any, NamedTuple
 
 from huggingface_hub import snapshot_download
@@ -73,8 +72,7 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
 # CohereASR
 def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
     assert audio_count == 1, "CohereASR only support single audio input per prompt"
-    # TODO (ekagra): add HF ckpt after asr release
-    model_name = "/host/engines/vllm/audio/2b-release"
+    model_name = "CohereLabs/cohere-transcribe-03-2026"
 
     prompt = (
         "<|startofcontext|><|startoftranscript|>"
@@ -633,7 +631,7 @@ def main(args):
         req_data.engine_args.limit_mm_per_prompt or {}
     )
 
-    engine_args = asdict(req_data.engine_args) | {"seed": args.seed}
+    engine_args = vars(req_data.engine_args) | {"seed": args.seed}
     if args.tensor_parallel_size is not None:
         engine_args["tensor_parallel_size"] = args.tensor_parallel_size
     llm = LLM(**engine_args)

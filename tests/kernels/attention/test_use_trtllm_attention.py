@@ -55,37 +55,37 @@ def _clear_supports_cache():
 # supports_trtllm_attention
 
 
-@patch("vllm.utils.flashinfer.vllm_is_batch_invariant", return_value=True)
-def test_supports_batch_invariant_disables(_mock):
+@patch("vllm.envs.VLLM_BATCH_INVARIANT", True)
+def test_supports_batch_invariant_disables():
     assert supports_trtllm_attention() is False
 
 
-@patch("vllm.utils.flashinfer.vllm_is_batch_invariant", return_value=False)
+@patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
-    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
+    "vllm.utils.flashinfer.current_platform.is_device_capability",
     return_value=True,
 )
 @patch("vllm.utils.flashinfer.has_nvidia_artifactory", return_value=True)
-def test_supports_sm100_with_artifactory(_art, _cap, _bi):
+def test_supports_sm100_with_artifactory(_art, _cap):
     assert supports_trtllm_attention() is True
 
 
-@patch("vllm.utils.flashinfer.vllm_is_batch_invariant", return_value=False)
+@patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
-    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
+    "vllm.utils.flashinfer.current_platform.is_device_capability",
     return_value=False,
 )
-def test_supports_non_sm100_platform(_cap, _bi):
+def test_supports_non_sm100_platform(_cap):
     assert supports_trtllm_attention() is False
 
 
-@patch("vllm.utils.flashinfer.vllm_is_batch_invariant", return_value=False)
+@patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
-    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
+    "vllm.utils.flashinfer.current_platform.is_device_capability",
     return_value=True,
 )
 @patch("vllm.utils.flashinfer.has_nvidia_artifactory", return_value=False)
-def test_supports_sm100_without_artifactory(_art, _cap, _bi):
+def test_supports_sm100_without_artifactory(_art, _cap):
     assert supports_trtllm_attention() is False
 
 

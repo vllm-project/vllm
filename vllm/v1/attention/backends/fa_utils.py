@@ -3,8 +3,8 @@
 
 from typing import Any
 
+import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -114,7 +114,7 @@ def get_flash_attn_version(
 
         # FA4 currently uses batch-shape-dependent scheduling
         # heuristics on SM100+, which breaks batch invariance.
-        if vllm_is_batch_invariant() and fa_version == 4:
+        if envs.VLLM_BATCH_INVARIANT and fa_version == 4:
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
                 "defaulting to FA version 2.",
@@ -152,6 +152,17 @@ def get_flash_attn_version(
         return fa_version
     except (ImportError, AssertionError):
         return None
+
+
+def is_fa_version_supported(fa_version: int) -> bool:
+    try:
+        from vllm.vllm_flash_attn.flash_attn_interface import (
+            is_fa_version_supported as _is_fa_version_supported,
+        )
+
+        return _is_fa_version_supported(fa_version)
+    except ImportError:
+        return False
 
 
 def flash_attn_supports_fp8() -> bool:
