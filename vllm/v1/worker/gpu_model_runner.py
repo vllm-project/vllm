@@ -2326,9 +2326,7 @@ class GPUModelRunner(
                 req_doc_ranges[req_idx] = image_doc_ranges
 
             # Set mm_prefix_range for all attention metadata
-            self._set_mm_prefix_range_for_metadata(attn_metadata,
-                                                     req_doc_ranges)
-                        
+            self._set_mm_prefix_range_for_metadata(attn_metadata, req_doc_ranges)
 
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
@@ -6473,7 +6471,7 @@ class GPUModelRunner(
         req_doc_ranges: dict[int, list[tuple[int, int]]],
     ) -> None:
         """Set mm_prefix_range for all attention metadata objects.
-        
+
         This method handles both list and non-list attention metadata,
         computing mm_prefix_range_tensor once and sharing it across all
         metadata objects to avoid redundant host-to-device transfers.
@@ -6494,14 +6492,16 @@ class GPUModelRunner(
         shared_tensor = None
         for metadata in metadata_list:
             metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
-            
+
             # Only compute tensor for TritonAttentionMetadata
             if isinstance(metadata, TritonAttentionMetadata):
                 if shared_tensor is None:
-                    shared_tensor = TritonAttentionMetadata.compute_mm_prefix_range_tensor(
-                        req_doc_ranges,
-                        metadata.seq_lens.shape[0],  # type: ignore[attr-defined]
-                        metadata.seq_lens.device,  # type: ignore[attr-defined]
+                    shared_tensor = (
+                        TritonAttentionMetadata.compute_mm_prefix_range_tensor(
+                            req_doc_ranges,
+                            metadata.seq_lens.shape[0],  # type: ignore[attr-defined]
+                            metadata.seq_lens.device,  # type: ignore[attr-defined]
+                        )
                     )
                 metadata.mm_prefix_range_tensor = shared_tensor
 

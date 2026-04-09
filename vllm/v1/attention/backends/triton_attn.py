@@ -118,9 +118,9 @@ class TritonAttentionMetadata:
             padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
             padded.append(padded_r)
         # Create tensor with efficient H2D transfer
-        return torch.tensor(
-            padded, dtype=torch.int32, device=device
-        ).view(num_seqs, max_ranges, 2)
+        return torch.tensor(padded, dtype=torch.int32, device=device).view(
+            num_seqs, max_ranges, 2
+        )
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
