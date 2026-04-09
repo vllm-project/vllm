@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import gc
+import random
+import string
 import sys
 import weakref
 
@@ -16,6 +18,7 @@ from vllm.platforms import current_platform
 from vllm.utils.mem_utils import KiB_bytes, MiB_bytes, format_mib
 
 MODEL_NAME = "Qwen/Qwen3-VL-4B-Instruct"
+RANDOM_PREFIX_LEN = 100
 TEST_IMAGE_NAMES = [
     "2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg",
     "Grayscale_8bits_palette_sample_image.png",
@@ -34,10 +37,17 @@ SAMPLING_PARAMS = SamplingParams(
 
 
 def _make_messages(image_url: str) -> list[ChatCompletionMessageParam]:
+    # Avoid obscuring memory leaks because of prefix caching
+    random_text = "".join(random.sample(string.ascii_uppercase, RANDOM_PREFIX_LEN))
+
     return [
         {
             "role": "user",
             "content": [
+                {
+                    "type": "text",
+                    "text": f"Ignore this random string: {random_text}",
+                },
                 {"type": "image_url", "image_url": {"url": image_url}},
                 {
                     "type": "text",
