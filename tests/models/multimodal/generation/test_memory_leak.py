@@ -63,10 +63,7 @@ def _ru_maxrss_bytes() -> int | None:
     except ImportError:
         return None
 
-    rss = sum(
-        resource.getrusage(who).ru_maxrss
-        for who in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)
-    )
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     if rss <= 0:
         return 0
 
@@ -88,7 +85,9 @@ def _format_mib(num_bytes: int | None) -> str:
 
 
 @pytest.fixture(scope="function")
-def llm():
+def llm(monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm_kwargs = dict(
