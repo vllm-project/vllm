@@ -1046,6 +1046,13 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.accelerator.synchronize()
 
+    def _get_or_create_async_output_copy_stream(self) -> torch.cuda.Stream:
+        stream = self.async_output_copy_stream
+        if stream is None:
+            stream = torch.cuda.Stream()
+            self.async_output_copy_stream = stream
+        return stream
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -3152,21 +3159,21 @@ class GPUModelRunner(
             model_runner_output.pooler_output = [None] * num_reqs
             return model_runner_output
 
-        if self.use_async_scheduling:
-            return AsyncGPUPoolingModelRunnerOutput(
-                model_runner_output=model_runner_output,
+        if not current_platform.is_cuda_alike():
+            # cpu/xpu runners cannot use the CUDA stream/event-based wrapper.
+            model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
                 raw_pooler_output=raw_pooler_output,
                 finished_mask=finished_mask,
-                async_output_copy_stream=self.async_output_copy_stream,
             )
+            self._sync_device()
+            return model_runner_output
 
-        model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
+        return AsyncGPUPoolingModelRunnerOutput(
+            model_runner_output=model_runner_output,
             raw_pooler_output=raw_pooler_output,
             finished_mask=finished_mask,
+            async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
         )
-        self._sync_device()
-
-        return model_runner_output
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
         # Pad tokens to multiple of tensor_parallel_size when
@@ -4333,7 +4340,7 @@ class GPUModelRunner(
                 sampled_token_ids=sampler_output.sampled_token_ids,
                 logprobs_tensors=sampler_output.logprobs_tensors,
                 invalid_req_indices=invalid_req_indices,
-                async_output_copy_stream=self.async_output_copy_stream,
+                async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
             )
         with record_function_or_nullcontext(
@@ -4857,6 +4864,9 @@ class GPUModelRunner(
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
         ):
+            from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+            _apply_constrain_to_fx_strides_patch()
             backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
             compilation_counter.stock_torch_compile_count += 1
             self.model.compile(fullgraph=True, backend=backend)
@@ -5859,6 +5869,13 @@ class GPUModelRunner(
                 layer.kv_cache = (
                     torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
                 )
+            # Clean up quantized KV cache scale views
+            # (int8_per_token_head, fp8_per_token_head)
+            if hasattr(layer, "impl"):
+                if hasattr(layer.impl, "_k_scale_cache"):
+                    layer.impl._k_scale_cache = None
+                if hasattr(layer.impl, "_v_scale_cache"):
+                    layer.impl._v_scale_cache = None
 
         gc.collect()
         torch.accelerator.empty_cache()
@@ -6507,11 +6524,6 @@ class GPUModelRunner(
             block_sizes != self._init_block_sizes
             or kernel_block_sizes != self._init_kernel_block_sizes
         ):
-            assert self.offload_config.uva.cpu_offload_gb == 0, (
-                "Cannot re-initialize the input batch when CPU weight "
-                "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
-                "for more details."
-            )
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
             self.input_batch = InputBatch(
