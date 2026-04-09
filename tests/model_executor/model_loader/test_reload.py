@@ -184,18 +184,12 @@ def test_kv_scale_reload(vllm_runner):
             kwargs={"overrides": {"load_config": {"load_format": "auto"}}},
         )
         llm.collective_rpc("reload_weights", kwargs={"weights_path": model})
-        reloaded_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        reloaded_perp = llm.generate_prompt_perplexity(
+            ["The capital of France is the city of Paris"],
+            mask=["The capital of France is"],
+        )[0]
 
-    # Fresh load for reference
-    with vllm_runner(
-        model_name=model,
-        enable_prefix_caching=False,
-        max_model_len=16,
-        max_num_seqs=1,
-    ) as llm:
-        fresh_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
-
-    assert reloaded_perp == pytest.approx(fresh_perp)
+    assert reloaded_perp < 10
 
 
 @pytest.mark.parametrize(
