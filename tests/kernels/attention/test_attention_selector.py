@@ -326,6 +326,31 @@ def test_invalid_backend():
         AttentionConfig(backend=AttentionBackendEnum["INVALID"])
 
 
+def test_diffkv_backend_string_parses():
+    attention_config = AttentionConfig(backend="FLASH_ATTN_DIFFKV")
+    assert attention_config.backend == AttentionBackendEnum.FLASH_ATTN_DIFFKV
+
+
+def test_diffkv_backend_cannot_be_selected_globally():
+    if CudaPlatform is None:
+        pytest.skip("CudaPlatform not available")
+
+    attention_config = AttentionConfig(
+        backend=AttentionBackendEnum.FLASH_ATTN_DIFFKV
+    )
+    cache_config = CacheConfig(block_size=16)
+    vllm_config = VllmConfig(
+        attention_config=attention_config, cache_config=cache_config
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+        pytest.raises(ValueError, match="cannot be selected as a global"),
+    ):
+        get_attn_backend(16, torch.float16, None)
+
+
 @pytest.mark.parametrize("auto_value", ["auto", "AUTO", "Auto"])
 def test_auto_backend_string(auto_value: str):
     """Test that 'auto' string value triggers automatic backend selection."""
