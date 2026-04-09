@@ -481,6 +481,8 @@ def choose_mp_linear_kernel(
 def init_wfp8_a16_linear_kernel(
     weight_quant_key: QuantKey,
     activation_quant_key: QuantKey,
+    weight_shape: tuple[int, int],
+    input_dtype: torch.dtype,
     out_dtype: torch.dtype,
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
@@ -488,6 +490,8 @@ def init_wfp8_a16_linear_kernel(
     config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
+        weight_shape=weight_shape,
+        input_dtype=input_dtype,
         out_dtype=out_dtype,
     )
 

@@ -6,6 +6,7 @@ from collections.abc import Callable
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
 
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.kernels.linear import (
     init_wfp8_a16_linear_kernel,
 )
@@ -38,18 +39,14 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
     def __init__(self, weight_quant: QuantizationArgs, is_static_input_scheme: bool):
         self.weight_quant = weight_quant
         self.strategy = weight_quant.strategy
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
 
-        weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
-        activation_quant_key = (
+        self.weight_quant_key = STRATEGY_TO_WEIGHT_QUANT_KEY[self.strategy]
+        self.activation_quant_key = (
             kFp8StaticTensorSym if is_static_input_scheme else kFp8DynamicTensorSym
-        )
-
-        self.linear_kernel = init_wfp8_a16_linear_kernel(
-            weight_quant_key=weight_quant_key,
-            activation_quant_key=activation_quant_key,
-            out_dtype=None,
         )
 
     @classmethod
@@ -111,6 +108,14 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
                 weight_loader=weight_loader,
             )
             layer.register_parameter("input_scale", input_scale)
+
+        self.linear_kernel = init_wfp8_a16_linear_kernel(
+            weight_quant_key=self.weight_quant_key,
+            activation_quant_key=self.activation_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.strategy == QuantizationStrategy.BLOCK:
