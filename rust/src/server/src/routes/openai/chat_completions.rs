@@ -723,9 +723,10 @@ fn chat_finish_reason_to_openai(
         FinishReason::Stop(_) if saw_tool_calls => Ok("tool_calls"),
         FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
+        FinishReason::Abort => Ok("abort"),
         FinishReason::Repetition => Ok("stop"),
-        FinishReason::Abort | FinishReason::Error => {
-            bail_server_error!("stream terminated without a valid OpenAI finish reason");
+        FinishReason::Error => {
+            bail_server_error!("Internal server error");
         }
     }
 }
@@ -801,8 +802,16 @@ mod tests {
     }
 
     #[test]
-    fn final_chunk_rejects_abort_and_error_finish_reasons() {
-        assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, false).is_err());
+    fn final_chunk_maps_abort_finish_reason() {
+        let chunk = final_chunk("chatcmpl-1", "model", 1, FinishReason::Abort, false)
+            .expect("abort is a valid finish reason");
+
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
+        assert_eq!(chunk.choices[0].stop_reason, None);
+    }
+
+    #[test]
+    fn final_chunk_rejects_error_finish_reason() {
         assert!(final_chunk("chatcmpl-1", "model", 1, FinishReason::Error, false).is_err());
     }
 

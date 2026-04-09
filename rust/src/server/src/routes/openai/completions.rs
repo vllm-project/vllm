@@ -345,8 +345,9 @@ fn completion_finish_reason_to_openai(
     match finish_reason {
         FinishReason::Stop(_) | FinishReason::Repetition => Ok("stop"),
         FinishReason::Length => Ok("length"),
-        FinishReason::Abort | FinishReason::Error => {
-            bail_server_error!("stream terminated without a valid OpenAI finish reason");
+        FinishReason::Abort => Ok("abort"),
+        FinishReason::Error => {
+            bail_server_error!("Internal server error");
         }
     }
 }
@@ -428,8 +429,14 @@ mod tests {
     }
 
     #[test]
-    fn final_chunk_rejects_abort_and_error_finish_reasons() {
-        assert!(final_chunk("cmpl-1", "model", 1, FinishReason::Abort).is_err());
+    fn final_chunk_maps_abort_finish_reason() {
+        let chunk =
+            final_chunk("cmpl-1", "model", 1, FinishReason::Abort).expect("finish reason valid");
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("abort"));
+    }
+
+    #[test]
+    fn final_chunk_rejects_error_finish_reason() {
         assert!(final_chunk("cmpl-1", "model", 1, FinishReason::Error).is_err());
     }
 

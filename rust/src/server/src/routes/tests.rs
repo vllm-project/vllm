@@ -1374,10 +1374,7 @@ async fn invalid_terminal_finish_reason_is_returned_as_openai_error_sse() {
 
     assert!(text.contains("\"role\":\"assistant\""), "{text}");
     assert!(text.contains("\"type\":\"server_error\""), "{text}");
-    assert!(
-        text.contains("stream terminated without a valid OpenAI finish reason"),
-        "{text}"
-    );
+    assert!(text.contains("Internal server error"), "{text}");
     assert!(!text.contains("\"usage\":"), "{text}");
     assert!(text.trim_end().ends_with("data: [DONE]"), "{text}");
 }

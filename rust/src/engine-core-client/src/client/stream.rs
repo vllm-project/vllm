@@ -6,11 +6,11 @@ use futures::Stream;
 use futures::stream::FusedStream;
 use thiserror_ext::AsReport as _;
 use tokio::sync::mpsc;
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::client::AbortRequest;
 use crate::client::state::OutputReceiver;
-use crate::protocol::EngineCoreOutput;
+use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
 use crate::{AbortCause, Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +86,12 @@ impl Stream for EngineCoreOutputStream {
                         // terminated with cleanly-finished state and expect no more outputs to
                         // come.
                         if output.finished() {
+                            if output.finish_reason == Some(EngineCoreFinishReason::Error) {
+                                error!(
+                                    self.request_id,
+                                    "request failed with an internal error during generation"
+                                );
+                            }
                             debug!(self.request_id, "request completed via final output");
                             self.state = State::Finished;
                         }
