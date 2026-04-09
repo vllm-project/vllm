@@ -31,14 +31,12 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
     def _split_lines(self, text, width):
         """
         1. Sentences split across lines have their single newlines removed.
-        2. Paragraphs and explicit newlines are split into separate lines.
+        2. Paragraphs and lists are split into separate lines.
         3. Each line is wrapped to the specified width (width of terminal).
         """
-        # The patterns also include whitespace after the newline
-        single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
-        multiple_newlines = re.compile(r"\n{2,}\s*")
-        text = single_newline.sub(" ", text)
-        lines = re.split(multiple_newlines, text)
+        # The pattern also includes whitespace after the newline
+        newlines_to_remove = re.compile(r"(?<!\n)\n(?!\n)(?!\s*(-|\*|\+|\d+\.))\s*")
+        lines = newlines_to_remove.sub(" ", text).splitlines()
         return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
@@ -184,13 +182,11 @@ class FlexibleArgumentParser(ArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
-        # Check for --model in command line arguments first
         if args and args[0] == "serve":
+            # Check for --model in command line arguments first
             try:
                 model_idx = next(
-                    i
-                    for i, arg in enumerate(args)
-                    if arg == "--model" or arg.startswith("--model=")
+                    i for i, arg in enumerate(args) if re.match(r"^--model(=.+|$)", arg)
                 )
                 logger.warning(
                     "With `vllm serve`, you should provide the model as a "
@@ -219,6 +215,19 @@ class FlexibleArgumentParser(ArgumentParser):
                 ]
             except StopIteration:
                 pass
+            # Check for --served-model-name without a positional model argument
+            if (
+                len(args) > 1
+                and args[1].startswith("-")
+                and not any(re.match(r"^--config(=.+|$)", arg) for arg in args)
+                and any(
+                    re.match(r"^--served[-_]model[-_]name(=.+|$)", arg) for arg in args
+                )
+            ):
+                raise ValueError(
+                    "`model` should be provided as the first positional argument when "
+                    "using `vllm serve`. i.e. `vllm serve <model> --<arg> <value>`."
+                )
 
         if "--config" in args:
             args = self._pull_args_from_config(args)

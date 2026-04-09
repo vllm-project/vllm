@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON };
+enum class ISA { AMX, VEC, VEC16, NEON, VXE };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};

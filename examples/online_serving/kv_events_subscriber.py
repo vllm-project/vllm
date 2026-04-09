@@ -37,6 +37,12 @@ class BlockStored(KVCacheEvent):
     medium: str | None
     lora_name: str | None
 
+    extra_keys: list[tuple[Any, ...] | None] | None = None
+    """Extra keys used in block hash computation, one entry per block in
+    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
+    prompt embeddings data, etc. for that specific block.
+    """
+
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]

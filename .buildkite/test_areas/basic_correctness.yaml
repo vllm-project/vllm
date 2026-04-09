@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: Basic Correctness
   timeout_in_minutes: 30
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/basic_correctness/test_basic_correctness
@@ -14,8 +15,3 @@ steps:
   - pytest -v -s basic_correctness/test_cumem.py
   - pytest -v -s basic_correctness/test_basic_correctness.py
   - pytest -v -s basic_correctness/test_cpu_offload.py
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd

@@ -34,12 +34,20 @@ def _swigluoai_forward_native(
     return gated_output
 
 
+def _gelu_and_mul(
+    x: torch.Tensor,
+) -> torch.Tensor:
+    d = x.shape[-1] // 2
+    return F.gelu(x[..., :d], approximate="none") * x[..., d:]
+
+
 # Map activation names to their native forward functions.
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
 _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
     MoEActivation.SILU: SiluAndMul.forward_native,
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
+    MoEActivation.GELU: _gelu_and_mul,
 }
 
 
@@ -280,7 +288,7 @@ class CPUFusedMOE:
         if not (w13_output_size % 32 == 0 and w2_output_size % 32 == 0):
             return False, "none"
 
-        supports_amx = torch._C._cpu._is_amx_tile_supported()
+        supports_amx = torch.cpu._is_amx_tile_supported()
 
         if (
             supports_amx
@@ -402,7 +410,7 @@ class CPUFusedMOE:
             input,
             topk_weights,
             topk_ids,
-            activation,
+            activation.value,
             global_num_experts,
             skip_weighted,
         )

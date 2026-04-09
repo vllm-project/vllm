@@ -293,21 +293,22 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
             self,
             seq_len: int,
             mm_counts: Mapping[str, int],
-            mm_options: Mapping[str, BaseDummyOptions] | None = None,
+            mm_options: Mapping[str, BaseDummyOptions],
         ) -> MultiModalDataDict:
             num_images = mm_counts.get("image", 0)
 
             target_width, target_height = \
                 self.info.get_image_size_with_most_features()
 
-            image_overrides = mm_options.get("image") if mm_options else None
+            image_overrides = mm_options.get("image")
 
             return {
-                "image":
-                self._get_dummy_images(width=target_width,
-                                    height=target_height,
-                                    num_images=num_images,
-                                    overrides=image_overrides)
+                "image": self._get_dummy_images(
+                    width=target_width,
+                    height=target_height,
+                    num_images=num_images,
+                    overrides=image_overrides,
+                )
             }
         ```
 
@@ -479,17 +480,16 @@ Assuming that the memory usage increases with the number of tokens, the dummy in
             self,
             seq_len: int,
             mm_counts: Mapping[str, int],
-            mm_options: Optional[Mapping[str, BaseDummyOptions]] = None,
+            mm_options: Mapping[str, BaseDummyOptions],
         ) -> MultiModalDataDict:
             target_width, target_height = \
                 self.info.get_image_size_with_most_features()
             num_images = mm_counts.get("image", 0)
 
-            image_overrides = mm_options.get("image") if mm_options else None
+            image_overrides = mm_options.get("image")
 
             return {
-                "image":
-                self._get_dummy_images(
+                "image": self._get_dummy_images(
                     width=target_width,
                     height=target_height,
                     num_images=num_images,

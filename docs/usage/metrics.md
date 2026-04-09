@@ -45,6 +45,12 @@ The following metrics are exposed:
 
 --8<-- "docs/generated/metrics/nixl_connector.inc.md"
 
+## Model Flops Utilization (MFU) Performance Metrics
+
+These metrics are available via `--enable-mfu-metrics`:
+
+--8<-- "docs/generated/metrics/perf.inc.md"
+
 ## Deprecation Policy
 
 Note: when metrics are deprecated in version `X.Y`, they are hidden in version `X.Y+1`

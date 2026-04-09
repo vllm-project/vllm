@@ -147,7 +147,7 @@ def extract_harmony_streaming_delta(
                         function=DeltaFunctionCall(arguments=group.text),
                     )
                 )
-        elif group.channel == "commentary":
+        elif group.channel == "commentary" and group.recipient is None:
             # Tool call preambles meant to be shown to the user
             combined_content += group.text
             content_encountered = True

@@ -75,13 +75,22 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             config.hidden_size,
         )
 
+        # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
+        # missing from hf_quant_config.json exclude_modules. Force unquantized.
+        # Ref: https://github.com/vllm-project/vllm/pull/38650
+        # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
+        fc_quant = (
+            None
+            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            else quant_config
+        )
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
             gather_output=True,
             bias=False,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=fc_quant,
             prefix=f"{prefix}.fc",
         )
 
@@ -339,7 +348,7 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
             "k_proj",
             "v_proj",
         ],
-        "gate_up_proj": ["up_proj", "down_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -380,13 +389,11 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:

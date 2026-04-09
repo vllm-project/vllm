@@ -23,12 +23,12 @@ from transformers.models.internvl.video_processing_internvl import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.interns1_vit import InternS1VisionModel
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -297,8 +297,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
@@ -310,8 +309,8 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         config = self.info.get_hf_config()
         image_size_h, image_size_w = config.vision_config.image_size
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -765,7 +764,6 @@ class InternS1ForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -778,7 +776,6 @@ class InternS1ForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

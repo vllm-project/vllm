@@ -12,7 +12,7 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 
-class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """
     Prepare/Finalize using MoRI kernels.
     """
@@ -70,16 +70,13 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         - Optional dispatched expert topk IDs
         - Optional dispatched expert topk weight
         """
-        if defer_input_quant:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} does not support defer_input_quant=True. "
-                "Please select an MoE kernel that accepts quantized inputs."
-            )
         assert not apply_router_weight_on_input, (
             "mori does not support apply_router_weight_on_input=True now."
         )
         scale = None
-        if self.use_fp8_dispatch:
+        # When defer_input_quant is True, the expert kernel handles
+        # quantization internally, so skip FP8 dispatch quantization.
+        if self.use_fp8_dispatch and not defer_input_quant:
             from aiter import QuantType, get_hip_quant
 
             if quant_config.is_block_quantized:

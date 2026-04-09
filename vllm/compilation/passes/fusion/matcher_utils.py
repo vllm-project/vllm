@@ -26,7 +26,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
 
-RMS_OP = torch.ops._C.rms_norm.default
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
@@ -38,7 +37,7 @@ QUANT_OPS: dict[QuantKey, OpOverload] = {
 }
 
 if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.default  # noqa: E501
+    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out  # noqa: E501
 
 if current_platform.is_cuda():
     QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
@@ -89,10 +88,13 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         num_heads: int,
         num_kv_heads: int,
         use_flashinfer: bool = False,
+        match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
     ) -> None:
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
+        if match_rocm_aiter is None:
+            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
 
         super().__init__(enabled)
         self.is_neox = is_neox
@@ -104,6 +106,8 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.rotary_dim = head_size
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
+        elif match_rocm_aiter:
+            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
         else:
             self.rotary_op = ROTARY_OP
 
@@ -153,69 +157,6 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
             )
         )
         return result
-
-
-class MatcherRMSNorm(MatcherCustomOp):
-    def __init__(
-        self,
-        epsilon: float,
-        enabled: bool | None = None,
-        match_rocm_aiter: bool = False,
-    ) -> None:
-        if enabled is None:
-            enabled = RMSNorm.enabled()
-
-        super().__init__(enabled)
-        self.epsilon = epsilon
-        self._rmsnorm_op = RMS_OP
-        self.match_rocm_aiter = match_rocm_aiter
-
-        if match_rocm_aiter:
-            self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_op()
-
-    def inputs(self) -> list[torch.Tensor]:
-        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
-        weight = self.empty(16)
-        return [input, weight]
-
-    def forward_rocm_aiter(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._rmsnorm_op(
-            x=input,
-            weight=weight,
-            variance_epsilon=self.epsilon,
-        )
-
-    def forward_custom(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.match_rocm_aiter:
-            return self.forward_rocm_aiter(input, weight)
-
-        result = torch.empty_like(input)
-        _, result = auto_functionalized(
-            self._rmsnorm_op,
-            result=result,
-            input=input,
-            weight=weight,
-            epsilon=self.epsilon,
-        )
-
-        return result
-
-    def forward_native(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return RMSNorm.forward_static(
-            input, self.epsilon, input.size(-1), self.model_dtype, weight
-        )
 
 
 class MatcherFusedAddRMSNorm(MatcherCustomOp):
@@ -292,6 +233,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
+        is_tma_aligned: bool = False,
     ) -> None:
         if enabled is None:
             enabled = QuantFP8.enabled()
@@ -301,6 +243,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
         self.match_rocm_aiter = match_rocm_aiter
+        self.is_tma_aligned = is_tma_aligned
 
         if match_rocm_aiter:
             assert not quant_key.scale.group_shape.is_per_tensor(), (
@@ -336,6 +279,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             quant_key.scale.group_shape,
             column_major_scales=has_col_major_scales,
             use_ue8m0=is_e8m0,
+            tma_aligned_scales=self.is_tma_aligned,
             compile_native=False,
         )
 
@@ -367,8 +311,11 @@ class MatcherQuantFP8(MatcherCustomOp):
         )
 
         if self.quant_key.scale.group_shape.is_per_group():
-            assert scale is None
-            scale = self.make_scale(input, transposed=self.has_col_major_scales)
+            # for tma_aligned, the scale must be passed to forward_custom
+            # tma_aligned fusion then matches by custom op arguments
+            if not self.is_tma_aligned:
+                assert scale is None
+                scale = self.make_scale(input, transposed=self.has_col_major_scales)
 
             finfo = torch.finfo(self.quant_key.dtype)
             fp8_min = finfo.min
@@ -384,6 +331,8 @@ class MatcherQuantFP8(MatcherCustomOp):
                 fp8_min=fp8_min,
                 fp8_max=fp8_max,
                 scale_ue8m0=self.is_e8m0,
+                dummy_is_scale_transposed=self.has_col_major_scales,
+                dummy_is_tma_aligned=self.is_tma_aligned,
             )
             return result, scale
 

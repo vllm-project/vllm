@@ -13,8 +13,7 @@ def pp_broadcast(
     num_rejected: torch.Tensor,
 ) -> None:
     pp = get_pp_group()
-    if not pp.is_last_rank:
-        return
+    assert pp.is_last_rank
 
     assert sampled_token_ids.dtype == torch.int64
     torch.distributed.broadcast(
@@ -27,10 +26,9 @@ def pp_broadcast(
 
 def pp_receive(
     num_reqs: int, max_sample_len: int = 1
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     pp = get_pp_group()
-    if pp.is_last_rank:
-        return None
+    assert not pp.is_last_rank
 
     sampled_tokens = torch.empty(
         num_reqs, max_sample_len, dtype=torch.int64, device=pp.device

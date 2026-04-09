@@ -24,6 +24,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -265,11 +266,17 @@ class MambaMixer(MambaBase, PluggableLayer):
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, Mamba1AttentionMetadata)
             query_start_loc_p = attn_metadata.query_start_loc_p
-            state_indices_tensor = attn_metadata.state_indices_tensor
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-            conv_state = self_kv_cache[0].transpose(-1, -2)
-            ssm_state = self_kv_cache[1]
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
+            conv_state = (
+                self.kv_cache[0]
+                if is_conv_state_dim_first()
+                else self.kv_cache[0].transpose(-1, -2)
+            )
+            ssm_state = self.kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
+            cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
+            last_chunk_indices_p = attn_metadata.last_chunk_indices_p
 
         # 1. Gated MLP's linear projection
         projected_states = self.in_proj(hidden_states)[0].transpose(-2, -1)
@@ -295,17 +302,13 @@ class MambaMixer(MambaBase, PluggableLayer):
         prefill_decode_split = split_batch_to_prefill_and_decode(
             hidden_states_BC,
             gate,
-            state_indices_tensor,
             num_prefill_tokens,
-            num_prefills,
             num_decode_tokens,
         )
         hidden_states_BC_p = prefill_decode_split.hidden_states_BC_p
         hidden_states_BC_d = prefill_decode_split.hidden_states_BC_d
         gate_p = prefill_decode_split.gate_p
         gate_d = prefill_decode_split.gate_d
-        state_indices_tensor_p = prefill_decode_split.state_indices_tensor_p
-        state_indices_tensor_d = prefill_decode_split.state_indices_tensor_d
 
         if is_mamba_cache_all:
             block_idx_last_computed_token_d, block_idx_last_computed_token_p = (
@@ -379,6 +382,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
+                cu_chunk_seqlen=cu_chunk_seqlen_p,
+                last_chunk_indices=last_chunk_indices_p,
             )
             ssm_outputs.append(scan_out_p)
 
@@ -427,6 +432,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=scan_outputs_d,
+                enable_stochastic_rounding=self.cache_config.enable_mamba_cache_stochastic_rounding,
+                cache_philox_rounds=self.cache_config.mamba_cache_philox_rounds,
             )
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
@@ -477,16 +484,12 @@ class PrefillDecodeSplit(NamedTuple):
     hidden_states_BC_d: torch.Tensor
     gate_p: torch.Tensor
     gate_d: torch.Tensor
-    state_indices_tensor_p: torch.Tensor
-    state_indices_tensor_d: torch.Tensor
 
 
 def split_batch_to_prefill_and_decode(
     hidden_states_BC: torch.Tensor,
     gate: torch.Tensor,
-    state_indices_tensor: torch.Tensor,
     num_prefill_tokens: int,
-    num_prefills: int,
     num_decode_tokens: int,
 ) -> PrefillDecodeSplit:
     num_actual_tokens = num_prefill_tokens + num_decode_tokens
@@ -501,20 +504,11 @@ def split_batch_to_prefill_and_decode(
         gate[..., :num_actual_tokens], [num_decode_tokens, num_prefill_tokens], dim=-1
     )
 
-    # num_decode_tokens accounts for CUDA graph padding when applicable
-    state_indices_tensor_d, state_indices_tensor_p = torch.split(
-        state_indices_tensor[: num_decode_tokens + num_prefills],
-        [num_decode_tokens, num_prefills],
-        dim=0,
-    )
-
     return PrefillDecodeSplit(
         hidden_states_BC_p=hidden_states_BC_p,
         hidden_states_BC_d=hidden_states_BC_d,
         gate_p=gate_p,
         gate_d=gate_d,
-        state_indices_tensor_p=state_indices_tensor_p,
-        state_indices_tensor_d=state_indices_tensor_d,
     )
 
 

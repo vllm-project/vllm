@@ -14,12 +14,11 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -28,7 +27,7 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -90,12 +89,8 @@ class LLMEngine:
         self.should_execute_dummy_batch = False
 
         self.renderer = renderer = renderer_from_config(self.vllm_config)
-        self.io_processor = get_io_processor(
-            self.vllm_config,
-            self.model_config.io_processor_plugin,
-        )
 
-        # Convert TokPrompt --> EngineCoreRequest.
+        # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
         # Converts EngineCoreOutputs --> RequestOutput.
@@ -199,10 +194,6 @@ class LLMEngine:
             self.should_execute_dummy_batch = True
         return aggregated_has_unfinished
 
-    @classmethod
-    def validate_outputs(cls, outputs, output_type):
-        return outputs
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
             # Cache the result
@@ -219,7 +210,7 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType | ProcessorInputs,
+        prompt: EngineCoreRequest | PromptType | EngineInput,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -234,10 +225,16 @@ class LLMEngine:
 
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
+            logger.warning_once(
+                "Passing EngineCoreRequest to LLMEngine.generate() and .add_requests() "
+                "is deprecated and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
             request = prompt
             if request_id != request.request_id:
                 logger.warning_once(
-                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "LLMEngine.add_request() was passed a request_id parameter that "
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
@@ -246,12 +243,12 @@ class LLMEngine:
                 request_id,
                 prompt,
                 params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
                 supported_tasks=self.get_supported_tasks(),
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -353,8 +350,8 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1):
-        self.engine_core.sleep(level)
+    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+        self.engine_core.sleep(level, mode)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)

@@ -66,7 +66,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import MixtureOfExperts, SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -586,7 +593,7 @@ class HunYuanDecoderLayer(nn.Module):
         "inputs_embeds": 0,
     }
 )
-class HunYuanModel(nn.Module):
+class HunYuanModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -600,7 +607,6 @@ class HunYuanModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        self.padding_idx = config.pad_token_id
 
         self.vocab_size = config.vocab_size
 
@@ -630,7 +636,6 @@ class HunYuanModel(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-        self.aux_hidden_state_layers = tuple[int, ...]()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -655,13 +660,10 @@ class HunYuanModel(nn.Module):
 
         cla_factor = _get_cla_factor(self.config)
         prev_kv_states = None
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for i, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            if i in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
-
             hidden_states, residual, kv_states = layer(
                 positions,
                 hidden_states,
@@ -673,6 +675,10 @@ class HunYuanModel(nn.Module):
                 prev_kv_states = kv_states
             else:
                 prev_kv_states = None
+
+            self._maybe_add_hidden_state(
+                aux_hidden_states, i + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -905,7 +911,9 @@ class HunYuanModel(nn.Module):
         return loaded_params
 
 
-class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+class HunyuanV1ModelBase(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -943,13 +951,6 @@ class HunyuanV1ModelBase(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
             )
         else:
             self.lm_head = PPMissingLayer()
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,

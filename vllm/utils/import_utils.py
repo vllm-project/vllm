@@ -402,19 +402,24 @@ def _has_module(module_name: str) -> bool:
     return importlib.util.find_spec(module_name) is not None
 
 
-def has_pplx() -> bool:
-    """Whether the optional `pplx_kernels` package is available."""
-    return _has_module("pplx_kernels")
-
-
 def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
     return _has_module("deep_ep")
 
 
 def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return _has_module("deep_gemm")
+    """Whether the optional `deep_gemm` package is available.
+
+    Prefers an externally installed ``deep_gemm`` package (so users can
+    override with a newer version), then falls back to the vendored copy
+    bundled in the vLLM wheel.
+    """
+    return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
+
+
+def has_nixl_ep() -> bool:
+    """Whether the optional `nixl_ep` package is available."""
+    return _has_module("nixl_ep")
 
 
 def has_triton_kernels() -> bool:
@@ -461,3 +466,8 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+def has_fbgemm_gpu() -> bool:
+    """Whether the optional `fbgemm_gpu` package is available."""
+    return _has_module("fbgemm_gpu")

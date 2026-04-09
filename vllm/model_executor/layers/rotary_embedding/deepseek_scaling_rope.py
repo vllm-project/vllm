@@ -152,6 +152,23 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             key = key_rot
         return query, key
 
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return torch.ops.vllm.xpu_ops_deepseek_scaling_rope(
+            positions,
+            query,
+            key,
+            offsets,
+            self._match_cos_sin_cache_dtype(query),
+            self.rotary_dim,
+            self.is_neox_style,
+        )
+
     def forward_hip(
         self,
         positions: torch.Tensor,

@@ -5,19 +5,20 @@
 # Generate Buildkite annotation for ROCm wheel release
 set -ex
 
-# Get build configuration from meta-data
+# Extract build configuration from Dockerfile.rocm_base (single source of truth)
 # Extract ROCm version dynamically from Dockerfile.rocm_base
 # BASE_IMAGE format: rocm/dev-ubuntu-22.04:7.0-complete -> extracts "7.0"
 ROCM_VERSION=$(grep -E '^ARG BASE_IMAGE=' docker/Dockerfile.rocm_base | sed -E 's/.*:([0-9]+\.[0-9]+).*/\1/' || echo "unknown")
-PYTHON_VERSION=$(buildkite-agent meta-data get rocm-python-version 2>/dev/null || echo "3.12")
-PYTORCH_ROCM_ARCH=$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo "gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151")
+PYTHON_VERSION=$(grep '^ARG PYTHON_VERSION=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTHON_VERSION=//')
+PYTORCH_ROCM_ARCH=$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
 
-# TODO: Enable the nightly build for ROCm
 # Get release version, default to 1.0.0.dev for nightly/per-commit builds
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version 2>/dev/null || echo "")
 if [ -z "${RELEASE_VERSION}" ]; then
   RELEASE_VERSION="1.0.0.dev"
 fi
+
+ROCM_BASE_CACHE_KEY=$(.buildkite/scripts/cache-rocm-base-wheels.sh key)
 
 # S3 URLs
 S3_BUCKET="${S3_BUCKET:-vllm-wheels}"
@@ -68,7 +69,7 @@ aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/triton
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/torchvision-*.whl .
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/torchaudio-*.whl .
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/amdsmi-*.whl .
-aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/aiter-*.whl .
+aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/amd_aiter-*.whl .
 aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/flash-attn-*.whl .
 \`\`\`
 
@@ -80,7 +81,7 @@ aws s3 cp s3://${S3_BUCKET}/rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}/flash-
 - **torchvision**: TorchVision for ROCm PyTorch
 - **torchaudio**: Torchaudio for ROCm PyTorch
 - **amdsmi**: AMD SMI Python bindings
-- **aiter**: Aiter for ROCm
+- **amd_aiter**: Aiter for ROCm
 - **flash-attn**: Flash Attention for ROCm
 
 ### :warning: Notes
@@ -96,7 +97,7 @@ To download and upload the image:
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-base
 docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm
 
-docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${BUILDKITE_COMMIT}-rocm-base vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base
+docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm-base vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:latest-base
 docker tag vllm/vllm-openai-rocm:${BUILDKITE_COMMIT}-base vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
 docker push vllm/vllm-openai-rocm:latest-base

@@ -23,6 +23,24 @@ from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.math_utils import cdiv
 
+_DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES: set[str] = {
+    "qwen3_5_text",
+    "qwen3_5_moe_text",
+}
+
+
+def should_auto_disable_deep_gemm(model_type: str | None) -> bool:
+    """Check if DeepGemm should be auto-disabled for this model on Blackwell.
+
+    Returns True if the model is known to have accuracy degradation with
+    DeepGemm's E8M0 scale format on Blackwell GPUs (SM100+).
+    """
+    if model_type is None:
+        return False
+    if not current_platform.is_device_capability_family(100):
+        return False
+    return model_type in _DEEPGEMM_BLACKWELL_EXCLUDED_MODEL_TYPES
+
 
 class DeepGemmQuantScaleFMT(Enum):
     # Float32 scales in Float32 tensor
@@ -70,10 +88,7 @@ def is_deep_gemm_supported() -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
     """
-    is_supported_arch = current_platform.is_cuda() and (
-        current_platform.is_device_capability(90)
-        or current_platform.is_device_capability_family(100)
-    )
+    is_supported_arch = current_platform.support_deep_gemm()
     return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
 
 
@@ -123,6 +138,41 @@ _get_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | None = None
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
 
 
+def _import_deep_gemm():
+    """Import the deep_gemm module.
+
+    Prefers an externally installed ``deep_gemm`` package (so users can
+    pin a specific version), then falls back to the vendored copy bundled
+    in the vLLM wheel.
+
+    Returns ``None`` when neither source is usable.
+    """
+    # 1. Try the external (pip-installed) package first.
+    try:
+        module = importlib.import_module("deep_gemm")
+        logger.debug_once("Imported deep_gemm module from site-packages")
+        return module
+    except ImportError:
+        logger.debug_once(
+            "deep_gemm not found in site-packages, "
+            "trying vendored vllm.third_party.deep_gemm"
+        )
+
+    # 2. Fall back to the vendored copy bundled in the vLLM wheel.
+    try:
+        module = importlib.import_module("vllm.third_party.deep_gemm")
+        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
+        return module
+    except ImportError:
+        logger.debug_once("Vendored deep_gemm not found either")
+    except Exception as e:
+        # The vendored module may raise RuntimeError during _C.init()
+        # if JIT include files are missing (e.g. incomplete wheel).
+        logger.warning_once("Failed to import vendored deep_gemm: %s", e)
+
+    return None
+
+
 def _lazy_init() -> None:
     """Import deep_gemm and resolve symbols on first use."""
     global _fp8_gemm_nt_impl, _grouped_impl, _grouped_masked_impl
@@ -154,7 +204,9 @@ def _lazy_init() -> None:
             envs.VLLM_CACHE_ROOT, "deep_gemm"
         )
 
-    _dg = importlib.import_module("deep_gemm")
+    _dg = _import_deep_gemm()
+    if _dg is None:
+        return
 
     _fp8_gemm_nt_impl = getattr(_dg, "fp8_gemm_nt", None)
     _grouped_impl = getattr(_dg, "m_grouped_fp8_gemm_nt_contiguous", None)
@@ -178,8 +230,18 @@ def _lazy_init() -> None:
 
 def get_num_sms() -> int:
     _lazy_init()
-    _dg = importlib.import_module("deep_gemm")
-    return int(_dg.get_num_sms())
+    dg = _import_deep_gemm()
+    if dg is None:
+        raise RuntimeError("DeepGEMM is not available")
+    return int(dg.get_num_sms())
+
+
+def set_num_sms(num_sms: int) -> None:
+    _lazy_init()
+    dg = _import_deep_gemm()
+    if dg is None:
+        raise RuntimeError("DeepGEMM is not available")
+    dg.set_num_sms(num_sms)
 
 
 @functools.cache
@@ -349,7 +411,7 @@ def _align(x: int, y: int) -> int:
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/v2.1.1/csrc/utils/math.hpp#L19
-def get_tma_aligned_size(x: int, element_size: int):
+def get_tma_aligned_size(x: int, element_size: int) -> int:
     return _align(x, 16 // element_size)
 
 
@@ -398,7 +460,7 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
 
 def should_use_deepgemm_for_fp8_linear(
     output_dtype: torch.dtype,
-    weight: torch.Tensor,
+    weight_shape: tuple[int, int],
     supports_deep_gemm: bool | None = None,
 ):
     if supports_deep_gemm is None:
@@ -413,8 +475,8 @@ def should_use_deepgemm_for_fp8_linear(
     return (
         supports_deep_gemm
         and output_dtype == torch.bfloat16
-        and weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        and weight_shape[0] % N_MULTIPLE == 0
+        and weight_shape[1] % K_MULTIPLE == 0
     )
 
 
@@ -431,6 +493,7 @@ __all__ = [
     "is_deep_gemm_e8m0_used",
     "is_deep_gemm_supported",
     "get_num_sms",
+    "set_num_sms",
     "should_use_deepgemm_for_fp8_linear",
     "get_col_major_tma_aligned_tensor",
     "get_mk_alignment_for_contiguous_layout",
