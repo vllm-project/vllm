@@ -53,10 +53,12 @@ try:
             self.compiled_dag_cuda_device_set = False
             self._execute_model_outputs = deque[Any]()
             self._pp_execute_model_outputs: dict[int, Any] = {}
-            # Set to True after a step where the last PP rank broadcast sampled
-            # tokens.  At the start of the NEXT step, non-last ranks will call
-            # _pp_receive_prev_sampled_token_ids_to_input_batch() to receive them.
-            self._pp_need_prev_token_sync: bool = False
+            # State for the early sampled-token irecv. The actual P2P traffic
+            # runs on GPUModelRunner.pp_sampled_token_group so it does not
+            # interfere with Ray compiled-DAG PP communication.
+            self._pp_irecv_work: Any = None
+            self._pp_irecv_buf: Any = None
+            self._pp_pending_prev_req_id_to_index: Any = None
             # Number of execute_model_ray calls; used for trace flushing and
             # lazy process-name registration.
             self._pp_trace_step_count: int = 0
@@ -163,24 +165,26 @@ try:
                 pp_trace.set_process_name(f"pp_rank_{pp_rank}")
 
             # Capture overall start time for the total span (see finally block).
-            _ray_t0 = time.perf_counter() * 1_000_000.0
+            _ray_t0 = time.monotonic() * 1_000_000.0
 
             try:
                 start_ns = time.monotonic_ns()
-                # --- PP async: receive prev sampled token ids from last rank ---
-                # In the Ray compiled DAG, each PP stage runs independently.
-                # The last rank posts non-blocking isend()s right after sampling.
-                # Non-last ranks must post matching recv()s at the start of the
-                # NEXT step (before execute_model updates the input batch) so that
-                # _prepare_input_ids can use prev_sampled_token_ids instead of the
-                # placeholder -1 values that async scheduling puts in input_ids_cpu.
-                if use_async_pp and not is_last_rank and self._pp_need_prev_token_sync:
+                # Complete the irecv that was posted after the previous step's
+                # forward pass. Using a dedicated process group keeps this
+                # overlap away from Ray's compiled-DAG PP communicator.
+                if (use_async_pp and not is_last_rank
+                        and self._pp_irecv_work is not None):
                     with pp_trace.span("pp_recv",
                                        pp_rank=pp_rank, step=step_id,
                                        tokens=num_tokens):
-                        self.worker.model_runner \
-                            ._pp_receive_prev_sampled_token_ids_to_input_batch()
-                    self._pp_need_prev_token_sync = False
+                        self.worker.model_runner._pp_complete_irecv(
+                            self._pp_irecv_work,
+                            self._pp_irecv_buf,
+                            self._pp_pending_prev_req_id_to_index,
+                        )
+                    self._pp_irecv_work = None
+                    self._pp_irecv_buf = None
+                    self._pp_pending_prev_req_id_to_index = None
 
                 # Best-effort debug context for model-runner level PP logs.
                 # This helps correlate broadcast/receive logs with Ray DAG step ids.
@@ -192,12 +196,14 @@ try:
                         scheduler_output, intermediate_tensors
                     )
 
-                # After this step's execute_model completes, schedule a receive
-                # for the NEXT step: the last rank will isend() sampled tokens
-                # after its sample_tokens() call, and we need to recv() them
-                # before the next execute_model() updates the batch.
+                # Post the recv for the NEXT step's sampled tokens as early as
+                # possible so the transfer can overlap with Ray DAG scheduling.
                 if use_async_pp and not is_last_rank and num_tokens > 0:
-                    self._pp_need_prev_token_sync = True
+                    (
+                        self._pp_irecv_work,
+                        self._pp_irecv_buf,
+                        self._pp_pending_prev_req_id_to_index,
+                    ) = self.worker.model_runner._pp_post_irecv()
 
                 if self._is_intermediate_tensors(output):
                     if (

@@ -24,11 +24,12 @@ Spans of interest:
     driver/update_from_output — scheduler update after output
     worker/pp_recv           — time non-last ranks block on dist.recv (our fix)
     worker/execute_model     — actual model forward pass per PP stage
-    worker/sample_tokens     — pp3 sampling time
+    worker/sample_tokens     — last pp sampling time
     worker/execute_model_ray — total time in execute_model_ray per call
 """
 
 import atexit
+import gzip
 import json
 import os
 import threading
@@ -49,12 +50,72 @@ _FLUSH_STEPS: int = int(os.environ.get("VLLM_PP_TRACE_FLUSH_STEPS", "100"))
 # ---------------------------------------------------------------------------
 _lock = threading.Lock()
 _events: list[dict[str, Any]] = []
+_external_trace_files: set[str] = set()
 _pid: int = os.getpid()
 _process_name: str = f"pid_{_pid}"  # overridden by set_process_name()
+_CLOCK_SYNC_NAME = "vllm_pp_trace_clock_sync"
+_clock_sync_emitted: bool = False
+_CLOCK_OFFSET_FILE = "pp_trace_clock_offset_us.json"
 
 
 def is_enabled() -> bool:
     return _ENABLED
+
+
+def _now_us() -> float:
+    return time.monotonic_ns() / 1_000.0
+
+
+def _emit_clock_sync_if_needed() -> None:
+    """Emit a one-time marker into both PP trace and torch profiler trace.
+
+    The marker lets us rebase PP trace timestamps onto the torch profiler clock
+    domain when we merge the files for Perfetto/Chrome.
+    """
+    global _clock_sync_emitted
+    if not _ENABLED or _clock_sync_emitted:
+        return
+
+    sync_ts_us = _now_us()
+    with _lock:
+        _events.append({
+            "name": _CLOCK_SYNC_NAME,
+            "ph": "i",
+            "s": "p",
+            "ts": sync_ts_us,
+            "pid": _pid,
+            "tid": threading.get_ident(),
+        })
+    _clock_sync_emitted = True
+
+    try:
+        torch = __import__("torch")
+        with torch.profiler.record_function(_CLOCK_SYNC_NAME):
+            pass
+    except Exception:
+        # Profiling sync is best-effort only.
+        return
+
+
+def emit_profiler_clock_sync() -> None:
+    """Emit a sync marker while the torch profiler is actively recording.
+
+    Torch profiler traces only capture `record_function()` ranges after
+    profiling has started, so we need a second explicit sync point at profiler
+    start time to align PP spans with the exported torch trace clock domain.
+    """
+    if not _ENABLED:
+        return
+    with _lock:
+        _events.append({
+            "name": _CLOCK_SYNC_NAME,
+            "ph": "i",
+            "s": "p",
+            "ts": _now_us(),
+            "pid": _pid,
+            "tid": threading.get_ident(),
+            "args": {"source": "torch_profiler"},
+        })
 
 
 def set_process_name(name: str) -> None:
@@ -90,11 +151,12 @@ def span(name: str, **kwargs: Any) -> Generator[None, None, None]:
         yield
         return
 
-    t0 = time.perf_counter() * 1_000_000.0  # µs, relative to process start
+    _emit_clock_sync_if_needed()
+    t0 = _now_us()
     try:
         yield
     finally:
-        dur = time.perf_counter() * 1_000_000.0 - t0
+        dur = _now_us() - t0
         ev: dict[str, Any] = {
             "name": name,
             "ph": "X",
@@ -117,11 +179,12 @@ def instant(name: str, **kwargs: Any) -> None:
     """Record an instant (zero-duration) marker event."""
     if not _ENABLED:
         return
+    _emit_clock_sync_if_needed()
     ev: dict[str, Any] = {
         "name": name,
         "ph": "i",
         "s": "p",  # process scope
-        "ts": time.perf_counter() * 1_000_000.0,
+        "ts": _now_us(),
         "pid": _pid,
         "tid": threading.get_ident(),
     }
@@ -133,6 +196,93 @@ def instant(name: str, **kwargs: Any) -> None:
         }
     with _lock:
         _events.append(ev)
+
+
+def register_external_trace(path: str) -> None:
+    """Register another Chrome-trace file to merge into this PP trace.
+
+    This is used by the torch profiler so a worker's CUDA/CPU timeline can be
+    viewed in the same Perfetto/Chrome trace JSON as the PP async spans.
+    """
+    if not _ENABLED or not path:
+        return
+    with _lock:
+        _external_trace_files.add(os.path.abspath(path))
+
+
+def _load_external_trace_events(path: str) -> list[dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+
+    opener = gzip.open if path.endswith(".gz") else open
+    with opener(path, "rt") as f:
+        payload = json.load(f)
+
+    trace_events = payload.get("traceEvents", [])
+    # Keep PP process naming authoritative for this pid.
+    return [
+        ev
+        for ev in trace_events
+        if not (ev.get("ph") == "M" and ev.get("name") == "process_name")
+    ]
+
+
+def _find_sync_ts(
+    events: list[dict[str, Any]],
+    *,
+    choose_last: bool = False,
+) -> float | None:
+    iterable = reversed(events) if choose_last else events
+    for ev in iterable:
+        if ev.get("name") == _CLOCK_SYNC_NAME and "ts" in ev:
+            return float(ev["ts"])
+    return None
+
+
+def _shift_events(events: list[dict[str, Any]], delta_us: float) -> list[dict[str, Any]]:
+    shifted: list[dict[str, Any]] = []
+    for ev in events:
+        if "ts" not in ev:
+            shifted.append(ev)
+            continue
+        shifted_ev = dict(ev)
+        shifted_ev["ts"] = float(shifted_ev["ts"]) + delta_us
+        shifted.append(shifted_ev)
+    return shifted
+
+
+def _clock_offset_path() -> str:
+    return os.path.join(_TRACE_DIR, _CLOCK_OFFSET_FILE)
+
+
+def _load_global_clock_offset_us() -> float | None:
+    if not _ENABLED:
+        return None
+    path = _clock_offset_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+        return float(payload["offset_us"])
+    except Exception:
+        return None
+
+
+def _store_global_clock_offset_us(offset_us: float) -> None:
+    if not _ENABLED:
+        return
+    os.makedirs(_TRACE_DIR, exist_ok=True)
+    path = _clock_offset_path()
+    tmp_path = f"{path}.tmp.{_pid}"
+    payload = {"offset_us": offset_us}
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(payload, f, separators=(",", ":"))
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
 
 def flush(tag: str = "") -> str | None:
@@ -155,6 +305,36 @@ def flush(tag: str = "") -> str | None:
 
     with _lock:
         snapshot = list(_events)  # snapshot without clearing
+        external_trace_files = sorted(_external_trace_files)
+
+    applied_global_offset = False
+    for external_trace_path in external_trace_files:
+        try:
+            external_events = _load_external_trace_events(external_trace_path)
+        except Exception:
+            continue
+
+        local_sync_ts = _find_sync_ts(snapshot, choose_last=True)
+        external_sync_ts = _find_sync_ts(external_events)
+        if local_sync_ts is not None and external_sync_ts is not None:
+            offset_us = external_sync_ts - local_sync_ts
+            _store_global_clock_offset_us(offset_us)
+            snapshot = _shift_events(snapshot, offset_us)
+            applied_global_offset = True
+            break
+
+    if not applied_global_offset:
+        global_offset_us = _load_global_clock_offset_us()
+        if global_offset_us is not None:
+            snapshot = _shift_events(snapshot, global_offset_us)
+
+    for external_trace_path in external_trace_files:
+        try:
+            snapshot.extend(_load_external_trace_events(external_trace_path))
+        except Exception:
+            # Tracing is best-effort only; keep PP spans even if an external
+            # trace is malformed or still being finalized by another writer.
+            continue
 
     payload = {
         "traceEvents": snapshot,
@@ -182,7 +362,7 @@ def record_complete(name: str, t0_us: float, **kwargs: Any) -> None:
     Typical usage (avoids the overhead of a context manager for functions with
     multiple return points)::
 
-        _t0 = time.perf_counter() * 1e6
+        _t0 = time.monotonic() * 1e6
         try:
             ...
             return result
@@ -191,7 +371,8 @@ def record_complete(name: str, t0_us: float, **kwargs: Any) -> None:
     """
     if not _ENABLED:
         return
-    dur = time.perf_counter() * 1_000_000.0 - t0_us
+    _emit_clock_sync_if_needed()
+    dur = _now_us() - t0_us
     ev: dict[str, Any] = {
         "name": name,
         "ph": "X",

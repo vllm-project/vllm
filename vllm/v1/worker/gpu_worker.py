@@ -1004,6 +1004,8 @@ class Worker(WorkerBase):
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
+        if self.model_runner is not None:
+            self.model_runner.shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
 

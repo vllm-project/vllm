@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import glob
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -171,7 +173,9 @@ class TorchProfilerWrapper(WorkerProfiler):
 
         self.local_rank = local_rank
         self.profiler_config = profiler_config
+        self.worker_name = worker_name
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
+        self._torch_profiler_trace_dir = torch_profiler_trace_dir
         if local_rank in (None, 0):
             logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
@@ -192,11 +196,15 @@ class TorchProfilerWrapper(WorkerProfiler):
         if on_trace_ready is not None:
             trace_handler = on_trace_ready
         else:
-            trace_handler = torch.profiler.tensorboard_trace_handler(
+            tensorboard_trace_handler = torch.profiler.tensorboard_trace_handler(
                 torch_profiler_trace_dir,
                 worker_name=worker_name,
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
+
+            def trace_handler(prof: torch.profiler.profile) -> None:
+                tensorboard_trace_handler(prof)
+                self._register_pp_trace_file()
 
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
 
@@ -240,13 +248,50 @@ class TorchProfilerWrapper(WorkerProfiler):
             0,
         )
 
+    def _register_pp_trace_file(self) -> None:
+        if _is_uri_path(self._torch_profiler_trace_dir):
+            return
+
+        try:
+            from vllm.v1.executor import pp_trace
+        except Exception:
+            return
+
+        if not pp_trace.is_enabled():
+            return
+
+        pattern = os.path.join(
+            self._torch_profiler_trace_dir,
+            f"{self.worker_name}*.pt.trace.json*",
+        )
+        matches = sorted(glob.glob(pattern), key=os.path.getmtime)
+        if matches:
+            pp_trace.register_external_trace(matches[-1])
+            pp_trace.flush()
+        else:
+            logger.warning(
+                "PP trace merge requested but no torch profiler trace was found "
+                "for worker '%s' under %s",
+                self.worker_name,
+                self._torch_profiler_trace_dir,
+            )
+
     @override
     def _start(self) -> None:
         self.profiler.start()
+        try:
+            from vllm.v1.executor import pp_trace
+
+            if pp_trace.is_enabled():
+                with torch.profiler.record_function("vllm_pp_trace_clock_sync"):
+                    pp_trace.emit_profiler_clock_sync()
+        except Exception:
+            logger.debug("Failed to emit PP/torch clock sync marker", exc_info=True)
 
     @override
     def _stop(self) -> None:
         self.profiler.stop()
+        self._register_pp_trace_file()
 
         profiler_config = self.profiler_config
         rank = self.local_rank
