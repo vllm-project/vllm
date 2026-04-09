@@ -1437,7 +1437,7 @@ class TimedTrace(BenchmarkDataset):
         # load and we will do transformation once we have the Tokenizer available
         # this is jsonl data format
         with open(self.dataset_path) as f:
-            self.data = f.read()
+            self.data = f.readlines()
 
     def _sample_token(self, num_tokens: int, tokenizer: TokenizerLike) -> list[int]:
         # Initialize vocab only if it doesn't exist yet
