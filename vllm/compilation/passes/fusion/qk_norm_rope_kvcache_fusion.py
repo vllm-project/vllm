@@ -330,23 +330,6 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         cc = config.compilation_config
         self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
 
-        # The fused kernel may write V-cache in interleaved layout (via
-        # set_fused_kv_cache_layout).  If some compile ranges exceed
-        # max_token_num the fusion is skipped for those ranges and the
-        # unfused path writes V in standard PagedAttention layout -- a
-        # cross-range layout mismatch.  Bump the limit so the fusion
-        # covers every possible batch size the scheduler can issue.
-        max_batch_tokens = config.scheduler_config.max_num_batched_tokens
-        if self.max_token_num < max_batch_tokens:
-            logger.info(
-                "QK-Norm+RoPE+KVCache fusion: raising "
-                "rope_kvcache_fusion_max_token_num from %d to %d "
-                "to cover all compile ranges (required for "
-                "consistent V-cache layout).",
-                self.max_token_num, max_batch_tokens,
-            )
-            self.max_token_num = max_batch_tokens
-
         dtype = config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
             logger.warning_once(
