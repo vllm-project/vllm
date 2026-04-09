@@ -9,7 +9,7 @@ use std::sync::Arc;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
@@ -80,9 +80,7 @@ pub async fn chat_completions(
         );
         let sse_stream = chat_completion_sse_stream(chunk_stream);
 
-        Sse::new(sse_stream)
-            .keep_alive(KeepAlive::default())
-            .into_response()
+        Sse::new(sse_stream).into_response()
     } else {
         let response = match collect_chat_completion(
             chat_stream,
