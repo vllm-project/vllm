@@ -799,6 +799,7 @@ class SpecDecodeBaseProposer:
                     req_ranks = torch.repeat_interleave(
                         torch.arange(batch_size, dtype=torch.long, device=self.device),
                         extend_lens_batch.long(),
+                        output_size=total_num_input_tokens,
                     )
                     out_indices_for_input = (
                         torch.arange(
