@@ -676,9 +676,12 @@ def _one_sided_data_worker(rank, world_size):
             assert recv_a1q.numel() > 0
             assert recv_ids.numel() > 0
 
-            # --- One-sided combine ---
-            # Production shapes expert output as (ep_size, max_tokens, hidden_size)
-            expert_output = torch.randn(
+            # --- Round-trip exact verification ---
+            # The dispatch routes each token once per *distinct* expert
+            # rank. Combine performs an unweighted sum of per-rank
+            # contributions. With constant expert output (all 1s):
+            #   result[i] = 1.0 * num_distinct_expert_ranks(i)
+            expert_output = torch.ones(
                 world_size, runtime_max_tokens, hidden_size,
                 device=device, dtype=torch.bfloat16,
             )
@@ -687,7 +690,33 @@ def _one_sided_data_worker(rank, world_size):
                 runtime_max_tokens_per_rank=runtime_max_tokens,
             )
             assert combined.shape == (tokens_per_rank, hidden_size)
-            assert combined.abs().sum() > 0
+
+            experts_per_rank = num_experts // world_size
+            expert_ranks = topk_ids // experts_per_rank  # (tokens, top_k)
+            num_distinct = torch.tensor(
+                [len(set(row.tolist())) for row in expert_ranks],
+                device=device, dtype=torch.bfloat16,
+            ).unsqueeze(1)  # (tokens, 1)
+            expected = num_distinct.expand_as(combined)
+            torch.testing.assert_close(combined, expected)
+
+            # --- Linearity check with scaled expert output ---
+            # Scaling the expert output by a constant should scale the
+            # combined result by the same constant.
+            # Re-dispatch to reset internal state (one-sided requires a
+            # fresh dispatch before each combine).
+            manager.moe_alltoall.dispatch(
+                token_selected_experts=topk_ids,
+                input_payloads=payloads,
+                runtime_max_tokens_per_rank=runtime_max_tokens,
+            )
+            scale = 3.0
+            combined_scaled = manager.moe_alltoall.combine(
+                payload=expert_output * scale,
+                runtime_max_tokens_per_rank=runtime_max_tokens,
+            )
+            expected_scaled = (expected * scale).to(torch.bfloat16)
+            torch.testing.assert_close(combined_scaled, expected_scaled)
 
             torch.distributed.barrier()
 
