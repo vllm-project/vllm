@@ -4,6 +4,8 @@
 # The kernels in this file are adapted from LightLLM's context_attention_fwd:
 # https://github.com/ModelTC/lightllm/blob/main/lightllm/models/llama/triton_kernel/context_flashattention_nopad.py
 
+from typing import Any
+
 import torch
 
 from vllm.platforms import current_platform
@@ -780,7 +782,7 @@ def context_attention_fwd(
         return
 
     max_seq_len = 0 if max_seq_len is None else max_seq_len
-    extra_kargs = {}
+    extra_kargs: dict[str, Any] = {}
     if current_platform.is_rocm():
         extra_kargs = {}
 
