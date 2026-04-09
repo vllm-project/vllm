@@ -771,6 +771,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
+        use_audio_in_video: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -781,6 +782,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         # add extra video token for video processing
         self.video_token = video_token
         self.video_pruning_rate = video_pruning_rate
+        self.use_audio_in_video = use_audio_in_video
 
         # Video params live exclusively in vision_config
         vision_config = getattr(config, "vision_config", config)

@@ -1741,6 +1741,27 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Phi-4-reasoning-vision
+def run_phi4siglip(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "microsoft/Phi-4-reasoning-vision-15B"
+    prompts = [
+        f"<|user|>\n<image>\n{question}<|end|>\n<|assistant|>\n"
+        for question in questions
+    ]
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Pixtral HF-format
 def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2222,6 +2243,7 @@ model_example_map = {
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
+    "phi4_siglip": run_phi4siglip,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
