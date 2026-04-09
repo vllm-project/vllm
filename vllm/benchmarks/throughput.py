@@ -259,7 +259,7 @@ async def run_vllm_async(
             prompts.append(prompt)
             lora_requests.append(request.lora_request)
 
-        async def _run_batch(request_id_prefix: str) -> None:
+        async def run_batch(request_id_prefix: str) -> None:
             generators = []
             for i, (prompt, sp, lr) in enumerate(
                 zip(prompts, sampling_params, lora_requests)
@@ -278,13 +278,13 @@ async def run_vllm_async(
         if num_iters_warmup > 0:
             print("Warming up...")
             for w in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
-                await _run_batch(f"warmup_{w}")
+                await run_batch(f"warmup_{w}")
             await reset_prefix_cache_async(llm)
 
         start = time.perf_counter()
         if do_profile:
             await llm.start_profile()
-        await _run_batch("test")
+        await run_batch("test")
         if do_profile:
             await llm.stop_profile()
         end = time.perf_counter()
