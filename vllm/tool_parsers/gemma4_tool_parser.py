@@ -39,7 +39,7 @@ from vllm.entrypoints.openai.responses.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
-from vllm.tool_parsers.utils import find_common_prefix
+from vllm.tool_parsers.utils import consume_space, find_common_prefix
 
 logger = init_logger(__name__)
 
@@ -53,7 +53,8 @@ STRING_DELIM_LEN = len(STRING_DELIM)
 STRUCTURAL_CHARS = (",", "}", "]")
 
 # Pre-compiled regex for malformed input detection
-TOOL_CALL_KEY_PATTERN = re.compile(r",\s*([a-zA-Z_]\w*):\s*$")
+# Supports standard identifiers, hyphens, and dots (e.g., "file-name", "module.path")
+TOOL_CALL_KEY_PATTERN = re.compile(r",\s*([a-zA-Z_][\w.\-]*):\s*$")
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,18 @@ def _parse_gemma4_value(value_str: str) -> object:
     return value_str
 
 
+def _skip_string_in_nested_structure(text: str, i: int, n: int) -> int:
+    """Skip over a string delimiter and its contents in nested structures."""
+    i += STRING_DELIM_LEN
+    end_pos, is_closing_delim = _find_string_value_end(text, i)
+    if end_pos == -1:
+        return n
+    elif is_closing_delim:
+        return end_pos + STRING_DELIM_LEN
+    else:
+        return min(end_pos + 1, n)
+
+
 def _find_string_value_end(args_str: str, value_start: int) -> tuple[int, bool]:
     """Find the end position of a string value, handling missing delimiters.
 
@@ -98,10 +111,11 @@ def _find_string_value_end(args_str: str, value_start: int) -> tuple[int, bool]:
 
     Returns:
         Tuple of (end_position, is_closing_delimiter) where:
-        - end_position: Position where the string value ends
+        - end_position: Position where the string value ends (or -1 if
+          no delimiter found for unterminated strings)
         - is_closing_delimiter: True if end_position points to a valid closing
-          delimiter, False if it points to a comma (malformed input), or -1 if
-          no delimiter found (unterminated string)
+          delimiter, False if it points to a comma (malformed input) or if
+          no delimiter found (end_position will be -1 for unterminated strings)
 
     Examples:
         Well-formed:
@@ -123,12 +137,13 @@ def _find_string_value_end(args_str: str, value_start: int) -> tuple[int, bool]:
         # No delimiter found - unterminated string
         return (-1, False)
 
-    # Stage 1: Check if delimiter is followed by structural character
-    # In valid Gemma4, closing delimiters are ALWAYS followed by ',', '}', or ']'
+    # Check if delimiter is followed by structural character (with optional whitespace)
     after_delim_pos = next_delim + STRING_DELIM_LEN
+    if after_delim_pos < len(args_str) and args_str[after_delim_pos].isspace():
+        after_delim_pos = consume_space(after_delim_pos, args_str)
+
     if after_delim_pos < len(args_str):
-        char_after = args_str[after_delim_pos]
-        if char_after in STRUCTURAL_CHARS:
+        if args_str[after_delim_pos] in STRUCTURAL_CHARS:
             # This is a valid closing delimiter
             return (next_delim, True)
     else:
@@ -234,16 +249,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             i += 1
             while i < n and depth > 0:
                 if args_str[i:].startswith(STRING_DELIM):
-                    # Skip over string contents to avoid counting { inside strings
-                    i += STRING_DELIM_LEN
-                    end_pos, is_closing_delim = _find_string_value_end(args_str, i)
-                    if end_pos == -1:
-                        i = n
-                    elif is_closing_delim:
-                        i = end_pos + STRING_DELIM_LEN
-                    else:
-                        # Stopped at comma (malformed) - advance with bounds check
-                        i = min(end_pos + 1, n)
+                    i = _skip_string_in_nested_structure(args_str, i, n)
                     continue
                 if args_str[i] == "{":
                     depth += 1
@@ -264,15 +270,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             i += 1
             while i < n and depth > 0:
                 if args_str[i:].startswith(STRING_DELIM):
-                    i += STRING_DELIM_LEN
-                    end_pos, is_closing_delim = _find_string_value_end(args_str, i)
-                    if end_pos == -1:
-                        i = n
-                    elif is_closing_delim:
-                        i = end_pos + STRING_DELIM_LEN
-                    else:
-                        # Stopped at comma (malformed) - advance with bounds check
-                        i = min(end_pos + 1, n)
+                    i = _skip_string_in_nested_structure(args_str, i, n)
                     continue
                 if args_str[i] == "[":
                     depth += 1
@@ -312,13 +310,20 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
 
         # String element
         if arr_str[i:].startswith(STRING_DELIM):
-            i += len(STRING_DELIM)
-            end_pos = arr_str.find(STRING_DELIM, i)
+            i += STRING_DELIM_LEN
+            val_start = i
+
+            end_pos, is_closing_delim = _find_string_value_end(arr_str, val_start)
+
             if end_pos == -1:
-                items.append(arr_str[i:])
+                # Unterminated string — take rest
+                items.append(arr_str[val_start:])
                 break
-            items.append(arr_str[i:end_pos])
-            i = end_pos + len(STRING_DELIM)
+
+            items.append(arr_str[val_start:end_pos])
+
+            # Advance position based on what we found
+            i = end_pos + STRING_DELIM_LEN if is_closing_delim else end_pos
 
         # Nested object
         elif arr_str[i] == "{":
@@ -327,9 +332,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             i += 1
             while i < n and depth > 0:
                 if arr_str[i:].startswith(STRING_DELIM):
-                    i += len(STRING_DELIM)
-                    nd = arr_str.find(STRING_DELIM, i)
-                    i = nd + len(STRING_DELIM) if nd != -1 else n
+                    i = _skip_string_in_nested_structure(arr_str, i, n)
                     continue
                 if arr_str[i] == "{":
                     depth += 1
@@ -347,6 +350,9 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             sub_start = i + 1
             i += 1
             while i < n and depth > 0:
+                if arr_str[i:].startswith(STRING_DELIM):
+                    i = _skip_string_in_nested_structure(arr_str, i, n)
+                    continue
                 if arr_str[i] == "[":
                     depth += 1
                 elif arr_str[i] == "]":

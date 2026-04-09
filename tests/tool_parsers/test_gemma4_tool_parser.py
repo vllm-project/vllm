@@ -127,6 +127,21 @@ class TestParseGemma4Args:
         result = _parse_gemma4_args('name:<|"|>test<|"|>,flag:', partial=True)
         assert result == {"name": "test"}
 
+    def test_delimiter_with_trailing_whitespace(self):
+        """Test delimiter followed by whitespace before structural character."""
+        result = _parse_gemma4_args('key:<|"|>value<|"|> ,next:<|"|>data<|"|>')
+        assert result == {"key": "value", "next": "data"}
+
+    def test_hyphenated_argument_key(self):
+        """Test argument keys with hyphens (e.g., file-name)."""
+        result = _parse_gemma4_args('file-name:<|"|>test.txt<|"|>,user-id:123')
+        assert result == {"file-name": "test.txt", "user-id": 123}
+
+    def test_dotted_argument_key(self):
+        """Test argument keys with dots (e.g., module.path)."""
+        result = _parse_gemma4_args('config.path:<|"|>/etc/config<|"|>,api.version:2')
+        assert result == {"config.path": "/etc/config", "api.version": 2}
+
 
 class TestParseGemma4Array:
     def test_string_array(self):
@@ -140,6 +155,33 @@ class TestParseGemma4Array:
     def test_bare_values(self):
         result = _parse_gemma4_array("42,true,3.14")
         assert result == [42, True, 3.14]
+
+    def test_array_string_elements(self):
+        """Test array parsing with string elements."""
+        result = _parse_gemma4_array('<|"|>first<|"|>,<|"|>second<|"|>')
+        assert result == ["first", "second"]
+
+        result = _parse_gemma4_array('<|"|>first<|"|>,<|"|>second')
+        assert result == ["first", "second"]
+
+    def test_array_nested_object_with_malformed_string(self):
+        """Test nested object in array with malformed string delimiter."""
+        result = _parse_gemma4_array('{a:<|"|>value,b:<|"|>other<|"|>}')
+        assert len(result) == 1
+        assert isinstance(result[0], dict)
+        assert result[0]["a"] == "value"
+        assert result[0]["b"] == "other"
+
+    def test_array_nested_array_with_string(self):
+        """Test nested array with string elements."""
+        result = _parse_gemma4_array('[<|"|>inner1<|"|>,<|"|>inner2<|"|>]')
+        assert len(result) == 1
+        assert result[0] == ["inner1", "inner2"]
+
+    def test_array_string_with_structural_chars(self):
+        """Test array string containing structural characters."""
+        result = _parse_gemma4_array('<|"|>text[with]brackets<|"|>,<|"|>more<|"|>')
+        assert result == ["text[with]brackets", "more"]
 
 
 # ---------------------------------------------------------------------------
