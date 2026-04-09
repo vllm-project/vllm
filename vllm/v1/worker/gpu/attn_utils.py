@@ -37,7 +37,6 @@ def init_attn_backend(
 ):
     attn_backends: dict[str, type[AttentionBackend]] = {}
     attn_groups: list[list[AttentionGroup]] = []
-    attn_backend_workspace: torch.Tensor | None = None
     for kv_cache_group_id, kv_cache_group_spec in enumerate(
         kv_cache_config.kv_cache_groups
     ):
@@ -79,13 +78,6 @@ def init_attn_backend(
                 kernel_block_size=None,
                 num_metadata_builders=1,
             )
-            builder = group.get_metadata_builder(0)
-            if attn_backend_workspace is None:
-                if hasattr(builder, "_get_workspace_buffer"):
-                    attn_backend_workspace = builder._get_workspace_buffer()
-            else:
-                if hasattr(builder, "set_workspace_buffer"):
-                    builder.set_workspace_buffer(attn_backend_workspace)
         attn_groups.append(groups)
     return attn_backends, attn_groups
 
