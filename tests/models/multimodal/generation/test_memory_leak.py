@@ -63,7 +63,10 @@ def _ru_maxrss_bytes() -> int | None:
     except ImportError:
         return None
 
-    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    rss = sum(
+        resource.getrusage(who).ru_maxrss
+        for who in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)
+    )
     if rss <= 0:
         return 0
 
