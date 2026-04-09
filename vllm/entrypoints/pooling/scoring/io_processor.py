@@ -278,7 +278,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         assert isinstance(ctx.prompts, ScoringData)
-        assert not isinstance(ctx.pooling_params, list)
+        assert not isinstance(ctx.pooling_params, Sequence)
 
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
