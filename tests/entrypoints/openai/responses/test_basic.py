@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 import openai  # use the official client for correctness check
 import openai.types.responses as openai_responses_types
 import pytest
@@ -37,8 +39,8 @@ async def test_instructions(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_chat(client: openai.AsyncOpenAI):
     response = await client.responses.create(
+        instructions="Finish the answer with QED.",
         input=[
-            {"role": "system", "content": "Finish the answer with QED."},
             {"role": "user", "content": "What is 5 * 3?"},
             {"role": "assistant", "content": "15. QED."},
             {"role": "user", "content": "Multiply the result by 2."},
@@ -67,6 +69,9 @@ async def test_chat_with_input_type(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 async def test_logprobs(client: openai.AsyncOpenAI):
+    model = os.environ.get("VLLM_TEST_MODEL", "")
+    if "gpt-oss" in model:
+        pytest.skip("logprobs not supported for gpt-oss models")
     response = await client.responses.create(
         include=["message.output_text.logprobs"],
         input="What is 13 * 24?",
