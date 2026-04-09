@@ -55,7 +55,8 @@ struct Counter {
 
 inline int64_t get_available_l2_size() {
   static int64_t size = []() {
-    const uint32_t l2_cache_size = at::cpu::L2_cache_size();
+    auto caps = at::cpu::get_cpu_capabilities();
+    const uint32_t l2_cache_size = caps.at("l2_cache_size").toInt();
     return l2_cache_size >> 1;  // use 50% of L2 cache
   }();
   return size;
