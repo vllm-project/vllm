@@ -71,6 +71,7 @@ class OffloadingHandler(ABC):
 
     def shutdown(self) -> None:  # noqa: B027 -- optional no-op default
         """Shutdown the handler and release any resources."""
+        pass
 
 
 class OffloadingWorker:
