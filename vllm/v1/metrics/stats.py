@@ -173,6 +173,8 @@ class SchedulerStats:
 
     num_running_reqs: int = 0
     num_waiting_reqs: int = 0
+    num_prefilling_reqs: int = 0
+    num_decoding_reqs: int = 0
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
