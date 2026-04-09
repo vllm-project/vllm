@@ -55,11 +55,16 @@ class MambaHybridModelState(DefaultModelState):
         # During CUDAGraph capture, num_decode_draft_tokens_cpu and num_accepted_tokens
         # are created by attn_metadata_builder.build_for_cudagraph_capture, so we only
         # compute them during actual (non-capture) forward execution.
+        is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
         num_decode_draft_tokens_cpu = None
         num_accepted_tokens = None
         if not for_capture:
             assert req_states is not None
             assert scheduled_spec_decode_tokens is not None
+            is_prefilling[: input_batch.num_reqs] = torch.from_numpy(
+                req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np]
+                < req_states.prefill_len.np[input_batch.idx_mapping_np]
+            )
             num_decode_draft_tokens_cpu = torch.full(
                 (num_reqs,),
                 -1,
@@ -99,6 +104,7 @@ class MambaHybridModelState(DefaultModelState):
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
             for_cudagraph_capture=for_capture,
