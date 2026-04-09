@@ -18,7 +18,7 @@ pull_request_rules:
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:
-    - status-failure=pre-commit
+    - check-failure=pre-commit
     - -closed
     - -draft
   actions:
@@ -51,7 +51,7 @@ pull_request_rules:
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails
   conditions:
-    - status-failure=dco
+    - check-failure=dco
     - -closed
     - -draft
   actions:
@@ -384,6 +384,7 @@ pull_request_rules:
     - label=ready
     - "#approved-reviews-by >= 1"
     - "#commits-behind >= 50"
+    - "#check-failure = 0"
     - -closed
     - -draft
     - -conflict
