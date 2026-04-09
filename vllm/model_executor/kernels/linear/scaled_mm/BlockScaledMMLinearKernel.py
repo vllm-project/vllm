@@ -219,12 +219,6 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> bool:
-        """Return a scalar boolean Tensor selecting the branch for torch.cond.
-
-        Returns True to dispatch to base, False to dispatch to fallback.
-        Must return a scalar boolean Tensor (not a Python bool) for
-        torch.compile compatibility.
-        """
         raise NotImplementedError
 
     def apply_block_scaled_mm(
