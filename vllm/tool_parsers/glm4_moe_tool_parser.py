@@ -21,7 +21,6 @@ import regex as re
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -31,9 +30,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
 
@@ -48,8 +49,8 @@ class Glm4MoeModelToolParser(ToolParser):
     rather than waiting for the complete </arg_value> tag.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         # Stateful streaming fields
         self.current_tool_name_sent: bool = False
         self.prev_tool_call_arr: list[dict[str, Any]] = []
@@ -122,7 +123,7 @@ class Glm4MoeModelToolParser(ToolParser):
     def _is_string_type(
         tool_name: str,
         arg_name: str,
-        tools: list[ChatCompletionToolsParam] | None,
+        tools: list[Tool] | None,
     ) -> bool:
         if tools is None:
             return False
@@ -151,7 +152,9 @@ class Glm4MoeModelToolParser(ToolParser):
             logger.exception("Failed to determine if tools are enabled.")
             return False
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """Adjust request parameters for tool call token handling."""
         request = super().adjust_request(request)
         if request.tools and request.tool_choice != "none":
@@ -186,7 +189,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 for key, value in pairs:
                     arg_key = key.strip()
                     arg_val = value.strip()
-                    if not self._is_string_type(tc_name, arg_key, request.tools):
+                    if not self._is_string_type(tc_name, arg_key, self.tools):
                         arg_val = self._deserialize(arg_val)
                     logger.debug("arg_key = %s, arg_val = %s", arg_key, arg_val)
                     arg_dct[arg_key] = arg_val
@@ -206,7 +209,12 @@ class Glm4MoeModelToolParser(ToolParser):
             )
         else:
             if len(tool_calls) > 0:
-                content = model_output[: model_output.find(self.tool_calls_start_token)]
+                content: str | None = model_output[
+                    : model_output.find(self.tool_calls_start_token)
+                ]
+                # Normalize empty/whitespace-only content to None
+                if not content or not content.strip():
+                    content = None
                 return ExtractedToolCallInformation(
                     tools_called=True, tool_calls=tool_calls, content=content
                 )
@@ -322,7 +330,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 key = (self._pending_key or "").strip()
 
                 is_string = self._is_string_type(
-                    self._current_tool_name, key, request.tools
+                    self._current_tool_name, key, self.tools
                 )
 
                 if is_string:

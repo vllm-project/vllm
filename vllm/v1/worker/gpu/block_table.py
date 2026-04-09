@@ -169,7 +169,7 @@ class BlockTables:
         return self.slot_mappings[:, :num_tokens]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def _gather_block_tables_kernel(
     batch_idx_to_req_idx,  # [batch_size]
     src_block_table_ptrs,  # [num_kv_cache_groups]

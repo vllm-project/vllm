@@ -24,6 +24,7 @@ from transformers import (
     GenerationConfig,
     GenerationMixin,
 )
+from transformers.masking_utils import create_causal_mask
 from transformers.video_utils import VideoMetadata
 
 from vllm.logprobs import SampleLogprobs
@@ -489,12 +490,13 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.image_size = self.vision_config.image_size
 
         def __call__(self, text: str, images: Image | list[Image], **kwargs):
-            from vllm.model_executor.models.h2ovl import (
-                IMG_CONTEXT,
-                IMG_END,
-                IMG_START,
+            from vllm.transformers_utils.processors.h2ovl import (
                 image_to_pixel_values_h2ovl,
             )
+
+            IMG_START = "<img>"
+            IMG_END = "</img>"
+            IMG_CONTEXT = "<IMG_CONTEXT>"
 
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
@@ -679,10 +681,14 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         sin = sin.to(inputs_embeds.dtype)
 
         # Prepare attention mask
-        if attention_mask is not None:
-            attention_mask = self._update_causal_mask(
-                attention_mask, inputs_embeds, cache_position, past_key_values, False
-            )
+        attention_mask = create_causal_mask(
+            config=self.config,
+            input_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            position_ids=position_ids,
+            cache_position=cache_position,
+        )
 
         # Initialize and collect hidden states
         hidden_states = inputs_embeds
@@ -751,16 +757,17 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.image_size = self.vision_config.image_size
 
         def __call__(self, text: str, images: Image | list[Image], **kwargs):
-            from vllm.model_executor.models.skyworkr1v import (
-                IMG_CONTEXT,
-                IMG_END,
-                IMG_START,
-                image_to_pixel_values_skyworkr1v,
+            from vllm.transformers_utils.processors.internvl import (
+                image_to_pixel_values_internvl,
             )
+
+            IMG_START = "<img>"
+            IMG_END = "</img>"
+            IMG_CONTEXT = "<IMG_CONTEXT>"
 
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
-                image_to_pixel_values_skyworkr1v(
+                image_to_pixel_values_internvl(
                     image,
                     input_size=self.image_size,
                     min_num=self.min_num,
@@ -815,13 +822,14 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             videos: npt.NDArray | list[npt.NDArray] = None,
             **kwargs,
         ):
-            from vllm.model_executor.models.internvl import (
-                IMG_CONTEXT,
-                IMG_END,
-                IMG_START,
+            from vllm.transformers_utils.processors.internvl import (
                 image_to_pixel_values_internvl,
                 video_to_pixel_values_internvl,
             )
+
+            IMG_START = "<img>"
+            IMG_END = "</img>"
+            IMG_CONTEXT = "<IMG_CONTEXT>"
 
             images = [images] if isinstance(images, Image) else images
             videos = [videos] if isinstance(videos, np.ndarray) else videos
@@ -1146,6 +1154,31 @@ def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return BatchFeature(data=inputs, tensor_type="pt")
 
     hf_model.processor = processor
+    return hf_model
+
+
+def paddleocr_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches the HfRunner to fix create_causal_mask API mismatch.
+
+    The PaddleOCR-VL HF model passes `inputs_embeds` to create_causal_mask,
+    but transformers renamed this parameter to `input_embeds`.
+    """
+    import sys
+
+    model_module = sys.modules.get(type(hf_model.model.model).__module__)
+    if model_module is None:
+        return hf_model
+
+    original_create_causal_mask = getattr(model_module, "create_causal_mask", None)
+    if original_create_causal_mask is None:
+        return hf_model
+
+    def patched_create_causal_mask(*args, **kwargs):
+        if "inputs_embeds" in kwargs:
+            kwargs["input_embeds"] = kwargs.pop("inputs_embeds")
+        return original_create_causal_mask(*args, **kwargs)
+
+    model_module.create_causal_mask = patched_create_causal_mask  # type: ignore[attr-defined]
     return hf_model
 
 

@@ -3,7 +3,6 @@
 """Benchmark offline inference throughput."""
 
 import argparse
-import dataclasses
 import json
 import os
 import random
@@ -18,6 +17,7 @@ from transformers import AutoModelForCausalLM, PreTrainedTokenizerBase
 
 from vllm.benchmarks.datasets import (
     AIMODataset,
+    ASRDataset,
     BurstGPTDataset,
     ConversationDataset,
     InstructCoderDataset,
@@ -53,7 +53,7 @@ def run_vllm(
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     assert all(
         llm.llm_engine.model_config.max_model_len
         >= (request.prompt_len + request.expected_output_len)
@@ -141,7 +141,7 @@ def run_vllm_chat(
     """
     from vllm import LLM, SamplingParams
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     assert all(
         llm.llm_engine.model_config.max_model_len
@@ -181,7 +181,6 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     do_profile: bool,
-    disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
@@ -191,7 +190,6 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as llm:
         model_config = llm.model_config
         assert all(
@@ -350,6 +348,7 @@ def get_requests(args, tokenizer):
         "tokenizer": tokenizer,
         "lora_path": args.lora_path,
         "max_loras": args.max_loras,
+        "lora_assignment": getattr(args, "lora_assignment", "random"),
         "num_requests": args.num_prompts,
     }
 
@@ -416,6 +415,12 @@ def get_requests(args, tokenizer):
             dataset_cls = AIMODataset
             common_kwargs["dataset_subset"] = None
             common_kwargs["dataset_split"] = "train"
+        elif args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS:
+            dataset_cls = ASRDataset
+            common_kwargs["dataset_subset"] = args.hf_subset
+            common_kwargs["dataset_split"] = args.hf_split
+            sample_kwargs["asr_min_audio_len_sec"] = args.asr_min_audio_len_sec
+            sample_kwargs["asr_max_audio_len_sec"] = args.asr_max_audio_len_sec
     elif args.dataset_name == "prefix_repetition":
         dataset_cls = PrefixRepetitionRandomDataset
         sample_kwargs["prefix_len"] = args.prefix_repetition_prefix_len
@@ -559,6 +564,7 @@ def validate_args(args):
         elif args.dataset_path in (
             InstructCoderDataset.SUPPORTED_DATASET_PATHS
             | AIMODataset.SUPPORTED_DATASET_PATHS
+            | ASRDataset.SUPPORTED_DATASET_PATHS
         ):
             assert args.backend == "vllm", (
                 f"{args.dataset_path} needs to use vllm as the backend."
@@ -757,12 +763,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Use vLLM async engine rather than LLM class.",
     )
     parser.add_argument(
-        "--disable-frontend-multiprocessing",
-        action="store_true",
-        default=False,
-        help="Disable decoupled async engine frontend.",
-    )
-    parser.add_argument(
         "--disable-detokenize",
         action="store_true",
         help=(
@@ -777,6 +777,15 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=None,
         help="Path to the lora adapters to use. This can be an absolute path, "
         "a relative path, or a Hugging Face model identifier.",
+    )
+    parser.add_argument(
+        "--lora-assignment",
+        type=str,
+        default="random",
+        choices=["random", "round-robin"],
+        help="Strategy for assigning LoRA adapters to requests. "
+        "'random' (default) selects a LoRA at random for each request. "
+        "'round-robin' cycles through LoRAs deterministically.",
     )
     parser.add_argument(
         "--prefix-len",
@@ -840,6 +849,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
     add_random_dataset_base_args(parser)
     add_random_multimodal_dataset_args(parser)
 
+    # ASR dataset
+    parser.add_argument(
+        "--asr-min-audio-len-sec",
+        type=float,
+        default=0.0,
+        help="Minimum audio duration in seconds for ASR dataset filtering.",
+    )
+    parser.add_argument(
+        "--asr-max-audio-len-sec",
+        type=float,
+        default=float("inf"),
+        help="Maximum audio duration in seconds for ASR dataset filtering.",
+    )
+
     parser = AsyncEngineArgs.add_cli_args(parser)
 
 
@@ -870,7 +893,6 @@ def main(args: argparse.Namespace):
                     requests,
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
-                    disable_frontend_multiprocessing=args.disable_frontend_multiprocessing,
                     disable_detokenize=args.disable_detokenize,
                     do_profile=args.profile,
                 )

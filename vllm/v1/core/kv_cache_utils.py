@@ -413,7 +413,7 @@ def _gen_mm_extra_hash_keys(
     # We do not need to check all mm inputs if the start token index is out of
     # range. This usually happens in the late prefill phase and decoding phase.
     last_pos = mm_features[-1].mm_position
-    if last_pos.offset + last_pos.length < start_token_idx:
+    if last_pos.offset + last_pos.length <= start_token_idx:
         return extra_keys, start_mm_idx
 
     # Support start_mm_idx == -1 to indicate the last mm input.
@@ -428,13 +428,16 @@ def _gen_mm_extra_hash_keys(
         offset = mm_feature.mm_position.offset
         length = mm_feature.mm_position.length
         if end_token_idx > offset:
-            if start_token_idx > offset + length:
+            if start_token_idx >= offset + length:
                 # This block has passed the current mm input.
                 curr_mm_idx += 1
                 continue
 
-            # The block contains the current mm input.
-            extra_keys.append(mm_feature.identifier)
+            # The block contains the current mm input. Include its offset
+            # relative to the start of the block so prefix-cache keys stay
+            # distinct when the same MM item appears at different positions
+            # within otherwise-identical placeholder blocks.
+            extra_keys.append((mm_feature.identifier, offset - start_token_idx))
 
             if end_token_idx >= offset + length:
                 # If this block contains the end of the current mm input,

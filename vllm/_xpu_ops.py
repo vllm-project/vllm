@@ -37,6 +37,26 @@ if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
         return torch.empty((M, N), dtype=input.dtype, device=input.device)
 
 
+if hasattr(torch.ops._xpu_C, "int4_gemm_w4a8"):
+
+    @register_fake("_xpu_C::int4_gemm_w4a8")
+    def _int4_gemm_w4a8_fake(
+        input: torch.Tensor,
+        input_scales: torch.Tensor,
+        input_zero_points: torch.Tensor,
+        q_weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        group_size: int,
+        g_idx: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        input_2d = input.view(-1, input.shape[-1])
+        M = input_2d.size(0)
+        N = q_weight.size(1)
+        return torch.empty((M, N), dtype=torch.float16, device=input.device)
+
+
 if hasattr(torch.ops._xpu_C, "int4_gemm_w4a16"):
 
     @register_fake("_xpu_C::int4_gemm_w4a16")
@@ -82,11 +102,87 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _xpu_mxfp8_quantize_impl(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP8_BLOCK_SIZE = 32
+    assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+    if dtype is not None:
+        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
+            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
+            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
+        )
+    else:
+        dtype = current_platform.fp8_dtype()
+
+    finfo = torch.finfo(dtype)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+    eps = 1e-10
+
+    x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    torch.ops._C.per_token_group_fp8_quant(
+        x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
+    )
+    x_s = x_s.to(torch.float8_e8m0fnu)
+    return x_q, x_s
+
+
+def _xpu_mxfp8_quantize_fake(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if dtype is None:
+        dtype = current_platform.fp8_dtype()
+
+    MXFP8_BLOCK_SIZE = 32
+
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.zeros(shape, device=x.device, dtype=torch.float32)
+
+    return x.to(dtype), x_s.to(torch.float8_e8m0fnu)
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
 
 class xpu_ops:
+    @staticmethod
+    @torch.compile
+    def dynamic_per_token_int8_quant_ref(
+        input: torch.Tensor, use_sym_quant: bool, bits: int
+    ):
+        original_sizes = input.size()
+        # view is not safe in torch.compile if input is not contiguous
+        input = input.reshape(
+            -1, original_sizes[-1]
+        )  # Flatten except for the last dimension
+        qmin = -(2 ** (bits - 1)) if use_sym_quant else 0
+        qmax = 2 ** (bits - 1) - 1 if use_sym_quant else 2**bits - 1
+        min_val = torch.min(input, dim=-1)[0].to(dtype=torch.float32).unsqueeze(-1)
+        max_val = torch.max(input, dim=-1)[0].to(dtype=torch.float32).unsqueeze(-1)
+        if use_sym_quant:
+            scale = (
+                torch.maximum(torch.abs(min_val), torch.abs(max_val)) / qmax
+            ).clamp(min=1e-5)
+            zero_point = torch.zeros_like(scale).to(dtype=torch.int32)
+        else:
+            scale = ((max_val - min_val) / qmax).clamp(min=1e-5)
+            zero_point = -1 * torch.round(min_val / scale).to(dtype=torch.int32)
+        scale = scale.to(dtype=input.dtype)
+        quantized = torch.clamp(
+            torch.round(input / scale.to(dtype=torch.float32) + zero_point),
+            qmin,
+            qmax,
+        ).to(dtype=torch.int8 if use_sym_quant else torch.uint8)
+        return (
+            quantized.view(original_sizes),
+            scale.view(original_sizes[:-1] + (1,)),
+            zero_point.view(original_sizes[:-1] + (1,)),
+        )
+
     @staticmethod
     def flash_attn_varlen_func(
         q: torch.Tensor,
@@ -116,6 +212,7 @@ class xpu_ops:
         num_splits=0,
         return_softmax_lse: bool | None = False,
         s_aux: torch.Tensor | None = None,
+        return_attn_probs: bool | None = False,
     ):
         assert cu_seqlens_k is not None or seqused_k is not None, (
             "cu_seqlens_k or seqused_k must be provided"
@@ -447,6 +544,12 @@ class xpu_ops:
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_mxfp8_quantize",
+                op_func=_xpu_mxfp8_quantize_impl,
+                fake_impl=_xpu_mxfp8_quantize_fake,
             )
 
             _OPS_REGISTERED = True

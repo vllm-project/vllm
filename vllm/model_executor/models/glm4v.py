@@ -18,6 +18,7 @@ from transformers import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -32,7 +33,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -395,13 +395,13 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         vision_config = config.vision_config
 
         image_size = vision_config["image_size"]
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("size", {"width": image_size, "height": image_size})
 
         return GLM4VImageProcessorFast(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
-        return self.ctx.init_processor(
-            GLM4VProcessor,
+        return GLM4VProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=self.get_image_processor(**kwargs),
         )
