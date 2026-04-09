@@ -254,6 +254,261 @@ class OpenAIServingResponses(GenerateBaseServing):
             .chat_template_kwargs
         )
 
+roject
+
+import asyncio
+import time
+from collections import deque
+from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AsyncExitStack
+from copy import copy
+from http import HTTPStatus
+from typing import Any, Final
+
+from fastapi import Request
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseStatus,
+    response_text_delta_event,
+)
+from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
+from openai.types.responses.tool import Mcp, Tool
+from openai_harmony import Message as OpenAIHarmonyMessage
+from pydantic import TypeAdapter
+
+from vllm import envs
+from vllm.config.utils import replace
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (
+    ChatCompletionMessageParam,
+    ChatTemplateContentFormatOption,
+)
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    GenerationError,
+)
+from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
+    ErrorResponse,
+    RequestResponseMetadata,
+)
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.parser.harmony_utils import (
+    build_harmony_preamble,
+    extract_instructions_from_messages,
+    get_user_message,
+    has_custom_tools,
+    render_for_completion,
+)
+from vllm.entrypoints.openai.responses.context import (
+    ConversationContext,
+    HarmonyContext,
+    ParsableContext,
+    SimpleContext,
+)
+from vllm.entrypoints.openai.responses.harmony import (
+    construct_harmony_previous_input_messages,
+    harmony_to_response_output,
+    response_input_to_harmony,
+)
+from vllm.entrypoints.openai.responses.protocol import (
+    InputTokensDetails,
+    OutputTokensDetails,
+    ResponseCompletedEvent,
+    ResponseCreatedEvent,
+    ResponseInProgressEvent,
+    ResponseInputOutputItem,
+    ResponseInputOutputMessage,
+    ResponsesRequest,
+    ResponsesResponse,
+    ResponseUsage,
+    StreamingResponsesResponse,
+)
+from vllm.entrypoints.openai.responses.streaming_events import (
+    SimpleStreamingEventProcessor,
+    StreamingState,
+    _StateType,
+    emit_content_delta_events,
+    emit_previous_item_done_events,
+    emit_tool_action_events,
+    split_delta,
+)
+from vllm.entrypoints.openai.responses.utils import (
+    build_response_output_items,
+    construct_input_messages,
+    construct_tool_dicts,
+    extract_function_tool_names,
+    extract_tool_types,
+)
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import EngineInput, tokens_input
+from vllm.logger import init_logger
+from vllm.logprobs import Logprob as SampleLogprob
+from vllm.logprobs import SampleLogprobs
+from vllm.lora.request import LoRARequest
+from vllm.outputs import CompletionOutput
+from vllm.parser import Parser, ParserManager
+from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.tokenizers import TokenizerLike
+from vllm.utils import random_uuid
+from vllm.utils.collection_utils import as_list
+
+logger = init_logger(__name__)
+
+
+def _extract_allowed_tools_from_mcp_requests(
+    tools: list[Tool],
+) -> dict[str, list[str] | None]:
+    """
+    Extract allowed_tools mapping from MCP tool requests.
+
+    Returns a dictionary mapping server_label to allowed_tools list.
+    Handles both list format and McpAllowedToolsMcpToolFilter object format.
+
+    Special handling:
+    - If allowed_tools is None, returns None (allows all tools)
+    - If allowed_tools contains "*", returns None (allows all tools)
+    - Otherwise, returns the list of specific tool names
+
+    This function can be reused for both harmony and non-harmony MCP calls.
+    """
+    allowed_tools_map: dict[str, list[str] | None] = {}
+    for tool in tools:
+        if not isinstance(tool, Mcp):
+            continue
+
+        # allowed_tools can be a list or an object with tool_names
+        # Extract the actual list of tool names
+        allowed_tools_val = None
+        if tool.allowed_tools is not None:
+            if isinstance(tool.allowed_tools, list):
+                allowed_tools_val = tool.allowed_tools
+            elif hasattr(tool.allowed_tools, "tool_names"):
+                # It's an McpAllowedToolsMcpToolFilter object
+                allowed_tools_val = tool.allowed_tools.tool_names
+
+        # Normalize "*" to None (both mean "allow all tools")
+        if allowed_tools_val is not None and "*" in allowed_tools_val:
+            allowed_tools_val = None
+
+        allowed_tools_map[tool.server_label] = allowed_tools_val
+    return allowed_tools_map
+
+
+class OpenAIServingResponses(GenerateBaseServing):
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        models: OpenAIServingModels,
+        online_renderer: OnlineRenderer,
+        *,
+        request_logger: RequestLogger | None,
+        chat_template: str | None,
+        chat_template_content_format: ChatTemplateContentFormatOption,
+        return_tokens_as_token_ids: bool = False,
+        reasoning_parser: str = "",
+        enable_auto_tools: bool = False,
+        tool_parser: str | None = None,
+        tool_server: ToolServer | None = None,
+        enable_prompt_tokens_details: bool = False,
+        enable_force_include_usage: bool = False,
+        enable_log_outputs: bool = False,
+        default_chat_template_kwargs: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            engine_client=engine_client,
+            models=models,
+            request_logger=request_logger,
+            return_tokens_as_token_ids=return_tokens_as_token_ids,
+        )
+
+        self.online_renderer = online_renderer
+        self.chat_template = chat_template
+        self.chat_template_content_format: Final = chat_template_content_format
+        self.chat_template_kwargs = default_chat_template_kwargs or {}
+        self.enable_log_outputs = enable_log_outputs
+
+        # Set up the unified parser - either a unified parser or fall back to
+        # separate parsers accessed through the parser interface
+        self.parser = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
+            is_harmony=self.model_config.hf_config.model_type == "gpt_oss",
+        )
+        self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        self.enable_force_include_usage = enable_force_include_usage
+
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
+
+        # If False (default), the "store" option is (silently) ignored and the
+        # response is not stored. If True, the response is stored in memory.
+        # NOTE(woosuk): This may not be intuitive for users, as the default
+        # behavior in OpenAI's Responses API is to store the response, but
+        # vLLM's default behavior is not.
+        self.enable_store = envs.VLLM_ENABLE_RESPONSES_API_STORE
+        if self.enable_store:
+            logger.warning_once(
+                "`VLLM_ENABLE_RESPONSES_API_STORE` is enabled. This may "
+                "cause a memory leak since we never remove responses from "
+                "the store."
+            )
+
+        self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
+        if self.use_harmony:
+            logger.warning(
+                "For gpt-oss, we ignore --enable-auto-tool-choice "
+                "and always enable tool use."
+            )
+        self.enable_auto_tools = enable_auto_tools
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove responses from the store.
+        self.response_store: dict[str, ResponsesResponse] = {}
+        self.response_store_lock = asyncio.Lock()
+
+        # HACK(woosuk): This is a hack. We should use a better store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove messages from the store.
+        self.msg_store: dict[str, list[ChatCompletionMessageParam]] = {}
+
+        # HACK(wuhang): This is a hack. We should use a better store.
+        # FIXME: If enable_store=True, this may cause a memory leak since we
+        # never remove events from the store.
+        self.event_store: dict[
+            str, tuple[deque[StreamingResponsesResponse], asyncio.Event]
+        ] = {}
+
+        self.background_tasks: dict[str, asyncio.Task] = {}
+
+        self.tool_server = tool_server
+
+    def _effective_chat_template_kwargs(
+        self, request: ResponsesRequest
+    ) -> dict[str, Any]:
+        return (
+            request.build_chat_params(
+                self.chat_template,
+                self.chat_template_content_format,
+            )
+            .with_defaults(self.chat_template_kwargs)
+            .chat_template_kwargs
+        )
+
     def _make_response_parser(
         self,
         request: ResponsesRequest,
@@ -268,6 +523,39 @@ class OpenAIServingResponses(GenerateBaseServing):
             chat_template_kwargs=chat_template_kwargs,
             model_config=self.model_config,
         )
+    def _apply_harmony_truncation(
+        self,
+        prompt_token_ids: list[int],
+        request: ResponsesRequest,
+    ) -> list[int]:
+        """Apply truncation to prompt token IDs for the Harmony path.
+
+        Per the OpenAI Responses API spec, when truncation is "auto",
+        the input should be truncated from the beginning to fit within
+        the model's context window. This drops items from the beginning
+        of the conversation to make room for output tokens.
+
+        Args:
+            prompt_token_ids: The full tokenized prompt.
+            request: The Responses API request with truncation settings.
+
+        Returns:
+            The (possibly truncated) prompt token IDs.
+        """
+        if request.truncation == "disabled":
+            return prompt_token_ids
+
+        max_model_len = self.model_config.max_model_len
+        max_output_tokens = request.max_output_tokens or 0
+        max_input_tokens = max_model_len - max_output_tokens
+
+        if max_input_tokens <= 0:
+            return prompt_token_ids
+
+        if len(prompt_token_ids) > max_input_tokens:
+            prompt_token_ids = prompt_token_ids[-max_input_tokens:]
+
+        return prompt_token_ids
 
     def _validate_generator_input(
         self,
@@ -514,6 +802,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 engine_input=engine_input,
                 sampling_params=sampling_params,
                 context=context,
+                request=request,
                 lora_request=lora_request,
                 priority=self._get_priority(request, raw_request),
                 trace_headers=trace_headers,
@@ -668,6 +957,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         engine_input: EngineInput,
         sampling_params: SamplingParams,
         context: ConversationContext,
+        request: ResponsesRequest,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
@@ -720,6 +1010,13 @@ class OpenAIServingResponses(GenerateBaseServing):
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, HarmonyContext):
                 token_ids = context.render_for_completion()
+
+                # Apply truncation for multi-turn Harmony requests,
+                # consistent with initial request handling.
+                token_ids = self._apply_harmony_truncation(
+                    token_ids, request
+                )
+
                 engine_input = tokens_input(token_ids)
 
                 sampling_params.max_tokens = max_model_len - len(token_ids)
@@ -765,6 +1062,14 @@ class OpenAIServingResponses(GenerateBaseServing):
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
+
+        # Apply truncation for the Harmony path. The non-Harmony path
+        # handles this through build_tok_params / TokenizeParams, but
+        # the Harmony path bypasses the renderer and must truncate here.
+        prompt_token_ids = self._apply_harmony_truncation(
+            prompt_token_ids, request
+        )
+
         engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
         engine_input["arrival_time"] = arrival_time
 
