@@ -20,6 +20,9 @@ from ..base import (
 )
 from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
+# This enables torch.cond to be cached.
+torch.ops.higher_order.cond._cacheable = True
+
 
 @dataclass
 class FP8BlockParams(FP8Params):
