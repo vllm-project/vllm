@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
 
@@ -267,7 +267,7 @@ class SweepServeWorkloadArgs(SweepServeArgs):
         base_args = SweepServeArgs.from_cli_args(args)
 
         return cls(
-            **asdict(base_args),
+            **{f.name: getattr(base_args, f.name) for f in fields(base_args)},
             workload_var=args.workload_var,
             workload_iters=args.workload_iters,
         )

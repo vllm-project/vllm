@@ -84,16 +84,16 @@ def run_benchmark(
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             function_under_test()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         function_under_test = lambda: g.replay()
 
     def run_cuda_benchmark(n_iters: int) -> float:
         nonlocal key, value, key_cache, value_cache, slot_mapping
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start = time.perf_counter()
         for _ in range(n_iters):
             function_under_test()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
         end = time.perf_counter()
         return (end - start) / n_iters
 
@@ -104,7 +104,7 @@ def run_benchmark(
 
     # free tensors to mitigate OOM when sweeping
     del key, value, key_cache, value_cache, slot_mapping
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     return lat
 

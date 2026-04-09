@@ -41,7 +41,7 @@ MODEL=meta-llama/Llama-3.3-70B-Instruct SYSTEM=TPU TP=8 DOWNLOAD_DIR='' INPUT_LE
 | --- | --- | --- |
 | `BASE` | **Required.** The absolute path to the parent directory of your vLLM repository directory. | `"$HOME"` |
 | `MODEL` | **Required.** The Hugging Face model identifier to be served by vllm. | `"meta-llama/Llama-3.1-8B-Instruct"` |
-| `SYSTEM`| **Required.** The hardware you are running on. Choices: `TPU` or `GPU`. (For other systems, it might not support saving profiles) | `"TPU"` |
+| `SYSTEM` | **Required.** The hardware you are running on. Choices: `TPU` or `GPU`. (For other systems, it might not support saving profiles) | `"TPU"` |
 | `TP` | **Required.** The tensor-parallelism size. | `1` |
 | `DOWNLOAD_DIR` | **Required.** Directory to download and load model weights from. | `""` (default download path) |
 | `INPUT_LEN` | **Required.** Request input length. | `4000` |

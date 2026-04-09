@@ -54,7 +54,7 @@ def worker_fn_wrapper(fn):
         update_environment_variables(env)
         local_rank = os.environ["LOCAL_RANK"]
         device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
         init_distributed_environment()
         fn()
 
@@ -68,12 +68,12 @@ def worker_fn():
     )
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32).cuda(pynccl_comm.rank)
     tensor = pynccl_comm.all_reduce(tensor)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
 def test_pynccl():
     distributed_run(worker_fn, 2)
@@ -93,16 +93,16 @@ def multiple_allreduce_worker_fn():
     if torch.distributed.get_rank() in [0, 1]:
         tensor = pynccl_comm.all_reduce(tensor)
         tensor = pynccl_comm.all_reduce(tensor)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(tensor == 4).cpu().item()
     else:
         tensor = pynccl_comm.all_reduce(tensor)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(tensor == 2).cpu().item()
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 4, reason="Need at least 4 GPUs to run the test."
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs to run the test."
 )
 def test_pynccl_multiple_allreduce():
     # this tests pynccl for multiple tp groups, in a standalone way
@@ -121,16 +121,16 @@ def multiple_allreduce_with_vllm_worker_fn():
         if torch.distributed.get_rank() in [0, 1]:
             tensor = tensor_model_parallel_all_reduce(tensor)
             tensor = tensor_model_parallel_all_reduce(tensor)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             assert torch.all(tensor == 4).cpu().item()
         else:
             tensor = tensor_model_parallel_all_reduce(tensor)
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             assert torch.all(tensor == 2).cpu().item()
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 4, reason="Need at least 4 GPUs to run the test."
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs to run the test."
 )
 def test_pynccl_multiple_allreduce_with_vllm():
     # this tests pynccl for multiple tp groups, together with vllm
@@ -147,12 +147,12 @@ def worker_fn_with_cudagraph():
         )
         # run something in the default stream to initialize torch engine
         a = torch.ones((4, 4), device=f"cuda:{pynccl_comm.rank}")
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         with torch.cuda.graph(graph):
             a_out = pynccl_comm.all_reduce(a)
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(a_out == pynccl_comm.world_size).cpu().item()
 
 
@@ -180,12 +180,12 @@ def all_gather_worker_fn():
     ).to(device)
 
     pynccl_comm.all_gather(result, tensor)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
 def test_pynccl_all_gather():
     distributed_run(all_gather_worker_fn, 2)
@@ -215,12 +215,12 @@ def all_gatherv_worker_fn():
     ).to(device)
 
     pynccl_comm.all_gatherv(result, tensor, sizes=sizes)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
 def test_pynccl_all_gatherv():
     distributed_run(all_gatherv_worker_fn, 2)
@@ -255,12 +255,12 @@ def reduce_scatter_worker_fn():
     ).to(device)
 
     pynccl_comm.reduce_scatter(result, tensor)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
 def test_pynccl_reduce_scatter():
     distributed_run(reduce_scatter_worker_fn, 2)
@@ -293,19 +293,19 @@ def reduce_scatterv_worker_fn():
     expected = sum(tensor[start:end] for tensor in all_tensors).to(device)
 
     pynccl_comm.reduce_scatterv(result, tensor, sizes=sizes)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
 def test_pynccl_reduce_scatterv():
     distributed_run(reduce_scatterv_worker_fn, 2)
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
 def test_pynccl_with_cudagraph():
     distributed_run(worker_fn_with_cudagraph, 2)
@@ -325,12 +325,12 @@ def send_recv_worker_fn():
         pynccl_comm.send(tensor, dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
     else:
         pynccl_comm.recv(tensor, src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     assert torch.all(tensor == 1).cpu().item()
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
 )
 def test_pynccl_send_recv():
     distributed_run(send_recv_worker_fn, 2)
@@ -355,7 +355,7 @@ def multiple_send_recv_worker_fn():
         pynccl_comm.send(tensor, dst=(pynccl_comm.rank + 1) % pynccl_comm.world_size)
     else:
         pynccl_comm.recv(tensor, src=(pynccl_comm.rank - 1) % pynccl_comm.world_size)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     if torch.distributed.get_rank() in [0, 2]:
         assert torch.all(tensor == 1).cpu().item()
     else:
@@ -363,14 +363,14 @@ def multiple_send_recv_worker_fn():
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 4, reason="Need at least 4 GPUs to run the test."
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs to run the test."
 )
 def test_pynccl_multiple_send_recv():
     distributed_run(multiple_send_recv_worker_fn, 4)
 
 
 @pytest.mark.skipif(
-    torch.cuda.device_count() < 4, reason="Need at least 4 GPUs to run the test."
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs to run the test."
 )
 def test_pynccl_broadcast():
     distributed_run(broadcast_worker_fn, 4)
@@ -396,7 +396,7 @@ def broadcast_worker_fn():
         pynccl_comm.broadcast(recv_tensors[i], src=i)
         # the broadcast op might be launched in a different stream
         # need to synchronize to make sure the tensor is ready
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         assert torch.all(recv_tensors[i] == i).cpu().item()
 
 

@@ -4,7 +4,7 @@
 
 import functools
 import json
-from collections.abc import Collection, Set
+from collections.abc import Collection, Sequence, Set
 from pathlib import Path
 from typing import Any, Literal, overload
 
@@ -348,7 +348,9 @@ class Grok2Tokenizer(TokenizerLike):
             tokens = self._maybe_truncate(tokens, max_length)
         return tokens
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self, ids: Sequence[int] | int, skip_special_tokens: bool = False
+    ) -> str:
         if isinstance(ids, int):
             ids = [ids]
         if skip_special_tokens:
@@ -371,7 +373,7 @@ class Grok2Tokenizer(TokenizerLike):
         return [self._token_to_id.get(token, self._unk_token_id) for token in tokens]
 
     def convert_ids_to_tokens(
-        self, ids: list[int], skip_special_tokens: bool = False
+        self, ids: Sequence[int], skip_special_tokens: bool = False
     ) -> list[str]:
         tokens = []
         for token_id in ids:

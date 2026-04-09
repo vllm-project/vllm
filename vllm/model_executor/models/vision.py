@@ -143,11 +143,6 @@ def is_vit_use_data_parallel():
     return mm_encoder_tp_mode == "data"
 
 
-def should_torch_compile_mm_vit(vllm_config: VllmConfig) -> bool:
-    """Callable to be passed to `@support_torch_compile`'s `enable_if` argument."""
-    return vllm_config.compilation_config.compile_mm_encoder
-
-
 VisionFeatureSelectStrategyStr = Literal["class", "default", "full"]
 
 VisionFeatureSelectStrategy: TypeAlias = (

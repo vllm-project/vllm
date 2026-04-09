@@ -44,6 +44,28 @@ class MediaWithBytes(Generic[_T]):
 
 
 class MediaIO(ABC, Generic[_T]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
+    @classmethod
+    def merge_kwargs(
+        cls,
+        default_kwargs: dict[str, Any] | None,
+        runtime_kwargs: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Merge config-level kwargs and request-level kwargs.
+
+        By default this performs a shallow merge where runtime kwargs override
+        keys in default kwargs. Subclasses may override to apply modality-
+        specific behavior.
+        """
+        merged = dict(default_kwargs or {})
+        if runtime_kwargs:
+            merged.update(runtime_kwargs)
+        return merged
+
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError

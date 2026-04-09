@@ -177,18 +177,18 @@ def benchmark_config(
     def run():
         w8a8_block_matmul(A, B, As, Bs, block_size, config, out_dtype)
 
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     # JIT complication & warmup
     for _ in range(5):
         run()
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     start_event = torch.Event(enable_timing=True)
     end_event = torch.Event(enable_timing=True)
 
     latencies: list[float] = []
     for i in range(num_iters):
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start_event.record()
         run()
         end_event.record()
@@ -285,7 +285,7 @@ def tune_on_gpu(args_dict):
     weight_shapes = args_dict["weight_shapes"]
     args = args_dict["args"]
 
-    torch.cuda.set_device(gpu_id)
+    torch.accelerator.set_device_index(gpu_id)
     print(f"Starting tuning on GPU {gpu_id} with batch sizes {batch_sizes}")
 
     block_n = args.block_n
@@ -334,7 +334,7 @@ def distribute_batch_sizes(batch_sizes, num_gpus):
 
 def main(args):
     print(args)
-    num_gpus = torch.cuda.device_count()
+    num_gpus = torch.accelerator.device_count()
     if num_gpus == 0:
         raise RuntimeError("No GPU available for tuning")
     print(f"Found {num_gpus} GPUs for parallel tuning")

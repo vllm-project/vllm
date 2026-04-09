@@ -109,9 +109,9 @@ def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
         f"got {len(vllm_piecewise_split_graph)}"
     )
     compile_start_artifacts = capture.get("artifact", "vllm_piecewise_compile_start")
-    assert len(compile_start_artifacts) == 2, (
-        "Expected 2 vllm_piecewise_compile_start "
-        "(one for dynamic ranges, one for compile size), "
+    assert len(compile_start_artifacts) == 4, (
+        "Expected 4 vllm_piecewise_compile_start "
+        "(2 subgraphs x 2 ranges each: dynamic + compile size), "
         f"got {len(compile_start_artifacts)}"
     )
     submod_dumps = capture.get("graph_dump", r"vllm_submod_.*")

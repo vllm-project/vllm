@@ -238,7 +238,7 @@ class LongcatRouter(nn.Module):
         self,
         config: FlashConfig,
         zero_expert_num: int,
-        rounter_params_dtype: torch.dtype,
+        router_params_dtype: torch.dtype,
         prefix: str = "",
     ):
         super().__init__()
@@ -252,12 +252,12 @@ class LongcatRouter(nn.Module):
             config.hidden_size,
             self.n_routed_experts,
             bias=config.router_bias,
-            params_dtype=rounter_params_dtype,
+            params_dtype=router_params_dtype,
             quant_config=None,
             prefix=f"{prefix}.classifier",
         )
         self.e_score_correction_bias = nn.Parameter(
-            torch.zeros((self.n_routed_experts), dtype=rounter_params_dtype)
+            torch.zeros((self.n_routed_experts), dtype=router_params_dtype)
         )
 
     def forward(self, hidden_states):
@@ -281,14 +281,14 @@ class LongcatMoe(nn.Module):
         super().__init__()
         self.hidden_size = hidden_size
         # Gate always runs at half / full precision for now.
-        self.rounter_params_dtype = params_dtype
+        self.router_params_dtype = params_dtype
         if config.router_dtype == "float32":
-            self.rounter_params_dtype = torch.float32
+            self.router_params_dtype = torch.float32
 
         self.router = LongcatRouter(
             config=config,
             zero_expert_num=config.zero_expert_num,
-            rounter_params_dtype=self.rounter_params_dtype,
+            router_params_dtype=self.router_params_dtype,
             prefix=f"{prefix}.gate",
         )
 
@@ -309,7 +309,7 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=enable_eplb,
             routed_scaling_factor=config.routed_scaling_factor,
-            router_logits_dtype=self.rounter_params_dtype,
+            router_logits_dtype=self.router_params_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -329,7 +329,7 @@ class LongcatMoe(nn.Module):
             hidden_states_padded = hidden_states
 
         router_logits_full = self.router(
-            hidden_states_padded.to(self.rounter_params_dtype)
+            hidden_states_padded.to(self.router_params_dtype)
         )
 
         # ZeroExpertFusedMoE handles routing memoization and zero expert computation
