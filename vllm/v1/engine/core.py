@@ -1818,18 +1818,17 @@ class DPEngineCoreProc(EngineCoreProc):
         if self.step_counter % 32 != 0:
             return True
 
-        has_unfinished, all_paused = ParallelConfig.sync_dp_state(
+        has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
             self.dp_group,
-            has_unfinished=local_unfinished or self.pending_pause,
+            has_unfinished=local_unfinished,
             pending_pause=self.pending_pause,
             dp_size=self.dp_size,
         )
 
-        if all_paused:
+        if pause_consensus:
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
-            return False
 
         return has_unfinished
 
