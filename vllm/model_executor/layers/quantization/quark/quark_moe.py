@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_m
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
+    backend_to_kernel_cls,
     convert_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
@@ -55,11 +56,6 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import backend_to_kernel_cls
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
-from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import OCP_MXQuantizationEmulationTritonExperts
 
 logger = init_logger(__name__)
 
@@ -757,7 +753,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         if self.ocp_mx_scheme == "w_mxfp4":
             self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
-        
+
         if self.emulate:
             # We use the same code path between MXFP4/MXFP6 emulation.
             self.mxfp4_backend = Mxfp4MoeBackend.EMULATION
@@ -972,9 +968,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                     )
 
         # For w_mxfp4, use oracle functions
-        if (self.emulate or (
+        if self.emulate or (
             self.ocp_mx_scheme == "w_mxfp4"
-            and self.mxfp4_backend != Mxfp4MoeBackend.NONE)
+            and self.mxfp4_backend != Mxfp4MoeBackend.NONE
         ):
             self._setup_kernel_via_oracle(layer)
             return

@@ -75,7 +75,8 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
     @staticmethod
     def _supports_quant_scheme(
-        weight_key, activation_key,
+        weight_key,
+        activation_key,
     ) -> bool:
         # This class is used for emulation only - the oracle selects it
         # directly rather than via quant scheme matching.
@@ -88,20 +89,14 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         """Dequantize weights based on the OCP MX scheme."""
-        if self.ocp_mx_scheme.startswith("w_mxfp4"):
+        if self.ocp_mx_scheme.startswith("w_mxfp4"):  # type: ignore[union-attr]
             return dequant_mxfp4(w, w_scale, dtype)
-        elif self.ocp_mx_scheme.startswith("w_mxfp6_e3m2"):
-            return dequant_mxfp6(
-                w, w_scale, quant_dtype="fp6_e3m2", float_dtype=dtype
-            )
-        elif self.ocp_mx_scheme.startswith("w_mxfp6_e2m3"):
-            return dequant_mxfp6(
-                w, w_scale, quant_dtype="fp6_e2m3", float_dtype=dtype
-            )
+        elif self.ocp_mx_scheme.startswith("w_mxfp6_e3m2"):  # type: ignore[union-attr]
+            return dequant_mxfp6(w, w_scale, quant_dtype="fp6_e3m2", float_dtype=dtype)
+        elif self.ocp_mx_scheme.startswith("w_mxfp6_e2m3"):  # type: ignore[union-attr]
+            return dequant_mxfp6(w, w_scale, quant_dtype="fp6_e2m3", float_dtype=dtype)
         else:
-            raise NotImplementedError(
-                f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}"
-            )
+            raise NotImplementedError(f"Unsupported ocp_mx_scheme={self.ocp_mx_scheme}")
 
     def apply(
         self,
@@ -131,12 +126,8 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         assert w2.dtype == torch.uint8
 
         # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
-        w1_dequant = self._dequant_weights(
-            w1, self.w1_scale_val, hidden_states.dtype
-        )
-        w2_dequant = self._dequant_weights(
-            w2, self.w2_scale_val, hidden_states.dtype
-        )
+        w1_dequant = self._dequant_weights(w1, self.w1_scale_val, hidden_states.dtype)
+        w2_dequant = self._dequant_weights(w2, self.w2_scale_val, hidden_states.dtype)
 
         # Apply activation QDQ if needed by the OCP MX scheme
         hidden_states, _ = moe_kernel_quantize_input(
