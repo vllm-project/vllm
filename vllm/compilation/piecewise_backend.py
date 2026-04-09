@@ -353,12 +353,22 @@ class PiecewiseBackend:
         return None
 
     def __call__(self, *args: Any) -> Any:
-        runtime_shape = args[self.sym_shape_indices[0]]
-        range_entry = self._find_range_for_shape(runtime_shape)
+        if self.sym_shape_indices:
+            runtime_shape = args[self.sym_shape_indices[0]]
+            range_entry = self._find_range_for_shape(runtime_shape)
+            assert range_entry is not None, (
+                f"Shape: {runtime_shape} out of considered ranges: "
+                f"{self.compile_ranges}"
+            )
+        else:
+            # All inputs have static shapes; use the first compiled range_entry
+            range_entry = next(
+                (re for re in self.range_entries.values() if re.compiled), None
+            )
+            assert range_entry is not None, (
+                "No compiled range_entry found for static shape compilation"
+            )
 
-        assert range_entry is not None, (
-            f"Shape: {runtime_shape} out of considered ranges: {self.compile_ranges}"
-        )
         assert range_entry.compiled, (
             "All ranges should be compiled or loaded up front in "
             "PiecewiseBackend.__init__. "
