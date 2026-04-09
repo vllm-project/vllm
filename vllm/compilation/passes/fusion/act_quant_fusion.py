@@ -301,7 +301,7 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
-        if current_platform.is_cuda_alike():
+        if current_platform.is_cuda():
             for quant_key in [kFp8Dynamic128Sym, kFp8Dynamic64Sym]:
                 for is_scale_transposed in [False, True]:
                     for is_e8m0 in [True, False]:
