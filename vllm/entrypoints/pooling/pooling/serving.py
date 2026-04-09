@@ -72,11 +72,14 @@ class ServingPooling(PoolingServingBase):
         if getattr(request, "dimensions", None) is not None:
             raise ValueError("dimensions is currently not supported")
 
+        assert request.task is not None
+        pooling_task = request.task
+
         # plugin task uses io_processor.parse_request to verify inputs
-        if request.task != "plugin" and request.task != self.pooling_task:
-            if request.task not in self.supported_tasks:
+        if pooling_task != "plugin" and pooling_task != self.pooling_task:
+            if pooling_task not in self.io_processors:
                 raise ValueError(
-                    f"Unsupported task: {request.task!r} "
+                    f"Unsupported task: {pooling_task!r} "
                     f"Supported tasks: {self.supported_tasks}"
                 )
             else:
@@ -84,10 +87,10 @@ class ServingPooling(PoolingServingBase):
                     "Pooling multitask support is deprecated and will be removed "
                     "in v0.20. When the default pooling task is not what you want, you "
                     "need to manually specify it via --pooler-config.task %s. ",
-                    request.task,
+                    pooling_task,
                 )
 
-        if request.task == "plugin" or isinstance(request, IOProcessorRequest):
+        if pooling_task == "plugin" or isinstance(request, IOProcessorRequest):
             if "plugin" not in self.io_processors:
                 raise ValueError(
                     "No IOProcessor plugin installed. Please refer "
@@ -95,10 +98,7 @@ class ServingPooling(PoolingServingBase):
                     "'prithvi_geospatial_mae_io_processor' "
                     "offline inference example for more details."
                 )
-            request.task = "plugin"
-
-        pooling_task = request.task
-        assert pooling_task is not None
+            pooling_task = "plugin"
 
         io_processor = self.io_processors[pooling_task]
         await io_processor.pre_process_online_async(ctx)
