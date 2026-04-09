@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8StaticTensorSym,
 )
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType, MultipleOf
 from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.backends.rocm_attn import (
@@ -23,8 +24,6 @@ logger = init_logger(__name__)
 
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
-    accept_output_buffer: bool = True
-
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [MultipleOf(16)]
@@ -142,7 +141,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -158,8 +157,6 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
-
         if output_block_scale is not None:
             raise NotImplementedError(
                 "fused block_scale output quantization is not yet supported"
@@ -200,7 +197,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
 
         softmax_scale = self.scale
         fp8_post_attn_v_rescale = False
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
             # When Q is FP8, triton kernel skips K/V dequant (for fp8xfp8 matmul).
@@ -299,7 +296,7 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         flash_layout = True
 
-        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
