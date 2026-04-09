@@ -45,24 +45,22 @@ from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 
-def _reset_prefix_cache_after_warmup(llm) -> None:
+def reset_prefix_cache(llm) -> None:
     if not llm.reset_prefix_cache():
         warnings.warn(
             "reset_prefix_cache() failed after warmup; the timed run may still "
             "reuse KV blocks from warmup. If metrics look skewed, try "
-            "--no-enable-prefix-caching, wait until pending KV work finishes, "
-            "or omit warmup.",
+            "--no-enable-prefix-caching.",
             stacklevel=2,
         )
 
 
-async def _reset_prefix_cache_after_warmup_async(llm) -> None:
+async def reset_prefix_cache_async(llm) -> None:
     if not await llm.reset_prefix_cache():
         warnings.warn(
             "reset_prefix_cache() failed after warmup; the timed run may still "
             "reuse KV blocks from warmup. If metrics look skewed, try "
-            "--no-enable-prefix-caching, wait until pending KV work finishes, "
-            "or omit warmup.",
+            "--no-enable-prefix-caching.",
             stacklevel=2,
         )
 
@@ -143,7 +141,7 @@ def run_vllm(
         print("Warming up...")
         for _ in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
             run_pass(use_tqdm=False)
-        _reset_prefix_cache_after_warmup(llm)
+        reset_prefix_cache(llm)
 
     start = time.perf_counter()
     if do_profile:
@@ -199,7 +197,7 @@ def run_vllm_chat(
         print("Warming up...")
         for _ in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
             llm.chat(prompts, sampling_params, use_tqdm=False)
-        _reset_prefix_cache_after_warmup(llm)
+        reset_prefix_cache(llm)
 
     start = time.perf_counter()
     if do_profile:
@@ -285,7 +283,7 @@ async def run_vllm_async(
             print("Warming up...")
             for w in tqdm(range(num_iters_warmup), desc="Warmup iterations"):
                 await _run_batch(f"warmup_{w}")
-            await _reset_prefix_cache_after_warmup_async(llm)
+            await reset_prefix_cache_async(llm)
 
         start = time.perf_counter()
         if do_profile:
