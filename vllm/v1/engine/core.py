@@ -1720,23 +1720,30 @@ class DPEngineCoreProc(EngineCoreProc):
                 "resuming."
             )
         if self.engines_running:
-            logger.debug("resume_scheduler called while engines are running. Ignoring.")
             return
 
         super().resume_scheduler()
         self.ignore_start_dp_wave = False
 
         # Barrier: wait for all DP ranks to have resumed (and cleared
-        # ignore_start_dp_wave) before sending start_wave. Uses the
-        # existing all-reduce which is safe because engines are stopped.
+        # ignore_start_dp_wave) before any rank starts stepping. Uses
+        # the existing all-reduce which is safe because engines are
+        # stopped. We set engines_running directly rather than going
+        # through the coordinator's start_wave mechanism because the
+        # coordinator deduplicates same-wave starts — the second
+        # engine's start_wave would be silently dropped.
         has_global_unfinished = ParallelConfig.has_unfinished_dp(
             self.dp_group, self.scheduler.has_unfinished_requests()
         )
 
-        if self.has_coordinator and has_global_unfinished:
-            self.output_queue.put_nowait(
-                (-1, EngineCoreOutputs(start_wave=self.current_wave))
-            )
+        if has_global_unfinished:
+            self.engines_running = True
+
+    def barrier(self):
+        """Blocking barrier on the DP process group (test-only utility)."""
+        import torch.distributed as dist
+
+        dist.barrier(group=self.dp_group)
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -1750,7 +1757,10 @@ class DPEngineCoreProc(EngineCoreProc):
             ):
                 self.current_wave = new_wave
                 if not self.engines_running:
-                    logger.debug("EngineCore starting idle loop for wave %d.", new_wave)
+                    logger.debug(
+                        "EngineCore starting idle loop for wave %d.",
+                        new_wave,
+                    )
                     self.engines_running = True
         else:
             super()._handle_client_request(request_type, request)
