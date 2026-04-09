@@ -302,11 +302,6 @@ class TileGemm122<c10::BFloat16> {
     _tile_loadconfig(&config);
   }
 };
-// Minimum query-head count to engage AMX for FP8 tiles; below this the AMX
-// tile-config/release overhead dominates and we fall back to the 1-2-2 pattern
-// with a smaller tile footprint (TileGemm122 already handles m <= 16).
-constexpr static int32_t kAmxMinM = 1;
-
 // FP8 E4M3/E5M2 KV cache specialisation of TileGemm224.
 // The A tile (query buffer) is always BF16; only the B tile (KV cache) is FP8.
 // FP8 bytes are dequantised to BF16 into a stack scratch buffer before being

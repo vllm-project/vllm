@@ -11,10 +11,12 @@ static_assert(false, "AVX2 must be supported for the current implementation.");
 
 namespace vec_op {
 
-// Tag for E5M2 BF16Vec32 constructor (avoids collision with E4M3 float-scale
-// ctor).
-struct fp8_e5m2_tag {};
-// Tags for direct FP8→unscaled BF16 conversion (AMX path, no FP32 round-trip).
+// Tags for FP8 BF16Vec32 constructors (avoid overload collision with
+// BF16Vec32(void*)).
+// VEC path (FP8 → pseudo-FP16 layout, scale correction applied later):
+struct fp8_e4m3_tag {};  // E4M3 → pseudo-FP16; BF16 value = true_E4M3 * 2^-8
+struct fp8_e5m2_tag {};  // E5M2 → FP16 bits directly (same exponent bias=15)
+// AMX path (FP8 → unscaled BF16, no FP32 round-trip):
 // BF16 value = true_E4M3 * 2^-120 (E4M3) or true_E5M2 * 2^-112 (E5M2).
 // Exponent rebiasing is folded into k/v scales by the caller.
 struct fp8_bf16_e4m3_tag {};
@@ -185,10 +187,9 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
                                (__m128i)vec8_data.reg, 2),
             (__m128i)vec8_data.reg, 3)) {}
 
-  // Decode 32 FP8-E4M3 bytes to FP16 layout (stored in the BF16 register).
-  // No scale is applied here; the caller handles scale in a subsequent step.
-  // The float parameter must be kept to avoid collision with BF16Vec32(void*).
-  explicit BF16Vec32(const uint8_t* ptr, [[maybe_unused]] float /*scale*/) {
+  // Decode 32 FP8-E4M3 bytes to pseudo-FP16 layout (stored in the BF16
+  // register).  Result = true_E4M3 * 2^-8; caller applies scale * 2^8.
+  explicit BF16Vec32(const uint8_t* ptr, fp8_e4m3_tag) {
     __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
     __m512i b16 = _mm512_cvtepu8_epi16(b8);
     __m512i sign =
@@ -255,8 +256,8 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
             (__m128i)vec8_data.reg, 1)) {}
 
   // E4M3 decode (AVX2 path) — same bit-layout trick as the AVX512 variant
-  // above.
-  explicit BF16Vec32(const uint8_t* ptr, [[maybe_unused]] float /*scale*/) {
+  // above.  Result = true_E4M3 * 2^-8; caller applies scale * 2^8.
+  explicit BF16Vec32(const uint8_t* ptr, fp8_e4m3_tag) {
     __m256i b8 = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(ptr));
     __m128i b8_low = _mm256_extracti128_si256(b8, 0);
     __m128i b8_high = _mm256_extracti128_si256(b8, 1);

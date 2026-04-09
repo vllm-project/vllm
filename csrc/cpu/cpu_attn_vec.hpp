@@ -191,7 +191,7 @@ class TileGemm82FP8 {
       // k_scale is in the attention scale (logits); v_scale is in final_output.
       vec_op::BF16Vec32 fp16_b_reg =
           is_e5m2 ? vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e5m2_tag{})
-                  : vec_op::BF16Vec32(curr_b_0, 0.0f);
+                  : vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e4m3_tag{});
       vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, 0);
       vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, 1);
 

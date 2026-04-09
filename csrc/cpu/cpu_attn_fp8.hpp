@@ -177,6 +177,8 @@ inline uint8_t float_to_fp8e5m2_scalar(float v, float inv_scale) noexcept {
   const uint8_t mant2 = static_cast<uint8_t>((bits >> 21) & 0x03);
   if (exp_fp32 < -14) {  // subnormal in E5M2
     const int shift = -14 - exp_fp32;
+    if (shift + 21 >= 32)
+      return sign;  // underflow: too small for E5M2 subnormal
     const uint32_t m = (0x800000u | (bits & 0x7FFFFFu)) >> (shift + 21);
     return sign | static_cast<uint8_t>(std::min<uint32_t>(m, 3u));
   }
