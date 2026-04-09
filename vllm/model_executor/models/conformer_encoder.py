@@ -47,6 +47,11 @@ class Conv2dSubsampling(nn.Module):
         return x, input_lengths, mask
 
 
+class Swish(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
+
+
 class RelPositionalEncoding(nn.Module):
     def __init__(self, d_model: int, max_len: int = 5000):
         super().__init__()
@@ -82,7 +87,7 @@ class ConformerFeedForward(nn.Module):
             output_size=d_model * 4,
             bias=True,
         )
-        self.nonlinear = nn.SiLU()
+        self.nonlinear = Swish()
         self.linear_project = ReplicatedLinear(
             input_size=d_model * 4,
             output_size=d_model,
@@ -231,7 +236,7 @@ class ConformerConvolution(nn.Module):
             bias=False,
         )
         self.batch_norm = nn.LayerNorm(d_model * 2)
-        self.swish = nn.SiLU()
+        self.swish = Swish()
         self.pointwise_conv2 = nn.Conv1d(
             d_model * 2, d_model, kernel_size=1, bias=False
         )
