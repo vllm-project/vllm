@@ -19,8 +19,12 @@ from openai.types.responses import (
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
+    ResponseTextConfig,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
+)
+from openai.types.responses.response_format_text_json_schema_config import (
+    ResponseFormatTextJSONSchemaConfig,
 )
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
@@ -40,7 +44,11 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponseCreatedEvent,
+    ResponseRawMessageAndToken,
     ResponsesRequest,
+    ResponsesResponse,
+    serialize_message,
 )
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
@@ -85,6 +93,16 @@ class MockConversationContext(ConversationContext):
 
     async def cleanup_session(self) -> None:
         pass
+
+
+def test_serialize_message_pydantic_model_returns_dict() -> None:
+    msg = ResponseRawMessageAndToken(message="hello", tokens=[1, 2, 3])
+
+    serialized = serialize_message(msg)
+
+    assert isinstance(serialized, dict)
+    assert serialized["type"] == "raw_message_tokens"
+    assert serialized["message"] == "hello"
 
 
 @pytest.fixture
@@ -144,6 +162,56 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
         "code_interpreter",
         "web_search_preview",
     }
+
+
+@pytest.mark.skip_global_cleanup
+def test_response_created_event_uses_public_json_schema_alias() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "event_name": {"type": "string"},
+            "date": {"type": "string"},
+            "participants": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["event_name", "date", "participants"],
+        "additionalProperties": False,
+    }
+    text = ResponseTextConfig()
+    text.format = ResponseFormatTextJSONSchemaConfig(
+        type="json_schema",
+        name="calendar_event",
+        schema=schema,
+        description="A calendar event.",
+        strict=True,
+    )
+    request = ResponsesRequest(
+        model="test-model",
+        input="Alice and Bob are going to a science fair on Friday.",
+        text=text,
+    )
+    sampling_params = request.to_sampling_params(default_max_tokens=64)
+    initial_response = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="in_progress",
+        usage=None,
+    ).model_dump(mode="json", by_alias=True)
+
+    fmt = initial_response["text"]["format"]
+    assert fmt["schema"] == schema
+    assert "schema_" not in fmt
+
+    event = ResponseCreatedEvent(
+        type="response.created",
+        sequence_number=0,
+        response=initial_response,
+    )
+    assert event.response.text is not None
+    assert event.response.text.format is not None
+    assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
 
 
 class TestInitializeToolSessions:
@@ -652,6 +720,31 @@ class _IdentityIncrement:
 _identity_increment = _IdentityIncrement()
 
 
+def _mock_parser_with_reasoning(serving, delta_sequence: list[DeltaMessage]):
+    """Set up serving.parser so that it returns a mock parser instance
+    with a reasoning parser that returns the given delta_sequence.
+
+    The mock has reasoning_parser set (truthy) but tool_parser as None,
+    so the parser's parse_delta enters the reasoning-only branch.
+    """
+    call_count = 0
+
+    def mock_parse_delta(**kwargs):
+        nonlocal call_count
+        if call_count >= len(delta_sequence):
+            return None
+        result = delta_sequence[call_count]
+        call_count += 1
+        return result
+
+    mock_parser_instance = MagicMock()
+    mock_parser_instance.reasoning_parser = MagicMock()  # truthy
+    mock_parser_instance.tool_parser = None
+    mock_parser_instance.parse_delta = mock_parse_delta
+    mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
+    serving.parser = MagicMock(return_value=mock_parser_instance)
+
+
 class TestStreamingReasoningToContentTransition:
     """Tests for _process_simple_streaming_events reasoning-to-content
     transition, specifically the fix for mixed deltas that carry both
@@ -670,28 +763,13 @@ class TestStreamingReasoningToContentTransition:
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         serving = _make_serving_instance_with_reasoning()
 
-        # Sequence of DeltaMessages the mock reasoning parser will return
+        # Sequence of DeltaMessages the mock orchestrator will return
         delta_sequence = [
             DeltaMessage(reasoning="thinking..."),
             DeltaMessage(reasoning=" end", content="hello"),  # mixed delta
             DeltaMessage(content=" world"),
         ]
-        call_count = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        # Mock the reasoning parser on the serving instance
-        mock_parser = MagicMock()
-        mock_parser.is_reasoning_end = MagicMock(return_value=False)
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = MagicMock(return_value=None)
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = None
+        _mock_parser_with_reasoning(serving, delta_sequence)
         # Create contexts for each streaming chunk
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -759,22 +837,7 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="thinking"),
             DeltaMessage(content="answer"),
         ]
-        call_count = 0
-        _call_count_tool = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser = MagicMock()
-        mock_parser.is_reasoning_end = MagicMock(return_value=False)
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = MagicMock(return_value=None)
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -836,22 +899,7 @@ class TestStreamingReasoningToContentTransition:
             DeltaMessage(reasoning="step 1"),
             DeltaMessage(reasoning=" step 2"),
         ]
-        call_count = 0
-        _call_count_tool = 0
-
-        def mock_extract_reasoning_streaming(**kwargs):
-            nonlocal call_count
-            result = delta_sequence[call_count]
-            call_count += 1
-            return result
-
-        mock_parser = MagicMock()
-        mock_parser.is_reasoning_end = MagicMock(return_value=False)
-        mock_parser.extract_reasoning_streaming = mock_extract_reasoning_streaming
-        mock_parser.extract_tool_calls_streaming = MagicMock(return_value=None)
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+        _mock_parser_with_reasoning(serving, delta_sequence)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -953,9 +1001,35 @@ class TestContentBeforeToolCall:
         mock_parser.is_reasoning_end = MagicMock(return_value=False)
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning
         mock_parser.extract_tool_calls_streaming = mock_extract_tool_calls
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+
+        # parse_delta delegates to the extract methods for compatibility
+        def mock_parse_delta(delta_text, delta_token_ids, request, prompt_token_ids):
+            # Call both extract methods and combine results
+            reasoning_result = mock_extract_reasoning(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+            )
+            tool_result = mock_extract_tool_calls(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=request,
+            )
+            # Return tool result if it has tool calls, otherwise reasoning result
+            if tool_result and tool_result.tool_calls:
+                return tool_result
+            return reasoning_result
+
+        mock_parser.parse_delta = mock_parse_delta
+        # Unified parser mock - parser class is called with (tokenizer, tools)
+        serving.parser = MagicMock(return_value=mock_parser)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -1041,9 +1115,35 @@ class TestContentBeforeToolCall:
         mock_parser.is_reasoning_end = MagicMock(return_value=False)
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning
         mock_parser.extract_tool_calls_streaming = mock_extract_tool_calls
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+
+        # parse_delta delegates to the extract methods for compatibility
+        def mock_parse_delta(delta_text, delta_token_ids, request, prompt_token_ids):
+            # Call both extract methods and combine results
+            reasoning_result = mock_extract_reasoning(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+            )
+            tool_result = mock_extract_tool_calls(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=request,
+            )
+            # Return tool result if it has tool calls, otherwise reasoning result
+            if tool_result and tool_result.tool_calls:
+                return tool_result
+            return reasoning_result
+
+        mock_parser.parse_delta = mock_parse_delta
+        # Unified parser mock - parser class is called with (tokenizer, tools)
+        serving.parser = MagicMock(return_value=mock_parser)
 
         contexts = [
             _make_simple_context_with_output("chunk1", [10]),
@@ -1179,11 +1279,40 @@ class TestContentAndReasoningBeforeToolCall:
         mock_tool_parser = MagicMock()
         mock_tool_parser.extract_tool_calls_streaming = mock_extract_tool_calls
 
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(
-            return_value=mock_reasoning_parser
-        )
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_tool_parser)
+        # Add parse_delta method that delegates to the extract methods
+        def mock_parse_delta(delta_text, delta_token_ids, request, prompt_token_ids):
+            # Call both extract methods and combine results
+            reasoning_result = mock_extract_reasoning(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+            )
+            tool_result = mock_extract_tool_calls(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=request,
+            )
+            # Return tool result if it has tool calls, otherwise reasoning result
+            if tool_result and tool_result.tool_calls:
+                return tool_result
+            return reasoning_result
+
+        mock_reasoning_parser.parse_delta = mock_parse_delta
+        mock_reasoning_parser.tool_parser = mock_tool_parser
+
+        # Unified parser mock - parser class is called with (tokenizer, tools)
+        # Return mock_reasoning_parser which has both reasoning and tool methods
+        def mock_parser_constructor(tokenizer, tools):
+            return mock_reasoning_parser
+
+        serving.parser = mock_parser_constructor
 
         contexts = [
             _make_simple_context_with_output("c1", [10]),
@@ -1280,9 +1409,35 @@ class TestContentAndReasoningBeforeToolCall:
         mock_parser.is_reasoning_end = MagicMock(return_value=False)
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning
         mock_parser.extract_tool_calls_streaming = mock_extract_tool_calls
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+
+        # parse_delta delegates to the extract methods for compatibility
+        def mock_parse_delta(delta_text, delta_token_ids, request, prompt_token_ids):
+            # Call both extract methods and combine results
+            reasoning_result = mock_extract_reasoning(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+            )
+            tool_result = mock_extract_tool_calls(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=request,
+            )
+            # Return tool result if it has tool calls, otherwise reasoning result
+            if tool_result and tool_result.tool_calls:
+                return tool_result
+            return reasoning_result
+
+        mock_parser.parse_delta = mock_parse_delta
+        # Unified parser mock - parser class is called with (tokenizer, tools)
+        serving.parser = MagicMock(return_value=mock_parser)
 
         contexts = [
             _make_simple_context_with_output("c1", [10]),
@@ -1410,9 +1565,35 @@ class TestContentAndReasoningBeforeToolCall:
         mock_parser.is_reasoning_end = MagicMock(return_value=False)
         mock_parser.extract_reasoning_streaming = mock_extract_reasoning
         mock_parser.extract_tool_calls_streaming = mock_extract_tool_calls
-        serving.parser = MagicMock()
-        serving.parser.reasoning_parser_cls = MagicMock(return_value=mock_parser)
-        serving.parser.tool_parser_cls = MagicMock(return_value=mock_parser)
+
+        # parse_delta delegates to the extract methods for compatibility
+        def mock_parse_delta(delta_text, delta_token_ids, request, prompt_token_ids):
+            # Call both extract methods and combine results
+            reasoning_result = mock_extract_reasoning(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+            )
+            tool_result = mock_extract_tool_calls(
+                previous_text="",
+                current_text=delta_text,
+                delta_text=delta_text,
+                previous_token_ids=[],
+                current_token_ids=delta_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=request,
+            )
+            # Return tool result if it has tool calls, otherwise reasoning result
+            if tool_result and tool_result.tool_calls:
+                return tool_result
+            return reasoning_result
+
+        mock_parser.parse_delta = mock_parse_delta
+        # Unified parser mock - parser class is called with (tokenizer, tools)
+        serving.parser = MagicMock(return_value=mock_parser)
 
         contexts = [
             _make_simple_context_with_output("c1", [10]),

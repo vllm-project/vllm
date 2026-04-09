@@ -257,19 +257,19 @@ class DFlashProposer(SpecDecodeBaseProposer):
         )
 
     @override
-    def build_per_layer_attn_metadata(
+    def build_per_group_and_layer_attn_metadata(
         self, cad: CommonAttentionMetadata, draft_index: int = 0
-    ) -> dict[str, object]:
-        per_layer_attention_metadata = super().build_per_layer_attn_metadata(
+    ) -> tuple[list[object], dict[str, object]]:
+        per_group, per_layer = super().build_per_group_and_layer_attn_metadata(
             cad, draft_index
         )
-        for layer_name, attn_metadata in per_layer_attention_metadata.items():
+        for layer_name, attn_metadata in per_layer.items():
             assert getattr(attn_metadata, "causal", None) is False, (
                 f"Attention metadata for layer {layer_name} does not have"
                 " non-causal support, which is required for DFlash."
                 " Consider using a different attention backend, such as FlashAttention."
             )
-        return per_layer_attention_metadata
+        return per_group, per_layer
 
     @override
     def _get_eagle3_use_aux_hidden_state_from_config(self):

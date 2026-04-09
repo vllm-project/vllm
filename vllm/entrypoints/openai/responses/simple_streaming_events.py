@@ -39,9 +39,8 @@ from vllm.entrypoints.openai.responses.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import SampleLogprobs
-from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
+from vllm.parser.abstract_parser import Parser
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
 
@@ -72,117 +71,42 @@ class SimpleStreamingState:
 def _parse_delta_message(
     request: "ResponsesRequest | None",
     output,
-    reasoning_parser: "ReasoningParser | None",
-    tool_parser: "ToolParser | None",
+    parser: "Parser | None",
     state: SimpleStreamingState,
 ) -> tuple[DeltaMessage | None, str, list[int]]:
-    """Parse a generation output into a DeltaMessage.
+    """Parse a generation output into a DeltaMessage using unified parser.
 
-    Extracts reasoning, tool calls, and content from the raw output using
-    the appropriate parsers.
+    Uses parser.parse_delta() as base parsing, then applies additional
+    processing for tool call quirks and content restoration.
     """
     delta_text = output.text
     delta_token_ids = as_list(output.token_ids)
     current_text = state.previous_text + delta_text
     current_token_ids = state.previous_token_ids + delta_token_ids
 
-    delta_message: DeltaMessage | None = None
-
-    if reasoning_parser and tool_parser:
-        # reasoning parser didn't see the reasoning end marker, because
-        # it was already in the prompt.
-        if state.prompt_is_reasoning_end:
-            state.reasoning_ended = True
-        # Track content extracted when reasoning ends, so it can be restored
-        # if the tool_parser doesn't find a tool call
-        extracted_content: str | None = None
-        if not state.reasoning_ended:
-            delta_message = reasoning_parser.extract_reasoning_streaming(
-                previous_text=state.previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                previous_token_ids=state.previous_token_ids,
-                current_token_ids=current_token_ids,
-                delta_token_ids=delta_token_ids,
-            )
-            if reasoning_parser.is_reasoning_end(delta_token_ids):
-                state.reasoning_ended = True
-                current_token_ids = reasoning_parser.extract_content_ids(
-                    delta_token_ids
-                )
-                # Save the content before stripping it, so it can be restored
-                # if the tool_parser doesn't find a tool call
-                extracted_content = delta_message.content if delta_message else None
-                if delta_message and delta_message.content:
-                    current_text = delta_message.content
-                    delta_message.content = None
-                else:
-                    current_text = ""
-        if state.reasoning_ended:
-            if not state.tool_call_text_started:
-                state.tool_call_text_started = True
-                state.previous_text = ""
-                state.previous_token_ids = []
-                delta_text = current_text
-                delta_token_ids = current_token_ids
-            potential_reasoning_delta = delta_message
-            delta_message = tool_parser.extract_tool_calls_streaming(
-                previous_text=state.previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                previous_token_ids=state.previous_token_ids,
-                current_token_ids=current_token_ids,
-                delta_token_ids=delta_token_ids,
-                request=request,  # type: ignore[arg-type]
-            )
-            if delta_message is None:
-                delta_message = potential_reasoning_delta
-            # If the tool_parser returned None and we had extracted content,
-            # restore it to the delta_message so it can be emitted as text
-            if (
-                delta_message
-                and delta_message is potential_reasoning_delta
-                and extracted_content
-            ):
-                delta_message.content = extracted_content
-
-    elif reasoning_parser:
-        delta_message = reasoning_parser.extract_reasoning_streaming(
-            previous_text=state.previous_text,
-            current_text=current_text,
+    # Base parsing via unified parser
+    if parser:
+        delta_message = parser.parse_delta(
             delta_text=delta_text,
-            previous_token_ids=state.previous_token_ids,
-            current_token_ids=current_token_ids,
-            delta_token_ids=delta_token_ids,
-        )
-    elif tool_parser:
-        delta_message = tool_parser.extract_tool_calls_streaming(
-            previous_text=state.previous_text,
-            current_text=current_text,
-            delta_text=delta_text,
-            previous_token_ids=state.previous_token_ids,
-            current_token_ids=current_token_ids,
             delta_token_ids=delta_token_ids,
             request=request,  # type: ignore[arg-type]
+            prompt_token_ids=None,
         )
     else:
-        delta_message = DeltaMessage(
-            content=output.text,
-        )
+        delta_message = DeltaMessage(content=output.text)
 
     if delta_message is None:
         return None, current_text, current_token_ids
 
-    # parser/model quirk: handle tool call related quirks
-    # (applies when tool_parser is configured, regardless of reasoning_parser)
-    if tool_parser and delta_message:
+    # Apply additional processing for tool call quirks
+    # (preserved from original _parse_delta_message)
+    if parser and parser.tool_parser and delta_message:
         # remove any spurious output text after the first tool call has
         # started streaming
         if state.first_tool_call_started:
             delta_message.content = None
         # skip whitespaces only output text before tool calls (otherwise we stream
         # phantom messages with, for example, just 2 newlines).
-        # TODO: might be tool_parser responsibility?
         if (
             delta_message.content
             and (
@@ -505,8 +429,7 @@ def _events_tc_done(
 
 async def process_simple_stream(
     result_generator: AsyncIterator,
-    reasoning_parser: "ReasoningParser | None",
-    tool_parser: "ToolParser | None",
+    parser: "Parser | None",
     request: "ResponsesRequest | None",
     tokenizer: "TokenizerLike | None",
     _emit_event: Callable[[StreamingResponsesResponse], StreamingResponsesResponse],
@@ -549,8 +472,8 @@ async def process_simple_stream(
                 raise GenerationError("Internal server error")
 
         # Initialize prompt_is_reasoning_end on first iteration
-        if reasoning_parser and state.prompt_is_reasoning_end is None:
-            state.prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
+        if parser and parser.reasoning_parser and state.prompt_is_reasoning_end is None:
+            state.prompt_is_reasoning_end = parser.reasoning_parser.is_reasoning_end(
                 output.prompt_token_ids
             )
 
@@ -572,8 +495,7 @@ async def process_simple_stream(
         result = _parse_delta_message(
             request=request,
             output=output,
-            reasoning_parser=reasoning_parser,
-            tool_parser=tool_parser,
+            parser=parser,
             state=state,
         )
         delta_message, current_text, current_token_ids = result
