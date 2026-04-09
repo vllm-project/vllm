@@ -461,6 +461,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "Param2MoEForCausalLM": _HfExamplesInfo(
+        "bharatgenai/Param2-17B-A2.4B-Thinking",
+        trust_remote_code=True,
+    ),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
@@ -644,7 +648,6 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
-        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
@@ -1245,6 +1248,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         tokenizer="meta-llama/Llama-3.1-8B-Instruct",
         use_original_num_layers=True,
         max_model_len=10240,
+    ),
+    "Eagle3MiniMaxM2ForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M2",
+        trust_remote_code=True,
+        speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+        tokenizer="MiniMaxAI/MiniMax-M2",
     ),
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
