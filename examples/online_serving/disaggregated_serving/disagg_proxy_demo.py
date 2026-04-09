@@ -392,7 +392,7 @@ class ProxyServer:
         model_suffix = model.split("/")[-1]
         for instance in instances:
             try:
-                response = requests.get(f"http://{instance}/v1/models")
+                response = requests.get(f"http://{instance}/v1/models", timeout=10.0)
                 if response.status_code == 200:
                     model_cur = response.json()["data"][0]["id"]
                     model_cur_suffix = model_cur.split("/")[-1]

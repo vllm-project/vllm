@@ -33,7 +33,7 @@ def http_bot(prompt):
         "stream": True,
         "max_tokens": 128,
     }
-    response = requests.post(args.model_url, headers=headers, json=pload, stream=True)
+    response = requests.post(args.model_url, headers=headers, json=pload, stream=True, timeout=10.0)
 
     for chunk in response.iter_lines(
         chunk_size=8192, decode_unicode=False, delimiter=b"\n"

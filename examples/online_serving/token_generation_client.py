@@ -35,7 +35,7 @@ def main(client):
         "sampling_params": {"max_tokens": 24, "temperature": 0.2, "detokenize": False},
         "stream": False,
     }
-    resp = client.post(GEN_ENDPOINT, json=payload)
+    resp = client.post(GEN_ENDPOINT, json=payload, timeout=10.0)
     resp.raise_for_status()
     data = resp.json()
     print(data)

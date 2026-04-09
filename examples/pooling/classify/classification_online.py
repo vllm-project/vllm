@@ -27,7 +27,7 @@ def main(args):
     classify_url = base_url + "/classify"
     tokenize_url = base_url + "/tokenize"
 
-    response = requests.get(models_url, headers=headers)
+    response = requests.get(models_url, headers=headers, timeout=10.0)
     model = response.json()["data"][0]["id"]
 
     # /classify can accept str as input
@@ -42,7 +42,7 @@ def main(args):
         "model": model,
         "input": prompts,
     }
-    response = requests.post(classify_url, headers=headers, json=payload)
+    response = requests.post(classify_url, headers=headers, json=payload, timeout=10.0)
     pprint.pprint(response.json())
 
     # /classify can accept token ids as input
@@ -51,6 +51,7 @@ def main(args):
         response = requests.post(
             tokenize_url,
             json={"model": model, "prompt": prompt},
+            timeout=10.0,
         )
         token_ids.append(response.json()["tokens"])
 
@@ -58,7 +59,7 @@ def main(args):
         "model": model,
         "input": token_ids,
     }
-    response = requests.post(classify_url, headers=headers, json=payload)
+    response = requests.post(classify_url, headers=headers, json=payload, timeout=10.0)
     pprint.pprint(response.json())
 
 

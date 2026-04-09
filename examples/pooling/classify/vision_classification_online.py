@@ -36,7 +36,7 @@ def main(args):
     models_url = base_url + "/v1/models"
     classify_url = base_url + "/classify"
 
-    response = requests.get(models_url)
+    response = requests.get(models_url, timeout=10.0)
     model_name = response.json()["data"][0]["id"]
 
     print("Text classification output:")
@@ -53,6 +53,7 @@ def main(args):
     response = requests.post(
         classify_url,
         json={"model": model_name, "messages": messages},
+        timeout=10.0,
     )
     pprint.pprint(response.json())
 
@@ -69,6 +70,7 @@ def main(args):
     response = requests.post(
         classify_url,
         json={"model": model_name, "messages": messages},
+        timeout=10.0,
     )
     pprint.pprint(response.json())
 
@@ -85,6 +87,7 @@ def main(args):
     response = requests.post(
         classify_url,
         json={"model": model_name, "messages": messages},
+        timeout=10.0,
     )
     pprint.pprint(response.json())
 
@@ -101,6 +104,7 @@ def main(args):
     response = requests.post(
         classify_url,
         json={"model": model_name, "messages": messages},
+        timeout=10.0,
     )
     pprint.pprint(response.json())
 

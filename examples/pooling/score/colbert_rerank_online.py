@@ -54,7 +54,7 @@ def rerank_example():
         "documents": documents,
     }
 
-    response = requests.post(f"{BASE_URL}/rerank", headers=headers, json=data)
+    response = requests.post(f"{BASE_URL}/rerank", headers=headers, json=data, timeout=10.0)
     result = response.json()
     print(json.dumps(result, indent=2))
 
@@ -78,7 +78,7 @@ def score_example():
         ],
     }
 
-    response = requests.post(f"{BASE_URL}/score", headers=headers, json=data)
+    response = requests.post(f"{BASE_URL}/score", headers=headers, json=data, timeout=10.0)
     result = response.json()
     print(json.dumps(result, indent=2))
 

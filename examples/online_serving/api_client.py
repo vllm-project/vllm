@@ -35,7 +35,7 @@ def post_http_request(
         "max_tokens": 16,
         "stream": stream,
     }
-    response = requests.post(api_url, headers=headers, json=pload, stream=stream)
+    response = requests.post(api_url, headers=headers, json=pload, stream=stream, timeout=10.0)
     return response
 
 

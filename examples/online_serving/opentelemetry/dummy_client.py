@@ -31,4 +31,4 @@ with tracer.start_as_current_span("client-span", kind=SpanKind.CLIENT) as span:
         "temperature": 0.0,
         # "stream": True,
     }
-    response = requests.post(url, headers=headers, json=payload)
+    response = requests.post(url, headers=headers, json=payload, timeout=10.0)

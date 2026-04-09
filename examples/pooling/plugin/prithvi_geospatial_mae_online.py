@@ -35,7 +35,7 @@ def main():
         "model": "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
     }
 
-    ret = requests.post(server_endpoint, json=request_payload_url)
+    ret = requests.post(server_endpoint, json=request_payload_url, timeout=10.0)
 
     print(f"response.status_code: {ret.status_code}")
     print(f"response.reason:{ret.reason}")

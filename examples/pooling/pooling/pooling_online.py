@@ -17,7 +17,7 @@ import requests
 
 def post_http_request(prompt: dict, api_url: str) -> requests.Response:
     headers = {"User-Agent": "Test Client"}
-    response = requests.post(api_url, headers=headers, json=prompt)
+    response = requests.post(api_url, headers=headers, json=prompt, timeout=10.0)
     return response
 
 
@@ -34,7 +34,7 @@ def main(args):
     models_url = base_url + "/v1/models"
     pooing_url = base_url + "/pooling"
 
-    response = requests.get(models_url)
+    response = requests.get(models_url, timeout=10.0)
     model = response.json()["data"][0]["id"]
 
     # Input like Completions API

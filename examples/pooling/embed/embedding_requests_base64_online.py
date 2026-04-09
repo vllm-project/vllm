@@ -17,7 +17,7 @@ from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
 def post_http_request(prompt: dict, api_url: str) -> requests.Response:
     headers = {"User-Agent": "Test Client"}
-    response = requests.post(api_url, headers=headers, json=prompt)
+    response = requests.post(api_url, headers=headers, json=prompt, timeout=10.0)
     return response
 
 
@@ -33,7 +33,7 @@ def main(args):
     models_url = base_url + "/v1/models"
     embeddings_url = base_url + "/v1/embeddings"
 
-    response = requests.get(models_url)
+    response = requests.get(models_url, timeout=10.0)
     model = response.json()["data"][0]["id"]
 
     input_texts = [

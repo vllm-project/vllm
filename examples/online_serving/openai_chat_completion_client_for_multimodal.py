@@ -45,7 +45,7 @@ headers = {"User-Agent": "vLLM Example Client"}
 def encode_base64_content_from_url(content_url: str) -> str:
     """Encode a content retrieved from a remote url to base64 format."""
 
-    with requests.get(content_url, headers=headers) as response:
+    with requests.get(content_url, headers=headers, timeout=10.0) as response:
         response.raise_for_status()
         result = base64.b64encode(response.content).decode("utf-8")
 
