@@ -1713,15 +1713,27 @@ class DPEngineCoreProc(EngineCoreProc):
                 )
 
     def resume_scheduler(self):
+        if self.pending_pause or (self.engines_running and self.ignore_start_dp_wave):
+            raise RuntimeError(
+                "resume_scheduler called while pause is still in "
+                "flight. Wait for the pause future to resolve before "
+                "resuming."
+            )
+        if self.engines_running:
+            logger.debug("resume_scheduler called while engines are running. Ignoring.")
+            return
+
         super().resume_scheduler()
-        self.pending_pause = False
         self.ignore_start_dp_wave = False
-        if (
-            self.has_coordinator
-            and not self.engines_running
-            and self.scheduler.has_unfinished_requests()
-        ):
-            # Wake up other DP engines.
+
+        # Barrier: wait for all DP ranks to have resumed (and cleared
+        # ignore_start_dp_wave) before sending start_wave. Uses the
+        # existing all-reduce which is safe because engines are stopped.
+        has_global_unfinished = ParallelConfig.has_unfinished_dp(
+            self.dp_group, self.scheduler.has_unfinished_requests()
+        )
+
+        if self.has_coordinator and has_global_unfinished:
             self.output_queue.put_nowait(
                 (-1, EngineCoreOutputs(start_wave=self.current_wave))
             )
