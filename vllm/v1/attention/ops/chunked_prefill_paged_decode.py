@@ -266,6 +266,7 @@ def chunked_prefill_paged_decode(
     # Optional tensor for sinks
     sinks=None,
     is_block_table_ptr: bool = False,
+    use_interleaved_v_cache: bool = False,
 ):
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
@@ -274,6 +275,8 @@ def chunked_prefill_paged_decode(
 
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
+
+    interleaved_v_kx = (16 // key_cache.element_size()) if use_interleaved_v_cache else 0
 
     if max_query_len > 1:
         context_attention_fwd(
@@ -297,6 +300,7 @@ def chunked_prefill_paged_decode(
             skip_decode=True,
             fp8_out_scale=output_scale,
             sinks=sinks,
+            interleaved_v_kx=interleaved_v_kx,
         )
 
     block_size = value_cache.shape[3]
@@ -390,6 +394,7 @@ def chunked_prefill_paged_decode(
             k_scale=k_scale,
             v_scale=v_scale,
             fp8_out_scale=output_scale,
+            use_interleaved_v_cache=use_interleaved_v_cache,
         )
     else:
         real_block_size = value_cache.shape[3]

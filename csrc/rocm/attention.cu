@@ -325,7 +325,8 @@ __device__ float warpReduceMax(float val) {
 // clang-format off
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE>
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO, MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -563,26 +564,54 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   _B16x8 Vlocal[VTLOOP][VHELOOP][VTLANELOOP];  // this could be B8x16 too
 
-  const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride +
-                         ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE);
+  // KX_V = number of contiguous token elements per interleaved chunk
+  // (e.g. 8 for bf16, 16 for fp8). This is also the 'x' dimension size.
+  constexpr int KX_V = 16 / sizeof(cache_t);
 
-  // v fetches are 16head elems across lanes x 16 tokens per lane
-  for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
-    const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
-    const cache_t* v_ptr2 = v_ptr + vhead_elem * BLOCK_SIZE;
-
-    for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
-      for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+  if constexpr (USE_INTERLEAVED_V_CACHE) {
+    // Interleaved V-cache layout: [num_blocks, num_heads, block_size/x, head_dim, x]
+    // Address for v[block][head][token t][dim d]:
+    //   chunk = t / x,  sub = t % x
+    //   addr = base + chunk * head_dim * x + d * x + sub
+    const cache_t* v_ptr_head = v_cache + wg_start_kv_head_idx * kv_head_stride;
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
         const int vblock_depth = 0;
         const int64_t vblock_number = static_cast<int64_t>(
             vphysical_block_number[vtoken_depth][vblock_depth]);
-        const cache_t* v_ptr3 = v_ptr2 + (vblock_number * kv_block_stride);
-
-        const cache_t* v_fetch_ptr =
-            v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-        const _B16x8* v_fetch_ptr_16B =
-            reinterpret_cast<const _B16x8*>(v_fetch_ptr);
-        Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+        const cache_t* v_block_ptr =
+            v_ptr_head + vblock_number * kv_block_stride;
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int bo = ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE) +
+                         vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          const int bo_chunk = bo / KX_V;       // which chunk of x tokens
+          const cache_t* v_fetch_ptr =
+              v_block_ptr +
+              (bo_chunk * HEAD_SIZE + vhead_elem) * KX_V + (bo % KX_V);
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
+              *reinterpret_cast<const _B16x8*>(v_fetch_ptr);
+        }
+      }
+    }
+  } else {
+    const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride +
+                           ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE);
+    for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
+      const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
+      const cache_t* v_ptr2 = v_ptr + vhead_elem * BLOCK_SIZE;
+      for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
+        for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
+          const int vblock_depth = 0;
+          const int64_t vblock_number = static_cast<int64_t>(
+              vphysical_block_number[vtoken_depth][vblock_depth]);
+          const cache_t* v_ptr3 = v_ptr2 + (vblock_number * kv_block_stride);
+          const cache_t* v_fetch_ptr =
+              v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
+          const _B16x8* v_fetch_ptr_16B =
+              reinterpret_cast<const _B16x8*>(v_fetch_ptr);
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+        }
       }
     }
   }
@@ -926,7 +955,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -1107,25 +1137,40 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
       }
     }
 
+    // KX_V = number of contiguous token elements per interleaved chunk
+    constexpr int KX_V = 16 / sizeof(cache_t);
     const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride;
-    // fetch vcache in kv cache auto case
+    // fetch vcache in kv cache auto case (bf16/fp16)
     if constexpr (KV_DTYPE == vllm::Fp8KVCacheDataType::kAuto) {
       const _B16x8* v_ptrh8 = reinterpret_cast<const _B16x8*>(v_ptr);
-      // iterate over each v block
       for (int b = 0; b < VBLOCKS; b++) {
-        // int32 physical_block_number leads to overflow when multiplied with
-        // kv_block_stride
         const int64_t vphysical_block_number =
             static_cast<int64_t>(vphysical_blocks[b]);
         const _B16x8* v_ptrh8b =
             v_ptrh8 + (vphysical_block_number * kv_block_stride) / 8;
-        // iterate over each head elem (within head_size)
         for (int h = 0; h < VHELOOP; h++) {
           const int head_size_elem = h * WARP_SIZE + laneid;
-          const _B16x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
-          // iterate over all velems within block
-          for (int d = 0; d < BLOCK_SIZE / 8; d++) {
-            Vlocal[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+          if constexpr (USE_INTERLEAVED_V_CACHE) {
+            // Interleaved layout: [num_blocks, num_heads, block_size/x, head_dim, x]
+            // Iterate over chunks of x tokens; within each chunk, x values
+            // for the same head_size_elem are contiguous (16-byte aligned).
+            for (int bo_chunk = 0; bo_chunk < BLOCK_SIZE / KX_V; bo_chunk++) {
+              const _B16x8* v_chunk =
+                  v_ptrh8b +
+                  (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
+              for (int xd = 0; xd < KX_V / 8; xd++) {
+                Vlocal[h][b * BLOCK_SIZE / 8 + bo_chunk * (KX_V / 8) + xd] =
+                    v_chunk[xd];
+              }
+            }
+          } else {
+            // Standard PagedAttention layout: [num_blocks, num_heads, head_dim, block_size]
+            // All block_size tokens for one head_size_elem are contiguous.
+            const _B16x8* v_ptrh8be =
+                v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
+            for (int d = 0; d < BLOCK_SIZE / 8; d++) {
+              Vlocal[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+            }
           }
         }
       }
@@ -1133,21 +1178,31 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     // fetch vcache in fp8 case
     else {  // if constexpr (KV_DTYPE != vllm::Fp8KVCacheDataType::kAuto)
       const _B8x8* v_ptrh8 = reinterpret_cast<const _B8x8*>(v_ptr);
-      // iterate over each v block
       for (int b = 0; b < VBLOCKS; b++) {
-        // int32 physical_block_number leads to overflow when multiplied with
-        // kv_block_stride
         const int64_t vphysical_block_number =
             static_cast<int64_t>(vphysical_blocks[b]);
         const _B8x8* v_ptrh8b =
             v_ptrh8 + (vphysical_block_number * kv_block_stride) / 8;
-        // iterate over each head elem (within head_size)
         for (int h = 0; h < VHELOOP; h++) {
           const int head_size_elem = h * WARP_SIZE + laneid;
-          const _B8x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
-          // iterate over all velems within block
-          for (int d = 0; d < BLOCK_SIZE / 8; d++) {
-            Vlocalb8[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+          if constexpr (USE_INTERLEAVED_V_CACHE) {
+            // Same interleaved addressing as bf16 above, but with fp8
+            // elements (KX_V=16, using _B8x8 loads instead of _B16x8).
+            for (int bo_chunk = 0; bo_chunk < BLOCK_SIZE / KX_V; bo_chunk++) {
+              const _B8x8* v_chunk =
+                  v_ptrh8b +
+                  (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
+              for (int xd = 0; xd < KX_V / 8; xd++) {
+                Vlocalb8[h][b * BLOCK_SIZE / 8 + bo_chunk * (KX_V / 8) + xd] =
+                    v_chunk[xd];
+              }
+            }
+          } else {
+            const _B8x8* v_ptrh8be =
+                v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
+            for (int d = 0; d < BLOCK_SIZE / 8; d++) {
+              Vlocalb8[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
+            }
           }
         }
       }
@@ -1727,7 +1782,8 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE>
+          MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2164,7 +2220,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2495,7 +2552,8 @@ __device__ __forceinline__ _B16x8 from_floatx8(const floatx8& inp) {
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
-          MFMAType MFMA_TYPE>
+          MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -2897,7 +2955,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,       // [num_seqs, num_heads, head_size]
@@ -3127,7 +3186,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO, MFMAType MFMA_TYPE>
+          int GQA_RATIO, MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const scalar_t* __restrict__ q,         // [num_seqs, num_heads, head_size]
@@ -3154,7 +3214,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
           int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO>
+          int GQA_RATIO,
+          bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const scalar_t* __restrict__ q,          // [num_seqs, num_heads, head_size]
@@ -3199,7 +3260,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 #define LAUNCH_CUSTOM_ATTENTION_MFMA16(GQA_RATIO)                              \
   paged_attention_ll4mi_QKV_mfma16_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,  \
                                           HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
-                                          GQA_RATIO, MFMA_TYPE>                \
+                                          GQA_RATIO, MFMA_TYPE,                \
+                                          USE_INTERLEAVED_V_CACHE>             \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
@@ -3210,7 +3272,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
   paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
                                          HEAD_SIZE, NTHR, ALIBI_ENABLED,       \
-                                         GQA_RATIO>                            \
+                                         GQA_RATIO,                            \
+                                         USE_INTERLEAVED_V_CACHE>              \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
@@ -3227,7 +3290,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
-          bool ALIBI_ENABLED, MFMAType MFMA_TYPE>
+          bool ALIBI_ENABLED, MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE = false>
 void paged_attention_custom_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -3383,7 +3447,8 @@ void paged_attention_custom_launcher(
 
 template <typename T, typename KVT, vllm::Fp8KVCacheDataType KV_DTYPE,
           int BLOCK_SIZE, int HEAD_SIZE, typename OUTT, int PARTITION_SIZE_OLD,
-          bool ALIBI_ENABLED, MFMAType MFMA_TYPE>
+          bool ALIBI_ENABLED, MFMAType MFMA_TYPE,
+          bool USE_INTERLEAVED_V_CACHE = false>
 void paged_attention_custom_launcher_navi(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
@@ -3554,21 +3619,46 @@ void paged_attention_custom_launcher_navi(
   }
 }
 
-#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,   \
-                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)               \
-  if (!is_navi) {                                                           \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>( \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
-  } else {                                                                  \
-    paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
-                                         HEAD_SIZE, OUTT, PSIZE,            \
-                                         ALIBI_ENABLED, MFMA_TYPE>(         \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
-        max_seq_len, alibi_slopes, k_scale, v_scale);                       \
+// USE_INTERLEAVED_V_CACHE: selects the V-cache read path at compile time.
+// Currently only the GFX9 kernels (MI300x/MI325x/MI350x/MI355x) have the
+// actual interleaved V-fetch logic implemented. The GFX11 (RDNA 3), GFX12
+// (RDNA 4), and fallback stub kernels carry the template parameter solely
+// for compilation compatibility -- their bodies are UNREACHABLE_CODE stubs.
+// TODO: implement interleaved V-cache support in the NAVI (GFX11/GFX12)
+// kernels if shuffle KV cache layout is needed on RDNA GPUs.
+#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,      \
+                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)                  \
+  if (use_interleaved_v_cache) {                                               \
+    if (!is_navi) {                                                            \
+      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
+                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,   \
+                                      true>(                                   \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
+          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
+    } else {                                                                   \
+      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,         \
+                                           HEAD_SIZE, OUTT, PSIZE,             \
+                                           ALIBI_ENABLED, MFMA_TYPE, true>(    \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
+          max_seq_len, alibi_slopes, k_scale, v_scale);                        \
+    }                                                                          \
+  } else {                                                                     \
+    if (!is_navi) {                                                            \
+      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
+                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>(  \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
+          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
+    } else {                                                                   \
+      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,         \
+                                           HEAD_SIZE, OUTT, PSIZE,             \
+                                           ALIBI_ENABLED, MFMA_TYPE>(          \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
+          max_seq_len, alibi_slopes, k_scale, v_scale);                        \
+    }                                                                          \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
@@ -3665,7 +3755,8 @@ void paged_attention(
     const std::string& kv_cache_dtype, torch::Tensor& k_scale,
     torch::Tensor& v_scale,
     const std::optional<torch::Tensor>& fp8_out_scale,
-    const std::string& mfma_type) {
+    const std::string& mfma_type,
+    bool use_interleaved_v_cache) {
   // clang-format on
   bool is_navi = is_navi_gpu();
   const int head_size = query.size(2);
