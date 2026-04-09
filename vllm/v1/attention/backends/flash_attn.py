@@ -10,6 +10,7 @@ import numpy as np
 import torch
 
 from vllm.model_executor.layers.attention import Attention
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -20,6 +21,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
     get_flash_attn_version,
+    is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
@@ -45,7 +47,6 @@ from vllm.config import (
 from vllm.config.cache import CacheDType
 from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
-from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.backend import (
@@ -62,7 +63,6 @@ logger = init_logger(__name__)
 
 
 class FlashAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
@@ -171,7 +171,13 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
-        return head_size % 8 == 0 and head_size <= 256
+        if head_size % 8 != 0:
+            return False
+        if head_size <= 256:
+            return True
+        if is_fa_version_supported(4):
+            return head_size <= 512
+        return False
 
     @classmethod
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
@@ -619,6 +625,14 @@ class FlashAttentionImpl(AttentionImpl):
             requires_alibi=alibi_slopes is not None,
             head_size=head_size,
         )
+        # head_size > 256 requires FA4 on SM90+; force upgrade from FA3
+        if (
+            head_size > 256
+            and self.vllm_flash_attn_version == 3
+            and current_platform.is_cuda()
+            and current_platform.is_device_capability_family(90)
+        ):
+            self.vllm_flash_attn_version = 4
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
@@ -664,7 +678,7 @@ class FlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -683,7 +697,6 @@ class FlashAttentionImpl(AttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
-        assert output is not None, "Output tensor must be provided."
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )

@@ -222,7 +222,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
             else:
                 self.cpu_fused_moe = cpu_fused_moe.CPUFusedMOE(layer)
-        elif current_platform.is_xpu():
+        elif self.unquantized_backend == UnquantizedMoeBackend.XPU:
             w13 = layer.w13_weight
             w2 = layer.w2_weight
 
