@@ -54,13 +54,15 @@ class Mxfp4MoeBackend(Enum):
     # Marlin
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
-    # ROCm AITER (CK)
-    CK = "CK"
+    # ROCm AITER
+    AITER = "AITER"
     # Triton
     TRITON = "TRITON"
     TRITON_UNFUSED = "TRITON_UNFUSED"
     # XPU
     XPU = "XPU"
+    # Emulation
+    EMULATION = "EMULATION"
 
 
 # Backends that share the same TRTLLM weight format
@@ -130,7 +132,7 @@ def backend_to_kernel_cls(
 
         return [BatchedMarlinExperts]
 
-    elif backend == Mxfp4MoeBackend.CK:
+    elif backend == Mxfp4MoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             AiterExperts,
         )
@@ -141,6 +143,13 @@ def backend_to_kernel_cls(
         from vllm.model_executor.layers.fused_moe.xpu_fused_moe import XPUExpertsMXFp4
 
         return [XPUExpertsMXFp4]
+
+    elif backend == Mxfp4MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+            OCP_MXQuantizationEmulationTritonExperts,
+        )
+
+        return [OCP_MXQuantizationEmulationTritonExperts]
 
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
@@ -155,8 +164,9 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
         "flashinfer_cutlass_afp8": Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
         "triton": Mxfp4MoeBackend.TRITON,
         "marlin": Mxfp4MoeBackend.MARLIN,
-        "ck": Mxfp4MoeBackend.CK,
+        "aiter": Mxfp4MoeBackend.AITER,
         "xpu": Mxfp4MoeBackend.XPU,
+        "emulation": Mxfp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -173,13 +183,14 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     """
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.CK,
+        Mxfp4MoeBackend.AITER,
         Mxfp4MoeBackend.TRITON,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -656,7 +667,7 @@ def convert_to_mxfp4_moe_kernel_format(
                 w2_bias,
             )
 
-    elif mxfp4_backend == Mxfp4MoeBackend.CK:
+    elif mxfp4_backend == Mxfp4MoeBackend.AITER:
         from vllm._aiter_ops import rocm_aiter_ops
 
         if w13_bias is not None:
@@ -762,6 +773,17 @@ def convert_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+        # No additional transformation needed for emulation backend,
+        # weights are dequantized on the fly in the experts class.
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend: {mxfp4_backend}: "
@@ -794,7 +816,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-        Mxfp4MoeBackend.CK,
+        Mxfp4MoeBackend.AITER,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,

@@ -10,6 +10,7 @@ from transformers import PretrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     MPLinearLayerConfig,
@@ -233,6 +234,11 @@ class AWQMarlinConfig(QuantizationConfig):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> "QuantizationMethods | None":
+        # Skip override to marlin kernels, as they are not
+        # batch invariant
+        if envs.VLLM_BATCH_INVARIANT:
+            return None
+
         can_convert = cls.is_awq_marlin_compatible(hf_quant_cfg)
         is_valid_user_quant = (
             user_quant is None or user_quant == "marlin" or user_quant == "awq_marlin"
