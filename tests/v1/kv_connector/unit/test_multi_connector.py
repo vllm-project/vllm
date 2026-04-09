@@ -231,10 +231,11 @@ def test_multi_example_connector_consistency():
     ]
     # First three events are from initialization (register_kv_caches,
     # set_host_xfer_buffer_ops, get_handshake_metadata), then generate() events.
-    assert events["storage1-WORKER"][:7] == [
+    assert events["storage1-WORKER"][:8] == [
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
+        "handle_preemptions",
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",
@@ -246,10 +247,11 @@ def test_multi_example_connector_consistency():
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-WORKER"][:7] == [
+    assert events["storage2-WORKER"][:8] == [
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
         "get_handshake_metadata",
+        "handle_preemptions",
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",
@@ -399,8 +401,8 @@ def test_multi_connector_handle_preemptions_integration():
         # testing the delegation behavior of MultiConnector here.
         # The connector attribute contains the KV connector.
         assert scheduler.connector is not None, "Scheduler should have a connector"
-        preempted_req_ids = {"req-1", "req-2", "req-3"}
-        scheduler.connector.handle_preemptions(preempted_req_ids)
+        connector_md = scheduler.connector.build_connector_meta(scheduler.schedule())
+        scheduler.connector.handle_preemptions(connector_md)
 
         # Verify both connectors received the handle_preemptions call
         events = get_connector_events()

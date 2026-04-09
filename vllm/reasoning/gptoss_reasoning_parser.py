@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-no_func_reaonsing_tag = {
+no_func_reasoning_tag = {
     "type": "structural_tag",
     "format": {
         "type": "triggered_tags",
@@ -51,10 +51,10 @@ def from_builtin_tool_to_tag(tool: str) -> list[dict]:
     return tag
 
 
-def tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list: list[str]) -> dict:
+def tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list: list[str]) -> dict:
     import copy
 
-    new_tag = copy.deepcopy(no_func_reaonsing_tag)
+    new_tag = copy.deepcopy(no_func_reasoning_tag)
     new_tag["format"]["triggers"].append("<|channel|>commentary to=")
 
     for tool in builtin_tool_list:
@@ -162,7 +162,7 @@ class GptOssReasoningParser(ReasoningParser):
     ) -> str | None:
         if original_tag is None:
             if tool_server is None:
-                return json.dumps(no_func_reaonsing_tag)
+                return json.dumps(no_func_reasoning_tag)
             else:
                 builtin_tool_list: list[str] = []
                 if tool_server.has_tool("browser"):
@@ -175,11 +175,11 @@ class GptOssReasoningParser(ReasoningParser):
                 if len(builtin_tool_list) > 0:
                     logger.info("Builtin_tool_list: %s", builtin_tool_list)
                     func_tag = json.dumps(
-                        tag_with_builtin_funcs(no_func_reaonsing_tag, builtin_tool_list)
+                        tag_with_builtin_funcs(no_func_reasoning_tag, builtin_tool_list)
                     )
                 else:
                     logger.info("Builtin_tool_list is empty")
-                    func_tag = json.dumps(no_func_reaonsing_tag)
+                    func_tag = json.dumps(no_func_reasoning_tag)
 
                 return func_tag
         else:

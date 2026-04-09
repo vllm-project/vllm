@@ -30,8 +30,8 @@ def seed_oss_tokenizer():
 
 
 @pytest.fixture
-def seed_oss_tool_parser(seed_oss_tokenizer):
-    return SeedOssToolParser(seed_oss_tokenizer)
+def seed_oss_tool_parser(seed_oss_tokenizer, sample_tools):
+    return SeedOssToolParser(seed_oss_tokenizer, tools=sample_tools)
 
 
 @pytest.fixture

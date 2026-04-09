@@ -74,6 +74,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
             prefix=maybe_prefix(prefix, "fc"),
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )

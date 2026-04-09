@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
+from mistral_common.guidance.grammar_factory import GrammarFactory
+from mistral_common.guidance.tokenizer import from_mistral_tokenizer
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
@@ -15,8 +18,15 @@ from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
     SpecialTokenPolicy,
     SpecialTokens,
+    Tokenizer,
 )
-from mistral_common.tokens.tokenizers.instruct import InstructTokenizerV13
+from mistral_common.tokens.tokenizers.instruct import (
+    InstructTokenizerBase,
+    InstructTokenizerV13,
+)
+from mistral_common.tokens.tokenizers.mistral import (
+    MistralTokenizer as MistralCommonTokenizer,
+)
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer,
 )
@@ -26,20 +36,20 @@ from pydantic import ValidationError
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
+from vllm.tokenizers.protocol import TokenizerLike
 
-from .protocol import TokenizerLike
+try:
+    # Transformers v5
+    from transformers.tokenization_mistral_common import MistralCommonBackend
+except ImportError:
+    # Transformers v4
+    from transformers.tokenization_mistral_common import (
+        MistralCommonTokenizer as MistralCommonBackend,
+    )
 
 if TYPE_CHECKING:
+    import llguidance
     from transformers import BatchEncoding
-
-    try:
-        # Transformers v5
-        from transformers.tokenization_mistral_common import MistralCommonBackend
-    except ImportError:
-        # Transformers v4
-        from transformers.tokenization_mistral_common import (
-            MistralCommonTokenizer as MistralCommonBackend,
-        )
 
 logger = init_logger(__name__)
 
@@ -235,15 +245,6 @@ class MistralTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> "MistralTokenizer":
-        try:
-            # Transformers v5
-            from transformers.tokenization_mistral_common import MistralCommonBackend
-        except ImportError:
-            # Transformers v4
-            from transformers.tokenization_mistral_common import (
-                MistralCommonTokenizer as MistralCommonBackend,
-            )
-
         tokenizer = MistralCommonBackend.from_pretrained(
             path_or_repo_id,
             *args,
@@ -255,13 +256,13 @@ class MistralTokenizer(TokenizerLike):
 
         return cls(tokenizer)
 
-    def __init__(self, tokenizer: "MistralCommonBackend") -> None:
+    def __init__(self, tokenizer: MistralCommonBackend) -> None:
         super().__init__()
 
-        self.transformers_tokenizer = tokenizer
-        self.mistral = tokenizer.tokenizer
-        self.instruct = self.mistral.instruct_tokenizer
-        self.tokenizer = self.instruct.tokenizer
+        self.transformers_tokenizer: MistralCommonBackend = tokenizer
+        self.mistral: MistralCommonTokenizer = tokenizer.tokenizer
+        self.instruct: InstructTokenizerBase = self.mistral.instruct_tokenizer
+        self.tokenizer: Tokenizer = self.instruct.tokenizer
 
         mode = self.mistral._chat_completion_request_validator._mode
         if mode != ValidationMode.test:
@@ -483,7 +484,11 @@ class MistralTokenizer(TokenizerLike):
         return self.transformers_tokenizer.convert_tokens_to_ids(tokens)
 
     def convert_tokens_to_string(self, tokens: list[str]) -> str:
-        to_decode_special_tokens = {SpecialTokens.tool_calls}
+        to_decode_special_tokens = {
+            SpecialTokens.tool_calls,
+            SpecialTokens.begin_think,
+            SpecialTokens.end_think,
+        }
         if self.is_tekken:
             assert isinstance(self.tokenizer, Tekkenizer), type(self.tokenizer)
             tokens = [
@@ -573,3 +578,24 @@ class MistralTokenizer(TokenizerLike):
             ]
 
         return tokens
+
+    @property
+    def supports_grammar(self) -> bool:
+        return GrammarFactory.is_supported(self.mistral)
+
+    @cached_property
+    def grammar_factory(self) -> GrammarFactory:
+        if not self.supports_grammar:
+            raise AttributeError(
+                "This tokenizer does not support `grammar_factory`. "
+                "This is only supported for tekken tokenizers with "
+                "version >= 11."
+            )
+        # Cache grammar factory to avoid creating a llguidance tokenizer at every usage.
+        return GrammarFactory(self.mistral)
+
+    @cached_property
+    def llg_tokenizer(self) -> "llguidance.LLTokenizer":
+        if not self.is_tekken:
+            raise ValueError("`llg_tokenizer` is only supported for Tekkenizers.")
+        return from_mistral_tokenizer(self.mistral)

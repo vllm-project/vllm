@@ -59,7 +59,7 @@ class PydanticMagicMock(MagicMock):
     """`MagicMock` that's able to generate pydantic-core schemas."""
 
     def __init__(self, *args, **kwargs):
-        name = kwargs.pop("name", None)
+        name = kwargs.get("name")
         super().__init__(*args, **kwargs)
         self.__spec__ = ModuleSpec(name, None)
 
@@ -85,7 +85,8 @@ def auto_mock(module_name: str, attr: str, max_mocks: int = 100):
             logger.info("Mocking %s for argparse doc generation", e.name)
             sys.modules[e.name] = PydanticMagicMock(name=e.name)
         except Exception:
-            logger.exception("Failed to import %s.%s: %s", module_name, attr)
+            logger.exception("Failed to import %s.%s", module_name, attr)
+            raise
 
     raise ImportError(
         f"Failed to import {module_name}.{attr} after mocking {max_mocks} imports"
@@ -153,7 +154,7 @@ class MarkdownFormatter(HelpFormatter):
             heading_md = f"{self._argument_heading_prefix} {option_strings}\n\n"
             self._markdown_output.append(heading_md)
 
-            if action.choices or isinstance(action.metavar, (list, tuple)):
+            if action.choices or isinstance(action.metavar, list | tuple):
                 choices_iterable = action.choices or action.metavar
                 choices = f"`{'`, `'.join(str(c) for c in choices_iterable)}`"
                 self._markdown_output.append(f":   Possible choices: {choices}\n\n")

@@ -15,18 +15,18 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_one_sided_prepare_finalize import (  # noqa: E501
-    FlashInferNVLinkOneSidedPrepareAndFinalize,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_nvlink_two_sided_prepare_finalize import (  # noqa: E501
-    FlashInferNVLinkTwoSidedPrepareAndFinalize,
-)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     make_moe_prepare_and_finalize_naive_dp_ep,
     make_moe_prepare_and_finalize_no_dp_ep,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_one_sided import (  # noqa: E501
+    FlashInferNVLinkOneSidedPrepareAndFinalize,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
+    FlashInferNVLinkTwoSidedPrepareAndFinalize,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
@@ -35,8 +35,8 @@ logger = init_logger(__name__)
 
 if current_platform.is_cuda_alike():
     if has_deep_ep():
-        from .deepep_ht_prepare_finalize import DeepEPHTPrepareAndFinalize
-        from .deepep_ll_prepare_finalize import (
+        from .prepare_finalize.deepep_ht import DeepEPHTPrepareAndFinalize
+        from .prepare_finalize.deepep_ll import (
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
@@ -186,16 +186,23 @@ def maybe_make_prepare_finalize(
         use_fp8_dispatch = (
             quant_config.is_per_act_token or quant_config.is_block_quantized
         )
-        # For PTPC (per token per channel) quant, the scale dim for each token is 1
-        # For 1x128 quant, the scale dim for each token is hidden_dim // 128
-        scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+        if use_fp8_dispatch:
+            # For PTPC (per token per channel) quant, scale dim is 1
+            # For 1x128 quant, scale dim is hidden_dim // 128
+            quant_dtype = quant_config.quant_dtype
+            scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+        else:
+            # Unquantized dispatch (e.g. AITER with defer_input_quant):
+            # dispatch raw BF16/FP16 data, no scales needed.
+            quant_dtype = moe.in_dtype
+            scale_dim = 0
         all_to_all_args = dict(
             rank=all2all_manager.rank,
             num_ep_ranks=all2all_manager.world_size,
-            quant_dtype=quant_config.quant_dtype,
+            quant_dtype=quant_dtype,
             token_hidden_size=moe.hidden_dim,
             scale_dim=scale_dim,
-            scale_type_size=torch.float32.itemsize,
+            scale_type_size=0 if scale_dim == 0 else torch.float32.itemsize,
             max_num_tokens_per_dp_rank=moe.max_num_tokens,
             input_dtype=moe.in_dtype,
             num_local_experts=moe.num_experts // all2all_manager.world_size,
@@ -229,7 +236,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
-    elif moe.use_naive_all2all_kernels and allow_new_interface:
+    elif moe.use_ag_rs_all2all_kernels and allow_new_interface:
         prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,

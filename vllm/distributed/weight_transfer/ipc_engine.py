@@ -2,12 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
-import base64
 import pickle
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from typing import Any
 
+import pybase64 as base64
 import requests
 import torch
 from torch.multiprocessing.reductions import reduce_tensor

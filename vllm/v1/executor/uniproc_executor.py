@@ -43,12 +43,14 @@ class UniProcExecutor(Executor):
                 max_workers=1, thread_name_prefix="WorkerAsyncOutput"
             )
 
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
         self.driver_worker.init_worker(all_kwargs=[kwargs])
-        if not is_eep_new_worker:
-            self.driver_worker.init_device()
+        self.driver_worker.init_device()
+
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.driver_worker.elastic_ep_execute("load_model")
+        else:
             self.driver_worker.load_model()
-            current_platform.update_block_size_for_backend(self.vllm_config)
+        current_platform.update_block_size_for_backend(self.vllm_config)
 
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
@@ -133,6 +135,10 @@ class UniProcExecutor(Executor):
     def shutdown(self) -> None:
         if worker := self.driver_worker:
             worker.shutdown()
+
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
 
 
 class ExecutorWithExternalLauncher(UniProcExecutor):
