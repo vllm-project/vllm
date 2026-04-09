@@ -21,6 +21,7 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -78,6 +79,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 
 
 @router.get("/v1/responses/{response_id}")
+@instrument(span_name="GET /v1/responses/{response_id}")
 @load_aware_call
 async def retrieve_responses(
     response_id: str,
@@ -108,6 +110,7 @@ async def retrieve_responses(
 
 
 @router.post("/v1/responses/{response_id}/cancel")
+@instrument(span_name="POST /v1/responses/{response_id}/cancel")
 @load_aware_call
 async def cancel_responses(response_id: str, raw_request: Request):
     handler = responses(raw_request)

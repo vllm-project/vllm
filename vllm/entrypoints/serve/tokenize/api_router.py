@@ -24,6 +24,7 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -45,6 +46,7 @@ router = APIRouter()
         HTTPStatus.NOT_IMPLEMENTED.value: {"model": ErrorResponse},
     },
 )
+@instrument(span_name="POST /tokenize")
 @with_cancellation
 async def tokenize(request: TokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -70,6 +72,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
+@instrument(span_name="POST /detokenize")
 @with_cancellation
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
     handler = tokenization(raw_request)
@@ -98,6 +101,7 @@ def attach_router(app: FastAPI):
         """Conditionally register the tokenizer info endpoint if enabled."""
 
         @router.get("/tokenizer_info")
+        @instrument(span_name="GET /tokenizer_info")
         async def get_tokenizer_info(raw_request: Request):
             """Get comprehensive tokenizer information."""
             result = await tokenization(raw_request).get_tokenizer_info()

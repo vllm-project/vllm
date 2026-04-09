@@ -8,6 +8,7 @@ from fastapi.responses import Response
 from vllm.config import ProfilerConfig
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -19,6 +20,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.post("/start_profile")
+@instrument(span_name="POST /start_profile")
 async def start_profile(raw_request: Request):
     logger.info("Starting profiler...")
     await engine_client(raw_request).start_profile()
@@ -27,6 +29,7 @@ async def start_profile(raw_request: Request):
 
 
 @router.post("/stop_profile")
+@instrument(span_name="POST /stop_profile")
 async def stop_profile(raw_request: Request):
     logger.info("Stopping profiler...")
     await engine_client(raw_request).stop_profile()

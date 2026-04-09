@@ -12,6 +12,7 @@ from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.serve.disagg.protocol import GenerateRequest
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -33,6 +34,7 @@ def render(request: Request) -> OpenAIServingRender | None:
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
+@instrument(span_name="POST /v1/chat/completions/render")
 async def render_chat_completion(request: ChatCompletionRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:
@@ -58,6 +60,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": ErrorResponse},
     },
 )
+@instrument(span_name="POST /v1/completions/render")
 async def render_completion(request: CompletionRequest, raw_request: Request):
     handler = render(raw_request)
     if handler is None:

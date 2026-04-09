@@ -8,6 +8,7 @@ from fastapi.responses import Response
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -19,6 +20,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 @router.post("/reset_prefix_cache")
+@instrument(span_name="POST /reset_prefix_cache")
 async def reset_prefix_cache(
     raw_request: Request,
     reset_running_requests: bool = Query(default=False),
@@ -45,6 +47,7 @@ async def reset_prefix_cache(
 
 
 @router.post("/reset_mm_cache")
+@instrument(span_name="POST /reset_mm_cache")
 async def reset_mm_cache(raw_request: Request):
     """
     Reset the multi-modal cache. Note that we currently do not check if the
@@ -56,6 +59,7 @@ async def reset_mm_cache(raw_request: Request):
 
 
 @router.post("/reset_encoder_cache")
+@instrument(span_name="POST /reset_encoder_cache")
 async def reset_encoder_cache(raw_request: Request):
     """
     Reset the encoder cache. Note that we currently do not check if the

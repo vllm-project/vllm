@@ -14,6 +14,7 @@ import vllm.envs as envs
 from vllm.collect_env import get_env_info
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -41,6 +42,7 @@ def _get_system_env_info_cached():
 
 
 @router.get("/server_info")
+@instrument(span_name="GET /server_info")
 async def show_server_info(
     raw_request: Request,
     config_format: Annotated[Literal["text", "json"], Query()] = "text",

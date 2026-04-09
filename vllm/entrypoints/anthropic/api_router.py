@@ -23,6 +23,7 @@ from vllm.entrypoints.utils import (
     with_cancellation,
 )
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 
 logger = init_logger(__name__)
 
@@ -55,6 +56,7 @@ def translate_error_response(response: ErrorResponse) -> JSONResponse:
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
     },
 )
+@instrument(span_name="POST /v1/messages")
 @with_cancellation
 @load_aware_call
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
@@ -101,6 +103,7 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
     },
 )
+@instrument(span_name="POST /v1/messages/count_tokens")
 @load_aware_call
 @with_cancellation
 async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Request):
