@@ -121,7 +121,7 @@ def _sync_hip_cuda_env_vars():
 
 
 # Sync at import time - catches misconfigurations from process start.
-_sync_hip_cuda_env_vars()
+#_sync_hip_cuda_env_vars()
 
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
