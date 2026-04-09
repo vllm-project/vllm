@@ -467,21 +467,17 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     if self.policy == SchedulingPolicy.PRIORITY:
-                        running = self.running.copy()
-                        req_candidates: list[Request] = []
-                        while running:
-                            candidate = max(
-                                running,
-                                key=lambda r: (r.priority, r.arrival_time),
-                            )
+                        req_candidates = []
+                        for candidate in sorted(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                            reverse=True,
+                        ):
                             if candidate == request:
                                 break
                             req_candidates.append(candidate)
-                            running.remove(candidate)
                     else:
-                        req_candidates = list(
-                            reversed(self.running[self.running.index(request) + 1 :])
-                        )
+                        req_candidates = list(reversed(self.running[req_index + 1 :]))
 
                     num_reqs_to_preempt = self._get_num_reqs_to_preempt_for_decode_step(
                         request,
@@ -505,7 +501,13 @@ class Scheduler(SchedulerInterface):
                         requests_to_preempt = req_candidates[:num_reqs_to_preempt]
 
                     for preempted_req in requests_to_preempt:
-                        self.running.remove(preempted_req)
+                        if self.policy == SchedulingPolicy.PRIORITY:
+                            preempted_idx = self.running.index(preempted_req)
+                            self.running.pop(preempted_idx)
+                            if preempted_idx < req_index:
+                                req_index -= 1
+                        else:
+                            self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
                             scheduled_running_reqs.remove(preempted_req)
@@ -523,7 +525,6 @@ class Scheduler(SchedulerInterface):
                                     for i in preempted_encoder_inputs
                                 )
                                 encoder_compute_budget += num_embeds_to_restore
-                            req_index -= 1
                         self._preempt_request(preempted_req, scheduled_timestamp)
                         preempted_reqs.append(preempted_req)
 
