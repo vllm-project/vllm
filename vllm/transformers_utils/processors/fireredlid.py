@@ -207,7 +207,7 @@ class FireRedLIDFeatureExtractor(SequenceFeatureExtractor):
 
         # Pad to uniform length
         max_feat_len = max(f.size(0) for f in feats)
-        padded = torch.zeros(len(feats), max_feat_len, feats[0].size(1))
+        padded = feats[0].new_zeros(len(feats), max_feat_len, feats[0].size(1))
         for i, feat in enumerate(feats):
             padded[i, : feat.size(0)] = feat
 
