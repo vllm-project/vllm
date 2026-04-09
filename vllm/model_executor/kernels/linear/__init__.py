@@ -297,12 +297,8 @@ def init_fp8_linear_kernel(
             force_kernel=force_kernel,
         )
 
-    if module_name:
-        logger.info_once(
-            "Selected %s for %s",
-            kernel_type.__name__,
-            module_name,
-            scope="global",
+        return kernel_type(
+            scaled_mm_linear_kernel_config,
         )
 
     return kernel_type(scaled_mm_linear_kernel_config)
