@@ -378,7 +378,7 @@ pull_request_rules:
       add:
         - tool-calling
 
-- name: auto-rebase to keep candidate PRs within 1 day behind main
+- name: auto-rebase to keep merge candidate within 1 day behind main
   conditions:
     - base = main
     - label=ready
