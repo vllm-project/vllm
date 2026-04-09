@@ -26,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,
     SinkFullAttentionSpec,
+    get_kv_quant_mode,
 )
 
 logger = init_logger(__name__)
@@ -168,8 +169,7 @@ class StaticSinkAttention(Attention, CustomOp):
             "sink_key and sink_value have not been prepared"
         )
         if not self.sink_populated:
-            forward_context: ForwardContext = get_forward_context()
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            self_kv_cache = self.kv_cache
             torch.ops.vllm.maybe_populate_sink(self_kv_cache, self.layer_name)
 
         return super().forward(query, key, value, output_shape)
@@ -190,7 +190,7 @@ class StaticSinkAttention(Attention, CustomOp):
         sink_kv_slot_mapping = torch.arange(
             self.block_size,
             self.sink_len + self.block_size,
-            device=torch.cuda.current_device(),
+            device=torch.accelerator.current_device_index(),
             dtype=torch.long,
         )
         triton_reshape_and_cache_flash_diffkv(
@@ -218,6 +218,7 @@ class StaticSinkAttention(Attention, CustomOp):
             head_size_v=self.head_size_v,
             sink_len=self.sink_len,
             dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
 

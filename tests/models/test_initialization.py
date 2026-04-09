@@ -136,6 +136,10 @@ def can_initialize(
         if model_arch == "WhisperForConditionalGeneration":
             m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
+        kwargs = {}
+        if not model_info.enable_prefix_caching:
+            kwargs["enable_prefix_caching"] = False
+
         LLM(
             model_info.default,
             tokenizer=model_info.tokenizer,
@@ -165,6 +169,7 @@ def can_initialize(
             hf_overrides=hf_overrides_fn,
             max_num_seqs=model_info.max_num_seqs,
             attention_config=attention_config,
+            **kwargs,
         )
 
 

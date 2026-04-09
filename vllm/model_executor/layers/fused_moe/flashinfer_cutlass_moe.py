@@ -61,6 +61,11 @@ def is_valid_flashinfer_cutlass_fused_moe(
 
 
 class FlashInferExperts(mk.FusedMoEExpertsModular):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.quant_config.use_nvfp4_w4a4:
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
@@ -194,10 +199,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
 
     def supports_expert_map(self) -> bool:
         return False
-
-    def supports_chunking(self) -> bool:
-        # This refers to TP chunking; DP chunking is handled separately.
-        return True
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
@@ -360,7 +361,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
         else:
-            quant_scales = None
+            quant_scales = []
             a1q_scale = None
             fc1_expert_weights = w1
             fc2_expert_weights = w2

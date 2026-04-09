@@ -15,9 +15,11 @@ tensorizer==2.10.1
 packaging>=24.2
 setuptools>=77.0.3,<80.0.0
 setuptools-scm>=8
-runai-model-streamer[s3,gcs]==0.15.3
+runai-model-streamer[s3,gcs,azure]==0.15.7
 conch-triton-kernels==1.2.1
 timm>=1.0.17
 # amd-quark: required for Quark quantization on ROCm 
 # To be consistent with test_quark.py
 amd-quark>=0.8.99
+# Required for faster safetensors model loading
+fastsafetensors >= 0.2.2

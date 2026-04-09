@@ -77,6 +77,7 @@ class MockKVBProj:
         self.qk_nope_head_dim = qk_nope_head_dim
         self.v_head_dim = v_head_dim
         self.out_dim = qk_nope_head_dim + v_head_dim
+        self.weight = torch.empty(0, dtype=torch.bfloat16)
 
     def __call__(self, x: torch.Tensor) -> tuple[torch.Tensor]:
         """
@@ -212,7 +213,11 @@ class BenchmarkConfig:
     profile_memory: bool = False
     use_cuda_graphs: bool = False
 
+    # "auto" or "fp8"
+    kv_cache_dtype: str = "auto"
+
     # MLA-specific
+    prefill_backend: str | None = None
     kv_lora_rank: int | None = None
     qk_nope_head_dim: int | None = None
     qk_rope_head_dim: int | None = None
@@ -367,6 +372,7 @@ class ResultsFormatter:
                     "backend",
                     "batch_spec",
                     "num_layers",
+                    "kv_cache_dtype",
                     "mean_time",
                     "std_time",
                     "throughput",
@@ -380,6 +386,7 @@ class ResultsFormatter:
                         "backend": r.config.backend,
                         "batch_spec": r.config.batch_spec,
                         "num_layers": r.config.num_layers,
+                        "kv_cache_dtype": r.config.kv_cache_dtype,
                         "mean_time": r.mean_time,
                         "std_time": r.std_time,
                         "throughput": r.throughput_tokens_per_sec or 0,

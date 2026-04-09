@@ -286,7 +286,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             cached_req = self._active_requests[req_id]
             req_block_ids = self._req_blocks[req_id]
 
-            assert new_block_ids is not None
+            if new_block_ids is None:
+                continue
+
             block_ids = new_block_ids[0]
 
             req_block_ids.extend(block_ids)
