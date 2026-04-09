@@ -130,11 +130,11 @@ def create_scheduler_adapter(
     )
 
     return LMCacheMPSchedulerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
-        vllm_config.cache_config.block_size,
-        parallel_strategy,
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
     )
@@ -163,11 +163,11 @@ def create_worker_adapter(
     )
 
     return LMCacheMPWorkerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
-        vllm_config.cache_config.block_size,
-        parallel_strategy,
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
     )
