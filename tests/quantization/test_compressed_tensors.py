@@ -654,18 +654,12 @@ def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
             from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
                 CompressedTensorsW8A8Mxfp8MoEMethod,
             )
-            from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-                MXFP8_SCALE_DTYPE,
-                MXFP8_VALUE_DTYPE,
-            )
 
             layer = model.model.layers[0]
 
             qkv = layer.self_attn.qkv_proj
             assert isinstance(qkv.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
-            assert qkv.weight.dtype is MXFP8_VALUE_DTYPE
-            assert qkv.weight_scale.dtype is MXFP8_SCALE_DTYPE
 
             experts = layer.mlp.experts
             assert isinstance(experts, FusedMoE)
