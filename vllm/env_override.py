@@ -500,6 +500,60 @@ if is_torch_equal("2.9.0"):
 # This mirrors the fix in https://github.com/pytorch/pytorch/pull/177558
 # and can be removed once torch >=2.12 is the minimum supported version.
 
+# ===================================================
+# torch >= 2.11 Inductor constrain_to_fx_strides monkeypatch
+# ===================================================
+# Inductor's constrain_to_fx_strides calls .stride() on every FX arg's meta
+# value, which crashes on FakeScriptObject (the compile-time proxy for hoisted
+# opaque types). The patched version skips args whose meta value is not a
+# torch.Tensor.
+# Upstream issue: https://github.com/pytorch/pytorch/issues/175973
+
+
+_constrain_to_fx_strides_patched = False
+
+
+def _apply_constrain_to_fx_strides_patch():
+    """Patch lowering.constrain_to_fx_strides globally. Safe to call
+    multiple times; only the first call does anything.
+    Only applies for torch >= 2.11 and < 2.12."""
+    global _constrain_to_fx_strides_patched
+    if _constrain_to_fx_strides_patched:
+        return
+    _constrain_to_fx_strides_patched = True
+
+    if not is_torch_equal_or_newer("2.11.0.dev") or is_torch_equal_or_newer(
+        "2.12.0.dev"
+    ):
+        return
+
+    import torch._inductor.ir as _ir
+    import torch._inductor.lowering as _lowering
+    from torch._inductor.virtualized import V as _V
+
+    def _patched(fx_node, *args, **kwargs):
+        def apply_constraint(arg, fx_arg):
+            if isinstance(arg, _ir.IRNode):
+                meta_val = fx_arg.meta.get("val")
+                if isinstance(meta_val, torch.Tensor):
+                    stride_order = _ir.get_stride_order(
+                        meta_val.stride(), _V.graph.sizevars.shape_env
+                    )
+                    return _ir.ExternKernel.require_stride_order(arg, stride_order)
+                return arg
+            if isinstance(arg, dict):
+                return {key: apply_constraint(arg[key], fx_arg[key]) for key in arg}
+            return arg
+
+        args = tuple(
+            apply_constraint(arg, fx_arg) for arg, fx_arg in zip(args, fx_node.args)
+        )
+        kwargs = {k: apply_constraint(v, fx_node.kwargs[k]) for k, v in kwargs.items()}
+        return args, kwargs
+
+    _lowering.constrain_to_fx_strides = _patched
+
+
 if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0"):
     import builtins as _builtins
     import pickle
