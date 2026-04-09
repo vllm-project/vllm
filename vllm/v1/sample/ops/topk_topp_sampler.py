@@ -71,7 +71,7 @@ class TopKTopPSampler(nn.Module):
             else:
                 self.forward = self.forward_cpu
         elif current_platform.is_xpu():
-            if envs.VLLM_USE_XPU_SAMPLER:
+            if envs.VLLM_XPU_USE_SAMPLER_KERNEL:
                 self.forward = self.forward_xpu
             else:
                 self.forward = self.forward_native
