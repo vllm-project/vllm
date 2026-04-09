@@ -364,7 +364,7 @@ class DefaultModelLoader(BaseModelLoader):
                 num_experts,
             )
 
-    @instrument(span_name="Load weights")
+    @instrument(span_name="Load weights", propagate_env=True)
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)

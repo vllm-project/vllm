@@ -91,7 +91,7 @@ class CPUModelRunner(GPUModelRunner):
             cpu_tl.sample_recovered_tokens_kernel
         )
 
-    @instrument(span_name="Loading (CPU)")
+    @instrument(span_name="Loading (CPU)", propagate_env=True)
     def load_model(self, load_dummy_weights: bool = False) -> None:
         if load_dummy_weights:
             raise ValueError(
@@ -111,7 +111,7 @@ class CPUModelRunner(GPUModelRunner):
     def get_model(self) -> nn.Module:
         return self.model
 
-    @instrument(span_name="Warmup (CPU)")
+    @instrument(span_name="Warmup (CPU)", propagate_env=True)
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape

@@ -538,7 +538,7 @@ def validate_api_server_args(args):
         )
 
 
-@instrument(span_name="API server setup")
+@instrument(span_name="API server setup", propagate_env=True)
 def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""

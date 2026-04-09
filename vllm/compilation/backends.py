@@ -259,7 +259,7 @@ class CompilerManager:
         )
         return compiled_graph
 
-    @instrument(span_name="Compile graph")
+    @instrument(span_name="Compile graph", propagate_env=True)
     def compile(
         self,
         graph: fx.GraphModule,
@@ -716,7 +716,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
         # When True, it annoyingly dumps the torch.fx.Graph on errors.
         self.extra_traceback = False
 
-    @instrument(span_name="Inductor compilation")
+    @instrument(span_name="Inductor compilation", propagate_env=True)
     def run(self, *args: Any) -> Any:
         return super().run(*args)
 

@@ -215,7 +215,7 @@ class Worker(WorkerBase):
             )
         return allocator.use_memory_pool(tag=tag)
 
-    @instrument(span_name="Init device")
+    @instrument(span_name="Init device", propagate_env=True)
     def init_device(self):
         if self.device_config.device_type == "cuda":
             # This env var set by Ray causes exceptions with graph building.
@@ -513,7 +513,7 @@ class Worker(WorkerBase):
             self.model_runner.update_max_model_len(max_model_len)
         logger.debug("Updated max_model_len to %d", max_model_len)
 
-    @instrument(span_name="Allocate KV cache")
+    @instrument(span_name="Allocate KV cache", propagate_env=True)
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
@@ -548,7 +548,7 @@ class Worker(WorkerBase):
         ):
             self.model_runner._init_kv_zero_meta()
 
-    @instrument(span_name="Warmup (GPU)")
+    @instrument(span_name="Warmup (GPU)", propagate_env=True)
     def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 

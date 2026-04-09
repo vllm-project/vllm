@@ -93,9 +93,18 @@ def instrument(
     span_name: str = "",
     attributes: dict[str, str] | None = None,
     record_exception: bool = True,
+    propagate_env: bool = False,
 ):
     """
     Generic decorator to instrument functions.
+
+    Args:
+        propagate_env: If True, temporarily inject the current span's
+            traceparent into ``os.environ`` so that child processes
+            spawned during this span inherit the trace context.  Only
+            needed for startup/init spans that fork workers; must NOT
+            be used on async HTTP route handlers where concurrent
+            coroutines would race on the shared ``os.environ``.
     """
     if obj is None:
         return functools.partial(
@@ -103,6 +112,7 @@ def instrument(
             span_name=span_name,
             attributes=attributes,
             record_exception=record_exception,
+            propagate_env=propagate_env,
         )
 
     # Dispatch to OTel (and potentially others later)
@@ -113,6 +123,7 @@ def instrument(
             span_name=span_name,
             attributes=attributes,
             record_exception=record_exception,
+            propagate_env=propagate_env,
         )
     else:
         return obj

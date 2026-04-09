@@ -4768,7 +4768,7 @@ class GPUModelRunner(
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
-    @instrument(span_name="Loading (GPU)")
+    @instrument(span_name="Loading (GPU)", propagate_env=True)
     def load_model(self, load_dummy_weights: bool = False) -> None:
         """
         Args:
@@ -6046,7 +6046,7 @@ class GPUModelRunner(
 
         return int(total_estimate)
 
-    @instrument(span_name="Capture model")
+    @instrument(span_name="Capture model", propagate_env=True)
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(

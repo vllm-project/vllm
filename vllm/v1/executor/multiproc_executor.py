@@ -575,7 +575,7 @@ class WorkerProc:
                 )
             )
 
-    @instrument(span_name="Worker init")
+    @instrument(span_name="Worker init", propagate_env=True)
     def __init__(
         self,
         vllm_config: VllmConfig,

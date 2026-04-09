@@ -36,7 +36,7 @@ from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 logger = init_logger(__name__)
 
 
-@instrument(span_name="Initialize model")
+@instrument(span_name="Initialize model", propagate_env=True)
 def initialize_model(
     vllm_config: VllmConfig,
     *,

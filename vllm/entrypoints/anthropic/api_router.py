@@ -56,7 +56,6 @@ def translate_error_response(response: ErrorResponse) -> JSONResponse:
         HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
     },
 )
-@instrument(span_name="POST /v1/messages")
 @with_cancellation
 @load_aware_call
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
