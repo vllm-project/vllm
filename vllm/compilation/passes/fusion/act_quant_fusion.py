@@ -13,6 +13,7 @@ from torch._inductor.pattern_matcher import (
 )
 from torch._ops import OpOverload
 
+import vllm.ir.ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -26,7 +27,7 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherQuantFP8, MatcherSiluAndMul
+from .matcher_utils import MatcherSiluAndMul
 from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
 
 logger = init_logger(__name__)
@@ -63,11 +64,6 @@ class ActivationQuantPattern(ABC):
         self.quant_key = quant_key
         self.quant_dtype = quant_key.dtype
 
-        assert self.quant_key in QUANT_OPS, (
-            f"unsupported quantization scheme {self.quant_key}"
-        )
-        self.QUANT_OP = QUANT_OPS[self.quant_key]
-
         assert self.quant_key in FUSED_OPS, (
             f"unsupported fusion scheme {self.quant_key}"
         )
@@ -91,13 +87,11 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
     def __init__(self) -> None:
         super().__init__(kFp8StaticTensorSym)
-        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        scale = self.quant_matcher.inputs()[1]
         return [
             *self.silu_and_mul_matcher.inputs(),  # input
-            scale,
+            empty_fp32(1, 1),
         ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -106,8 +100,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
             scale: torch.Tensor,
         ) -> torch.Tensor:
             result_silu_mul = self.silu_and_mul_matcher(input)
-            result_quant = self.quant_matcher(result_silu_mul, scale)
-            return result_quant[0]
+            return vllm.ir.ops.static_quant_fp8(result_silu_mul, scale, FP8_DTYPE)
 
         def replacement(
             input: torch.Tensor,
@@ -136,6 +129,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 
     def __init__(self) -> None:
         super().__init__(kNvfp4Dynamic)
+        self.QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
 
     def get_inputs(self) -> list[torch.Tensor]:
         result = self.empty_quant(5, 32)
@@ -195,54 +189,32 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         is_tma_aligned: bool = False,
     ) -> None:
         super().__init__(quant_key)
-        self.quant_matcher = MatcherQuantFP8(
-            quant_key,
-            has_col_major_scales=is_scale_transposed,
-            is_e8m0=is_e8m0,
-            is_tma_aligned=is_tma_aligned,
-        )
         self.group_size = quant_key.scale.group_shape[1]
         self.is_scale_transposed = is_scale_transposed
         self.is_e8m0 = is_e8m0
         self.is_tma_aligned = is_tma_aligned
 
     def get_inputs(self) -> list[torch.Tensor]:
-        scale = self.quant_matcher.empty_f32(1, 1)
-        return self.silu_and_mul_matcher.inputs() + [scale]
+        return self.silu_and_mul_matcher.inputs()
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         is_scale_transposed = self.is_scale_transposed
 
         def pattern(
             input: torch.Tensor,
-            scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             silu_out = self.silu_and_mul_matcher(input)
-            result = torch.empty(
-                silu_out.shape,
-                device=silu_out.device,
-                dtype=self.quant_dtype,
+            return vllm.ir.ops.dynamic_group_quant_fp8(
+                silu_out,
+                group_shape=[1, self.group_size],
+                column_major=is_scale_transposed,
+                use_ue8m0=self.is_e8m0,
+                fp8_dtype=FP8_DTYPE,
+                scale_alignment=4 if self.is_tma_aligned else 1,
             )
-            assert scale is not None
-            finfo = torch.finfo(self.quant_dtype)
-            _, result, scale = auto_functionalized(
-                self.quant_matcher.QUANT_OP,
-                input=silu_out,
-                output_q=result,
-                output_s=scale,
-                group_size=self.group_size,
-                eps=1e-10,
-                fp8_min=finfo.min,
-                fp8_max=finfo.max,
-                scale_ue8m0=self.is_e8m0,
-                dummy_is_scale_transposed=is_scale_transposed,
-                dummy_is_tma_aligned=self.is_tma_aligned,
-            )
-            return result, scale
 
         def replacement(
             input: torch.Tensor,
-            scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             d = input.shape[-1] // 2
             output_shape = input.shape[:-1] + (d,)

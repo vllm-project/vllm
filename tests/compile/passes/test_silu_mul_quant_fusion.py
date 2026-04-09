@@ -82,11 +82,7 @@ class TestSiluMulFp8QuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            (
-                QUANT_OPS[kFp8StaticTensorSym]
-                if self.enable_quant_fp8_custom_op
-                else torch.ops.vllm_ir.static_quant_fp8
-            ),
+            torch.ops.vllm_ir.static_quant_fp8,
         ]
 
     def ops_in_model_after(self):
@@ -201,11 +197,7 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
             ops.append(SILU_MUL_OP)
         # When silu custom op is disabled, aten.mul.Tensor also appears
         # in dequant code, so we skip checking it to avoid false positives.
-        ops.append(
-            QUANT_OPS[self.quant_key]
-            if self.enable_quant_fp8_custom_op
-            else torch.ops.vllm_ir.dynamic_group_quant_fp8
-        )
+        ops.append(torch.ops.vllm_ir.dynamic_group_quant_fp8)
         return ops
 
     def ops_in_model_after(self):
