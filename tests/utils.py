@@ -56,7 +56,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import (
-    cuda_device_count_stateless,
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 
@@ -382,7 +381,7 @@ class RemoteVLLMServer:
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
-                    device_count = cuda_device_count_stateless()
+                    device_count = current_platform.device_count()
                     for i in range(device_count):
                         handle = nvmlDeviceGetHandleByIndex(i)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
@@ -1495,7 +1494,7 @@ def multi_gpu_marks(*, num_gpus: int):
     """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
     test_selector = pytest.mark.distributed(num_gpus=num_gpus)
     test_skipif = pytest.mark.skipif(
-        cuda_device_count_stateless() < num_gpus,
+        current_platform.device_count() < num_gpus,
         reason=f"Need at least {num_gpus} GPUs to run the test.",
     )
 
@@ -1527,7 +1526,7 @@ def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
         @gpu_tier_mark(max_gpus=1)          # only on single-GPU
         @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
     """
-    gpu_count = cuda_device_count_stateless()
+    gpu_count = current_platform.device_count()
     marks = []
 
     if min_gpus > 1:

@@ -31,8 +31,6 @@ class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not c.input_symmetric:
-            return False, "supports symmetric input only."
         return True, None
 
     def apply_weights(
@@ -44,21 +42,47 @@ class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         params = self._get_layer_params(layer)
 
+        azp_adj = params.azp_adj
+        w = params.weight
+        w_s = params.weight_scale
+        i_zp = params.input_zero_point
+
+        symmetric = azp_adj is None
         x_q, x_s, x_zp = ops.scaled_int8_quant(
-            x.contiguous(), params.input_scale, params.input_zero_point, symmetric=True
+            x.contiguous(), params.input_scale, i_zp, symmetric=symmetric
         )
 
         assert x_zp is None, "Triton kernel only supports symmetric quantization"
 
-        return self.apply_scaled_mm(
+        out = self.apply_scaled_mm(
             A=x_q,
-            B=params.weight,
+            B=w,
             As=x_s,
-            Bs=params.weight_scale,
+            Bs=w_s,
             out_dtype=x.dtype,
             bias=bias,
             output_shape=[],
         )
+
+        if azp_adj is not None:
+            # Asymmetric quantization: subtract the zero-point correction.
+            # D = scale_a * scale_b * (A_q @ B_q - azp * azp_adj) + bias
+            # triton_scaled_mm already computed scale_a * scale_b * (A_q @ B_q) + bias
+            # so we subtract scale_a * scale_b * azp * azp_adj
+            #
+            # x_s: [M, 1] or scalar, w_s: [N, 1] or scalar, azp_adj: [1, N]
+            # Reshape w_s from [N, 1] to [1, N] for proper broadcasting.
+            w_s_row = w_s.view(1, -1) if w_s.dim() > 0 else w_s
+            static = i_zp is not None
+            if not static and x_zp is not None:
+                # Dynamic per-token: azp is per-token, azp_adj is per-channel
+                # x_zp: [M, 1], azp_adj: [1, N]
+                out -= x_s * w_s_row * (x_zp * azp_adj).to(x.dtype)
+            else:
+                # Static per-tensor: azp already folded into azp_adj
+                out -= (x_s * w_s_row * azp_adj).to(x.dtype)
+
+        return out
 
     def apply_scaled_mm(
         self,
@@ -92,10 +116,8 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self,
         A: torch.Tensor,
         B: torch.Tensor,
-        out_dtype: torch.dtype,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        **kwargs,
     ) -> torch.Tensor:
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             A,
@@ -103,7 +125,7 @@ class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             As,
             Bs,
             list(self.weight_group_shape),
-            out_dtype,
+            self.config.out_dtype,
         )
 
 

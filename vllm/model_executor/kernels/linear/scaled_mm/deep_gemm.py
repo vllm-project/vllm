@@ -4,6 +4,7 @@
 import torch
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
@@ -17,6 +18,7 @@ from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     is_deep_gemm_e8m0_used,
     is_deep_gemm_supported,
+    should_auto_disable_deep_gemm,
     should_use_deepgemm_for_fp8_linear,
 )
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -64,6 +66,15 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 "Supports only dynamic per token group activation "
                 "quantization with group_shape=(1,128).",
             )
+        model_config = get_current_vllm_config().model_config
+
+        if model_config is None:
+            return False, "Model configuration is required."
+
+        model_type = getattr(model_config.hf_text_config, "model_type", None)
+        if should_auto_disable_deep_gemm(model_type):
+            return False, f"Should not use deepgemm for model {model_type}"
+
         if not should_use_deepgemm_for_fp8_linear(
             config.out_dtype, config.weight_shape
         ):
@@ -97,19 +108,16 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self,
         A: torch.Tensor,
         B: torch.Tensor,
-        out_dtype: torch.dtype,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        **kwargs,
     ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
         output = torch.empty(
             (A.shape[0], B.shape[0]),
             dtype=out_dtype,
             device=A.device,
         )
-
         torch.ops.vllm.fp8_gemm_nt_op(A, As, B, Bs, output, self.use_deep_gemm_e8m0)
-
         return output
 
 

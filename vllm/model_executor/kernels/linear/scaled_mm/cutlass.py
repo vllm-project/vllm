@@ -6,7 +6,6 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
@@ -39,54 +38,6 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         cls, config: Int8ScaledMMLinearLayerConfig
     ) -> tuple[bool, str | None]:
         return True, None
-
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        super().process_weights_after_loading(layer)
-        params = self._get_layer_params(layer)
-        config = self.config
-
-        # INPUT SCALE
-        if config.is_static_input_scheme and not config.input_symmetric:
-            input_scale = params.input_scale
-            i_s_name = params.INPUT_SCALE
-            i_zp_name = params.INPUT_ZERO_POINT
-            input_zero_point = params.input_zero_point
-
-            assert input_zero_point is not None
-            # reconstruct the ranges
-            int8_traits = torch.iinfo(torch.int8)
-            azps = input_zero_point.to(dtype=torch.int32)
-            range_max = (input_scale * (int8_traits.max - azps)).max()
-            range_min = (input_scale * (int8_traits.min - azps)).min()
-
-            scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
-            replace_parameter(
-                layer, i_s_name, torch.nn.Parameter(scale, requires_grad=False)
-            )
-
-            # AZP loaded as int8 but used as int32
-            azp = (int8_traits.min - range_min / scale).to(dtype=torch.int32)
-            replace_parameter(
-                layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
-            )
-
-        # azp_adj is the AZP adjustment term, used to account for weights.
-        # It does not depend on scales or azp, so it is the same for
-        # static and dynamic quantization.
-        # For more details, see csrc/quantization/w8a8/cutlass/Epilogues.md
-        # https://github.com/vllm-project/vllm/blob/main/csrc/quantization/w8a8/cutlass/Epilogues.md
-        if not config.input_symmetric:
-            weight = getattr(layer, params.WEIGHT)
-            azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.int32)
-            if config.is_static_input_scheme:
-                # cutlass_w8a8 requires azp to be folded into azp_adj
-                # in the per-tensor case
-                azp_adj = getattr(layer, i_zp_name) * azp_adj
-            setattr(
-                layer,
-                params.AZP_ADJ,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
-            )
 
     def apply_weights(
         self,
@@ -166,8 +117,6 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 
 class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
-    is_hopper: bool = current_platform.is_device_capability(90)
-
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
@@ -179,6 +128,7 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             use_ue8m0=False,
             column_major_scales=True,
         )
+        self.is_hopper = current_platform.is_device_capability(90)
 
     @classmethod
     def is_supported(cls, compute_capability=None):
@@ -209,11 +159,10 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self,
         A: torch.Tensor,
         B: torch.Tensor,
-        out_dtype: torch.dtype,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        **kwargs,
     ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
         if self.is_hopper:
             return torch.ops.vllm.padded_cutlass(
                 A,
@@ -233,8 +182,6 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             )
 
 
-# We need to pass in the is_hopper flag as argument because the function
-# current_platform.is_device_capability() is not supported by Torch compiler.
 def cutlass_scaled_mm(
     A: torch.Tensor,
     B: torch.Tensor,

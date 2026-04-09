@@ -194,6 +194,9 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         else:
             layer.input_scale = None
 
+        if hasattr(self, "fp8_linear"):
+            self.fp8_linear.process_weights_after_loading(layer)
+
     def apply_weights(
         self,
         layer: torch.nn.Module,

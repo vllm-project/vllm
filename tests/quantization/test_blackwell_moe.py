@@ -210,6 +210,13 @@ def test_gptoss_eager(monkeypatch: pytest.MonkeyPatch):
 ## Qwen3 Next ##
 
 
+@pytest.mark.skip(
+    reason=(
+        "FLASHINFER TRTLLM MoE has a bug with all negative router logits "
+        "for models with RENORMALIZE. This will be re-enabled once the "
+        "issue is fixed in flashinfer."
+    )
+)
 def test_qwen3_next_bf16_moe_flashinfer_trtllm(monkeypatch: pytest.MonkeyPatch):
     can_initialize(
         "Qwen/Qwen3-Next-80B-A3B-Instruct",

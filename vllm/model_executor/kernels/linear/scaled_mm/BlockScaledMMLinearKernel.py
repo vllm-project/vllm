@@ -42,6 +42,10 @@ class FP8BlockParams(FP8Params):
 class Fp8BlockScaledMMLinearKernel(
     MMLinearKernel[FP8ScaledMMLinearLayerConfig, FP8BlockParams], ABC
 ):
+    # Set to False in subclasses that accept BF16 input directly (e.g. FlashInfer)
+    # and therefore do not need the input quantization step in apply_weights.
+    apply_input_quant: ClassVar[bool] = True
+
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
@@ -97,7 +101,7 @@ class Fp8BlockScaledMMLinearKernel(
         bias: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        maybe_out_dtype = self.config.out_dtype
+        out_dtype = self.config.out_dtype
         params = self._get_layer_params(layer)
         weight = params.weight
         weight_scale = (
@@ -111,16 +115,23 @@ class Fp8BlockScaledMMLinearKernel(
         # View input as 2D matrix for fp8 methods
         input_2d = x.view(-1, x.shape[-1])
         output_shape = [*x.shape[:-1], weight.shape[0]]
-        out_dtype = input_2d.dtype if maybe_out_dtype is None else maybe_out_dtype
 
-        q_input, input_scale = self.quant_fp8(
-            input_2d, input_scale, scale_up, use_triton=self.use_triton
-        )
+        if self.apply_input_quant:
+            q_input, input_scale = self.quant_fp8(
+                input_2d, input_scale, scale_up, use_triton=self.use_triton
+            )
+        else:
+            q_input = input_2d
+            # Provide a concrete placeholder so apply_block_scaled_mm args are
+            # always Tensors. Subclasses with apply_input_quant=False must not
+            # use As in apply_block_scaled_mm.
+            input_scale = (
+                input_scale if input_scale is not None else input_2d.new_ones(1)
+            )
 
         output = self.apply_block_scaled_mm(
             A=q_input,
             B=weight,
-            out_dtype=out_dtype,
             As=input_scale,
             Bs=weight_scale,
         )
@@ -134,9 +145,65 @@ class Fp8BlockScaledMMLinearKernel(
         self,
         A: torch.Tensor,
         B: torch.Tensor,
-        out_dtype: torch.dtype,
         As: torch.Tensor,
         Bs: torch.Tensor,
-        **kwargs,
     ) -> torch.Tensor:
         raise NotImplementedError
+
+
+class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
+    """Dynamic FP8 block-scaled kernel that dispatches at runtime.
+
+    Extends Fp8BlockScaledMMLinearKernel to inherit apply_weights and overrides
+    apply_block_scaled_mm to dispatch between two sub-kernels using torch.cond.
+
+    Subclasses must define:
+        base_type:     The primary kernel class.
+        fallback_type: The fallback kernel class.
+    """
+
+    base_type: ClassVar[type[Fp8BlockScaledMMLinearKernel]]
+    fallback_type: ClassVar[type[Fp8BlockScaledMMLinearKernel]]
+
+    def __init__(self, config: "FP8ScaledMMLinearLayerConfig") -> None:
+        super().__init__(config)
+        self.base = self.base_type(config)
+        self.fallback = self.fallback_type(config)
+
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        is_base_supported, reason_1 = cls.base_type.is_supported(compute_capability)
+        is_fallback_supported, reason_2 = cls.fallback_type.is_supported(
+            compute_capability
+        )
+        if is_base_supported and is_fallback_supported:
+            return True, None
+        if not is_base_supported and not is_fallback_supported:
+            return (
+                False,
+                f"base is not supported due to {reason_1}; "
+                f"fallback is not supported due to {reason_2}",
+            )
+        if not is_base_supported:
+            return False, f"base is not supported due to {reason_1}"
+        return False, f"fallback is not supported due to {reason_2}"
+
+    @classmethod
+    def can_implement(
+        cls, config: "FP8ScaledMMLinearLayerConfig"
+    ) -> tuple[bool, str | None]:
+        can_implement_base, reason_1 = cls.base_type.can_implement(config)
+        can_implement_fallback, reason_2 = cls.fallback_type.can_implement(config)
+        if can_implement_base and can_implement_fallback:
+            return True, None
+        if not can_implement_base and not can_implement_fallback:
+            return (
+                False,
+                f"base cannot implement due to {reason_1}; "
+                f"fallback cannot implement due to {reason_2}",
+            )
+        if not can_implement_base:
+            return False, f"base cannot implement due to {reason_1}"
+        return False, f"fallback cannot implement due to {reason_2}"
