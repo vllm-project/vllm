@@ -160,6 +160,12 @@ class AsyncLLM(EngineClient):
             client_index=client_index,
         )
 
+        if hasattr(self.engine_core, "register_ft_abort_callback"):
+            output_processor = self.output_processor
+            self.engine_core.register_ft_abort_callback(
+                lambda req_ids: output_processor.abort_requests(req_ids, internal=True)
+            )
+
         # Loggers.
         self.logger_manager: StatLoggerManager | None = None
         if self.log_stats:

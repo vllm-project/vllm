@@ -330,3 +330,12 @@ class FlashInferAllReduce:
     def destroy(self):
         if not self.disabled:
             destroy_fi_ar_workspace()
+
+    def abort(self):
+        """Forcefully abort without waiting for peers.
+
+        No NCCL comms here. If NCCL communicators are ever added, this
+        must call ncclCommAbort instead of ncclCommDestroy to avoid
+        hanging when a peer rank has died.
+        """
+        self.destroy()

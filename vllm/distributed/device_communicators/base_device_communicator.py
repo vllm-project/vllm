@@ -310,6 +310,15 @@ class DeviceCommunicatorBase:
     def destroy(self):
         pass
 
+    def abort(self):
+        """Forcefully abort the communicator without waiting for peers.
+
+        Subclasses that wrap NCCL communicators must override this to
+        call ncclCommAbort instead of ncclCommDestroy to avoid hanging
+        when a peer rank has died.
+        """
+        pass
+
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
         """
         Prepare the communication buffer for the model.
