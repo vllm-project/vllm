@@ -1082,7 +1082,6 @@ class LLM:
             raise ValueError(
                 "The 'data' field is only supported for the 'plugin' pooling task."
             )
-
         self._verify_pooling_task(pooling_task)
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
 

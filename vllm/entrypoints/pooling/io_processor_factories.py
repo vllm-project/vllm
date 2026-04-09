@@ -3,12 +3,12 @@
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.scoring.io_processor import ScoringIOProcessors
-from vllm.entrypoints.pooling.utils import enable_scoring_api
 from vllm.plugins.io_processors import has_io_processor
 from vllm.renderers import BaseRenderer
 from vllm.tasks import SupportedTask
+
+from .base.io_processor import PoolingIOProcessor
+from .utils import enable_scoring_api
 
 
 def init_pooling_io_processors(
@@ -21,24 +21,22 @@ def init_pooling_io_processors(
     processors: dict[str, type[PoolingIOProcessor]] = {}
 
     if "classify" in supported_tasks:
-        from vllm.entrypoints.pooling.classify.io_processor import ClassifyIOProcessor
+        from .classify.io_processor import ClassifyIOProcessor
 
         processors["classify"] = ClassifyIOProcessor
 
     if "token_classify" in supported_tasks:
-        from vllm.entrypoints.pooling.classify.io_processor import (
-            TokenClassifyIOProcessor,
-        )
+        from .classify.io_processor import TokenClassifyIOProcessor
 
         processors["token_classify"] = TokenClassifyIOProcessor
 
     if "embed" in supported_tasks:
-        from vllm.entrypoints.pooling.embed.io_processor import EmbedIOProcessor
+        from .embed.io_processor import EmbedIOProcessor
 
         processors["embed"] = EmbedIOProcessor
 
     if "token_embed" in supported_tasks:
-        from vllm.entrypoints.pooling.embed.io_processor import TokenEmbedIOProcessor
+        from .embed.io_processor import TokenEmbedIOProcessor
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
@@ -46,12 +44,17 @@ def init_pooling_io_processors(
         vllm_config,
         model_config.io_processor_plugin,
     ):
-        from vllm.entrypoints.pooling.pooling.io_processor import PluginIOProcessor
+        from .pooling.io_processor import PluginWithIOProcessor
 
-        processors["plugin"] = PluginIOProcessor
+        processors["plugin"] = PluginWithIOProcessor
+    elif "plugin" in supported_tasks:
+        from .pooling.io_processor import PluginWithoutIOProcessor
+
+        processors["plugin"] = PluginWithoutIOProcessor
 
     if enable_scoring_api(supported_tasks, model_config):
         score_type = model_config.score_type
+        from .scoring.io_processor import ScoringIOProcessors
 
         if score_type is not None and score_type in ScoringIOProcessors:
             processors[score_type] = ScoringIOProcessors[score_type]

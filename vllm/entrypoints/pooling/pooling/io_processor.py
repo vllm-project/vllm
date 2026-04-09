@@ -5,24 +5,22 @@ from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.pooling.protocol import (
-    IOProcessorRequest,
-    IOProcessorResponse,
-)
-from vllm.entrypoints.pooling.typing import (
-    OfflineInputsContext,
-    OfflineOutputsContext,
-    PoolingServeContext,
-)
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
+from ..typing import OfflineInputsContext, OfflineOutputsContext, PoolingServeContext
+from .protocol import IOProcessorRequest, IOProcessorResponse
+
 logger = init_logger(__name__)
 
 
-class PluginIOProcessor(PoolingIOProcessor):
+class PluginWithoutIOProcessor(PoolingIOProcessor):
+    name = "plugin"
+
+
+class PluginWithIOProcessor(PoolingIOProcessor):
     """IO Processor plugins are a feature that allows pre- and post-processing
     of the model input and output for pooling models."""
 
