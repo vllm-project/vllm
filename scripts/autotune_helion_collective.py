@@ -72,7 +72,8 @@ def _helion_all_gather_fp8_gemm_runtime(
         a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
     )
     inputs = (a_out, a_shared_symm, scale_a, b, scale_b, progress,configs["SPLITS_PER_RANK"],configs["RANK"])
-    best_config = helion_matmul_w_progress_fp8.run_autotune(inputs)
+    autotune_effort= "full"
+    best_config = helion_matmul_w_progress_fp8.run_autotune(inputs, autotune_effort)
     best_config.save("best_config.json")
     print("Best config found:", best_config)
 
@@ -82,16 +83,20 @@ def _helion_all_gather_fp8_gemm_runtime(
     return a_out, best_config
 
 def autotune(fn=helion_matmul_w_progress_fp8, force=False):
+    # M, K, N
     shapes_to_tune = [
-        (128, 32, 64),
-        (256, 1024, 1024),
-        #medium shapes
-        (2048, 1024, 2048),
-        (2048, 4096, 4096),
-        (4096, 2048, 4096),
-        #large shapes
-        (4096, 5120, 5120),
-        (8192, 8192, 8192),
+        # (128, 32, 64),
+        # (256, 1024, 1024),
+        # #medium shapes
+        # (2048, 1024, 2048),
+        # (2048, 4096, 4096),
+        # (4096, 2048, 4096),
+        # #large shapes
+        # (4096, 5120, 5120),
+        # (8192, 8192, 8192),
+        #  RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 (using asyncTP with 4 ranks)
+        (8192, 8192, 2560),
+        #(8192, 2560, 14336)
     ]
     #shapes_to_tune[(num_tokens, hidden_size, N)]
     rank = int(os.environ["RANK"])

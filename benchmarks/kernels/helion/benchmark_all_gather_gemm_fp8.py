@@ -432,8 +432,10 @@ if __name__ == "__main__":
         #(2048, 4096, 4096),
         #(4096, 2048, 4096),
         #large shapes
-        (4096, 5120, 5120),
+        #(4096, 5120, 5120),
         #(8192, 8192, 8192)
+        (8192, 8192, 2560),
+        #(8192, 2560, 14336)
     ]
     import time 
     rank, local_rank, world_size, device, dist_group, world_group = setup_distributed()
@@ -441,7 +443,7 @@ if __name__ == "__main__":
     _SymmetricMemory.signal_pad_size = 1024 * 1024 * 1024
 
     try:
-        for (M, N, K) in TEST_SHAPES:
+        for (M, K, N) in TEST_SHAPES:
             # allocating the tensors before bencharking, so we can reuse it in between split_per_rank.
             for sp in [1]: #[1, 2, 4],TODO: if we fix the split it will pass, if we do loop it will fail for accuracy. fix this!!!
                 if (M // world_size) % sp == 0:

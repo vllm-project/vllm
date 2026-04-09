@@ -64,6 +64,10 @@ def pick_helion_matmul_w_progress_fp8_config(
         f"rank_{rank}_mperrank_{M_per_rank}"
         f"_n_{N}_k_{K}_splits_{splits_per_rank}"
     )
+    logger.debug(
+            "target_key: %s for rank=%d, M=%d, N=%d, K=%d, splits=%d",
+            target_key, rank, M, N, K, splits_per_rank
+        )
     if target_key in config_keys:
         logger.debug("Found exact config: %s", target_key)
         return target_key
