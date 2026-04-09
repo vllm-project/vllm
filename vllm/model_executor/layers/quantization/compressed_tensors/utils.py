@@ -22,7 +22,7 @@ from vllm.model_executor.parameter import (
 
 # Maps quantization strategy to the corresponding scale parameter type.
 # Shared across compressed-tensor scheme classes (w8a16_fp8, w8a8_fp8, …).
-STRATEGT_TO_PARAMETER_TYPE = {
+STRATEGY_TO_PARAMETER_TYPE = {
     QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
     QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
     QuantizationStrategy.TENSOR: PerTensorScaleParameter,

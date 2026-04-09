@@ -17,7 +17,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    STRATEGT_TO_PARAMETER_TYPE,
+    STRATEGY_TO_PARAMETER_TYPE,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
@@ -122,7 +122,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # WEIGHT SCALE
         weight_scale = create_fp8_scale_parameter(
-            STRATEGT_TO_PARAMETER_TYPE[self.strategy],
+            STRATEGY_TO_PARAMETER_TYPE[self.strategy],
             output_partition_sizes,
             input_size_per_partition,
             layer.weight_block_size,
