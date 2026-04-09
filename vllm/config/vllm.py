@@ -171,9 +171,12 @@ _QK_NORM_MODEL_TYPES = frozenset({
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     """Enable fused QK-norm + RoPE + KV cache update for models with
-    QK-norm on ROCm with AITER. Requires rotary embedding custom op
-    and inductor graph partition (so unified_kv_cache_update is visible
-    to the compiled graph)."""
+    QK-norm on ROCm with AITER. Requires rotary embedding custom op.
+
+    Note: use_inductor_graph_partition is NOT checked here because
+    CompilationConfig.__post_init__ auto-enables it when this flag is
+    True (the callable runs during optimization-level default
+    application, before __post_init__ can set the dependent flags)."""
     from vllm._aiter_ops import rocm_aiter_ops
     from vllm.platforms import current_platform
 
@@ -188,10 +191,7 @@ def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
     model_type = getattr(hf_config, "model_type", "")
     if not has_qk_norm and model_type not in _QK_NORM_MODEL_TYPES:
         return False
-    return (
-        cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
-        and cfg.compilation_config.use_inductor_graph_partition
-    )
+    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
 
 
 def enable_qk_norm_rope(cfg: "VllmConfig") -> bool:
@@ -911,15 +911,26 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
-        # QK-norm+RoPE fusion requires the rotary_embedding custom op.
-        # This must run after optimization level defaults are applied, since
-        # the fusion may be auto-enabled by enable_qk_norm_rope().
+        # Fusion flags may have been auto-enabled by optimization-level
+        # callables above.  CompilationConfig.__post_init__ already ran
+        # (during construction) when these flags were still None, so we
+        # must apply the dependent settings here.
         pass_config = self.compilation_config.pass_config
         if (
             pass_config.enable_qk_norm_rope_fusion
             and "+rotary_embedding" not in self.compilation_config.custom_ops
         ):
             self.compilation_config.custom_ops.append("+rotary_embedding")
+        if pass_config.fuse_qk_norm_rope_kvcache:
+            if "+rotary_embedding" not in self.compilation_config.custom_ops:
+                self.compilation_config.custom_ops.append("+rotary_embedding")
+            if not self.compilation_config.use_inductor_graph_partition:
+                self.compilation_config.use_inductor_graph_partition = True
+                logger.info(
+                    "Enabling use_inductor_graph_partition for "
+                    "fuse_qk_norm_rope_kvcache (requires "
+                    "unified_kv_cache_update in compiled graph)."
+                )
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()

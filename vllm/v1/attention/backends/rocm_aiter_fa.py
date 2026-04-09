@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with AiterFlashAttention."""
 
+import math
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -1374,7 +1375,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             rocm_aiter_ops.is_enabled()
             and not rocm_aiter_ops.is_shuffle_kv_cache_enabled()
         )
-        
+
     def fused_qk_norm_rope_kvcache_supported(self):
         # Fusion is supported in both shuffle and non-shuffle KV cache layouts.
         return rocm_aiter_ops.is_enabled()
@@ -1415,39 +1416,47 @@ class AiterFlashAttentionImpl(AttentionImpl):
         # call doesn't trigger a device-to-host sync during CUDA graph capture.
         k_scale_val = layer._k_scale_float
         v_scale_val = layer._v_scale_float
-        if self._cached_k_scale_val != k_scale_val:
+        if self._cached_k_scale_val is None or (
+            self._cached_k_scale_val != k_scale_val
+            and not (math.isnan(self._cached_k_scale_val)
+                     and math.isnan(k_scale_val))
+        ):
             self._cached_k_scale_cpu = torch.tensor(k_scale_val,
                                                     dtype=torch.float32)
             self._cached_k_scale_val = k_scale_val
-        if self._cached_v_scale_val != v_scale_val:
+        if self._cached_v_scale_val is None or (
+            self._cached_v_scale_val != v_scale_val
+            and not (math.isnan(self._cached_v_scale_val)
+                     and math.isnan(v_scale_val))
+        ):
             self._cached_v_scale_cpu = torch.tensor(v_scale_val,
                                                     dtype=torch.float32)
             self._cached_v_scale_val = v_scale_val
 
         rocm_aiter_ops.hip_qk_norm_rope_and_cache(
-            qkv,
-            q_weight,
-            k_weight,
-            cos_sin_cache,
-            positions,
-            num_heads_q,
-            num_heads_k,
-            num_heads_v,
-            head_dim,
-            is_neox,
-            rms_norm_eps,
-            q_out,
-            key_cache,
-            value_cache,
-            layer_slot_mapping,
-            self._cached_k_scale_cpu,
-            self._cached_v_scale_cpu,
-            k_out,
-            None,
-            True,
-            use_shuffle_layout,
-            block_size,
-            x,
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=num_heads_q,
+            num_heads_k=num_heads_k,
+            num_heads_v=num_heads_v,
+            head_dim=head_dim,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_cache=key_cache,
+            v_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=self._cached_k_scale_cpu,
+            v_scale=self._cached_v_scale_cpu,
+            k_out=k_out,
+            v_out=None,
+            return_kv=True,
+            use_shuffle_layout=use_shuffle_layout,
+            block_size=block_size,
+            x=x,
         )
 
     def do_rope_and_kv_cache_update(
@@ -1485,5 +1494,3 @@ class AiterFlashAttentionImpl(AttentionImpl):
             flash_layout,
             is_fp8_kv_cache,
         )
-        
-    

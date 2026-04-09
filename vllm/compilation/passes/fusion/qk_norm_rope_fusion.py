@@ -71,7 +71,6 @@ class QkNormRopePattern:
         )
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
-        self.match_rocm_aiter = match_rocm_aiter
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_dim,

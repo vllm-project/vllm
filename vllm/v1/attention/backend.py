@@ -757,7 +757,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         :return: is fusion supported for this type of quantization
         """
         return False
-    
+
     def fused_qk_norm_rope_kvcache_supported(self):
         """
         Does this attention implementation support fused QKNorm+RoPE+KVCache fusion.
@@ -779,7 +779,7 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         with the KV cache update for implementations that support it.
         """
         return False
-    
+
     def do_qk_norm_rope_kvcache_update(self,
         layer: AttentionLayer,
         qkv: torch.Tensor,

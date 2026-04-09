@@ -3621,29 +3621,24 @@ void paged_attention_custom_launcher_navi(
 
 // USE_INTERLEAVED_V_CACHE: selects the V-cache read path at compile time.
 // Currently only the GFX9 kernels (MI300x/MI325x/MI350x/MI355x) have the
-// actual interleaved V-fetch logic implemented. The GFX11 (RDNA 3), GFX12
-// (RDNA 4), and fallback stub kernels carry the template parameter solely
-// for compilation compatibility -- their bodies are UNREACHABLE_CODE stubs.
+// actual interleaved V-fetch logic implemented.  The GFX11 (RDNA 3) and
+// GFX12 (RDNA 4) mfma16 kernels do NOT support interleaved V-cache addressing.
+// The template parameter is carried on all variants for compilation
+// compatibility; a TORCH_CHECK prevents dispatch to NAVI with interleaved V.
 // TODO: implement interleaved V-cache support in the NAVI (GFX11/GFX12)
 // kernels if shuffle KV cache layout is needed on RDNA GPUs.
 #define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,      \
                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)                  \
   if (use_interleaved_v_cache) {                                               \
-    if (!is_navi) {                                                            \
-      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
-                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,   \
-                                      true>(                                   \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
-          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
-    } else {                                                                   \
-      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,         \
-                                           HEAD_SIZE, OUTT, PSIZE,             \
-                                           ALIBI_ENABLED, MFMA_TYPE, true>(    \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
-          max_seq_len, alibi_slopes, k_scale, v_scale);                        \
-    }                                                                          \
+    TORCH_CHECK(!is_navi,                                                      \
+        "Reading interleaved V-cache layout from paged decode "                \
+        "attention not supported on NAVI GPUs");                               \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,     \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,     \
+                                    true>(                                     \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,     \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,          \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);           \
   } else {                                                                     \
     if (!is_navi) {                                                            \
       paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
