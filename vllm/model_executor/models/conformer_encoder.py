@@ -14,10 +14,6 @@ from torch import nn
 
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
-# ===========================================================================
-# Sub-components
-# ===========================================================================
-
 
 class Conv2dSubsampling(nn.Module):
     def __init__(self, idim: int, d_model: int, out_channels: int = 32):
@@ -285,17 +281,9 @@ class RelPosEmbConformerBlock(nn.Module):
         return out
 
 
-# ===========================================================================
-# ConformerEncoder – the full encoder stack
-# ===========================================================================
-
-
 class ConformerEncoder(nn.Module):
-    """Conformer encoder shared by FireRedASR2 and FireRedLID.
-
-    Sub-classes or callers may differ slightly in how they wrap this encoder
-    (e.g. FireRedASR2 feeds the output through an adapter, while FireRedLID
-    uses a cross-attention decoder directly), but the core encoder is the same.
+    """
+    Conformer encoder shared by FireRedASR2 and FireRedLID.
     """
 
     def __init__(

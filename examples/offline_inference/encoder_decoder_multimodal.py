@@ -55,7 +55,43 @@ def run_whisper():
     )
 
 
+def run_fireredlid():
+    engine_args = EngineArgs(
+        model="PatchyTisa/FireRedLID-vllm",
+        max_model_len=8,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"audio": 1},
+    )
+
+    prompts = [
+        {  # Test explicit encoder/decoder prompt
+            "encoder_prompt": {
+                "prompt": "",
+                "multi_modal_data": {
+                    "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+                },
+            },
+            "decoder_prompt": "<sos>",
+        },
+        {  # Another audio sample
+            "encoder_prompt": {
+                "prompt": "",
+                "multi_modal_data": {
+                    "audio": AudioAsset("winning_call").audio_and_sample_rate,
+                },
+            },
+            "decoder_prompt": "<sos>",
+        },
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 model_example_map = {
+    "fireredlid": run_fireredlid,
     "whisper": run_whisper,
 }
 
