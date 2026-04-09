@@ -47,15 +47,6 @@ from vllm.model_executor.models.qwen2_5_vl import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-from .interfaces import (
-    SupportsEagle,
-    SupportsEagle3,
-    SupportsLoRA,
-    SupportsMultiModal,
-    SupportsMultiModalPruning,
-    SupportsPP,
-    SupportsQuant,
-)
 from .qwen2_vl import Qwen2VLDummyInputsBuilder as Exaone4_5_DummyInputsBuilder
 from .qwen2_vl import Qwen2VLMultiModalProcessor as Exaone4_5_MultiModalProcessor
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
@@ -311,13 +302,6 @@ class Exaone4_5_ProcessingInfo(Qwen2VLProcessingInfo):
 class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        SupportsMultiModal.__init__(self)
-        SupportsLoRA.__init__(self)
-        SupportsPP.__init__(self)
-        SupportsQuant.__init__(self)
-        SupportsEagle.__init__(self)
-        SupportsEagle3.__init__(self)
-        SupportsMultiModalPruning.__init__(self)
 
         config: Exaone4_5_Config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
@@ -330,9 +314,7 @@ class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
             multimodal_config.is_multimodal_pruning_enabled()
         )
 
-        if multimodal_config.get_limit_per_prompt(
-            "image"
-        ) or multimodal_config.get_limit_per_prompt("video"):
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.visual = EXAONE4_5_VisionTransformer(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
@@ -340,14 +322,14 @@ class Exaone4_5_ForConditionalGeneration(Qwen2_5_VLForConditionalGeneration):
                 prefix=maybe_prefix(prefix, "visual"),
                 use_data_parallel=self.use_data_parallel,
             )
-        else:
-            self.visual = None
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-            hf_config=config.get_text_config(),
-            architectures=["Exaone4ForCausalLM"],
-        )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                hf_config=config.get_text_config(),
+                architectures=["Exaone4ForCausalLM"],
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
