@@ -413,7 +413,7 @@ def calc_diff(x: torch.Tensor, y: torch.Tensor):
 
 def should_use_deepgemm_for_fp8_linear(
     output_dtype: torch.dtype,
-    weight: torch.Tensor,
+    weight_shape: tuple[int, int],
     supports_deep_gemm: bool | None = None,
 ):
     if supports_deep_gemm is None:
@@ -428,8 +428,8 @@ def should_use_deepgemm_for_fp8_linear(
     return (
         supports_deep_gemm
         and output_dtype == torch.bfloat16
-        and weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        and weight_shape[0] % N_MULTIPLE == 0
+        and weight_shape[1] % K_MULTIPLE == 0
     )
 
 
