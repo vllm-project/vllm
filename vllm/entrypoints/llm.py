@@ -1400,6 +1400,9 @@ class LLM:
         scoring_data = io_processor.valid_inputs(data_1, data_2)
         n_queries = len(scoring_data.data_1)
 
+        if pooling_params is None:
+            pooling_params = PoolingParams()
+
         ctx = OfflineInputsContext(
             prompts=scoring_data,
             pooling_params=pooling_params,
@@ -1412,9 +1415,6 @@ class LLM:
         n_inputs = len(engine_inputs)
 
         seq_lora_requests = self._lora_request_to_seq(lora_request, n_inputs)
-
-        if ctx.pooling_params is None:
-            ctx.pooling_params = PoolingParams()
         params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
 
         for param in params_seq:
