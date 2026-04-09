@@ -874,6 +874,13 @@ class EngineCoreProc(EngineCore):
                     vllm_config=vllm_config,
                 )
             self._init_data_parallel(vllm_config)
+            super().__init__(
+                vllm_config,
+                executor_class,
+                log_stats,
+                executor_fail_callback,
+                internal_dp_balancing,
+            )
 
             # Initialize fault tolerance settings.
             self.enable_fault_tolerance = (
@@ -883,27 +890,21 @@ class EngineCoreProc(EngineCore):
                 assert addresses.fault_tolerance_addresses is not None
                 ft_addresses = addresses.fault_tolerance_addresses
                 engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
-
                 # The ZMQ address between engine_core_sentinel and worker_sentinel.
                 worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
-                vllm_config.parallel_config.fault_tolerance_config.worker_cmd_addr = (
-                    worker_cmd_addr
-                )
                 self.engine_core_sentinel = EngineCoreSentinel(
                     parallel_config=vllm_config.parallel_config,
                     engine_input_q=self.input_queue,
                     engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
                     engine=self,
+                    worker_cmd_addr=worker_cmd_addr,
                 )
-
-            super().__init__(
-                vllm_config,
-                executor_class,
-                log_stats,
-                executor_fail_callback,
-                internal_dp_balancing,
-            )
+                self.model_executor.collective_rpc(
+                    method="create_worker_sentinel",
+                    args=(worker_cmd_addr,),
+                    non_block=False,
+                )
 
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,

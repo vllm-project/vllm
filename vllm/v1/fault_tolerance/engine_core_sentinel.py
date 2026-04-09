@@ -44,6 +44,7 @@ class EngineCoreSentinel(BaseSentinel):
         engine_fault_socket_addr: str,
         sentinel_identity: bytes,
         engine: "EngineCoreProc",
+        worker_cmd_addr: str,
     ):
         self.engine_index = engine.engine_index
         super().__init__(
@@ -58,10 +59,9 @@ class EngineCoreSentinel(BaseSentinel):
         self.stop_busy_loop = threading.Event()
         self.busy_loop_paused = threading.Event()
         self.engine_input_q = engine_input_q
-        assert parallel_config.fault_tolerance_config.worker_cmd_addr is not None
         self.worker_cmd_socket = make_zmq_socket(
             ctx=self.ctx,
-            path=parallel_config.fault_tolerance_config.worker_cmd_addr,
+            path=worker_cmd_addr,
             socket_type=zmq.ROUTER,
             bind=True,
         )

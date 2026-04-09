@@ -314,10 +314,13 @@ class Worker(WorkerBase):
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
 
-        if self.parallel_config.enable_fault_tolerance:
-            self.worker_sentinel = WorkerSentinel(
-                self, self.device,self.model_runner.pause_event
-            )
+    def create_worker_sentinel(self, worker_cmd_addr: str):
+        self.worker_sentinel = WorkerSentinel(
+            worker=self,
+            pause_event=self.model_runner.pause_event,
+            device=self.device,
+            worker_cmd_addr=worker_cmd_addr,
+        )
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.

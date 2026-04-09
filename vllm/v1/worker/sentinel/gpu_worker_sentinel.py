@@ -26,6 +26,7 @@ class WorkerSentinel(BaseSentinel):
         worker: "Worker",
         device: torch.device,
         pause_event: threading.Event,
+        worker_cmd_addr: str,
     ):
         dp_rank = worker.parallel_config.data_parallel_rank
         tp_rank = get_tp_group().rank_in_group
@@ -36,10 +37,9 @@ class WorkerSentinel(BaseSentinel):
         self.pause_event = pause_event
         torch.accelerator.set_device_index(self.device)
 
-        assert worker.parallel_config.fault_tolerance_config.worker_cmd_addr is not None
         self.engine_core_cmd_socket = make_zmq_socket(
             self.ctx,
-            worker.parallel_config.fault_tolerance_config.worker_cmd_addr,
+            worker_cmd_addr,
             zmq.DEALER,
             bind=False,
             identity=self.identity,

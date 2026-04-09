@@ -26,10 +26,3 @@ class FaultToleranceConfig:
     """
     Port used to publish engine fault and status change notifications.
     """
-
-    worker_cmd_addr: str | None = None
-    """
-    ZMQ address used by EngineCoreSentinel to dispatch instructions to 
-    WorkerSentinel instances. This address is assigned dynamically during 
-    runtime.
-    """
