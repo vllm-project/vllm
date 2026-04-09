@@ -45,7 +45,7 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         logger.warning_once(
             "Using OCP_MXQuantizationEmulationTritonExperts MOE backend. This"
             " will dequantize weights on the fly and may be slower than native"
-            " quantized MOE. Consider using a device with native MX"
+            " quantized MOE. Consider using a device with native OCP MX"
             " quantization support for better performance."
         )
 
