@@ -24,11 +24,16 @@ vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 expect-test.workspace = true
 futures.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 vllm-llm = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "tokenizer_backends"
+harness = false
 
 [lints]
 workspace = true

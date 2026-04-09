@@ -24,11 +24,12 @@ base64 = "0.22.1"
 byteorder = "1.5.0"
 bytes = "1.11.1"
 clap = { version = "4.5.38", features = ["derive", "env"] }
+criterion = "0.5.1"
 easy-ext = "1.0.3"
 educe = "0.6.0"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"
-fastokens = "0.1.0"
+fastokens = { git = "https://github.com/Atero-ai/fastokens.git", rev = "ff12e3f555b30d08dbd3390ad6f61ff64b9ee78b" }
 futures = "0.3.31"
 futures-async-stream = "0.2.13"
 hex = "0.4.3"
