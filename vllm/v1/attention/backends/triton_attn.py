@@ -85,73 +85,39 @@ class TritonAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
-    _mm_prefix_range_tensor_cache: torch.Tensor | None = None
-    _mm_prefix_range_hash: int | None = None  # Hash of mm_prefix_range when cache was created
+    mm_prefix_range_tensor: torch.Tensor | None = None
 
     @staticmethod
-    def _hash_mm_prefix_range(mm_prefix_range: dict[int, list[tuple[int, int]]] | None) -> int:
-        """Compute hash of mm_prefix_range for cache validation.
-        
-        Uses frozenset for dict and tuples are already hashable.
-        Returns a consistent hash even if dict iteration order changes.
-        """
-        if mm_prefix_range is None:
-            return hash(None)
-        # Convert dict to frozenset of (key, tuple(ranges)) for stable hashing
-        return hash(frozenset(
-            (k, tuple(v)) for k, v in mm_prefix_range.items()
-        ))
-    
-    @property
-    def mm_prefix_range_tensor(self) -> torch.Tensor | None:
+    def compute_mm_prefix_range_tensor(
+        mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
+        num_seqs: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
         """Convert mm_prefix_range dict to padded tensor for Triton kernel.
 
-        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty
-        ranges. Cached after first call so that repeated access across layers
-        does not trigger redundant H2D / D2D copies.
-                
-        Cache is automatically invalidated when mm_prefix_range changes,
-        detected via hash comparison.
+        Returns shape: (num_seqs, max_ranges, 2) with 0-padding for empty ranges.
+        Empty ranges have start==end==0, which kernel skips via is_valid check.
         """
-        # Compute current hash of mm_prefix_range for cache validation
-        current_hash = self._hash_mm_prefix_range(self.mm_prefix_range)
-        
-        # Check if cache is valid
-        if (self._mm_prefix_range_tensor_cache is not None 
-            and self._mm_prefix_range_hash == current_hash):
-            return self._mm_prefix_range_tensor_cache
-        
-        # Cache miss or invalidated - recompute
-        result = self._compute_mm_prefix_range_tensor()
-        self._mm_prefix_range_tensor_cache = result
-        self._mm_prefix_range_hash = current_hash
-        return result
-
-    def _compute_mm_prefix_range_tensor(self) -> torch.Tensor | None:
-        if self.mm_prefix_range is None:
+        if mm_prefix_range is None:
             return None
-
-        num_seqs = self.seq_lens.shape[0]
-        device = self.seq_lens.device
 
         # Collect ranges, using [(0,0)] for empty sequences to ensure uniform dims
         range_lists = [
-            self.mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
+            mm_prefix_range.get(i, [(0, 0)]) or [(0, 0)] for i in range(num_seqs)
         ]
 
         # Return None if all ranges are trivial (only (0,0) placeholders)
         if all(r == [(0, 0)] for r in range_lists):
             return None
 
-        # Build on CPU first (pinned would be better, but this is only once)
-        # then move to GPU in a single H2D transfer
+        # Build on CPU first then move to GPU in a single H2D transfer
         max_ranges = max(len(r) for r in range_lists)
         # Pad all sequences to the same number of ranges
         padded = []
         for r in range_lists:
             padded_r = list(r) + [(0, 0)] * (max_ranges - len(r))
             padded.append(padded_r)
-        # Create a single CPU tensor for efficient H2D transfer, avoiding multiple transfers and nested padding operations
+        # Create tensor with efficient H2D transfer
         return torch.tensor(
             padded, dtype=torch.int32, device=device
         ).view(num_seqs, max_ranges, 2)
