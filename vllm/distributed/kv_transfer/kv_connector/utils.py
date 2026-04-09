@@ -301,7 +301,7 @@ def kv_postprocess_blksize_and_layout_on_receive(cache, indices, block_size_rati
 
 def yield_req_data(
     scheduler_output,
-) -> Iterator[tuple[str, tuple[list[int], ...], bool]]:
+) -> Iterator[tuple[str, tuple[list[int], ...] | None, bool]]:
     """
     Yields:
         (req_id, new_block_id_groups, preempted)
