@@ -34,3 +34,12 @@ def rms_norm(
     output = torch.empty(x.shape, device=x.device, dtype=x.dtype)
     torch.ops._C.rms_norm(output, x, weight, epsilon)
     return output
+
+
+@ir.ops.silu_and_mul.register_impl("xpu_kernels", supported=XPU_KERNELS_SUPPORTED)
+def silu_and_mul(x: Tensor) -> Tensor:
+    d = x.shape[-1] // 2
+    output_shape = x.shape[:-1] + (d,)
+    out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+    torch.ops._C.silu_and_mul(out, x)
+    return out
