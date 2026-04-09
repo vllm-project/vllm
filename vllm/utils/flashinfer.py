@@ -748,8 +748,9 @@ def is_flashinfer_fp8_blockscale_gemm_supported() -> bool:
 def should_use_flashinfer_for_blockscale_fp8_gemm(
     is_flashinfer_supported: bool,
     output_dtype: torch.dtype,
-    input: torch.Tensor,
-    weight: torch.Tensor,
+    input_dtype: torch.dtype,
+    weight_dtype: torch.dtype,
+    weight_shape: tuple[int, int],
 ):
     if not is_flashinfer_supported:
         return False
@@ -760,15 +761,12 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
-    weight_dtype = weight.dtype
-    input_dtype = input.dtype
-
     should_use_flashinfer = (
         output_dtype == torch.bfloat16
         and input_dtype == torch.bfloat16
         and weight_dtype == torch.float8_e4m3fn
-        and weight.shape[0] % N_MULTIPLE == 0
-        and weight.shape[1] % K_MULTIPLE == 0
+        and weight_shape[0] % N_MULTIPLE == 0
+        and weight_shape[1] % K_MULTIPLE == 0
     )
 
     return should_use_flashinfer
