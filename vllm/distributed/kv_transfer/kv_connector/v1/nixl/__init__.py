@@ -9,7 +9,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
-    compute_nixl_compatibility_hash,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
     NixlConnectorScheduler,
@@ -29,5 +28,4 @@ __all__ = [
     "NixlConnectorWorker",
     "NixlHandshakePayload",
     "NixlKVConnectorStats",
-    "compute_nixl_compatibility_hash",
 ]
