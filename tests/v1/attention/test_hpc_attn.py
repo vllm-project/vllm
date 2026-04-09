@@ -97,9 +97,7 @@ def make_common_meta(
         block_table_tensor=torch.zeros(
             (num_reqs, max_blocks), dtype=torch.int32, device=device
         ),
-        slot_mapping=torch.zeros(
-            sum(query_lens), dtype=torch.int64, device=device
-        ),
+        slot_mapping=torch.zeros(sum(query_lens), dtype=torch.int64, device=device),
     )
 
 
@@ -134,8 +132,8 @@ def test_builder_metadata_fields(device, kv_cache_spec, vllm_config):
     """build() returns correct metadata dtypes and shapes for decode/prefill/mixed."""
     cases = [
         # (seq_lens, query_lens, expected_tokens, expected_max_q)
-        ([32, 64], [1, 1], 2, 1),        # pure decode
-        ([16, 32], [16, 32], 48, 32),    # pure prefill
+        ([32, 64], [1, 1], 2, 1),  # pure decode
+        ([16, 32], [16, 32], 48, 32),  # pure prefill
         ([32, 64, 128], [1, 1, 16], 18, 16),  # mixed
     ]
     builder = make_builder(vllm_config, kv_cache_spec, device)
@@ -219,27 +217,37 @@ def test_cudagraph_normal_build_unchanged(device, kv_cache_spec, vllm_config):
 def test_impl_rejects_wrong_dtype(device):
     with pytest.raises((AssertionError, ValueError)):
         HpcAttentionImpl(
-            num_heads=8, head_size=128, scale=0.1, num_kv_heads=8,
-            alibi_slopes=None, sliding_window=None,
-            kv_cache_dtype="fp8", block_size=32,
+            num_heads=8,
+            head_size=128,
+            scale=0.1,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="fp8",
+            block_size=32,
         )
 
 
 def test_do_kv_cache_update(device):
     impl = make_impl()
     bs, num_kv_heads, head_size, block_size = 4, 8, 128, 32
-    kv_cache = torch.randn(2, 100, block_size, num_kv_heads, head_size,
-                           dtype=torch.bfloat16, device=device)
+    kv_cache = torch.randn(
+        2, 100, block_size, num_kv_heads, head_size, dtype=torch.bfloat16, device=device
+    )
     key = torch.randn(bs, num_kv_heads, head_size, dtype=torch.bfloat16, device=device)
-    value = torch.randn(bs, num_kv_heads, head_size, dtype=torch.bfloat16, device=device)
+    value = torch.randn(
+        bs, num_kv_heads, head_size, dtype=torch.bfloat16, device=device
+    )
     slot_mapping = torch.zeros(bs, dtype=torch.int64, device=device)
     layer = MagicMock()
     layer._k_scale = torch.tensor(1.0)
     layer._v_scale = torch.tensor(1.0)
 
     mock_fn = MagicMock()
-    with patch("vllm.v1.attention.backends.hpc_attn._get_reshape_and_cache_flash",
-               return_value=mock_fn):
+    with patch(
+        "vllm.v1.attention.backends.hpc_attn._get_reshape_and_cache_flash",
+        return_value=mock_fn,
+    ):
         impl.do_kv_cache_update(layer, key, value, kv_cache, slot_mapping)
     mock_fn.assert_called_once()
     args = mock_fn.call_args[0]
@@ -289,9 +297,15 @@ def test_forward_profiling_run(device):
     """forward() returns zeros when attn_metadata is None (profiling pass)."""
     impl = make_impl()
     output = torch.ones(4, 8, 128, dtype=torch.bfloat16, device=device)
-    result = impl.forward(MagicMock(), None, None, None,
-                          torch.zeros(1, dtype=torch.bfloat16, device=device),
-                          None, output)
+    result = impl.forward(
+        MagicMock(),
+        None,
+        None,
+        None,
+        torch.zeros(1, dtype=torch.bfloat16, device=device),
+        None,
+        output,
+    )
     assert torch.all(result == 0)
 
 
@@ -300,9 +314,13 @@ def test_forward_decode_dispatch(device):
     impl = make_impl()
     num_reqs, num_heads, head_size = 4, 8, 128
     meta = _make_decode_meta(num_reqs, device)
-    query = torch.randn(num_reqs, num_heads, head_size, dtype=torch.bfloat16, device=device)
+    query = torch.randn(
+        num_reqs, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
     output = torch.zeros_like(query)
-    kv_cache = torch.zeros(2, 100, 32, 8, head_size, dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(
+        2, 100, 32, 8, head_size, dtype=torch.bfloat16, device=device
+    )
     layer = MagicMock()
     layer._k_scale = torch.tensor(1.0)
     layer._v_scale = torch.tensor(1.0)
@@ -327,9 +345,13 @@ def test_forward_prefill_dispatch(device):
     num_heads, head_size = 8, 128
     total_q = sum(query_lens)
     meta = _make_prefill_meta(query_lens, device)
-    query = torch.randn(total_q, num_heads, head_size, dtype=torch.bfloat16, device=device)
+    query = torch.randn(
+        total_q, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
     output = torch.zeros_like(query)
-    kv_cache = torch.zeros(2, 100, 32, 8, head_size, dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(
+        2, 100, 32, 8, head_size, dtype=torch.bfloat16, device=device
+    )
     layer = MagicMock()
     layer._k_scale = torch.tensor(1.0)
     layer._v_scale = torch.tensor(1.0)
@@ -361,45 +383,69 @@ def test_forward_mixed_batch_output_slices(device):
         max_query_len=pref_q,
         query_start_loc=torch.tensor(q_start, dtype=torch.int32, device=device),
         max_seq_len=512,
-        seq_lens=torch.tensor([512] * num_decodes + [pref_q] * num_prefills,
-                              dtype=torch.int32, device=device),
-        block_table=torch.zeros(num_decodes + num_prefills, 16,
-                                dtype=torch.int32, device=device),
+        seq_lens=torch.tensor(
+            [512] * num_decodes + [pref_q] * num_prefills,
+            dtype=torch.int32,
+            device=device,
+        ),
+        block_table=torch.zeros(
+            num_decodes + num_prefills, 16, dtype=torch.int32, device=device
+        ),
         slot_mapping=torch.zeros(num_actual_tokens, dtype=torch.int64, device=device),
         num_decodes=num_decodes,
         num_decode_tokens=num_decodes,
     )
 
-    query = torch.randn(num_actual_tokens, num_heads, head_size,
-                        dtype=torch.bfloat16, device=device)
+    query = torch.randn(
+        num_actual_tokens, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
     output = torch.zeros_like(query)
-    kv_cache = torch.zeros(2, 64, block_size, num_kv_heads, head_size,
-                           dtype=torch.bfloat16, device=device)
+    kv_cache = torch.zeros(
+        2, 64, block_size, num_kv_heads, head_size, dtype=torch.bfloat16, device=device
+    )
     layer = MagicMock()
     layer._k_scale = torch.tensor(1.0, device=device)
     layer._v_scale = torch.tensor(1.0, device=device)
 
-    decode_out = torch.ones(num_decodes, num_heads, head_size,
-                            dtype=torch.bfloat16, device=device)
-    prefill_out = torch.full((num_prefill_tokens, num_heads, head_size),
-                             2.0, dtype=torch.bfloat16, device=device)
+    decode_out = torch.ones(
+        num_decodes, num_heads, head_size, dtype=torch.bfloat16, device=device
+    )
+    prefill_out = torch.full(
+        (num_prefill_tokens, num_heads, head_size),
+        2.0,
+        dtype=torch.bfloat16,
+        device=device,
+    )
     mock_hpc = MagicMock()
     mock_hpc.attention_decode_bf16.return_value = decode_out
     mock_hpc.attention_with_kvcache_prefill_bf16.return_value = prefill_out
 
-    impl = make_impl(block_size=block_size, num_heads=num_heads,
-                     head_size=head_size, num_kv_heads=num_kv_heads)
+    impl = make_impl(
+        block_size=block_size,
+        num_heads=num_heads,
+        head_size=head_size,
+        num_kv_heads=num_kv_heads,
+    )
     with patch.dict(sys.modules, {"hpc": mock_hpc}):
-        result = impl.forward(layer=layer, query=query, key=None, value=None,
-                              kv_cache=kv_cache, attn_metadata=meta, output=output)
+        result = impl.forward(
+            layer=layer,
+            query=query,
+            key=None,
+            value=None,
+            kv_cache=kv_cache,
+            attn_metadata=meta,
+            output=output,
+        )
 
     # Verify query slices passed to each kernel
     dec_q = mock_hpc.attention_decode_bf16.call_args[1].get(
-        "q", mock_hpc.attention_decode_bf16.call_args[0][0])
+        "q", mock_hpc.attention_decode_bf16.call_args[0][0]
+    )
     assert dec_q.shape == (num_decodes, num_heads, head_size)
 
     pref_q_arg = mock_hpc.attention_with_kvcache_prefill_bf16.call_args[1].get(
-        "q", mock_hpc.attention_with_kvcache_prefill_bf16.call_args[0][0])
+        "q", mock_hpc.attention_with_kvcache_prefill_bf16.call_args[0][0]
+    )
     assert pref_q_arg.shape == (num_prefill_tokens, num_heads, head_size)
 
     # Verify output slices
@@ -412,8 +458,9 @@ def test_forward_mixed_batch_output_slices(device):
 # ---------------------------------------------------------------------------
 
 
-def _sdpa_reference(query, key_cache, value_cache, block_table,
-                    seq_lens, query_start_loc, scale):
+def _sdpa_reference(
+    query, key_cache, value_cache, block_table, seq_lens, query_start_loc, scale
+):
     import torch.nn.functional as F
 
     batch = seq_lens.shape[0]
@@ -428,34 +475,69 @@ def _sdpa_reference(query, key_cache, value_cache, block_table,
         q_i = query[q_s:q_e].float()
         kv_len = int(seq_lens[i])
         n_blk = (kv_len + block_size - 1) // block_size
-        k_flat = key_cache[block_table[i, :n_blk]].reshape(-1, num_kv_heads, head_dim).float()
-        v_flat = value_cache[block_table[i, :n_blk]].reshape(-1, num_kv_heads, head_dim).float()
+        k_flat = (
+            key_cache[block_table[i, :n_blk]]
+            .reshape(-1, num_kv_heads, head_dim)
+            .float()
+        )
+        v_flat = (
+            value_cache[block_table[i, :n_blk]]
+            .reshape(-1, num_kv_heads, head_dim)
+            .float()
+        )
         k_i = k_flat[:kv_len].repeat_interleave(heads_per_group, dim=1)
         v_i = v_flat[:kv_len].repeat_interleave(heads_per_group, dim=1)
-        out = F.scaled_dot_product_attention(
-            q_i.transpose(0, 1).unsqueeze(0),
-            k_i.transpose(0, 1).unsqueeze(0),
-            v_i.transpose(0, 1).unsqueeze(0),
-            scale=scale, is_causal=(q_i.shape[0] > 1),
-        ).squeeze(0).transpose(0, 1)
+        out = (
+            F.scaled_dot_product_attention(
+                q_i.transpose(0, 1).unsqueeze(0),
+                k_i.transpose(0, 1).unsqueeze(0),
+                v_i.transpose(0, 1).unsqueeze(0),
+                scale=scale,
+                is_causal=(q_i.shape[0] > 1),
+            )
+            .squeeze(0)
+            .transpose(0, 1)
+        )
         outputs.append(out)
     return torch.cat(outputs, dim=0).to(torch.bfloat16)
 
 
-def _build_kvcache_and_meta(seq_lens, query_lens, num_kv_heads, head_dim,
-                             block_size, device):
+def _build_kvcache_and_meta(
+    seq_lens, query_lens, num_kv_heads, head_dim, block_size, device
+):
     batch = len(seq_lens)
     max_blocks = (max(seq_lens) + block_size - 1) // block_size
     total_blocks = batch * max_blocks
-    key_cache = torch.randn(total_blocks, block_size, num_kv_heads, head_dim,
-                            dtype=torch.bfloat16, device=device)
-    value_cache = torch.randn(total_blocks, block_size, num_kv_heads, head_dim,
-                              dtype=torch.bfloat16, device=device)
-    block_table = torch.arange(total_blocks, dtype=torch.int32,
-                               device=device).view(batch, max_blocks)
+    key_cache = torch.randn(
+        total_blocks,
+        block_size,
+        num_kv_heads,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    value_cache = torch.randn(
+        total_blocks,
+        block_size,
+        num_kv_heads,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=device,
+    )
+    block_table = torch.arange(total_blocks, dtype=torch.int32, device=device).view(
+        batch, max_blocks
+    )
     total_q = sum(query_lens)
-    q_start = torch.tensor([0] + list(torch.tensor(query_lens).cumsum(0).tolist()),
-                           dtype=torch.int32, device=device)
+    q_start = torch.tensor(
+        [0] + list(torch.tensor(query_lens).cumsum(0).tolist()),
+        dtype=torch.int32,
+        device=device,
+    )
+    # Decode requests (query_len == 1) are placed at the front of the batch.
+    # num_decodes and num_decode_tokens must be set correctly so that
+    # forward() dispatches to the right kernel (decode vs. prefill).
+    num_decodes = sum(1 for q in query_lens if q == 1)
+    num_decode_tokens = sum(q for q in query_lens if q == 1)
     meta = HpcAttentionMetadata(
         num_actual_tokens=total_q,
         max_query_len=max(query_lens),
@@ -464,18 +546,29 @@ def _build_kvcache_and_meta(seq_lens, query_lens, num_kv_heads, head_dim,
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=device),
         block_table=block_table,
         slot_mapping=torch.zeros(total_q, dtype=torch.int64, device=device),
+        num_decodes=num_decodes,
+        num_decode_tokens=num_decode_tokens,
     )
-    return key_cache, value_cache, torch.stack([key_cache, value_cache]), block_table, meta
+    return (
+        key_cache,
+        value_cache,
+        torch.stack([key_cache, value_cache]),
+        block_table,
+        meta,
+    )
 
 
-@pytest.mark.parametrize("num_q_heads,num_kv_heads", [(32, 8), (8, 1)])
-@pytest.mark.parametrize("seq_lens,query_lens", [
-    ([128, 256, 512], [1, 1, 1]),    # pure decode
-    ([64, 128], [1, 1]),
-    ([64, 64], [64, 64]),             # pure prefill
-    ([128, 64], [128, 64]),
-    ([128, 64], [1, 64]),             # mixed
-])
+@pytest.mark.parametrize("num_q_heads,num_kv_heads", [(8, 1), (4, 1)])
+@pytest.mark.parametrize(
+    "seq_lens,query_lens",
+    [
+        ([128, 256, 512], [1, 1, 1]),  # pure decode
+        ([64, 128], [1, 1]),
+        ([64, 64], [64, 64]),  # pure prefill
+        ([128, 64], [128, 64]),
+        ([128, 64], [1, 64]),  # mixed
+    ],
+)
 def test_accuracy_vs_sdpa(device, num_q_heads, num_kv_heads, seq_lens, query_lens):
     """HPC_ATTN output must match PyTorch SDPA within bfloat16 tolerance."""
     block_size, head_dim = 32, 128
@@ -483,22 +576,36 @@ def test_accuracy_vs_sdpa(device, num_q_heads, num_kv_heads, seq_lens, query_len
     total_q = sum(query_lens)
 
     key_cache, value_cache, full_kv_cache, block_table, meta = _build_kvcache_and_meta(
-        seq_lens, query_lens, num_kv_heads, head_dim, block_size, device)
-    query = torch.randn(total_q, num_q_heads, head_dim,
-                        dtype=torch.bfloat16, device=device)
+        seq_lens, query_lens, num_kv_heads, head_dim, block_size, device
+    )
+    query = torch.randn(
+        total_q, num_q_heads, head_dim, dtype=torch.bfloat16, device=device
+    )
 
-    impl = make_impl(block_size=block_size, num_heads=num_q_heads,
-                     head_size=head_dim, num_kv_heads=num_kv_heads)
+    impl = make_impl(
+        block_size=block_size,
+        num_heads=num_q_heads,
+        head_size=head_dim,
+        num_kv_heads=num_kv_heads,
+    )
     layer = MagicMock()
     layer._k_scale = torch.tensor(1.0)
     layer._v_scale = torch.tensor(1.0)
 
-    hpc_out = torch.zeros(total_q, num_q_heads, head_dim,
-                          dtype=torch.bfloat16, device=device)
+    hpc_out = torch.zeros(
+        total_q, num_q_heads, head_dim, dtype=torch.bfloat16, device=device
+    )
     impl.forward(layer, query, None, None, full_kv_cache, meta, hpc_out)
 
-    ref_out = _sdpa_reference(query, key_cache, value_cache, block_table,
-                              meta.seq_lens, meta.query_start_loc, scale)
+    ref_out = _sdpa_reference(
+        query,
+        key_cache,
+        value_cache,
+        block_table,
+        meta.seq_lens,
+        meta.query_start_loc,
+        scale,
+    )
 
     max_err = (hpc_out.float() - ref_out.float()).abs().max().item()
     assert torch.allclose(hpc_out.float(), ref_out.float(), atol=1e-2, rtol=1e-2), (
