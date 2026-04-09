@@ -63,9 +63,23 @@ class ServingPooling(PoolingServingBase):
         raw_request: Request | None = None,
     ) -> Response:
         assert isinstance(request, PoolingRequest)
+        pooling_task = self._verify_pooling_task(request)
 
+        io_processor = self.io_processors[pooling_task]
         ctx = await self._init_ctx(request, raw_request)
 
+        await io_processor.pre_process_online_async(ctx)
+
+        if ctx.pooling_params is None:
+            ctx.pooling_params = io_processor.create_pooling_params(request)
+
+        await self._prepare_generators(ctx)
+        await self._collect_batch(ctx)
+
+        await io_processor.post_process_online_async(ctx)
+        return await self._build_response(ctx)
+
+    def _verify_pooling_task(self, request: PoolingRequest) -> str:
         if getattr(request, "dimensions", None) is not None:
             raise ValueError("dimensions is currently not supported")
 
@@ -77,14 +91,6 @@ class ServingPooling(PoolingServingBase):
 
         assert request.task is not None
         pooling_task = request.task
-
-        if pooling_task == "plugin" and "plugin" not in self.io_processors:
-            raise ValueError(
-                "No IOProcessor plugin installed. Please refer "
-                "to the documentation and to the "
-                "'prithvi_geospatial_mae_io_processor' "
-                "offline inference example for more details."
-            )
 
         # plugin task uses io_processor.parse_request to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
@@ -101,17 +107,15 @@ class ServingPooling(PoolingServingBase):
                     pooling_task,
                 )
 
-        io_processor = self.io_processors[pooling_task]
-        await io_processor.pre_process_online_async(ctx)
+        if pooling_task == "plugin" and "plugin" not in self.io_processors:
+            raise ValueError(
+                "No IOProcessor plugin installed. Please refer "
+                "to the documentation and to the "
+                "'prithvi_geospatial_mae_io_processor' "
+                "offline inference example for more details."
+            )
 
-        if ctx.pooling_params is None:
-            ctx.pooling_params = io_processor.create_pooling_params(request)
-
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-
-        await io_processor.post_process_online_async(ctx)
-        return await self._build_response(ctx)
+        return pooling_task
 
     async def _build_response(
         self,
