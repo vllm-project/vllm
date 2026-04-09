@@ -11,7 +11,11 @@ from openai.types.responses import (
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
+    ResponseTextConfig,
     ResponseTextDeltaEvent,
+)
+from openai.types.responses.response_format_text_json_schema_config import (
+    ResponseFormatTextJSONSchemaConfig,
 )
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
@@ -28,7 +32,13 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponseCreatedEvent,
+    ResponseRawMessageAndToken,
+    ResponsesRequest,
+    ResponsesResponse,
+    serialize_message,
+)
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
@@ -71,6 +81,16 @@ class MockConversationContext(ConversationContext):
 
     async def cleanup_session(self) -> None:
         pass
+
+
+def test_serialize_message_pydantic_model_returns_dict() -> None:
+    msg = ResponseRawMessageAndToken(message="hello", tokens=[1, 2, 3])
+
+    serialized = serialize_message(msg)
+
+    assert isinstance(serialized, dict)
+    assert serialized["type"] == "raw_message_tokens"
+    assert serialized["message"] == "hello"
 
 
 @pytest.fixture
@@ -130,6 +150,56 @@ def test_extract_tool_types(monkeypatch: pytest.MonkeyPatch) -> None:
         "code_interpreter",
         "web_search_preview",
     }
+
+
+@pytest.mark.skip_global_cleanup
+def test_response_created_event_uses_public_json_schema_alias() -> None:
+    schema = {
+        "type": "object",
+        "properties": {
+            "event_name": {"type": "string"},
+            "date": {"type": "string"},
+            "participants": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["event_name", "date", "participants"],
+        "additionalProperties": False,
+    }
+    text = ResponseTextConfig()
+    text.format = ResponseFormatTextJSONSchemaConfig(
+        type="json_schema",
+        name="calendar_event",
+        schema=schema,
+        description="A calendar event.",
+        strict=True,
+    )
+    request = ResponsesRequest(
+        model="test-model",
+        input="Alice and Bob are going to a science fair on Friday.",
+        text=text,
+    )
+    sampling_params = request.to_sampling_params(default_max_tokens=64)
+    initial_response = ResponsesResponse.from_request(
+        request=request,
+        sampling_params=sampling_params,
+        model_name="test-model",
+        created_time=0,
+        output=[],
+        status="in_progress",
+        usage=None,
+    ).model_dump(mode="json", by_alias=True)
+
+    fmt = initial_response["text"]["format"]
+    assert fmt["schema"] == schema
+    assert "schema_" not in fmt
+
+    event = ResponseCreatedEvent(
+        type="response.created",
+        sequence_number=0,
+        response=initial_response,
+    )
+    assert event.response.text is not None
+    assert event.response.text.format is not None
+    assert event.response.text.format.model_dump(by_alias=True)["schema"] == schema
 
 
 class TestInitializeToolSessions:

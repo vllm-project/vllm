@@ -21,13 +21,15 @@ void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
   TORCH_CHECK(lengths.dtype() == torch::kInt32, "lengths must be int32");
   TORCH_CHECK(output.dtype() == torch::kInt32, "output must be int32");
   TORCH_CHECK(logits.dim() == 2, "logits must be 2D");
-  TORCH_CHECK(lengths.dim() == 1, "lengths must be 1D");
+  TORCH_CHECK(lengths.dim() == 1 || lengths.dim() == 2,
+              "lengths must be 1D or 2D");
+  TORCH_CHECK(lengths.is_contiguous(), "lengths must be contiguous");
   TORCH_CHECK(output.dim() == 2, "output must be 2D");
 
   const int64_t num_rows = logits.size(0);
   const int64_t stride = logits.size(1);
 
-  TORCH_CHECK(lengths.size(0) == num_rows, "lengths size mismatch");
+  TORCH_CHECK(lengths.numel() == num_rows, "lengths size mismatch");
   TORCH_CHECK(output.size(0) == num_rows && output.size(1) == k,
               "output size mismatch");
   namespace P = vllm::persistent;

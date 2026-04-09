@@ -520,3 +520,43 @@ class CpuPlatform(Platform):
                 import vllm._C  # noqa: F401
             except ImportError as e:
                 logger.warning("Failed to import from vllm._C: %r", e)
+
+    @classmethod
+    def pack_kv_cache(
+        cls,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_ids: list[int],
+        indices: torch.Tensor,
+    ) -> None:
+        """
+        Rewrite the kv cache shape for the current platform.
+        """
+        # Import lazily: cpu_attn pulls in _custom_ops, which needs a fully
+        # initialized vllm.platforms (avoid circular import while CpuPlatform loads).
+        from vllm._custom_ops import cpu_attn_reshape_and_cache
+        from vllm.v1.attention.backends.cpu_attn import _get_attn_isa
+
+        dtype = key.dtype
+        # For CPU_ATTN, the shape is [N, num_kv_heads, block_size, head_size]
+        _, _, block_size, head_size = key_cache.shape
+        key = key.permute(0, 2, 1, 3).flatten(0, 1)
+        value = value.permute(0, 2, 1, 3).flatten(0, 1)
+
+        isa = _get_attn_isa(dtype, block_size, head_size)
+        block_offsets = torch.arange(block_size, device="cpu", dtype=torch.long)
+        num_blocks = len(block_ids)
+        slot_mapping = (
+            block_offsets.reshape(1, block_size)
+            + indices.reshape(num_blocks, 1) * block_size
+        ).flatten()
+        cpu_attn_reshape_and_cache(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            isa,
+        )
