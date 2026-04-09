@@ -1,0 +1,45 @@
+{# ============================================================================
+   AMD GPU Resource Class Generator for Buildkite agent-stack-k8s
+
+   This Jinja2 snippet should be integrated into the test-template-aws.j2
+   (or equivalent) in vllm-project/ci-infra.
+
+   The agent-stack-k8s controller is deployed with a single queue
+   (mi250_internal) and resource-classes (1gpu, 2gpu, 4gpu, 8gpu) defined
+   in the Helm values. Each pipeline step selects its GPU tier via the
+   resource_class agent tag; no per-job podSpecPatch is needed.
+
+   Variables expected from the step definition (test-amd.yaml):
+     - step.agent_pool : str  (e.g. "mi250_internal")
+     - step.num_gpus   : int  (default 1)
+     - step.no_gpu     : bool (default false)
+
+   For mirror_hardwares steps (test-pipeline.yaml):
+     - mirror target "amdexperimental" maps to queue mi250_internal
+   ============================================================================ #}
+
+{% set amd_pool_queue_map = {
+    "mi250_internal": "mi250_internal",
+} %}
+
+{% set num_gpus = step.num_gpus | default(1) %}
+{% set is_amd = step.agent_pool is defined and step.agent_pool in amd_pool_queue_map %}
+
+{# Resource class name maps directly from num_gpus #}
+{% set gpu_resource_class = num_gpus | string ~ "gpu" %}
+
+{% if is_amd and not step.no_gpu | default(false) %}
+    agents:
+      queue: "{{ amd_pool_queue_map[step.agent_pool] }}"
+      resource_class: "{{ gpu_resource_class }}"
+{% elif is_amd and step.no_gpu | default(false) %}
+    agents:
+      queue: "{{ amd_pool_queue_map[step.agent_pool] }}"
+{% endif %}
+
+{# For mirrored steps from test-pipeline.yaml #}
+{% if "amdexperimental" in step.mirror_hardwares | default([]) %}
+    agents:
+      queue: "mi250_internal"
+      resource_class: "{{ gpu_resource_class }}"
+{% endif %}
