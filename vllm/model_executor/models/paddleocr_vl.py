@@ -200,7 +200,13 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         merge_size = hf_config.vision_config.spatial_merge_size
         patch_size = hf_config.vision_config.patch_size
         factor = merge_size * patch_size
-        max_num_tokens = image_processor.max_pixels // (factor**2)
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            max_pixels = image_processor.max_pixels
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            max_pixels = image_processor.size.longest_edge
+        max_num_tokens = max_pixels // (factor**2)
         # Find factors of max_num_tokens close to its square root
         # to create a dummy image with a reasonable aspect ratio.
         h_patches = int(math.sqrt(max_num_tokens))

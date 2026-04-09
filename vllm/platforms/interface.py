@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.inputs import EngineInput
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
@@ -205,6 +206,15 @@ class Platform:
         Get the custom compile backend for current platform.
         """
         return cls.simple_compile_backend
+
+    @classmethod
+    def import_ir_kernels(cls) -> None:
+        """
+        The default implementation imports ``vllm.kernels``, which registers
+        the built-in IR op implementations. Out-of-tree (OOT) platforms should
+        override this method to import their own kernel modules.
+        """
+        import vllm.kernels  # noqa: F401
 
     @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
@@ -504,6 +514,7 @@ class Platform:
             FullAttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
+            get_kv_quant_mode,
         )
 
         cache_config = vllm_config.cache_config
@@ -515,6 +526,8 @@ class Platform:
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
+        kv_quant_mode = get_kv_quant_mode(cache_config.cache_dtype)
+
         # Compute attention page size for 1 token
         if model_config.use_mla:
             attn_page_size_1_token = MLAAttentionSpec(
@@ -522,6 +535,7 @@ class Platform:
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
         else:
             attn_page_size_1_token = FullAttentionSpec(
@@ -529,6 +543,7 @@ class Platform:
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
 
         # Compute mamba page size
@@ -930,6 +945,16 @@ class Platform:
         raise NotImplementedError(
             "num_compute_units is not implemented for the current platform."
         )
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        """Get the default IR op priority for the current platform."""
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native always used by default. Platforms can override this behavior.
+        return IrOpPriorityConfig.with_default(["native"])
 
 
 class UnspecifiedPlatform(Platform):

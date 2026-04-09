@@ -408,8 +408,13 @@ def has_deep_ep() -> bool:
 
 
 def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return _has_module("deep_gemm")
+    """Whether the optional `deep_gemm` package is available.
+
+    Prefers an externally installed ``deep_gemm`` package (so users can
+    override with a newer version), then falls back to the vendored copy
+    bundled in the vLLM wheel.
+    """
+    return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
 
 
 def has_nixl_ep() -> bool:
@@ -461,3 +466,8 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+def has_fbgemm_gpu() -> bool:
+    """Whether the optional `fbgemm_gpu` package is available."""
+    return _has_module("fbgemm_gpu")
