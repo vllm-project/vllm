@@ -32,6 +32,10 @@ from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
 
+# User-facing reason labels for waiting request breakdown
+WAITING_REASON_CAPACITY = "capacity"
+WAITING_REASON_DEFERRED = "deferred"
+
 PerEngineStatLoggerFactory = Callable[[VllmConfig, int], "StatLoggerBase"]
 AggregateStatLoggerFactory = type["AggregateStatLoggerBase"]
 StatLoggerFactory = AggregateStatLoggerFactory | PerEngineStatLoggerFactory
@@ -222,24 +226,24 @@ class LoggingStatLogger(StatLoggerBase):
             "Running: %d reqs",
             "Waiting: %d reqs",
         ]
+        total_waiting = (
+            self.last_scheduler_stats.num_waiting_reqs
+            + self.last_scheduler_stats.num_skipped_waiting_reqs
+        )
         log_args: list[int | float | str] = [
             self.last_prompt_throughput,
             self.last_generation_throughput,
             self.last_scheduler_stats.num_running_reqs,
-            self.last_scheduler_stats.num_waiting_reqs,
+            total_waiting,
         ]
+
+        if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
+            log_parts.append("Deferred: %d reqs")
+            log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
 
         if self.num_preemptions > 0:
             log_parts.append("Preemptions: %d")
             log_args.append(self.num_preemptions)
-
-        # Only emit the deferred count when non-zero to keep idle-system logs
-        # clean.  A non-zero value here means the scheduler is holding back
-        # requests due to a constraint (LoRA, async KV, blocked status) and is
-        # worth surfacing to the operator alongside the total waiting count.
-        if self.last_scheduler_stats.num_skipped_waiting_reqs > 0:
-            log_parts.append("Deferred: %d reqs")
-            log_args.append(self.last_scheduler_stats.num_skipped_waiting_reqs)
 
         log_parts.extend(
             [
@@ -336,9 +340,6 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.num_running_reqs += (
                 last_scheduler_stats.num_running_reqs
             )
-            # Sum the deferred sub-population across engines just like the
-            # parent waiting count — the total skipped across all DP shards is
-            # the meaningful aggregate for cross-engine dashboards.
             self.last_scheduler_stats.num_skipped_waiting_reqs += (
                 last_scheduler_stats.num_skipped_waiting_reqs
             )
@@ -467,29 +468,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             gauge_scheduler_waiting, per_engine_labelvalues
         )
 
-        # Subset of vllm:num_requests_waiting that were deferred during the
-        # most recent scheduling pass due to a transient constraint rather than
-        # lack of capacity.  Common causes include:
-        #   - LoRA adapter slot budget exhausted for this step
-        #   - Request waiting for an async remote KV-cache transfer to complete
-        #   - Request in a blocked/paused status (e.g. encoder-decoder pipeline)
-        #
-        # A sustained high value here (relative to num_requests_waiting) points
-        # to a resource constraint bottleneck.  A value near zero means the
-        # waiting queue is draining normally and backlog is simply load-driven.
-        gauge_scheduler_skipped_waiting = self._gauge_cls(
-            name="vllm:num_requests_skipped_waiting",
+        gauge_waiting_by_reason = self._gauge_cls(
+            name="vllm:num_requests_waiting_by_reason",
             documentation=(
-                "Number of waiting requests deferred by the scheduler due to "
-                "a transient constraint (LoRA budget, async KV transfer, "
-                "blocked status).  Subset of vllm:num_requests_waiting."
+                "Number of waiting requests by reason. "
+                "Reason labels: 'capacity' = waiting for scheduling capacity; "
+                "'deferred' = deferred by transient constraints "
+                "(LoRA budget, KV transfer, blocked status). "
+                "Sum of all reasons equals vllm:num_requests_waiting."
             ),
             multiprocess_mode="mostrecent",
-            labelnames=labelnames,
+            labelnames=labelnames + ["reason"],
         )
-        self.gauge_scheduler_skipped_waiting = create_metric_per_engine(
-            gauge_scheduler_skipped_waiting, per_engine_labelvalues
-        )
+        self.gauge_waiting_by_reason: dict[str, dict[int, Gauge]] = {}
+        for waiting_reason in [WAITING_REASON_CAPACITY, WAITING_REASON_DEFERRED]:
+            self.gauge_waiting_by_reason[waiting_reason] = {
+                idx: gauge_waiting_by_reason.labels(
+                    model_name, str(idx), waiting_reason
+                )
+                for idx in engine_indexes
+            }
 
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
@@ -1068,12 +1066,15 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.gauge_scheduler_running[engine_idx].set(
                 scheduler_stats.num_running_reqs
             )
-            self.gauge_scheduler_waiting[engine_idx].set(
+            total_waiting = (
+                scheduler_stats.num_waiting_reqs
+                + scheduler_stats.num_skipped_waiting_reqs
+            )
+            self.gauge_scheduler_waiting[engine_idx].set(total_waiting)
+            self.gauge_waiting_by_reason[WAITING_REASON_CAPACITY][engine_idx].set(
                 scheduler_stats.num_waiting_reqs
             )
-            # Expose the deferred sub-population so dashboards can split
-            # "waiting due to load" from "waiting due to constraint".
-            self.gauge_scheduler_skipped_waiting[engine_idx].set(
+            self.gauge_waiting_by_reason[WAITING_REASON_DEFERRED][engine_idx].set(
                 scheduler_stats.num_skipped_waiting_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
