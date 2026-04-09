@@ -47,6 +47,13 @@ logger = init_logger(__name__)
 TOOL_CALL_START = "<|tool_call>"
 TOOL_CALL_END = "<tool_call|>"
 STRING_DELIM = '<|"|>'
+STRING_DELIM_LEN = len(STRING_DELIM)
+
+# Structural characters that follow closing string delimiters in well-formed input
+STRUCTURAL_CHARS = (",", "}", "]")
+
+# Pre-compiled regex for malformed input detection
+TOOL_CALL_KEY_PATTERN = re.compile(r",\s*([a-zA-Z_]\w*):\s*$")
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +83,75 @@ def _parse_gemma4_value(value_str: str) -> object:
 
     # Bare string (no <|"|> delimiters — shouldn't happen but be safe)
     return value_str
+
+
+def _find_string_value_end(args_str: str, value_start: int) -> tuple[int, bool]:
+    """Find the end position of a string value, handling missing delimiters.
+
+    Uses a two-stage check to distinguish between:
+    1. Closing delimiter (well-formed): followed by `,`, `}`, or `]`
+    2. Opening delimiter (malformed): delimiter belongs to next key
+
+    Args:
+        args_str: The full argument string being parsed
+        value_start: Position where the string value starts (after opening delimiter)
+
+    Returns:
+        Tuple of (end_position, is_closing_delimiter) where:
+        - end_position: Position where the string value ends
+        - is_closing_delimiter: True if end_position points to a valid closing
+          delimiter, False if it points to a comma (malformed input), or -1 if
+          no delimiter found (unterminated string)
+
+    Examples:
+        Well-formed:
+        >>> _find_string_value_end('text<|"|>,next:', 0)
+        (4, True)  # Delimiter at position 4, followed by ',' -> closing delimiter
+
+        Well-formed with comma-colon pattern in value:
+        >>> _find_string_value_end('foo,bar:<|"|>,x:', 0)
+        (8, True)  # Delimiter at position 8, followed by ',' -> closing delimiter
+
+        Malformed (missing closing delimiter):
+        >>> _find_string_value_end('foo,bar:<|"|>value', 0)
+        (3, False)  # Stops at comma position 3 (malformed - missing closing delim)
+    """
+    # Find next delimiter
+    next_delim = args_str.find(STRING_DELIM, value_start)
+
+    if next_delim == -1:
+        # No delimiter found - unterminated string
+        return (-1, False)
+
+    # Stage 1: Check if delimiter is followed by structural character
+    # In valid Gemma4, closing delimiters are ALWAYS followed by ',', '}', or ']'
+    after_delim_pos = next_delim + STRING_DELIM_LEN
+    if after_delim_pos < len(args_str):
+        char_after = args_str[after_delim_pos]
+        if char_after in STRUCTURAL_CHARS:
+            # This is a valid closing delimiter
+            return (next_delim, True)
+    else:
+        # Delimiter is at end of string - likely a closing delimiter
+        return (next_delim, True)
+
+    # Stage 2: Delimiter not followed by structural character - might be malformed
+    # Check if substring before delimiter contains ',identifier:' pattern
+    # Use in-place search to avoid creating temporary substring
+    last_comma = args_str.rfind(",", value_start, next_delim)
+
+    if last_comma != -1:
+        # Check if pattern ',identifier:' appears after the comma
+        after_comma = args_str[last_comma:next_delim]
+        match = TOOL_CALL_KEY_PATTERN.match(after_comma)
+
+        if match:
+            # Found ',key:' pattern - this delimiter likely opens next key's value
+            # Stop at the comma to avoid over-consumption
+            return (last_comma, False)
+
+    # No evidence of malformed input - use the delimiter
+    return (next_delim, True)
 
 
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
@@ -136,15 +212,20 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
 
         # String value: <|"|>...<|"|>
         if args_str[i:].startswith(STRING_DELIM):
-            i += len(STRING_DELIM)
+            i += STRING_DELIM_LEN
             val_start = i
-            end_pos = args_str.find(STRING_DELIM, i)
+
+            end_pos, is_closing_delim = _find_string_value_end(args_str, val_start)
+
             if end_pos == -1:
                 # Unterminated string — take rest
                 result[key] = args_str[val_start:]
                 break
+
             result[key] = args_str[val_start:end_pos]
-            i = end_pos + len(STRING_DELIM)
+
+            # Advance position based on what we found
+            i = end_pos + STRING_DELIM_LEN if is_closing_delim else end_pos
 
         # Nested object: {...}
         elif args_str[i] == "{":
@@ -154,9 +235,15 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             while i < n and depth > 0:
                 if args_str[i:].startswith(STRING_DELIM):
                     # Skip over string contents to avoid counting { inside strings
-                    i += len(STRING_DELIM)
-                    next_delim = args_str.find(STRING_DELIM, i)
-                    i = n if next_delim == -1 else next_delim + len(STRING_DELIM)
+                    i += STRING_DELIM_LEN
+                    end_pos, is_closing_delim = _find_string_value_end(args_str, i)
+                    if end_pos == -1:
+                        i = n
+                    elif is_closing_delim:
+                        i = end_pos + STRING_DELIM_LEN
+                    else:
+                        # Stopped at comma (malformed) - advance with bounds check
+                        i = min(end_pos + 1, n)
                     continue
                 if args_str[i] == "{":
                     depth += 1
@@ -177,9 +264,15 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             i += 1
             while i < n and depth > 0:
                 if args_str[i:].startswith(STRING_DELIM):
-                    i += len(STRING_DELIM)
-                    next_delim = args_str.find(STRING_DELIM, i)
-                    i = n if next_delim == -1 else next_delim + len(STRING_DELIM)
+                    i += STRING_DELIM_LEN
+                    end_pos, is_closing_delim = _find_string_value_end(args_str, i)
+                    if end_pos == -1:
+                        i = n
+                    elif is_closing_delim:
+                        i = end_pos + STRING_DELIM_LEN
+                    else:
+                        # Stopped at comma (malformed) - advance with bounds check
+                        i = min(end_pos + 1, n)
                     continue
                 if args_str[i] == "[":
                     depth += 1
