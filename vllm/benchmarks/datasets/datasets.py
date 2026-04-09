@@ -119,9 +119,6 @@ class BenchmarkDataset(ABC):
         self.disable_shuffle = disable_shuffle
         self.data: Any | None = None
 
-    def self_timed(self) -> bool:
-        return False
-
     def apply_multimodal_chat_transformation(
         self,
         prompt: str,
@@ -1422,13 +1419,15 @@ class TimedTrace(BenchmarkDataset):
         self.label_output_length = str(kwargs.get("label_output_length"))
         self.label_hash_ids = str(kwargs.get("label_hash_ids"))
         print(
-            f'timed-trace: chunk_size: {self.chunk_size}, sec_multiplier: {self.sec_multiplier}, label_ts: "{self.label_ts}", label_input_length: "{self.label_input_length}", label_output_length: "{self.label_output_length}", label_hash_ids: "{self.label_hash_ids}"'
+            f"timed-trace: chunk_size: {self.chunk_size}, "
+            f"sec_multiplier: {self.sec_multiplier}, "
+            f'label_ts: "{self.label_ts}", '
+            f'label_input_length: "{self.label_input_length}", '
+            f'label_output_length: "{self.label_output_length}", '
+            f'label_hash_ids: "{self.label_hash_ids}"'
         )
         self._expanded_generated_prompts = {}
         self.load_data()
-
-    def self_timed(self) -> bool:
-        return True
 
     def load_data(self) -> None:
         # check if the file is there
@@ -1437,7 +1436,8 @@ class TimedTrace(BenchmarkDataset):
 
         # load and we will do transformation once we have the Tokenizer available
         # this is jsonl data format
-        self.data = open(self.dataset_path)
+        with open(self.dataset_path) as f:
+            self.data = f.read()
 
     def _sample_token(self, num_tokens: int, tokenizer: TokenizerLike) -> list[int]:
         # Initialize vocab only if it doesn't exist yet
@@ -1492,10 +1492,9 @@ class TimedTrace(BenchmarkDataset):
         **kwargs,
     ) -> list:
         samples: list = []
-        ind = 0
         assert tokenizer is not None, "Tokenizer must be provided, now is Null"
 
-        for entry in self.data:
+        for ind, entry in enumerate(self.data):
             if len(samples) >= num_requests:
                 break
 
@@ -1531,7 +1530,6 @@ class TimedTrace(BenchmarkDataset):
                     timestamp=timestamp,
                 )
             )
-            ind += 1
 
         return samples
 
@@ -1677,19 +1675,28 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         help="Output length for each request. Overrides the output length "
         "from the ShareGPT dataset.",
     )
-    # FIXME(atr): I dont know why "timed-trace dataset options" as the name does not work!
+
+    # FIXME(atr): I dont know why "timed-trace dataset options" as the
+    # name does not work!
     timed_trace_group = parser.add_argument_group("timed-trace")
     timed_trace_group.add_argument(
         "--chunk-hash-size",
         type=int,
         default=16,
-        help="Each hash tokens, if present, represent how many token hashes. For example in Moonshot traces it is 512, while Alibaba has 16.",
+        help=(
+            "Each hash tokens, if present, represent how many token "
+            "hashes. For example in Moonshot traces it is 512, while "
+            "Alibaba has 16."
+        ),
     )
     timed_trace_group.add_argument(
         "--sec-multiplier",
         type=float,
         default=0.001,
-        help="What multipler to use when converting timestamps to seconds. We will multiply timestamps by this.",
+        help=(
+            "What multiplier to use when converting timestamps to "
+            "seconds. We will multiply timestamps by this."
+        ),
     )
     timed_trace_group.add_argument(
         "--label-timestamp",
@@ -1701,19 +1708,19 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--label-input-length",
         type=str,
         default="input_length",
-        help="What label to use to index the input length field in the trace.",
+        help=("What label to use to index the input length field in the trace."),
     )
     timed_trace_group.add_argument(
         "--label-output-length",
         type=str,
         default="output_length",
-        help="What label to use to index the output length field in the trace.",
+        help=("What label to use to index the output length field in the trace."),
     )
     timed_trace_group.add_argument(
         "--label-hash-ids",
         type=str,
         default="hash_ids",
-        help="What label to use to index the hash ids for the input prompts.",
+        help=("What label to use to index the hash ids for the input prompts."),
     )
 
     blazedit_group = parser.add_argument_group("blazedit dataset options")
