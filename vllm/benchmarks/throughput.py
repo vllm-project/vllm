@@ -44,25 +44,21 @@ from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
+RESET_PREFIX_WARNING = (
+    "reset_prefix_cache() failed after warmup; the "
+    "timed run may still reuse KV blocks from warmup. "
+    "If metrics look skewed, try --no-enable-prefix-caching."
+)
+
 
 def reset_prefix_cache(llm) -> None:
     if not llm.reset_prefix_cache():
-        warnings.warn(
-            "reset_prefix_cache() failed after warmup; the timed run may still "
-            "reuse KV blocks from warmup. If metrics look skewed, try "
-            "--no-enable-prefix-caching.",
-            stacklevel=2,
-        )
+        warnings.warn(RESET_PREFIX_WARNING, stacklevel=2)
 
 
 async def reset_prefix_cache_async(llm) -> None:
     if not await llm.reset_prefix_cache():
-        warnings.warn(
-            "reset_prefix_cache() failed after warmup; the timed run may still "
-            "reuse KV blocks from warmup. If metrics look skewed, try "
-            "--no-enable-prefix-caching.",
-            stacklevel=2,
-        )
+        warnings.warn(RESET_PREFIX_WARNING, stacklevel=2)
 
 
 def run_vllm(
