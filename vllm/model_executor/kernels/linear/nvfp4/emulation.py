@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     run_nvfp4_emulations,
 )
 
-from .NvFp4LinearKernel import NvFp4LinearKernel, NvFp4LinearLayerConfig
+from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
@@ -22,7 +22,7 @@ class EmulationNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

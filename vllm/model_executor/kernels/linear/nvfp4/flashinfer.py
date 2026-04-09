@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm, has_flashinfer
 
-from .NvFp4LinearKernel import NvFp4LinearKernel, NvFp4LinearLayerConfig
+from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
@@ -36,7 +36,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return False, "FlashInfer + >=sm_100 required"
 
     @classmethod
-    def can_implement(cls, c: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -99,7 +99,7 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
         return False, "FlashInfer required"
 
     @classmethod
-    def can_implement(cls, c: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -166,7 +166,7 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
         return False, "FlashInfer required"
 
     @classmethod
-    def can_implement(cls, c: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

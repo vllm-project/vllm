@@ -28,10 +28,10 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
-    def __init__(self, c: NvFp4LinearLayerConfig) -> None:
-        assert self.can_implement(c)[0]
+    def __init__(self, config: NvFp4LinearLayerConfig) -> None:
+        assert self.can_implement(config)[0]
         assert self.is_supported()[0]
-        self.config = c
+        self.config = config
 
     @classmethod
     @abstractmethod
@@ -43,8 +43,8 @@ class NvFp4LinearKernel(ABC):
 
     @classmethod
     @abstractmethod
-    def can_implement(cls, c: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
-        """Return whether this kernel can handle *c*."""
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+        """Return whether this kernel can handle *config*."""
         raise NotImplementedError
 
     @abstractmethod

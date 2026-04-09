@@ -10,7 +10,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 )
 from vllm.utils.import_utils import has_fbgemm_gpu
 
-from .NvFp4LinearKernel import NvFp4LinearKernel, NvFp4LinearLayerConfig
+from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 
 class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
@@ -25,7 +25,7 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
         return False, "fbgemm_gpu required"
 
     @classmethod
-    def can_implement(cls, c: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, config: NvFp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

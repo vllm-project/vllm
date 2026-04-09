@@ -526,6 +526,16 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
             continue
 
+        if kernel_cls is EmulationNvFp4LinearKernel and failure_reasons:
+            logger.warning_once(
+                "NVFP4 linear falling back to the slow and unoptimized "
+                "emulation backend as no optimized backend is available "
+                "(unavailable reasons:\n - %s\n). "
+                "In case you expect one of these backends to be used, "
+                "please verify your environment.",
+                "\n - ".join(failure_reasons),
+            )
+
         logger.info_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
         return kernel_cls(config)
 
