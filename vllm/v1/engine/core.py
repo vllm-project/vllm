@@ -1729,7 +1729,6 @@ class DPEngineCoreProc(EngineCoreProc):
         self.dp_rank = dp_rank
         dp_group, dp_store = parallel_config.stateless_init_dp_group(
             return_store=True,
-            fault_tolerance_config=parallel_config.fault_tolerance_config,
         )
         self.dp_group, self.dp_store = dp_group, dp_store
 

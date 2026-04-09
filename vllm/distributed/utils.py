@@ -16,7 +16,7 @@ import uuid
 from collections import deque
 from collections.abc import Sequence
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 from torch.distributed import ProcessGroup, Store, TCPStore
@@ -32,9 +32,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import suppress_stdout
-
-if TYPE_CHECKING:
-    from vllm.config import FaultToleranceConfig
 
 logger = init_logger(__name__)
 
@@ -533,7 +530,7 @@ def stateless_init_torch_distributed_process_group(
     group_name: str | None = None,
     return_store: bool = False,
     listen_socket: socket.socket | None = None,
-    fault_tolerance_config: "FaultToleranceConfig | None" = None,
+    gloo_timeout_seconds: int | None = None,
 ) -> ProcessGroup | tuple[ProcessGroup, Store]:
     """
     A replacement for `torch.distributed.init_process_group` that does not
@@ -574,8 +571,8 @@ def stateless_init_torch_distributed_process_group(
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
-    if fault_tolerance_config is not None:
-        timeout = timedelta(seconds=fault_tolerance_config.gloo_comm_timeout_sec)
+    if gloo_timeout_seconds is not None:
+        timeout = timedelta(seconds=gloo_timeout_seconds)
     if listen_socket is not None:
         store = create_tcp_store(
             host,

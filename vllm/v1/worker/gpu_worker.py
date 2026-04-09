@@ -1061,7 +1061,6 @@ def init_worker_distributed_environment(
         parallel_config.pipeline_parallel_size,
         parallel_config.prefill_context_parallel_size,
         parallel_config.decode_context_parallel_size,
-        fault_tolerance_config=parallel_config.fault_tolerance_config,
     )
 
     # Init ec connector here before KV caches init

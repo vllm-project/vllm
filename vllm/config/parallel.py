@@ -291,6 +291,9 @@ class ParallelConfig:
     timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
     Increase this for multi-node setups where model downloads may be slow."""
 
+    gloo_timeout_seconds: int | None = None
+    """Timeout (in seconds) for gloo communication groups."""
+
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
 
@@ -563,18 +566,15 @@ class ParallelConfig:
     def stateless_init_dp_group(
         self,
         return_store: Literal[False] = False,
-        fault_tolerance_config: "FaultToleranceConfig | None" = None,
     ) -> ProcessGroup: ...
     @overload
     def stateless_init_dp_group(
         self,
         return_store: Literal[True] = True,
-        fault_tolerance_config: "FaultToleranceConfig | None" = None,
     ) -> tuple[ProcessGroup, Store]: ...
     def stateless_init_dp_group(
         self,
         return_store: bool = False,
-        fault_tolerance_config: "FaultToleranceConfig | None" = None,
     ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
@@ -603,7 +603,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
-                    fault_tolerance_config=fault_tolerance_config,
+                    gloo_timeout_seconds=self.gloo_timeout_seconds,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
