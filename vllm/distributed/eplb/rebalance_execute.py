@@ -48,7 +48,7 @@ class AsyncEplbLayerResult:
     """Index of the MoE layer that was transferred."""
     new_physical_to_logical_map: torch.Tensor
     """
-    New physical→logical mapping for all layers, on CPU.
+    New physical→logical mapping for layers_idx, on CPU.
     Shape: (num_physical_experts)
     """
     is_unchanged: np.ndarray
