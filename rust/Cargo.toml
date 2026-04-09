@@ -86,7 +86,7 @@ vllm-llm = { path = "src/llm" }
 vllm-metrics = { path = "src/metrics" }
 vllm-server = { path = "src/server" }
 vllm-text = { path = "src/text" }
-zeromq = { git = "https://github.com/zeromq/zmq.rs", rev = "808ceb6", default-features = false, features = [
+zeromq = { git = "https://github.com/BugenZhao/zmq.rs", rev = "dde4ee5c48846b0cc22b1f4fad8c7514748180fe", default-features = false, features = [
     "tokio-runtime",
     "all-transport",
 ] } # TODO: switch to crates.io version after the patch gets released

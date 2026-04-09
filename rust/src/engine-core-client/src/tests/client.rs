@@ -14,7 +14,7 @@ use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
 use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
-use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, ZmqMessage};
+use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::protocol::handshake::{HandshakeInitMessage, ReadyMessage};
 use crate::protocol::stats::SchedulerStats;
@@ -268,6 +268,7 @@ fn bootstrapped_test_config(
     engine_count: usize,
     ready_timeout: Duration,
     client_index: u32,
+    coordinator_mode: Option<CoordinatorMode>,
 ) -> EngineCoreClientConfig {
     EngineCoreClientConfig {
         transport_mode: TransportMode::Bootstrapped {
@@ -276,10 +277,35 @@ fn bootstrapped_test_config(
             engine_count,
             ready_timeout,
         },
-        coordinator_mode: None,
+        coordinator_mode,
         model_name: "test-model".to_string(),
         client_index,
     }
+}
+
+async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
+    xpub.recv().await.unwrap().into_vec()
+}
+
+async fn recv_xpub_subscription(xpub: &mut XPubSocket) {
+    let frames = recv_xpub_message(xpub).await;
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].as_ref(), b"\x01");
+}
+
+async fn recv_external_coordinator_wakeup(xpub: &mut XPubSocket) -> (u32, u32) {
+    let frames = recv_xpub_message(xpub).await;
+    assert_eq!(frames.len(), 1);
+    rmp_serde::from_slice(&frames[0]).expect("decode external coordinator wakeup")
+}
+
+async fn send_external_coordinator_publish<T: serde::Serialize>(
+    xpub: &mut XPubSocket,
+    payload: &T,
+) {
+    xpub.send(ZmqMessage::from(rmp_serde::to_vec_named(payload).unwrap()))
+        .await
+        .unwrap();
 }
 
 fn spawn_mock_engine_task_with_init<F>(
@@ -2212,6 +2238,7 @@ async fn bootstrapped_connects_after_single_engine_registration() {
                 1,
                 Duration::from_secs(2),
                 0,
+                None,
             ))
             .await
             .unwrap()
@@ -2250,6 +2277,7 @@ async fn bootstrapped_connects_with_contiguous_engine_ids() {
                 2,
                 Duration::from_secs(2),
                 0,
+                None,
             ))
             .await
             .unwrap()
@@ -2287,6 +2315,7 @@ async fn bootstrapped_connect_times_out_without_registration() {
         1,
         Duration::from_millis(100),
         0,
+        None,
     ))
     .await;
 
@@ -2295,4 +2324,316 @@ async fn bootstrapped_connect_times_out_without_registration() {
         Err(error) => error,
     };
     assert!(matches!(error, Error::InputRegistrationTimeout { .. }));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_external_coordinator_connects_and_subscribes() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+    let coordinator_address = ipc.endpoint("stats.sock");
+
+    let mut stats_socket = XPubSocket::new();
+    stats_socket.bind(&coordinator_address).await.unwrap();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        let coordinator_address = coordinator_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config(
+                input_address,
+                output_address,
+                1,
+                Duration::from_secs(2),
+                0,
+                Some(CoordinatorMode::External {
+                    address: coordinator_address,
+                }),
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (_dealer, _push) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
+    let client = client_task.await.unwrap();
+
+    timeout(
+        Duration::from_secs(1),
+        recv_xpub_subscription(&mut stats_socket),
+    )
+    .await
+    .unwrap();
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_external_coordinator_updates_wave_ignores_counts_and_sends_one_wakeup() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+    let coordinator_address = ipc.endpoint("stats.sock");
+
+    let mut stats_socket = XPubSocket::new();
+    stats_socket.bind(&coordinator_address).await.unwrap();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        let coordinator_address = coordinator_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config(
+                input_address,
+                output_address,
+                1,
+                Duration::from_secs(2),
+                0,
+                Some(CoordinatorMode::External {
+                    address: coordinator_address,
+                }),
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (mut dealer, mut push) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
+    let client = client_task.await.unwrap();
+    recv_xpub_subscription(&mut stats_socket).await;
+
+    send_external_coordinator_publish(&mut stats_socket, &(vec![(11_u32, 3_u32)], 7_u32, false))
+        .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut stream = client.call(sample_request()).await.unwrap();
+
+    let wakeup = timeout(
+        Duration::from_secs(1),
+        recv_external_coordinator_wakeup(&mut stats_socket),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wakeup, (0, 7));
+
+    assert!(
+        timeout(
+            Duration::from_millis(200),
+            recv_external_coordinator_wakeup(&mut stats_socket)
+        )
+        .await
+        .is_err()
+    );
+
+    let add = recv_engine_message(&mut dealer).await;
+    assert_eq!(add[0].as_ref(), &[0x00]);
+    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+    assert_eq!(request.request_id, "req-1");
+    assert_eq!(request.current_wave, 7);
+    assert!(client.is_healthy());
+
+    send_outputs(
+        &mut push,
+        EngineCoreOutputs {
+            engine_index: 0,
+            outputs: vec![request_output(
+                "req-1",
+                vec![],
+                Some(EngineCoreFinishReason::Length),
+            )],
+            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let final_output = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap();
+    assert!(final_output.is_some());
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+    let coordinator_address = ipc.endpoint("stats.sock");
+
+    let mut stats_socket = XPubSocket::new();
+    stats_socket.bind(&coordinator_address).await.unwrap();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        let coordinator_address = coordinator_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config(
+                input_address,
+                output_address,
+                1,
+                Duration::from_secs(2),
+                0,
+                Some(CoordinatorMode::External {
+                    address: coordinator_address,
+                }),
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (mut dealer, mut push) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x00, 0x00]).await;
+    let client = client_task.await.unwrap();
+    recv_xpub_subscription(&mut stats_socket).await;
+
+    send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 5_u32, true)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut stream = client.call(sample_request()).await.unwrap();
+
+    assert!(
+        timeout(
+            Duration::from_millis(200),
+            recv_external_coordinator_wakeup(&mut stats_socket)
+        )
+        .await
+        .is_err()
+    );
+
+    let add = recv_engine_message(&mut dealer).await;
+    let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+    assert_eq!(request.current_wave, 5);
+
+    send_outputs(
+        &mut push,
+        EngineCoreOutputs {
+            engine_index: 0,
+            outputs: vec![request_output(
+                "req-1",
+                vec![],
+                Some(EngineCoreFinishReason::Length),
+            )],
+            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let final_output = timeout(Duration::from_secs(1), stream.next())
+        .await
+        .unwrap();
+    assert!(final_output.is_some());
+
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bootstrapped_external_coordinator_keeps_local_inflight_routing() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let input_address = ipc.input_endpoint();
+    let output_address = ipc.output_endpoint();
+    let coordinator_address = ipc.endpoint("stats.sock");
+
+    let mut stats_socket = XPubSocket::new();
+    stats_socket.bind(&coordinator_address).await.unwrap();
+
+    let client_task = tokio::spawn({
+        let input_address = input_address.clone();
+        let output_address = output_address.clone();
+        let coordinator_address = coordinator_address.clone();
+        async move {
+            EngineCoreClient::connect(bootstrapped_test_config(
+                input_address,
+                output_address,
+                2,
+                Duration::from_secs(2),
+                0,
+                Some(CoordinatorMode::External {
+                    address: coordinator_address,
+                }),
+            ))
+            .await
+            .unwrap()
+        }
+    });
+
+    let (mut dealer0, mut push0) = setup_bootstrapped_mock_engine(
+        input_address.clone(),
+        output_address.clone(),
+        &[0x00, 0x00],
+    )
+    .await;
+    let (mut dealer1, mut push1) =
+        setup_bootstrapped_mock_engine(input_address, output_address, &[0x01, 0x00]).await;
+    let client = client_task.await.unwrap();
+    recv_xpub_subscription(&mut stats_socket).await;
+
+    send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 0_u32, true)).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+
+    let add_1 = recv_engine_message(&mut dealer0).await;
+    let req_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
+    assert_eq!(req_1.request_id, "req-1");
+
+    let add_2 = recv_engine_message(&mut dealer1).await;
+    let req_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
+    assert_eq!(req_2.request_id, "req-2");
+
+    send_outputs(
+        &mut push0,
+        EngineCoreOutputs {
+            engine_index: 0,
+            outputs: vec![request_output(
+                "req-1",
+                vec![],
+                Some(EngineCoreFinishReason::Length),
+            )],
+            finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+            ..Default::default()
+        },
+    )
+    .await;
+    send_outputs(
+        &mut push1,
+        EngineCoreOutputs {
+            engine_index: 1,
+            outputs: vec![request_output(
+                "req-2",
+                vec![],
+                Some(EngineCoreFinishReason::Length),
+            )],
+            finished_requests: Some(BTreeSet::from(["req-2".to_string()])),
+            ..Default::default()
+        },
+    )
+    .await;
+
+    assert!(
+        timeout(Duration::from_secs(1), stream_1.next())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        timeout(Duration::from_secs(1), stream_2.next())
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    client.shutdown().await.unwrap();
 }

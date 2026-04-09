@@ -136,6 +136,7 @@ impl SharedRuntimeArgs {
         listen_fd: i32,
         input_address: String,
         output_address: String,
+        coordinator_address: Option<String>,
         engine_count: usize,
     ) -> Config {
         Config {
@@ -145,8 +146,10 @@ impl SharedRuntimeArgs {
                 engine_count,
                 ready_timeout: self.ready_timeout(),
             },
-            // TODO: this might be an external Python process once we support it.
-            coordinator_mode: CoordinatorMode::None,
+            coordinator_mode: match coordinator_address {
+                Some(address) => CoordinatorMode::External { address },
+                None => CoordinatorMode::None,
+            },
             model: self.model,
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
@@ -214,6 +217,10 @@ pub struct FrontendArgs {
     /// Frontend output PULL socket address that the Python engines will push responses to.
     #[arg(long)]
     pub output_address: String,
+    /// Optional Python-owned frontend-side DP coordinator socket address for external coordinator
+    /// mode in the bootstrapped frontend path, i.e., `stats_update_address`.
+    #[arg(long)]
+    pub coordinator_address: Option<String>,
     /// Total number of data-parallel engines expected for this frontend.
     #[arg(long, default_value_t = 1)]
     pub engine_count: usize,
@@ -230,6 +237,7 @@ impl FrontendArgs {
             self.listen_fd,
             self.input_address,
             self.output_address,
+            self.coordinator_address,
             self.engine_count,
         )
     }

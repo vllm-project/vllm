@@ -1,5 +1,7 @@
 mod bootstrap;
-mod runtime;
+mod external;
+mod handle;
+mod inproc;
 
 pub(crate) use bootstrap::CoordinatorBootstrap;
-pub(crate) use runtime::CoordinatorHandle;
+pub(crate) use handle::CoordinatorHandle;

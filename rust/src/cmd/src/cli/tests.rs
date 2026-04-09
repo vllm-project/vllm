@@ -187,6 +187,8 @@ fn frontend_args_accept_json() {
         "ipc:///tmp/input.sock",
         "--output-address",
         "ipc:///tmp/output.sock",
+        "--coordinator-address",
+        "tcp://127.0.0.1:7000",
         "--args-json",
         r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_count":2}"#,
     ])
@@ -199,6 +201,9 @@ fn frontend_args_accept_json() {
                     listen_fd: 3,
                     input_address: "ipc:///tmp/input.sock",
                     output_address: "ipc:///tmp/output.sock",
+                    coordinator_address: Some(
+                        "tcp://127.0.0.1:7000",
+                    ),
                     engine_count: 1,
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
@@ -746,4 +751,54 @@ fn frontend_args_reject_legacy_handshake_flags() {
     .unwrap_err();
 
     assert!(error.to_string().contains("--handshake-address"));
+}
+
+#[test]
+fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "frontend",
+        "--listen-fd",
+        "3",
+        "--input-address",
+        "ipc:///tmp/input.sock",
+        "--output-address",
+        "ipc:///tmp/output.sock",
+        "--coordinator-address",
+        "tcp://127.0.0.1:7000",
+        "--engine-count",
+        "2",
+        "--args-json",
+        r#"{"model_tag":"Qwen/Qwen3-0.6B"}"#,
+    ])
+    .unwrap();
+
+    let Command::Frontend(args) = cli.command else {
+        panic!("expected frontend args");
+    };
+    let config = args.into_config();
+
+    expect![[r#"
+        Config {
+            transport_mode: Bootstrapped {
+                input_address: "ipc:///tmp/input.sock",
+                output_address: "ipc:///tmp/output.sock",
+                engine_count: 2,
+                ready_timeout: 300s,
+            },
+            coordinator_mode: External {
+                address: "tcp://127.0.0.1:7000",
+            },
+            model: "Qwen/Qwen3-0.6B",
+            listener_mode: InheritedFd {
+                fd: 3,
+            },
+            tool_call_parser: None,
+            reasoning_parser: None,
+            max_model_len: None,
+            enable_log_requests: false,
+            disable_log_stats: false,
+        }
+    "#]]
+    .assert_debug_eq(&config);
 }

@@ -59,10 +59,7 @@ pub enum CoordinatorMode {
     /// Run the Rust in-process coordinator for managed `serve` deployments.
     InProc,
     /// Connect to an external coordinator owned by another process.
-    ///
-    /// This mode is defined now so the transport/config split is explicit, but it is rejected in
-    /// phase 1 until the external control-plane protocol is implemented.
-    External { stats_update_address: String },
+    External { address: String },
 }
 
 /// Configuration for connecting a Rust frontend client to an already running Python
@@ -234,14 +231,8 @@ impl EngineCoreClient {
                 engine_count,
                 ready_timeout,
             } => {
-                match config.coordinator_mode {
-                    None => {}
-                    Some(CoordinatorMode::External { .. }) => {
-                        return Err(Error::UnsupportedExternalCoordinator);
-                    }
-                    Some(CoordinatorMode::InProc) => {
-                        panic!("cannot use in-process coordinator with bootstrapped transport mode")
-                    }
+                if let Some(CoordinatorMode::InProc) = config.coordinator_mode {
+                    panic!("cannot use in-process coordinator with bootstrapped transport mode")
                 }
 
                 transport::connect_bootstrapped(
@@ -254,7 +245,7 @@ impl EngineCoreClient {
             }
         };
 
-        Self::from_connected(config, connected)
+        Self::from_connected(config, connected).await
     }
 
     /// Connect using handshake-owned transport mode while overriding the frontend input/output bind
@@ -275,7 +266,7 @@ impl EngineCoreClient {
 
     /// Create a new client instance from the connected transport state after the startup handshake
     /// completes.
-    fn from_connected(
+    async fn from_connected(
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
@@ -300,7 +291,8 @@ impl EngineCoreClient {
 
         let (coordinator, coordinator_output_task, coordinator_task) =
             if let Some(coordinator_transport) = connected.coordinator {
-                let (handle, runner) = CoordinatorHandle::new(coordinator_transport.input_socket);
+                let (handle, runner) =
+                    CoordinatorHandle::new_inproc(coordinator_transport.input_socket);
                 let (coordinator_output_tx, coordinator_output_rx) = mpsc::channel(64);
                 let coordinator_output_task =
                     AbortOnDropHandle::new(tokio::spawn(transport::run_output_loop(
@@ -315,6 +307,15 @@ impl EngineCoreClient {
                     Some(coordinator_output_task),
                     Some(coordinator_task),
                 )
+            } else if let Some(CoordinatorMode::External {
+                address: coordinator_address,
+            }) = config.coordinator_mode.as_ref()
+            {
+                let (handle, service) =
+                    CoordinatorHandle::connect_external(coordinator_address).await?;
+                let coordinator_task =
+                    AbortOnDropHandle::new(tokio::spawn(service.run(inner.clone())));
+                (Some(handle), None, Some(coordinator_task))
             } else {
                 (None, None, None)
             };

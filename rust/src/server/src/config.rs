@@ -18,7 +18,7 @@ pub enum CoordinatorMode {
     /// engines and the model is MoE.
     MaybeInProc,
     /// Connect to an external coordinator owned by another process.
-    External { stats_update_address: String },
+    External { address: String },
 }
 
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
@@ -68,10 +68,8 @@ impl Config {
                     None
                 }
             }
-            CoordinatorMode::External {
-                stats_update_address,
-            } => Some(EngineCoreCoordinatorMode::External {
-                stats_update_address: stats_update_address.clone(),
+            CoordinatorMode::External { address } => Some(EngineCoreCoordinatorMode::External {
+                address: address.clone(),
             }),
         }
     }
