@@ -133,7 +133,7 @@ def create_cross_attention_backend(
             value: torch.Tensor,
             kv_cache: torch.Tensor,
             attn_metadata: AttentionMetadata,
-            output: torch.Tensor | None = None,
+            output: torch.Tensor,
             output_scale: torch.Tensor | None = None,
             output_block_scale: torch.Tensor | None = None,
         ) -> torch.Tensor:

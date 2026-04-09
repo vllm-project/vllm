@@ -78,7 +78,7 @@ def _parse_gemma4_value(value_str: str) -> object:
     return value_str
 
 
-def _parse_gemma4_args(args_str: str) -> dict:
+def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
     """Parse Gemma4's custom key:value format into a Python dict.
 
     Format examples::
@@ -88,6 +88,12 @@ def _parse_gemma4_args(args_str: str) -> dict:
         count:42,flag:true
         nested:{inner_key:<|"|>val<|"|>}
         items:[<|"|>a<|"|>,<|"|>b<|"|>]
+
+    Args:
+        args_str: The raw Gemma4 argument string.
+        partial: When True (streaming), bare values at end of string are
+            omitted because they may be incomplete and type-unstable
+            (e.g. partial boolean parsed as bare string).
 
     Returns a dict ready for ``json.dumps()``.
     """
@@ -116,14 +122,16 @@ def _parse_gemma4_args(args_str: str) -> dict:
 
         # Parse value
         if i >= n:
-            result[key] = ""
+            if not partial:
+                result[key] = ""
             break
 
         # Skip whitespace after ':'
         while i < n and args_str[i] in (" ", "\n", "\t"):
             i += 1
         if i >= n:
-            result[key] = ""
+            if not partial:
+                result[key] = ""
             break
 
         # String value: <|"|>...<|"|>
@@ -155,7 +163,12 @@ def _parse_gemma4_args(args_str: str) -> dict:
                 elif args_str[i] == "}":
                     depth -= 1
                 i += 1
-            result[key] = _parse_gemma4_args(args_str[obj_start : i - 1])
+            if depth > 0:
+                # Incomplete nested object — use i (not i-1) to avoid
+                # dropping the last char, and recurse as partial.
+                result[key] = _parse_gemma4_args(args_str[obj_start:i], partial=True)
+            else:
+                result[key] = _parse_gemma4_args(args_str[obj_start : i - 1])
 
         # Array: [...]
         elif args_str[i] == "[":
@@ -173,20 +186,26 @@ def _parse_gemma4_args(args_str: str) -> dict:
                 elif args_str[i] == "]":
                     depth -= 1
                 i += 1
-            arr_content = args_str[arr_start : i - 1]
-            result[key] = _parse_gemma4_array(arr_content)
+            if depth > 0:
+                result[key] = _parse_gemma4_array(args_str[arr_start:i], partial=True)
+            else:
+                result[key] = _parse_gemma4_array(args_str[arr_start : i - 1])
 
         # Bare value (number, boolean, etc.)
         else:
             val_start = i
             while i < n and args_str[i] not in (",", "}", "]"):
                 i += 1
+            if partial and i >= n:
+                # Value may be incomplete (e.g. partial boolean) —
+                # withhold to avoid type instability during streaming.
+                break
             result[key] = _parse_gemma4_value(args_str[val_start:i])
 
     return result
 
 
-def _parse_gemma4_array(arr_str: str) -> list:
+def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
     """Parse a Gemma4 array content string into a Python list."""
     items: list = []
     i = 0
@@ -224,7 +243,10 @@ def _parse_gemma4_array(arr_str: str) -> list:
                 elif arr_str[i] == "}":
                     depth -= 1
                 i += 1
-            items.append(_parse_gemma4_args(arr_str[obj_start : i - 1]))
+            if depth > 0:
+                items.append(_parse_gemma4_args(arr_str[obj_start:i], partial=True))
+            else:
+                items.append(_parse_gemma4_args(arr_str[obj_start : i - 1]))
 
         # Nested array
         elif arr_str[i] == "[":
@@ -237,13 +259,18 @@ def _parse_gemma4_array(arr_str: str) -> list:
                 elif arr_str[i] == "]":
                     depth -= 1
                 i += 1
-            items.append(_parse_gemma4_array(arr_str[sub_start : i - 1]))
+            if depth > 0:
+                items.append(_parse_gemma4_array(arr_str[sub_start:i], partial=True))
+            else:
+                items.append(_parse_gemma4_array(arr_str[sub_start : i - 1]))
 
         # Bare value
         else:
             val_start = i
             while i < n and arr_str[i] not in (",", "]"):
                 i += 1
+            if partial and i >= n:
+                break
             items.append(_parse_gemma4_value(arr_str[val_start:i]))
 
     return items
@@ -436,8 +463,10 @@ class Gemma4ToolParser(ToolParser):
     ) -> DeltaMessage | None:
         # Buffer delta text to handle multi-token special sequences
         delta_text = self._buffer_delta_text(delta_text)
-        # Reconstruct current_text after buffering to stay in sync
-        current_text = previous_text + delta_text
+        # Keep current_text from the upstream stream state. The buffered delta
+        # is only for emission, and must not be stitched back into the
+        # accumulated model text or normal content like "<div>" can be
+        # duplicated into "<<div>" when a tool call just ended.
 
         # If no tool call token seen yet, emit as content
         if self.tool_call_start_token not in current_text:
@@ -661,7 +690,7 @@ class Gemma4ToolParser(ToolParser):
             DeltaMessage with the argument diff, or None if no new content.
         """
         try:
-            current_args = _parse_gemma4_args(raw_args_str)
+            current_args = _parse_gemma4_args(raw_args_str, partial=True)
         except Exception:
             logger.debug(
                 "Could not parse partial Gemma4 args yet: %s",
