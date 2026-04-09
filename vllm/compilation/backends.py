@@ -1002,11 +1002,11 @@ class VllmBackend:
         )
         hash_content = []
         for filepath in forward_code_files:
-            hash_content.append(filepath)
             if filepath == "<string>":
                 # This means the function was dynamically generated, with
                 # e.g. exec(). We can't actually check these.
                 continue
+            hash_content.append(filepath)
             try:
                 with open(filepath) as f:
                     hash_content.append(f.read())
