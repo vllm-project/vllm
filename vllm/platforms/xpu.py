@@ -203,6 +203,39 @@ class XPUPlatform(Platform):
                     "falling back to PIECEWISE graph mode on XPU platform."
                 )
 
+        # Disable fusion passes not yet supported on XPU.
+        pass_config = compilation_config.pass_config
+        if pass_config.enable_sp:
+            logger.warning(
+                "Sequence parallelism is not yet supported on XPU and will be disabled."
+            )
+            pass_config.enable_sp = False
+        if pass_config.fuse_gemm_comms:
+            logger.warning("Async TP is not yet supported on XPU and will be disabled.")
+            pass_config.fuse_gemm_comms = False
+        if pass_config.fuse_allreduce_rms:
+            logger.warning(
+                "AllReduce + RMSNorm fusion is not yet supported on XPU and will "
+                "be disabled."
+            )
+            pass_config.fuse_allreduce_rms = False
+        if pass_config.fuse_norm_quant:
+            logger.warning(
+                "RMSNorm + quant fusion is not yet supported on XPU and will be disabled."
+            )
+            pass_config.fuse_norm_quant = False
+        if pass_config.fuse_act_quant:
+            logger.warning(
+                "Activation + quant fusion is not yet supported on XPU and will "
+                "be disabled."
+            )
+            pass_config.fuse_act_quant = False
+        if pass_config.fuse_attn_quant:
+            logger.warning(
+                "Attention + quant fusion is not yet supported on XPU and will be disabled."
+            )
+            pass_config.fuse_attn_quant = False
+
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
