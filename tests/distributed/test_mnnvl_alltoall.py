@@ -457,8 +457,10 @@ def test_agrs_dispatch_combine(world_size):
 #
 # Tests actual data flow through the FlashInfer NVLink two-sided backend
 # by calling flashinfer_alltoall_dispatch (with defer_input_quant=True to
-# skip quantization) and flashinfer_alltoall_combine, then comparing
-# the combine output against the AgRs reference implementation.
+# skip quantization) and flashinfer_alltoall_combine, then verifying exact
+# round-trip values. Dispatch sends each token once per distinct expert
+# rank, and combine performs an unweighted sum, so:
+#   dispatch(hidden) → identity → combine = hidden * num_distinct_ranks(i)
 # ---------------------------------------------------------------------------
 
 
@@ -488,7 +490,6 @@ def _two_sided_data_worker(rank, world_size):
     tokens_per_rank = 32
     experts_per_token = 2
     num_experts = world_size * 4
-    total_tokens = world_size * tokens_per_rank
 
     # Initialize the FlashInfer two-sided manager
     manager = FlashInferNVLinkTwoSidedManager(cpu_group)
@@ -544,51 +545,45 @@ def _two_sided_data_worker(rank, world_size):
             assert fi_hidden.shape[1] == hidden_size
             assert fi_hidden.numel() > 0
 
-            # --- Combine phase ---
-            expert_output_for_fi = torch.randn(
-                fi_hidden.shape[0], hidden_size, device=device, dtype=torch.bfloat16,
-            )
-
-            fi_combined = flashinfer_alltoall_combine(
+            # --- Round-trip exact verification ---
+            # The all-to-all sends each token once per *distinct* expert
+            # rank. Combine performs an unweighted sum of the per-rank
+            # contributions. With identity expert (feeding dispatched
+            # hidden straight back):
+            #   result[i] = hidden[i] * num_distinct_expert_ranks(i)
+            combined = flashinfer_alltoall_combine(
                 manager,
-                expert_output_for_fi,
+                fi_hidden,
                 top_k=experts_per_token,
                 token_count=tokens_per_rank,
                 alltoall_info=alltoall_info,
             )
+            assert combined.shape == (tokens_per_rank, hidden_size)
 
-            # Verify combine returns the right shape: one row per local token
-            assert fi_combined.shape == (tokens_per_rank, hidden_size)
+            experts_per_rank = num_experts // world_size
+            expert_ranks = topk_ids // experts_per_rank  # (tokens, top_k)
+            num_distinct = torch.tensor(
+                [len(set(row.tolist())) for row in expert_ranks],
+                device=device, dtype=torch.float32,
+            ).unsqueeze(1)  # (tokens, 1)
+            expected = (hidden.float() * num_distinct).to(hidden.dtype)
+            torch.testing.assert_close(combined, expected)
 
-            # --- Round-trip consistency check ---
-            # Send a known value through dispatch+combine and verify the
-            # output is non-zero (data actually moved between ranks).
-            ones = torch.ones(
-                tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16,
-            )
-            rt_info, _, _, rt_dispatched, _ = flashinfer_alltoall_dispatch(
+            # --- Linearity check with scaled expert output ---
+            # Scaling the expert output by a constant should scale the
+            # combined result by the same constant.
+            scale = 3.0
+            combined_scaled = flashinfer_alltoall_combine(
                 manager,
-                local_sizes,
-                ones,
-                None,
-                topk_ids.clone(),
-                topk_weights.clone(),
-                experts_per_token,
-                num_experts,
-                quant_config,
-                defer_input_quant=True,
-            )
-            rt_combined = flashinfer_alltoall_combine(
-                manager,
-                rt_dispatched,
+                fi_hidden * scale,
                 top_k=experts_per_token,
                 token_count=tokens_per_rank,
-                alltoall_info=rt_info,
+                alltoall_info=alltoall_info,
             )
-            assert rt_combined.shape == (tokens_per_rank, hidden_size)
-            # After dispatch(ones)+combine, the result should be non-zero
-            # because the ones were distributed across ranks and combined back.
-            assert rt_combined.abs().sum() > 0
+            expected_scaled = (
+                hidden.float() * num_distinct * scale
+            ).to(hidden.dtype)
+            torch.testing.assert_close(combined_scaled, expected_scaled)
 
             torch.distributed.barrier()
 
@@ -600,7 +595,7 @@ def _two_sided_data_worker(rank, world_size):
 @requires_ptrace
 @pytest.mark.parametrize("world_size", [2])
 def test_two_sided_dispatch_combine(world_size):
-    """Test FlashInfer two-sided dispatch/combine with actual data flow."""
+    """Test FlashInfer two-sided dispatch/combine with exact value verification."""
     _spawn_workers(_two_sided_data_worker, world_size, dp_size=world_size)
 
 
