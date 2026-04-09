@@ -48,8 +48,13 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 logger.info("Using AgRs manager on XPU device.")
 
     def all_reduce(self, input_) -> torch.Tensor:
-        dist.all_reduce(input_, group=self.device_group)
-        return input_
+        if torch.compiler.is_compiling():
+            output = input_.clone()
+            dist.all_reduce(output, group=self.device_group)
+            return output
+        else:
+            dist.all_reduce(input_, group=self.device_group)
+            return input_
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
