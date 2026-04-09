@@ -46,7 +46,7 @@ def _get_backend_config(backend: str) -> dict:
 
     Args:
         backend: Backend name matching AttentionBackendEnum exactly
-                 (e.g., "FLASH_ATTN", "TRITON_ATTN", "FLASHINFER")
+                 (e.g., "FLASH_ATTN", "TRITON_ATTN", "FLASHINFER", "HPC_ATTN")
 
     Returns:
         Dict with backend_class
@@ -208,7 +208,7 @@ def _create_backend_impl(
 
     scale = get_attention_scale(config.head_dim)
 
-    impl = backend_class.get_impl_cls()(
+    impl_kwargs: dict = dict(
         num_heads=config.num_q_heads,
         head_size=config.head_dim,
         scale=scale,
@@ -217,6 +217,10 @@ def _create_backend_impl(
         sliding_window=None,
         kv_cache_dtype=config.kv_cache_dtype,
     )
+    if config.backend == "HPC_ATTN":
+        impl_kwargs["block_size"] = config.block_size
+
+    impl = backend_class.get_impl_cls()(**impl_kwargs)
 
     kv_cache_spec = FullAttentionSpec(
         block_size=config.block_size,
@@ -488,7 +492,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
 
     requests = parse_batch_spec(config.batch_spec)
 
-    if config.backend == "FLASHINFER":
+    if config.backend in ("FLASHINFER", "HPC_ATTN"):
         requests = reorder_for_flashinfer(requests)
 
     q_lens = [r.q_len for r in requests]
