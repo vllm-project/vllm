@@ -15,6 +15,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.protocol import EngineClient
 from vllm.logger import init_logger
+from vllm.tracing import instrument
 from vllm.v1.engine import PauseMode
 
 logger = init_logger(__name__)
@@ -28,6 +29,7 @@ router = APIRouter()
 
 
 @router.post("/pause")
+@instrument(span_name="POST /pause")
 async def pause_generation(
     raw_request: Request,
     mode: Annotated[PauseMode, Query()] = "abort",
@@ -73,6 +75,7 @@ async def pause_generation(
 
 
 @router.post("/resume")
+@instrument(span_name="POST /resume")
 async def resume_generation(raw_request: Request) -> JSONResponse:
     """Resume generation after a pause."""
 
@@ -93,6 +96,7 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
 
 
 @router.get("/is_paused")
+@instrument(span_name="GET /is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
 
@@ -111,6 +115,7 @@ async def is_paused(raw_request: Request) -> JSONResponse:
 
 
 @router.post("/init_weight_transfer_engine")
+@instrument(span_name="POST /init_weight_transfer_engine")
 async def init_weight_transfer_engine(raw_request: Request):
     try:
         body = await raw_request.json()
@@ -129,6 +134,7 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 
 @router.post("/update_weights")
+@instrument(span_name="POST /update_weights")
 async def update_weights(raw_request: Request):
     try:
         body = await raw_request.json()
@@ -147,6 +153,7 @@ async def update_weights(raw_request: Request):
 
 
 @router.get("/get_world_size")
+@instrument(span_name="GET /get_world_size")
 async def get_world_size(
     raw_request: Request,
     include_dp: bool = Query(True),
