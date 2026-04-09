@@ -18,6 +18,7 @@ from transformers import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
@@ -38,9 +39,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -193,7 +192,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         if inputs.mm_data_items:
             if isinstance(inputs.prompt, str):
                 if len(inputs.prompt) > 0:
@@ -1184,13 +1183,11 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         embed_input_ids: Callable[[torch.Tensor], torch.Tensor],
         *,
         is_multimodal: torch.Tensor | None,
-        handle_oov_mm_token: bool,
     ) -> torch.Tensor:
         inputs_embeds = super()._embed_text_input_ids(
             input_ids,
             embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         # NOTE: inputs_embeds in model runner has size text_config.projection_size
@@ -1219,7 +1216,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         self._is_text_input = (
             multimodal_embeddings is None or len(multimodal_embeddings) == 0
@@ -1232,7 +1228,6 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:

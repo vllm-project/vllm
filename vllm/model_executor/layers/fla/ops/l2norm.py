@@ -76,16 +76,20 @@ def l2norm_fwd_kernel(
 
 
 @triton.jit
-def l2norm_fwd_kernel2(X, Y, eps, M, N: tl.constexpr, MBLOCK: tl.constexpr):
+def l2norm_fwd_kernel2(
+    X, Y, eps, M, N: tl.constexpr, BD: tl.constexpr, MBLOCK: tl.constexpr
+):
     xoffset = tl.program_id(0) * MBLOCK
     row_idx = xoffset + tl.arange(0, MBLOCK)[:, None]
     xmask = row_idx < M
-    rindex = tl.arange(0, N)[None, :]
-    xs = tl.load(X + (rindex + N * row_idx), xmask).to(tl.float32)
-    square = tl.broadcast_to(xs * xs, [MBLOCK, N])
+    rindex = tl.arange(0, BD)[None, :]
+    cmask = rindex < N
+    mask = xmask & cmask
+    xs = tl.load(X + (rindex + N * row_idx), mask, other=0.0).to(tl.float32)
+    square = tl.broadcast_to(xs * xs, [MBLOCK, BD])
     square_sum = tl.sum(tl.where(xmask, square, 0), 1)[:, None]
     rsqrt = tl.rsqrt(square_sum + eps)
-    tl.store(Y + (rindex + N * row_idx), xs * rsqrt, xmask)
+    tl.store(Y + (rindex + N * row_idx), xs * rsqrt, mask)
 
 
 def l2norm_fwd(
@@ -116,6 +120,7 @@ def l2norm_fwd(
             eps,
             T,
             D,
+            BD,
             MBLOCK,
         )
     else:

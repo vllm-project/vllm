@@ -259,8 +259,25 @@ async def test_abort_during_final_step(async_scheduling: bool):
                 # Wait for generation to complete
                 await gen_task
 
-                # Give the scheduler a moment to finish cleanup
-                await asyncio.sleep(0.1)
+                # Poll for the KV connector to record the finish status
+                timeout = 5.0
+                start = time.time()
+                captured_statuses = []
+                while time.time() - start < timeout:
+                    with open(status_file) as f4:
+                        status_lines = f4.read().strip().split("\n")
+                        captured_statuses = [
+                            line
+                            for line in status_lines
+                            if line and line.startswith("FINISHED_")
+                        ]
+                    if captured_statuses:
+                        break
+                    await asyncio.sleep(0.05)
+                else:
+                    raise TimeoutError(
+                        "Timeout waiting for KV connector to record finish status."
+                    )
 
                 # Verify we got output
                 assert len(outputs) > 0, "Should have received at least one output"
@@ -274,15 +291,6 @@ async def test_abort_during_final_step(async_scheduling: bool):
                     f"Expected finish_reason='abort' but got "
                     f"'{final_output.outputs[0].finish_reason}'. "
                 )
-
-                with open(status_file) as f4:
-                    status_lines = f4.read().strip().split("\n")
-                    # Filter for actual finish statuses (not INIT or empty lines)
-                    captured_statuses = [
-                        line
-                        for line in status_lines
-                        if line and line.startswith("FINISHED_")
-                    ]
 
                 assert len(captured_statuses) >= 1, (
                     f"Expected at least 1 captured finish status, got "

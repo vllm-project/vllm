@@ -16,6 +16,23 @@ RAY_BASE_URL="https://raw.githubusercontent.com/ray-project/ray/master/python"
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf "$WORK_DIR"' EXIT
 
+# ── Detect PyTorch index URL ─────────────────────────────────────────────
+
+if python3 -c "import torch; assert torch.version.hip" 2>/dev/null; then
+    ROCM_VER=$(python3 -c "import torch; print(torch.version.hip.rsplit('.', 1)[0])")
+    CANDIDATE_URL="https://download.pytorch.org/whl/rocm${ROCM_VER}"
+    if curl -fsSL --head "${CANDIDATE_URL}/" >/dev/null 2>&1; then
+        TORCH_INDEX_URL="${CANDIDATE_URL}"
+    else
+        echo ">>> WARNING: ROCm ${ROCM_VER} wheel index not found at ${CANDIDATE_URL}"
+        echo ">>>          Falling back to default PyPI (resolution may be incomplete)"
+        TORCH_INDEX_URL=""
+    fi
+else
+    TORCH_INDEX_URL="https://download.pytorch.org/whl/cu129"
+fi
+echo ">>> Using PyTorch index: ${TORCH_INDEX_URL:-PyPI default}"
+
 # Fetch all Ray requirement files used in the LLM depset pipeline
 echo ">>> Fetching Ray requirement files"
 RAY_FILES=(
@@ -116,6 +133,11 @@ echo "============================================================"
 echo ">>> Resolving: Can Ray generate compatible lock files?"
 echo "============================================================"
 
+EXTRA_INDEX_ARGS=()
+if [[ -n "${TORCH_INDEX_URL}" ]]; then
+    EXTRA_INDEX_ARGS+=(--extra-index-url "${TORCH_INDEX_URL}")
+fi
+
 set +e
 uv pip compile \
     "${WORK_DIR}/requirements.txt" \
@@ -126,7 +148,7 @@ uv pip compile \
     -c "${WORK_DIR}/vllm-constraints.txt" \
     --python-version 3.12 \
     --python-platform x86_64-manylinux_2_31 \
-    --extra-index-url https://download.pytorch.org/whl/cu129 \
+    "${EXTRA_INDEX_ARGS[@]}" \
     --index-strategy unsafe-best-match \
     --unsafe-package setuptools \
     --unsafe-package ray \
@@ -166,12 +188,19 @@ See [issue #33599](https://github.com/vllm-project/vllm/issues/33599) for contex
 EOF
 fi
 
-# Notify Slack if webhook is configured.
+# Notify Slack if webhook is configured and PR/branch are valid.
 if [ -n "$RAY_COMPAT_SLACK_WEBHOOK_URL" ]; then
-    echo ">>> Sending Slack notification"
-    # Single quotes are intentional: the f-string expressions are Python, not shell.
-    # shellcheck disable=SC2016
-    PAYLOAD=$(python3 -c '
+    PR="${BUILDKITE_PULL_REQUEST:-}"
+    BRANCH="${BUILDKITE_BRANCH:-}"
+
+    # Skip notification if PR is invalid or branch is empty
+    if [[ "$PR" = "false" || -z "$PR" || -z "$BRANCH" ]]; then
+        echo ">>> Skipping Slack notification (invalid PR or empty branch: PR=$PR, branch=$BRANCH)"
+    else
+        echo ">>> Sending Slack notification"
+        # Single quotes are intentional: the f-string expressions are Python, not shell.
+        # shellcheck disable=SC2016
+        PAYLOAD=$(python3 -c '
 import json, os, sys
 pr = os.getenv("BUILDKITE_PULL_REQUEST", "N/A")
 branch = os.getenv("BUILDKITE_BRANCH", "unknown")
@@ -194,10 +223,11 @@ data = {
 print(json.dumps(data))
 ')
 
-    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
-        -H 'Content-type: application/json' \
-        -d "$PAYLOAD")
-    echo "    Slack webhook response: $HTTP_CODE"
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
+            -H 'Content-type: application/json' \
+            -d "$PAYLOAD")
+        echo "    Slack webhook response: $HTTP_CODE"
+    fi
 else
     echo ">>> Skipping Slack notification (RAY_COMPAT_SLACK_WEBHOOK_URL not set)"
 fi

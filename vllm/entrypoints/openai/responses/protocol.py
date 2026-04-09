@@ -6,7 +6,6 @@
 import time
 from typing import Any, Literal, TypeAlias
 
-import torch
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
@@ -28,6 +27,7 @@ from openai.types.responses import (
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
+    ResponseTextConfig,
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
@@ -39,20 +39,13 @@ from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreated
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
-from openai.types.responses.tool import Tool
-from openai_harmony import Message as OpenAIHarmonyMessage
-
-# Backward compatibility for OpenAI client versions
-try:  # For older openai versions (< 1.100.0)
-    from openai.types.responses import ResponseTextConfig
-except ImportError:  # For newer openai versions (>= 1.100.0)
-    from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
-
 from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
     ValidationError,
@@ -78,7 +71,8 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
-_LONG_INFO = torch.iinfo(torch.long)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -111,8 +105,8 @@ def serialize_message(msg):
     elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
-        # fallback to pyandic dump
-        return msg.model_dump_json()
+        # fallback to pydantic dump
+        return msg.model_dump(mode="json", by_alias=True)
 
 
 def serialize_messages(msgs):
@@ -179,6 +173,24 @@ class ResponsesRequest(OpenAIBaseModel):
     user: str | None = None
     skip_special_tokens: bool = True
     include_stop_str_in_output: bool = False
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
     prompt_cache_key: str | None = Field(
         default=None,
         description=(
@@ -197,12 +209,21 @@ class ResponsesRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=("Additional kwargs to pass to the HF processor."),
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -239,7 +260,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     repetition_penalty: float | None = None
-    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
@@ -248,6 +269,10 @@ class ResponsesRequest(OpenAIBaseModel):
             "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
         ),
+    )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
     )
     # --8<-- [end:responses-extra-params]
 
@@ -276,6 +301,7 @@ class ResponsesRequest(OpenAIBaseModel):
                     reasoning_effort=None if reasoning is None else reasoning.effort,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -320,6 +346,12 @@ class ResponsesRequest(OpenAIBaseModel):
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
 
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get("presence_penalty", 0.0)
+
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
+
         stop_token_ids = default_sampling_params.get("stop_token_ids")
 
         # Structured output
@@ -347,6 +379,10 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(stop, str):
             stop = [stop]
 
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
@@ -355,6 +391,8 @@ class ResponsesRequest(OpenAIBaseModel):
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
             stop_token_ids=stop_token_ids,
             stop=stop,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
@@ -363,7 +401,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
-            extra_args=self.vllm_xargs or {},
+            extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -484,6 +522,30 @@ class ResponsesResponse(OpenAIBaseModel):
     usage: ResponseUsage | None = None
     user: str | None = None
 
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
+
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
     # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
     # NOTE: custom serialization is needed
@@ -527,6 +589,7 @@ class ResponsesResponse(OpenAIBaseModel):
         usage: ResponseUsage | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -556,12 +619,15 @@ class ResponsesResponse(OpenAIBaseModel):
             prompt=request.prompt,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
+            presence_penalty=sampling_params.presence_penalty,
+            frequency_penalty=sampling_params.frequency_penalty,
             status=status,
             text=request.text,
             top_logprobs=sampling_params.logprobs,
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            kv_transfer_params=kv_transfer_params,
         )
 
 

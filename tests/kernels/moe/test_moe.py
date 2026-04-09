@@ -151,6 +151,12 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
         "b_type": scalar_types.float4_e2m1f,
         "group_blocks": [2],
     },
+    # MXFP8
+    {
+        "a_type": [scalar_types.bfloat16],
+        "b_type": scalar_types.float8_e4m3fn,
+        "group_blocks": [2],
+    },
     # AWQ-INT4 with INT8 activation
     {
         "a_type": [scalar_types.int8],
@@ -272,9 +278,9 @@ def run_moe_test(
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     torch.testing.assert_close(test_output, baseline_output, atol=atol, rtol=rtol)
 
@@ -287,7 +293,6 @@ def run_moe_test(
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize("chunk_size", [8192])
 def test_fused_moe(
     m: int,
     n: int,
@@ -297,13 +302,10 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
-    chunk_size: int,
     monkeypatch,
     workspace_init,
 ):
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
     #
     # Setup test data
@@ -398,12 +400,12 @@ def test_fused_moe(
         )
 
 
-def test_fused_moe_int64_overflow(monkeypatch, workspace_init):
+def test_fused_moe_int64_overflow(workspace_init):
     """Regression test for int32 overflow in stride*offset products.
 
-    When chunking is disabled and M is large, stride_cm * offs_token can
-    exceed int32 max. Verifies the offs_token int64 cast (fix for #34413)
-    prevents overflow and produces correct results.
+    With large M, stride_cm * offs_token can exceed int32 max. Verifies
+    the offs_token int64 cast (fix for #34413) prevents overflow and
+    produces correct results.
 
     Reproduces the scenario from PR #34279.
     """
@@ -416,9 +418,6 @@ def test_fused_moe_int64_overflow(monkeypatch, workspace_init):
 
     m, n, k, e, topk = 100000, 2048, 1024, 8, 6
     dtype = torch.bfloat16
-
-    # Disable chunking to expose the overflow-prone code path
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "10000000")
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
     w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
@@ -452,7 +451,6 @@ def test_fused_moe_int64_overflow(monkeypatch, workspace_init):
 @pytest.mark.parametrize("topk", TOP_KS_SMALL)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize("chunk_size", [8192])
 def test_naive_block_assignment_moe(
     m: int,
     n: int,
@@ -461,13 +459,10 @@ def test_naive_block_assignment_moe(
     topk: int,
     dtype: torch.dtype,
     padding: bool,
-    chunk_size: int,
     monkeypatch,
     workspace_init,
 ):
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
     #
     # Setup test data
@@ -716,7 +711,7 @@ def test_mixtral_moe(
     monkeypatch.setenv("MASTER_ADDR", "localhost")
     monkeypatch.setenv("MASTER_PORT", "12345")
     init_distributed_environment()
-    init_workspace_manager(torch.cuda.current_device())
+    init_workspace_manager(torch.accelerator.current_device_index())
 
     # Instantiate our and huggingface's MoE blocks
     vllm_config.compilation_config.static_forward_context = dict()
@@ -768,7 +763,7 @@ def test_mixtral_moe(
                 F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
                 requires_grad=False,
             )
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
 
         # FIXME (zyongye) fix this after we move self.kernel
@@ -1675,7 +1670,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         intermediate_size_per_partition=n,
         num_local_experts=e,
         num_logical_experts=e,
-        activation="silu",
+        activation=MoEActivation.SILU,
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=dtype,
@@ -1706,13 +1701,25 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.topk_group = 1
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
-        layer.activation = "silu"
+        layer.activation = MoEActivation.SILU
         layer.e_score_correction_bias = None
         layer.routing_method_type = RoutingMethodType.Renormalize
+        layer.expert_map = None
+        layer.apply_router_weight_on_input = False
+        layer.routed_scaling_factor = None
+        layer.shared_experts = None
+        layer._maybe_init_expert_routing_tables = lambda: None
 
         quant_method.process_weights_after_loading(layer)
 
-        trtllm_output = quant_method.forward_monolithic_cuda(
+        assert quant_method.moe_kernel is not None, (
+            "moe_kernel should be set after process_weights_after_loading"
+        )
+        assert quant_method.supports_internal_mk, (
+            "supports_internal_mk should be True after setup"
+        )
+
+        trtllm_output = quant_method.apply_monolithic(
             layer=layer,
             x=a,
             router_logits=router_logits,

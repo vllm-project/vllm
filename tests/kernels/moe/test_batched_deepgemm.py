@@ -5,10 +5,10 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
+from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
-from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedPrepareAndFinalize,
     BatchedTritonExperts,

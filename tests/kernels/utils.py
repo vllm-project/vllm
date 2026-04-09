@@ -941,7 +941,7 @@ def torch_experts(
                 if b_bias1 is not None:
                     tmp1 = tmp1 + b_bias1[i].view(1, -1).to(out.dtype)
 
-                tmp2 = SiluAndMul()(tmp1).to(out.dtype)
+                tmp2 = act()(tmp1).to(out.dtype)
 
                 tmp2, b_scale = moe_kernel_quantize_input(
                     tmp2, a2_scale, quant_dtype, per_act_token_quant, block_shape

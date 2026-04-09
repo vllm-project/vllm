@@ -23,7 +23,7 @@ CACHE_LAYOUTS = ["NHD", "HND"]
 KV_SCALE_TYPES = ["tensor", "attn_head"]
 
 # Parameters for MLA tests.
-KV_LORA_RANKS = [512]
+KV_LORA_RANKS = [256, 512]
 QK_ROPE_HEAD_DIMS = [64]
 NUM_TOKENS_MLA = [42]
 BLOCK_SIZES_MLA = [16]
@@ -35,7 +35,9 @@ NUM_BLOCKS = [1024, 10000]
 
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 # We assume fp8 is always enabled for testing.
 KV_CACHE_DTYPE = ["auto", "fp8"]
@@ -69,7 +71,7 @@ def test_reshape_and_cache(
         pytest.skip()
     set_random_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
     slot_mapping_lst = random.sample(range(num_slots), num_tokens)
@@ -192,7 +194,7 @@ def test_reshape_and_cache_flash(
 ) -> None:
     set_random_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     assert implementation in ["cuda", "triton"]
     if implementation == "triton" and kv_cache_layout == "HND":
         pytest.skip("Triton implementation only supports NHD layout.")
@@ -553,7 +555,7 @@ def test_concat_and_cache_mla(
 ) -> None:
     set_random_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     total_slots = num_blocks * block_size
     slot_mapping_lst = random.sample(range(total_slots), num_tokens)
@@ -627,10 +629,12 @@ def test_concat_and_cache_ds_mla(
         pytest.skip("concat_and_cache_mla doesn't support fp8_ds_mla on ROCm")
     if dtype.itemsize != 2:
         pytest.skip("ds_mla only supports 16-bit input")
+    if kv_lora_rank != 512:
+        pytest.skip("fp8_ds_mla requires kv_lora_rank == 512")
     kv_cache_dtype = "fp8_ds_mla"
     set_random_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     total_slots = num_blocks * block_size
     slot_mapping_lst = random.sample(range(total_slots), num_tokens)
@@ -663,7 +667,8 @@ def test_concat_and_cache_ds_mla(
         ref_cache_32bit = ref_cache_slice.view(torch.float32)
 
         kv_c_data = kv_c[i]
-        for tile_idx in range(4):
+        num_tiles = kv_lora_rank // 128
+        for tile_idx in range(num_tiles):
             tile_start = tile_idx * 128
             tile_end = (tile_idx + 1) * 128
             tile_data[:] = kv_c_data[tile_start:tile_end]
@@ -741,7 +746,7 @@ def test_swap_blocks_mla(
 ) -> None:
     set_random_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     entry_size = kv_lora_rank + qk_rope_head_dim
 

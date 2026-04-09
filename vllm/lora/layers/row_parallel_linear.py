@@ -11,6 +11,7 @@ from vllm.distributed import (
     split_tensor_along_last_dim,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.platforms import current_platform
 
@@ -57,10 +58,10 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             input_parallel = input_
         else:
             # TODO: simplify code below
-            splitted_input = split_tensor_along_last_dim(
+            split_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size
             )
-            input_parallel = splitted_input[self.tp_rank].contiguous()
+            input_parallel = split_input[self.tp_rank].contiguous()
 
         # Matrix multiply.
         bias_ = (
@@ -89,7 +90,7 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
     ) -> bool:
-        return type(source_layer) is RowParallelLinear
+        return type(source_layer) is maybe_get_oot_by_class(RowParallelLinear)
 
 
 # The following layer is based on the tensor parallelism strategy given in

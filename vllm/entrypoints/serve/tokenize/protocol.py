@@ -17,6 +17,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     OpenAIBaseModel,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 
 
@@ -100,6 +101,13 @@ class TokenizeChatRequest(OpenAIBaseModel):
             "Will be accessible by the chat template."
         ),
     )
+    media_io_kwargs: dict[str, dict[str, Any]] | None = Field(
+        default=None,
+        description=(
+            "Additional kwargs to pass to the media IO connectors, "
+            "keyed by modality. Merged with engine-level media_io_kwargs."
+        ),
+    )
     mm_processor_kwargs: dict[str, Any] | None = Field(
         default=None,
         description="Additional kwargs to pass to the HF processor.",
@@ -113,9 +121,9 @@ class TokenizeChatRequest(OpenAIBaseModel):
     @classmethod
     def check_generation_prompt(cls, data):
         if data.get("continue_final_message") and data.get("add_generation_prompt"):
-            raise ValueError(
+            raise VLLMValidationError(
                 "Cannot set both `continue_final_message` and "
-                "`add_generation_prompt` to True."
+                "`add_generation_prompt` to True.",
             )
         return data
 
@@ -134,6 +142,7 @@ class TokenizeChatRequest(OpenAIBaseModel):
                     continue_final_message=self.continue_final_message,
                 ),
             ),
+            media_io_kwargs=self.media_io_kwargs,
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
