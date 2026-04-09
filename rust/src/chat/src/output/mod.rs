@@ -141,6 +141,7 @@ pub(crate) fn output_stream(
                 .create_parser(name)
                 .ok_or_else(|| Error::ToolParserUnavailableByName {
                     name: name.to_string(),
+                    available_names: Vec::new(),
                 })?
         } else if let Some(model_id) = model_id {
             tool_parser_factory
@@ -165,6 +166,7 @@ pub(crate) fn output_stream(
                 .create_parser(name)
                 .ok_or_else(|| Error::ReasoningParserUnavailableByName {
                     name: name.to_string(),
+                    available_names: Vec::new(),
                 })?,
         )
     } else {

@@ -1,3 +1,4 @@
+use anyhow::Result;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 
 /// How the HTTP server obtains its listening socket.
@@ -46,6 +47,16 @@ pub struct Config {
 }
 
 impl Config {
+    /// Validate frontend configuration that can be checked before engine startup.
+    pub fn validate(&self) -> Result<()> {
+        vllm_chat::validate_parser_overrides(
+            self.tool_call_parser.as_deref(),
+            self.reasoning_parser.as_deref(),
+        )?;
+
+        Ok(())
+    }
+
     /// Return the number of engines implied by the configured transport mode.
     pub fn engine_count(&self) -> usize {
         match &self.transport_mode {

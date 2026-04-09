@@ -82,6 +82,10 @@ pub async fn serve<F>(config: Config, shutdown: F) -> Result<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
+    config
+        .validate()
+        .context("invalid OpenAI frontend configuration")?;
+
     let mut shutdown = Box::pin(shutdown);
 
     // Also check shutdown during the (potentially long) startup handshake.

@@ -16,10 +16,22 @@ pub enum Error {
     ToolParserRequiresModelId,
     #[error("tool parsing is not available for model `{model_id}`")]
     ToolParserUnavailableForModel { model_id: String },
-    #[error("tool call parser `{name}` is not registered")]
-    ToolParserUnavailableByName { name: String },
-    #[error("reasoning parser `{name}` is not registered")]
-    ReasoningParserUnavailableByName { name: String },
+    #[error(
+        "tool call parser `{name}` is not registered{}",
+        available_parser_hint(.available_names)
+    )]
+    ToolParserUnavailableByName {
+        name: String,
+        available_names: Vec<String>,
+    },
+    #[error(
+        "reasoning parser `{name}` is not registered{}",
+        available_parser_hint(.available_names)
+    )]
+    ReasoningParserUnavailableByName {
+        name: String,
+        available_names: Vec<String>,
+    },
     #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
@@ -32,3 +44,11 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn available_parser_hint(available_names: &[String]) -> String {
+    if available_names.is_empty() {
+        String::new()
+    } else {
+        format!(" (choose from: {})", available_names.join(", "))
+    }
+}
