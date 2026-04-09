@@ -42,7 +42,6 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.async_utils import merge_async_iterators
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 RESET_PREFIX_WARNING = (
     "reset_prefix_cache() failed after warmup; the "
@@ -300,26 +299,14 @@ def run_hf(
     trust_remote_code: bool,
     disable_detokenize: bool = False,
     num_iters_warmup: int = 0,
-    dtype: torch.dtype | str | None = torch.float16,
+    dtype: torch.dtype | None = torch.float16,
     enable_torch_compile: bool = False,
 ) -> float:
     assert isinstance(tokenizer, PreTrainedTokenizerBase), (
         "the hf backend only supports HF tokenizers"
     )
-    if isinstance(dtype, torch.dtype):
-        hf_torch_dtype: torch.dtype | str = dtype
-    elif dtype == "auto":
-        hf_torch_dtype = "auto"
-    elif isinstance(dtype, str) and dtype in STR_DTYPE_TO_TORCH_DTYPE:
-        hf_torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
-    elif dtype is None:
-        hf_torch_dtype = torch.float16
-    else:
-        raise ValueError(f"Unsupported dtype for HF backend: {dtype!r}")
     llm = AutoModelForCausalLM.from_pretrained(
-        model,
-        torch_dtype=hf_torch_dtype,
-        trust_remote_code=trust_remote_code,
+        model, dtype=dtype, trust_remote_code=trust_remote_code
     )
     if llm.config.model_type == "llama":
         # To enable padding in the HF backend.
