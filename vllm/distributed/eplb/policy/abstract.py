@@ -17,7 +17,7 @@ class AbstractEplbPolicy(ABC):
         num_nodes: int,
         num_ranks: int,
         old_global_expert_indices: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         """
         Entry point for expert-parallelism load balancer.
 
@@ -35,9 +35,5 @@ class AbstractEplbPolicy(ABC):
         Returns:
             physical_to_logical_map: [layers, num_replicas], the expert
                 index of each replica
-            logical_to_physical_map: [layers, num_logical_experts, X],
-                the replica indices for each expert
-            expert_count: [layers, num_logical_experts], number of
-                physical replicas for each logical expert
         """
         raise NotImplementedError

@@ -371,7 +371,7 @@ async def generation_error_handler(req: Request, exc: GenerationError):
 
 async def exception_handler(req: Request, exc: Exception):
     if req.app.state.args.log_error_stack:
-        logger.exception(
+        logger.error(
             "Exception caught. Request id: %s",
             req.state.request_metadata.request_id
             if hasattr(req.state, "request_metadata")

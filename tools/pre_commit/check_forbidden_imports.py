@@ -31,6 +31,7 @@ CHECK_IMPORTS = {
             "vllm/transformers_utils/config.py",
             "vllm/model_executor/models/registry.py",
             "vllm/compilation/caching.py",
+            "vllm/env_override.py",
             "vllm/compilation/piecewise_backend.py",
             "vllm/distributed/utils.py",
             "vllm/distributed/parallel_state.py",
@@ -58,6 +59,14 @@ CHECK_IMPORTS = {
             # pickle and cloudpickle
             "vllm/v1/serial_utils.py",
         },
+    ),
+    "base64": ForbiddenImport(
+        pattern=r"^\s*(?:import\s+base64(?:$|\s|,)|from\s+base64\s+import)",
+        tip=(
+            "Replace 'import base64' with 'import pybase64' "
+            "or 'import pybase64 as base64'."
+        ),
+        allowed_pattern=re.compile(r"^\s*import\s+pybase64(\s*|\s+as\s+base64\s*)$"),
     ),
     "re": ForbiddenImport(
         pattern=r"^\s*(?:import\s+re(?:$|\s|,)|from\s+re\s+import)",
