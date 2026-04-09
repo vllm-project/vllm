@@ -6,7 +6,6 @@ import json
 import math
 from typing import TYPE_CHECKING, Any
 
-import humming.ops
 import torch
 from humming import dtypes
 from humming.config import GemmType as HummingGemmType
@@ -21,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
 )
+from vllm.model_executor.layers.fused_moe.moe_fused_mul_sum import moe_fused_mul_sum
 from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import (
     moe_permute,
     moe_unpermute,
@@ -344,7 +344,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         assert not apply_router_weight_on_input
 
         self.main_apply(
-            output=output,
             hidden_states=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
@@ -355,7 +354,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     def main_apply(
         self,
-        output: torch.Tensor,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -420,7 +418,6 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
 
     def main_apply(
         self,
-        output: torch.Tensor,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -428,8 +425,6 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ):
-        assert workspace1.data_ptr() == output.data_ptr()
-
         buffers = self.prepare_buffers(
             workspace1,
             workspace2,
@@ -483,7 +478,7 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
         )
 
         if not self.is_batched:
-            humming.ops.moe_fused_mul_sum(
+            moe_fused_mul_sum(
                 inputs=buffers["down_output"].view(*topk_ids.shape, -1),
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -524,7 +519,6 @@ class HummingGroupedExperts(HummingExpertsBase):
 
     def main_apply(
         self,
-        output: torch.Tensor,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -532,7 +526,6 @@ class HummingGroupedExperts(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ):
-        assert output.data_ptr() == workspace1.data_ptr()
         valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
         valid_shape_m = math.ceil(valid_shape_m)
 
@@ -619,7 +612,6 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
 
     def main_apply(
         self,
-        output: torch.Tensor,
         hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -627,7 +619,6 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ):
-        assert output.data_ptr() == workspace1.data_ptr()
         valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
         valid_shape_m = math.ceil(valid_shape_m)
         expert_num_tokens = expert_tokens_meta.expert_num_tokens

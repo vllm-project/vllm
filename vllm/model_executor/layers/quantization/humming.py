@@ -62,7 +62,7 @@ try:
         HummingIndexedExperts,
         get_humming_moe_gemm_type,
     )
-except ImportError:
+except ModuleNotFoundError:
     HummingMethod = None
 
 
@@ -875,7 +875,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
         )
 
         self.experts.main_apply(
-            output=output,
             hidden_states=x,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
