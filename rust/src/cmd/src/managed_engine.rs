@@ -133,6 +133,7 @@ impl ManagedEngineHandle {
         };
 
         // First, try to gracefully terminate.
+        info!(pid, "shutting down managed engine with SIGTERM");
         process_group::terminate(pid)?;
 
         // Wait for the process to exit on its own.
@@ -144,6 +145,10 @@ impl ManagedEngineHandle {
         }
 
         // If it doesn't exit within the timeout, force kill it.
+        info!(
+            pid,
+            "managed engine did not exit within timeout, sending SIGKILL"
+        );
         process_group::kill(pid)?;
 
         let _ = self.wait_for_exit().await;

@@ -18,7 +18,6 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
-use futures::FutureExt as _;
 use socket2::Socket;
 use tokio::net::TcpListener;
 use tracing::{info, trace};
@@ -83,16 +82,16 @@ pub async fn serve<F>(config: Config, shutdown: F) -> Result<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    // Wrap the shutdown signal in a `Shared` future so we can also check it
-    // during the (potentially long) startup handshake, not only during HTTP
-    // graceful shutdown.
-    let shutdown = shutdown.shared();
+    let mut shutdown = Box::pin(shutdown);
 
+    // Also check shutdown during the (potentially long) startup handshake.
     let state = tokio::select! {
         result = build_state(&config) => result?,
-        _ = shutdown.clone() => return Ok(()),
+        _ = &mut shutdown => return Ok(()),
     };
-    let listener = bind_listener(&config.listener_mode).await?;
+    let listener = bind_listener(&config.listener_mode)
+        .await
+        .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr()?;
     let model = state.model_id.clone();
     let app = build_router(state.clone());

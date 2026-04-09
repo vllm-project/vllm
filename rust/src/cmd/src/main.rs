@@ -16,6 +16,7 @@ use crate::managed_engine::{ManagedEngineHandle, allocate_handshake_port};
 #[derive(Debug)]
 enum ShutdownReason {
     Signal,
+    Server(anyhow::Error),
     EngineExited(ExitStatus),
 }
 
@@ -80,38 +81,60 @@ async fn main() -> Result<()> {
             let shutdown_task = tokio::spawn(async move {
                 // Drive the frontend shutdown from either Ctrl-C or unexpected
                 // Python-engine termination, whichever happens first.
-                let reason = tokio::select! {
+                tokio::select! {
                     _ = shutdown_signal() => ShutdownReason::Signal,
 
                     status = shutdown_engine.wait_for_exit() => {
                         warn!(%status, "managed Python headless engine exited");
                         ShutdownReason::EngineExited(status)
                     },
-                };
-                let _ = shutdown_signal_tx.send(());
-                reason
+                }
             });
 
-            let serve_result = if args.headless {
+            let mut serve_task = if args.headless {
                 info!("running managed Python headless engine without Rust frontend");
-                let _ = shutdown_signal_rx.await;
-                Ok(())
+                tokio::spawn(async move {
+                    let _ = shutdown_signal_rx.await;
+                    Ok(())
+                })
             } else {
                 let config = args.to_frontend_config(handshake_address);
-                vllm_server::serve(config, shutdown_signal_rx.map(|_| ()))
-                    .await
-                    .inspect(|_| info!("OpenAI server shut down gracefully"))
+                tokio::spawn(async move {
+                    let result = vllm_server::serve(config, shutdown_signal_rx.map(|_| ())).await;
+                    if result.is_ok() {
+                        info!("OpenAI server shut down gracefully");
+                    }
+                    result
+                })
             };
 
-            let shutdown_result = engine.shutdown().await;
-            let shutdown_reason = shutdown_task.await.context("shutdown task join failed")?;
+            let shutdown_reason = tokio::select! {
+                reason = shutdown_task => {
+                    let _ = shutdown_signal_tx.send(());
+                    reason.context("shutdown task join failed")?
+                }
+                serve_result = &mut serve_task => {
+                    let serve_result = serve_result.context("serve task join failed")?;
+                    match serve_result {
+                        Ok(()) => ShutdownReason::Server(anyhow!("OpenAI server shut down unexpectedly without error")),
+                        Err(error) => ShutdownReason::Server(error),
+                    }
+                }
+            };
 
-            serve_result?;
-            shutdown_result?;
-            info!("managed Python headless engine shut down gracefully");
+            // Shutdown begins. Terminate the managed engine first.
+            engine.shutdown().await?;
+            info!("managed engine shut down gracefully");
+            // Wait for the API server to shut down gracefully by draining in-flight requests.
+            if !matches!(shutdown_reason, ShutdownReason::Server(_)) {
+                serve_task.await.context("serve task join failed")??;
+            }
 
             match shutdown_reason {
                 ShutdownReason::Signal => Ok(()),
+                ShutdownReason::Server(error) => {
+                    Err(error.context("OpenAI server shut down unexpectedly"))
+                }
                 ShutdownReason::EngineExited(status) => Err(anyhow!(
                     "managed Python headless engine exited unexpectedly with status {status}"
                 )),
