@@ -11,7 +11,6 @@ from vllm.triton_utils import tl, triton
 
 TRITON_SUPPORTED = current_platform.is_cuda_alike()
 
-_FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 
 
@@ -138,7 +137,7 @@ def _per_token_group_quant_fp8_colmajor(
 
 
 _triton_group_quant_args = (
-    lambda x, group_shape, column_major, use_ue8m0, scale_alignment=1: (
+    lambda x, group_shape, column_major, use_ue8m0, fp8_dtype, scale_alignment=1: (
         x.stride(-1) == 1  # last dimension must be contiguous
         and x.shape[-1] % group_shape[-1] == 0
     )
@@ -153,6 +152,7 @@ def dynamic_group_quant_fp8(
     group_shape: list[int],
     column_major: bool,
     use_ue8m0: bool,
+    fp8_dtype: torch.dtype,
     scale_alignment: int = 1,
 ) -> tuple[Tensor, Tensor]:
     group_size = group_shape[-1]
@@ -166,7 +166,7 @@ def dynamic_group_quant_fp8(
     num_warps = min(max(BLOCK // 256, 1), 8)
     num_stages = 1
 
-    x_q = torch.empty(x.shape, device=x.device, dtype=_FP8_DTYPE)
+    x_q = torch.empty(x.shape, device=x.device, dtype=fp8_dtype)
     x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)
 
     if column_major:

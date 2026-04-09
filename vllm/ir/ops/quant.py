@@ -4,25 +4,38 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    get_fp8_min_max,
-    group_broadcast,
-)
-from vllm.platforms import current_platform
-
 from ..op import register_op
 
-_FP8_DTYPE = current_platform.fp8_dtype()
-_FP8_MIN, _FP8_MAX = get_fp8_min_max()
-_FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
+
+def _get_fp8_min_max(fp8_dtype: torch.dtype) -> tuple[float, float]:
+    """Get min/max representable values for FP8 quantization."""
+    if fp8_dtype == torch.float8_e4m3fnuz:
+        return -224.0, 224.0
+    return torch.finfo(fp8_dtype).min, torch.finfo(fp8_dtype).max
 
 
-def quant_fp8(x: Tensor, scale: Tensor) -> Tensor:
+def _group_broadcast(t: Tensor, shape) -> Tensor:
+    # Follows the implementation in
+    # vllm/vllm/model_executor/layers/quantization/utils/quant_utils.py
+    for i, s in enumerate(shape):
+        t_dim_size = t.shape[i] if i < t.ndim else 1
+        if t_dim_size != s and t_dim_size != 1:
+            assert s % t_dim_size == 0
+            t = (
+                t.unsqueeze(i + 1)
+                .expand(*t.shape[: i + 1], s // t_dim_size, *t.shape[i + 1 :])
+                .flatten(i, i + 1)
+            )
+    return t
+
+
+def quant_fp8(x: Tensor, scale: Tensor, fp8_dtype: torch.dtype) -> Tensor:
+    fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
     out = (
         x.to(torch.float32)
-        * group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
+        * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
     )
-    return out.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+    return out.clamp(fp8_min, fp8_max).to(fp8_dtype)
 
 
 def _pad_token_dim(out: Tensor, num_token_padding: int | None) -> Tensor:
@@ -39,25 +52,34 @@ def _pad_token_dim(out: Tensor, num_token_padding: int | None) -> Tensor:
 
 @register_op
 def static_quant_fp8(
-    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+    x: Tensor,
+    scale: Tensor,
+    fp8_dtype: torch.dtype,
+    num_token_padding: int | None = None,
 ) -> Tensor:
-    return _pad_token_dim(quant_fp8(x, scale), num_token_padding)
+    return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding)
 
 
 @register_op
 def static_group_quant_fp8(
-    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+    x: Tensor,
+    scale: Tensor,
+    fp8_dtype: torch.dtype,
+    num_token_padding: int | None = None,
 ) -> Tensor:
-    return _pad_token_dim(quant_fp8(x, scale), num_token_padding)
+    return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding)
 
 
 @register_op
 def dynamic_quant_fp8(
     x: Tensor,
     per_token: bool,
+    fp8_dtype: torch.dtype,
     scale_ub: Tensor | None = None,
     num_token_padding: int | None = None,
 ) -> tuple[Tensor, Tensor]:
+    fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
+    fp8_min_scaling_factor = 1.0 / (fp8_max * 512.0)
     if per_token:
         x_max, _ = x.abs().max(dim=-1)
         x_max = x_max.unsqueeze(-1).to(torch.float32)
@@ -65,8 +87,8 @@ def dynamic_quant_fp8(
             x_max = x_max.clamp(max=scale_ub)
     else:
         x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
-    scale = (x_max / _FP8_MAX).clamp(min=_FP8_MIN_SCALING_FACTOR)
-    return _pad_token_dim(quant_fp8(x, scale), num_token_padding), scale
+    scale = (x_max / fp8_max).clamp(min=fp8_min_scaling_factor)
+    return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding), scale
 
 
 @register_op
@@ -75,8 +97,11 @@ def dynamic_group_quant_fp8(
     group_shape: list[int],
     column_major: bool,
     use_ue8m0: bool,
+    fp8_dtype: torch.dtype,
     scale_alignment: int = 1,
 ) -> tuple[Tensor, Tensor]:
+    fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
+    fp8_min_scaling_factor = 1.0 / (fp8_max * 512.0)
     orig_shape = x.shape
     hidden_dim = x.shape[-1]
     group_size = group_shape[-1]
@@ -89,13 +114,13 @@ def dynamic_group_quant_fp8(
 
     x_grouped = x.view(-1, num_groups, group_size)
     absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
-    scales_raw = absmax / _FP8_MAX
+    scales_raw = absmax / fp8_max
     if use_ue8m0:
         scales_raw = torch.exp2(torch.ceil(torch.log2(scales_raw)))
-    scales = (scales_raw).clamp(min=_FP8_MIN_SCALING_FACTOR)
+    scales = scales_raw.clamp(min=fp8_min_scaling_factor)
 
     x_scaled = x_grouped / scales
-    x_quant = x_scaled.clamp(_FP8_MIN, _FP8_MAX).to(_FP8_DTYPE)
+    x_quant = x_scaled.clamp(fp8_min, fp8_max).to(fp8_dtype)
 
     x_quant = x_quant.view(-1, padded_dim)
     if padded_dim != hidden_dim:

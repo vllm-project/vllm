@@ -97,10 +97,13 @@ direct_register_aiter_op(
     fake_impl=_static_per_tensor_quant_fp8_fake,
 )
 
-_static_quant_fp8_16bit_per_tensor = lambda x, scale, num_token_padding=None: (
-    scale.numel() == 1
-    and x.dtype in (torch.float16, torch.bfloat16)
-    and num_token_padding is None
+_static_quant_fp8_16bit_per_tensor = (
+    lambda x, scale, fp8_dtype, num_token_padding=None: (
+        fp8_dtype == torch.float8_e4m3fnuz
+        and scale.numel() == 1
+        and x.dtype in (torch.float16, torch.bfloat16)
+        and num_token_padding is None
+    )
 )
 """AITER static_quant_fp8 requires a scalar (per-tensor) scale, 16-bit activations,
 and no token padding. Per-token scales and padding fall through to native."""
@@ -112,8 +115,12 @@ and no token padding. Per-token scales and padding fall through to native."""
     supported=AITER_SUPPORTED,
 )
 def static_quant_fp8(
-    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+    x: Tensor,
+    scale: Tensor,
+    fp8_dtype: torch.dtype,
+    num_token_padding: int | None = None,
 ) -> Tensor:
+    assert fp8_dtype == torch.float8_e4m3fnuz
     assert scale.numel() == 1  # Only per tensor
     assert x.dtype in (torch.float16, torch.bfloat16)
     assert num_token_padding is None
@@ -174,8 +181,9 @@ direct_register_aiter_op(
 
 
 _dynamic_quant_fp8_16bit_no_ub = (
-    lambda x, per_token, scale_ub=None, num_token_padding=None: (
-        scale_ub is None
+    lambda x, per_token, fp8_dtype, scale_ub=None, num_token_padding=None: (
+        fp8_dtype == torch.float8_e4m3fnuz
+        and scale_ub is None
         and num_token_padding is None
         and x.dtype in (torch.float16, torch.bfloat16)
     )
@@ -192,9 +200,11 @@ and no token padding."""
 def dynamic_quant_fp8(
     x: Tensor,
     per_token: bool,
+    fp8_dtype: torch.dtype,
     scale_ub: Tensor | None = None,
     num_token_padding: int | None = None,
 ) -> tuple[Tensor, Tensor]:
+    assert fp8_dtype == torch.float8_e4m3fnuz
     assert scale_ub is None
     assert num_token_padding is None
     assert x.dtype in (torch.float16, torch.bfloat16)
@@ -231,8 +241,9 @@ direct_register_aiter_op(
 
 
 _dynamic_group_quant_fp8_128_rowmajor = (
-    lambda x, group_shape, column_major, use_ue8m0, scale_alignment=1: (
-        group_shape[-1] == 128
+    lambda x, group_shape, column_major, use_ue8m0, fp8_dtype, scale_alignment=1: (
+        fp8_dtype == torch.float8_e4m3fnuz
+        and group_shape[-1] == 128
         and not column_major
         and not use_ue8m0
         and x.is_contiguous()
@@ -255,8 +266,10 @@ def dynamic_group_quant_fp8(
     group_shape: list[int],
     column_major: bool,
     use_ue8m0: bool,
+    fp8_dtype: torch.dtype,
     scale_alignment: int = 1,
 ) -> tuple[Tensor, Tensor]:
+    assert fp8_dtype == torch.float8_e4m3fnuz
     assert group_shape[-1] == 128
     assert not column_major
     assert not use_ue8m0

@@ -15,7 +15,6 @@ CUDA_ALIKE = current_platform.is_cuda_alike()
 
 CUDA_ONLY = current_platform.is_cuda()
 
-_FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 
 
@@ -66,7 +65,9 @@ def rms_norm(
     return output
 
 
-_vllm_c_static_quant_fp8_args = lambda x, scale, num_token_padding=None: x.ndim == 2
+_vllm_c_static_quant_fp8_args = (
+    lambda x, scale, fp8_dtype, num_token_padding=None: x.ndim == 2
+)
 """vllm_c static_quant_fp8 requires a 2D input tensor."""
 
 
@@ -74,18 +75,21 @@ _vllm_c_static_quant_fp8_args = lambda x, scale, num_token_padding=None: x.ndim 
     "vllm_c", supports_args=_vllm_c_static_quant_fp8_args, supported=CUDA_ALIKE
 )
 def static_quant_fp8(
-    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+    x: Tensor,
+    scale: Tensor,
+    fp8_dtype: torch.dtype,
+    num_token_padding: int | None = None,
 ) -> Tensor:
     shape = x.shape
     if num_token_padding:
         shape = (max(num_token_padding, x.shape[0]),) + x.shape[1:]
-    output = torch.empty(shape, device=x.device, dtype=_FP8_DTYPE)
+    output = torch.empty(shape, device=x.device, dtype=fp8_dtype)
     torch.ops._C.static_scaled_fp8_quant(output, x, scale, None)
     return output
 
 
 _vllm_c_static_group_quant_fp8_args = (
-    lambda x, scale, num_token_padding=None: x.ndim == 2
+    lambda x, scale, fp8_dtype, num_token_padding=None: x.ndim == 2
 )
 """vllm_c static_group_quant_fp8 requires a 2D input tensor."""
 
@@ -94,18 +98,21 @@ _vllm_c_static_group_quant_fp8_args = (
     "vllm_c", supports_args=_vllm_c_static_group_quant_fp8_args, supported=CUDA_ALIKE
 )
 def static_group_quant_fp8(
-    x: Tensor, scale: Tensor, num_token_padding: int | None = None
+    x: Tensor,
+    scale: Tensor,
+    fp8_dtype: torch.dtype,
+    num_token_padding: int | None = None,
 ) -> Tensor:
     shape = x.shape
     if num_token_padding:
         shape = (max(num_token_padding, x.shape[0]),) + x.shape[1:]
-    output = torch.empty(shape, device=x.device, dtype=_FP8_DTYPE)
+    output = torch.empty(shape, device=x.device, dtype=fp8_dtype)
     torch.ops._C.static_scaled_fp8_quant(output, x, scale, None)
     return output
 
 
 _vllm_c_dynamic_quant_fp8_args = (
-    lambda x, per_token, scale_ub=None, num_token_padding=None: (
+    lambda x, per_token, fp8_dtype, scale_ub=None, num_token_padding=None: (
         x.ndim == 2 and (per_token or scale_ub is None)
     )
 )
@@ -118,13 +125,14 @@ _vllm_c_dynamic_quant_fp8_args = (
 def dynamic_quant_fp8(
     x: Tensor,
     per_token: bool,
+    fp8_dtype: torch.dtype,
     scale_ub: Tensor | None = None,
     num_token_padding: int | None = None,
 ) -> tuple[Tensor, Tensor]:
     shape = x.shape
     if num_token_padding:
         shape = (max(num_token_padding, x.shape[0]),) + x.shape[1:]
-    output = torch.empty(shape, device=x.device, dtype=_FP8_DTYPE)
+    output = torch.empty(shape, device=x.device, dtype=fp8_dtype)
     if per_token:
         scale = torch.empty((shape[0], 1), device=x.device, dtype=torch.float32)
         torch.ops._C.dynamic_per_token_scaled_fp8_quant(output, x, scale, scale_ub)
@@ -135,7 +143,7 @@ def dynamic_quant_fp8(
 
 
 _vllm_c_group_quant_args = (
-    lambda x, group_shape, column_major, use_ue8m0, scale_alignment=1: (
+    lambda x, group_shape, column_major, use_ue8m0, fp8_dtype, scale_alignment=1: (
         x.is_contiguous() and x.shape[-1] % group_shape[-1] == 0
     )
 )
@@ -149,6 +157,7 @@ def dynamic_group_quant_fp8(
     group_shape: list[int],
     column_major: bool,
     use_ue8m0: bool,
+    fp8_dtype: torch.dtype,
     scale_alignment: int = 1,
 ) -> tuple[Tensor, Tensor]:
     group_size = group_shape[-1]
@@ -156,7 +165,7 @@ def dynamic_group_quant_fp8(
     assert x.is_contiguous()
     assert x.shape[-1] % group_size == 0
 
-    x_q = torch.empty(x.shape, device=x.device, dtype=_FP8_DTYPE)
+    x_q = torch.empty(x.shape, device=x.device, dtype=fp8_dtype)
     x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)
     torch.ops._C.per_token_group_fp8_quant(
         x,
