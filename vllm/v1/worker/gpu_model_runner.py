@@ -5367,6 +5367,12 @@ class GPUModelRunner(
             ubatch_slices=ubatch_slices_padded,
         )
 
+        # Dummy runs have no real slot assignments — fill with -1 so
+        # concat_and_cache kernels skip the KV write.
+        if slot_mappings_by_group is not None:
+            for sm in slot_mappings_by_group.values():
+                sm.fill_(-1)
+
         # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
         # etc.) with execute_model.  It must participate in the same event
         # protocol so that back-to-back dummy/real steps don't overwrite
