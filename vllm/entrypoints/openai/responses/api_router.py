@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponseFailedEvent,
     ResponsesRequest,
     ResponsesResponse,
     StreamingResponsesResponse,
@@ -63,9 +64,11 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
 
     generator = await handler.create_responses(request, raw_request)
 
-    if isinstance(generator, ErrorResponse):
+    if isinstance(generator, ResponseFailedEvent):
         return JSONResponse(
-            content=generator.model_dump(), status_code=generator.error.code
+            # model_dump_json is more forgiving if the response does not have required fields
+            content=generator.model_dump_json(indent=None),
+            status_code=500,  # TODO
         )
     elif isinstance(generator, ResponsesResponse):
         return JSONResponse(content=generator.model_dump())
@@ -93,9 +96,11 @@ async def retrieve_responses(
         stream=stream,
     )
 
-    if isinstance(response, ErrorResponse):
+    if isinstance(response, ResponseFailedEvent):
         return JSONResponse(
-            content=response.model_dump(), status_code=response.error.code
+            # model_dump_json is more forgiving if the response
+            content=response.model_dump_json(indent=None),
+            status_code=500,  # TODO
         )
     elif isinstance(response, ResponsesResponse):
         return JSONResponse(content=response.model_dump())

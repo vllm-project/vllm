@@ -37,9 +37,16 @@ from openai.types.responses import (
 )
 from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreatedEvent
 from openai.types.responses import (
+    ResponseFailedEvent as OpenAIResponseFailedEvent,
+)
+from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
-from openai.types.responses.response import IncompleteDetails, ToolChoice
+from openai.types.responses.response import (
+    IncompleteDetails,
+    ResponseError,
+    ToolChoice,
+)
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
@@ -496,7 +503,7 @@ class ResponsesRequest(OpenAIBaseModel):
 class ResponsesResponse(OpenAIBaseModel):
     id: str = Field(default_factory=lambda: f"resp_{random_uuid()}")
     created_at: int = Field(default_factory=lambda: int(time.time()))
-    # error: Optional[ResponseError] = None
+    error: ResponseError | None = None
     incomplete_details: IncompleteDetails | None = None
     instructions: str | None = None
     metadata: Metadata | None = None
@@ -590,6 +597,7 @@ class ResponsesResponse(OpenAIBaseModel):
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
+        error: ResponseError | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -628,6 +636,7 @@ class ResponsesResponse(OpenAIBaseModel):
             user=request.user,
             usage=usage,
             kv_transfer_params=kv_transfer_params,
+            error=error,
         )
 
 
@@ -689,9 +698,14 @@ class ResponseInProgressEvent(OpenAIResponseInProgressEvent):
     response: ResponsesResponse  # type: ignore[override]
 
 
+class ResponseFailedEvent(OpenAIResponseFailedEvent):
+    response: ResponsesResponse  # type: ignore[override]
+
+
 StreamingResponsesResponse: TypeAlias = (
     ResponseCreatedEvent
     | ResponseInProgressEvent
+    | ResponseFailedEvent
     | ResponseCompletedEvent
     | ResponseOutputItemAddedEvent
     | ResponseOutputItemDoneEvent
