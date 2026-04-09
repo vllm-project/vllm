@@ -210,6 +210,7 @@ def triton_w4a16_gemm(
 
     if current_platform.is_rocm():
         from vllm.platforms.rocm import on_gfx1x
+
         if on_gfx1x():
             # Tuned for RDNA 3.5 (gfx1151, 40 CUs, 32-wide wavefronts).
             if M <= 32:
