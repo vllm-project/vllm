@@ -11,7 +11,6 @@ import pytest
 import torch
 
 from tests.models.registry import HF_EXAMPLE_MODELS
-from tests.utils import create_new_process_for_each_test
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
@@ -123,10 +122,9 @@ def llm(monkeypatch):
     cleanup_dist_env_and_memory()
 
 
-@create_new_process_for_each_test()
 @pytest.mark.core_model
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_NAMES], indirect=True)
-def test_qwen3_vl_no_memory_leak(llm, image_urls: list[str]) -> None:
+def test_no_memory_leak(llm, image_urls: list[str]) -> None:
     model_info = HF_EXAMPLE_MODELS.find_hf_info(MODEL_NAME)
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
