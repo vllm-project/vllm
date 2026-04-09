@@ -1030,26 +1030,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             ql_nope = ql_nope.transpose(0, 1)
 
         if fp8_attention:
-            ql_nope_shape = ql_nope.shape
-            q_pe_shape = q_pe.shape
-            decode_q_shape = (
-                ql_nope_shape[0],
-                ql_nope_shape[1],
-                ql_nope_shape[2] + q_pe_shape[2],
-            )
-            decode_q0 = torch.empty(
-                decode_q_shape,
-                device=ql_nope.device,
-                dtype=ql_nope.dtype,
-            )
-            decode_q0[..., : ql_nope_shape[2]].copy_(ql_nope)
-            decode_q0[..., ql_nope_shape[2] :].copy_(q_pe)
-
+            decode_q0 = torch.cat([ql_nope, q_pe], dim=-1)
             decode_q_final, _ = ops.scaled_fp8_quant(
-                decode_q0.view(decode_q_shape[0], -1),
+                decode_q0.view(decode_q0.shape[0], -1),
                 self._q_scale,
             )
-            decode_q_final = decode_q_final.view(decode_q_shape)
+            decode_q_final = decode_q_final.view(decode_q0.shape)
         else:
             decode_q_final = torch.cat([ql_nope, q_pe], dim=-1)
 
