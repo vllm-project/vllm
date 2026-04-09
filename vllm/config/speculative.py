@@ -187,7 +187,7 @@ class SpeculativeConfig:
     distribution, but the latter yields a higher acceptance rate at the cost
     of more memory to cache draft logits."""
 
-    synthetic_acceptance_rate: float = 0.0
+    synthetic_acceptance_rate: float = Field(default=0.0, ge=0.0, le=1.0)
     """Per-position conditional acceptance rate for synthetic rejection
     sampling. Each draft token is independently accepted with this
     probability, conditioned on all prior tokens being accepted.
