@@ -151,6 +151,12 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
         "b_type": scalar_types.float4_e2m1f,
         "group_blocks": [2],
     },
+    # MXFP8
+    {
+        "a_type": [scalar_types.bfloat16],
+        "b_type": scalar_types.float8_e4m3fn,
+        "group_blocks": [2],
+    },
     # AWQ-INT4 with INT8 activation
     {
         "a_type": [scalar_types.int8],
