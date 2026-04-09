@@ -1866,37 +1866,31 @@ def destroy_model_parallel():
 
     if _TP:
         _TP.destroy()
-    del _TP
     _TP = None
 
     global _DCP
     if _DCP:
         _DCP.destroy()
-    del _DCP
     _DCP = None
 
     global _PCP
     if _PCP:
         _PCP.destroy()
-    del _PCP
     _PCP = None
 
     global _PP
     if _PP:
         _PP.destroy()
-    del _PP
     _PP = None
 
     global _DP
     if _DP:
         _DP.destroy()
-    del _DP
     _DP = None
 
     global _EP
     if _EP:
         _EP.destroy()
-    del _EP
     _EP = None
 
     global _EPLB
@@ -1909,7 +1903,6 @@ def destroy_distributed_environment():
     global _WORLD, _NODE_COUNT
     if _WORLD:
         _WORLD.destroy()
-    del _WORLD
     _WORLD = None
     _NODE_COUNT = None
     if torch.distributed.is_initialized():
