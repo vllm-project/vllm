@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI
 
 from vllm.config import ModelConfig
+from vllm.entrypoints.pooling.utils import enable_scoring_api
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -21,23 +22,6 @@ else:
     SupportedTask = object
 
 logger = init_logger(__name__)
-
-
-def enable_scoring_api(
-    supported_tasks: tuple["SupportedTask", ...],
-    model_config: ModelConfig | None = None,
-) -> bool:
-    if any(t in supported_tasks for t in ("embed", "token_embed")):
-        return True
-
-    if model_config is not None and "classify" in supported_tasks:
-        num_labels = getattr(model_config.hf_config, "num_labels", 0)
-        if num_labels != 1:
-            logger.debug_once("Score API is only enabled for num_labels == 1.")
-            return False
-        return True
-
-    return False
 
 
 def register_pooling_api_routers(
@@ -68,7 +52,7 @@ def register_pooling_api_routers(
         app.include_router(embed_router)
 
     if enable_scoring_api(supported_tasks, model_config):
-        from vllm.entrypoints.pooling.score.api_router import router as score_router
+        from vllm.entrypoints.pooling.scoring.api_router import router as score_router
 
         app.include_router(score_router)
 
@@ -83,20 +67,18 @@ def init_pooling_state(
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
-    from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
-    from vllm.entrypoints.pooling.score.serving import ServingScores
+    from vllm.entrypoints.pooling.pooling.serving import ServingPooling
+    from vllm.entrypoints.pooling.scoring.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
     model_config = engine_client.model_config
-
     resolved_chat_template = load_chat_template(args.chat_template)
 
     state.serving_pooling = (
         (
-            OpenAIServingPooling(
+            ServingPooling(
                 engine_client,
                 state.openai_serving_models,
-                state.openai_serving_render,
                 supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
@@ -136,8 +118,12 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            score_template=resolved_chat_template,
-            log_error_stack=args.log_error_stack,
+            chat_template=resolved_chat_template,
+            chat_template_content_format=args.chat_template_content_format,
+            trust_request_chat_template=args.trust_request_chat_template,
+            enable_flash_late_interaction=getattr(
+                args, "enable_flash_late_interaction", True
+            ),
         )
         if enable_scoring_api(supported_tasks, model_config)
         else None

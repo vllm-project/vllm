@@ -50,7 +50,7 @@ async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: st
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.parametrize("task", ["classify", "embed", "token_embed", "plugin"])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
 async def test_pooling_not_supported(
     server: RemoteOpenAIServer, model_name: str, task: str
 ):
@@ -64,7 +64,8 @@ async def test_pooling_not_supported(
         },
     )
 
-    if task != "classify":
-        assert response.json()["error"]["type"] == "BadRequestError"
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    else:
         err_msg = f"Unsupported task: {task!r}"
-        assert response.json()["error"]["message"].startswith(err_msg)
+    assert response.json()["error"]["message"].startswith(err_msg)

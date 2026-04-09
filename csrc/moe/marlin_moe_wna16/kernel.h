@@ -13,7 +13,7 @@
       const int4 *__restrict__ b_bias_ptr,                            \
       const float *__restrict__ a_scales_ptr,                         \
       const int4 *__restrict__ scales_ptr,                            \
-      const uint16_t *__restrict__ global_scale_ptr,                  \
+      const float *__restrict__ global_scale_ptr,                     \
       const int4 *__restrict__ zp_ptr, const int *__restrict__ g_idx, \
       const int32_t *__restrict__ sorted_token_ids_ptr,               \
       const int32_t *__restrict__ expert_ids_ptr,                     \

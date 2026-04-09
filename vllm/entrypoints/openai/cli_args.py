@@ -278,6 +278,9 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_flash_late_interaction: bool = True
+    """If set, run pooling score MaxSim on GPU in the API server process.
+    Can significantly improve late-interaction scoring performance."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -344,6 +347,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         help="Read CLI options from a config file. "
         "Must be a YAML with the following options: "
         "https://docs.vllm.ai/en/latest/configuration/serve_args.html",
+    )
+    parser.add_argument(
+        "--grpc",
+        action="store_true",
+        default=False,
+        help="Launch a gRPC server instead of the HTTP OpenAI-compatible "
+        "server. Requires: pip install vllm[grpc].",
     )
     parser = FrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
