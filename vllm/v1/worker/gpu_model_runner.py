@@ -539,6 +539,44 @@ class GPUModelRunner(
         self.num_prompt_logprobs: dict[str, int] = {}
         self.comm_stream = torch.cuda.Stream()
 
+        # NOTE(yxing): oe embedding related
+        self.enable_oe_embedding = self.model_config.get_enable_oe_embedding()
+        if self.enable_oe_embedding:
+            assert not self.use_async_scheduling, (
+                "now OE embedding can't run with async schedule"
+            )
+            assert self.speculative_config is None, (
+                "now OE embedding can't run with speculative decoding"
+            )
+            self.max_ngram_size = self.model_config.get_max_ngram_size()
+            assert self.max_ngram_size >= 2, (
+                f"the max ngram size should be > 2, now is {self.max_ngram_size}"
+            )
+            self.oe_padding_token_id = self.model_config.get_oe_padding_token_id()
+
+            # oe-related tokens
+            self.n_head_per_ngram = self.model_config.get_n_head_per_ngram()
+            self.oe_vocab_size = self.model_config.get_oe_vocab_size()
+            self.oe_vocab_size_for_head: list[int] = []
+            self.oe_total_heads = self.n_head_per_ngram * (self.max_ngram_size - 1)
+            self._initialize_vocab_sizes_for_oe()
+            self.oe_cusum_vocab_size_for_head = [0] + list(
+                np.cumsum(self.oe_vocab_size_for_head)[:-1]
+            )
+
+            oe_original_vocab_size = self.model_config.get_vocab_size()
+            self.oe_vocab_mods: list[torch.Tensor] = []
+            self._precompute_vocab_mods(base_vocab_size=oe_original_vocab_size)
+
+            self.oe_input_ids = self._make_buffer(
+                self.oe_total_heads * self.max_num_tokens, dtype=torch.int32
+            )
+            self.oe_context = torch.zeros(
+                (self.max_ngram_size, self.max_num_tokens),
+                dtype=torch.int32,
+                device="cpu",
+            )
+
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -576,6 +614,10 @@ class GPUModelRunner(
             logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            max_ngram_size=self.max_ngram_size if self.enable_oe_embedding else 0,
+            oe_padding_token_id=self.oe_padding_token_id
+            if self.enable_oe_embedding
+            else 0,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -616,6 +658,18 @@ class GPUModelRunner(
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
             )
+
+        # NOTE(yxing): sink token related
+        self.num_sink_tokens = self.model_config.get_num_sink_tokens()
+        if self.num_sink_tokens:
+            self.sink_seq_lens = torch.full(
+                (self.max_num_reqs,),
+                self.num_sink_tokens,
+                device=self.device,
+                dtype=torch.int32,
+            )
+            self.max_sink_seq_len = self.num_sink_tokens
+
         # Because inputs_embeds may be bfloat16 and we don't need a numpy
         # version of this tensor, avoid a RuntimeError by not creating a
         # numpy buffer.
@@ -1453,6 +1507,34 @@ class GPUModelRunner(
             src=draft_token_ids.flatten()[prev_draft_token_indices_tensor],
         )
 
+    def _prepare_oe_input_ids(
+        self,
+        req_indices: np.ndarray,
+        token_indices_tensor: torch.Tensor,
+        num_scheduled_tokens: np.ndarray,
+    ):
+        total_num_scheduled_tokens = np.sum(num_scheduled_tokens)
+
+        torch.index_select(
+            self.input_batch.token_ids_cpu_tensor.flatten(),
+            0,
+            token_indices_tensor,
+            out=self.oe_context[0, :total_num_scheduled_tokens],
+        )
+        for ngram_idx in range(2, self.max_ngram_size + 1):
+            self.input_batch.shift_ngram_tokens(
+                ngram_idx=ngram_idx,
+                num_scheduled_tokens=num_scheduled_tokens,
+            )
+
+            # fill oe context
+            torch.index_select(
+                self.input_batch.oe_ngram_token_ids_cpu_tensor[ngram_idx - 1].flatten(),
+                0,
+                token_indices_tensor,
+                out=self.oe_context[ngram_idx - 1, :total_num_scheduled_tokens],
+            )
+
     def _get_encoder_seq_lens(
         self,
         num_scheduled_tokens: dict[str, int],
@@ -1564,6 +1646,12 @@ class GPUModelRunner(
             token_indices_tensor,
             out=self.input_ids.cpu[:total_num_scheduled_tokens],
         )
+        if self.enable_oe_embedding:
+            self._prepare_oe_input_ids(
+                req_indices=req_indices,
+                token_indices_tensor=token_indices_tensor,
+                num_scheduled_tokens=num_scheduled_tokens,
+            )
         if self.enable_prompt_embeds:
             is_token_ids = self.input_batch.is_token_ids_tensor.flatten()
             torch.index_select(
@@ -1717,6 +1805,37 @@ class GPUModelRunner(
             spec_decode_metadata,
         )
 
+    def _fill_oe_input_ids(
+        self, total_num_scheduled_tokens: int, num_padded_tokens: int
+    ):
+        # now compute hash ids for over encoding
+        for head_idx in range(self.oe_total_heads):
+            current_gram = int(head_idx // self.n_head_per_ngram) + 2
+            current_oe_context = self.oe_context[
+                :current_gram, :total_num_scheduled_tokens
+            ]
+            oe_polyhash_ids = (
+                current_oe_context * self.oe_vocab_mods[head_idx]
+            ) % self.oe_vocab_size_for_head[head_idx]
+            current_oe_input_ids = (
+                torch.sum(oe_polyhash_ids, dim=0)
+                % self.oe_vocab_size_for_head[head_idx]
+            )
+
+            oe_input_ids_start_idx = head_idx * num_padded_tokens
+            oe_input_ids_real_end_idx = (
+                oe_input_ids_start_idx + total_num_scheduled_tokens
+            )
+            oe_input_ids_pad_end_idx = oe_input_ids_start_idx + num_padded_tokens
+            self.oe_input_ids.cpu[oe_input_ids_start_idx:oe_input_ids_real_end_idx] = (
+                current_oe_input_ids + self.oe_cusum_vocab_size_for_head[head_idx]
+            )
+            self.oe_input_ids.cpu[
+                oe_input_ids_real_end_idx:oe_input_ids_pad_end_idx
+            ] = self.oe_cusum_vocab_size_for_head[head_idx]
+
+        self.oe_input_ids.copy_to_gpu(self.oe_total_heads * num_padded_tokens)
+
     def _build_attention_metadata(
         self,
         num_tokens: int,
@@ -1804,6 +1923,10 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
         )
+        # NOTE(yxing): attention metadata for sink tokens
+        if self.num_sink_tokens:
+            cm_base.max_sink_seq_len = self.max_sink_seq_len
+            cm_base.sink_seq_lens = self.sink_seq_lens[:num_reqs]
 
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens.cpu[:num_reqs] = get_dcp_local_seq_lens(
@@ -3548,6 +3671,16 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
+            if self.enable_oe_embedding:
+                total_oe_tokens_padded = num_tokens_padded * self.oe_total_heads
+                self._fill_oe_input_ids(
+                    total_num_scheduled_tokens=num_tokens_unpadded,
+                    num_padded_tokens=num_tokens_padded,
+                )
+                model_kwargs["oe_input_ids"] = self.oe_input_ids.gpu[
+                    :total_oe_tokens_padded
+                ]
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -4915,6 +5048,13 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
+            if self.enable_oe_embedding:
+                # NOTE(yxing): here, the oe context is used for profiling and cuda graph
+                total_oe_num_tokens_padded = num_tokens_padded * self.oe_total_heads
+                model_kwargs["oe_input_ids"] = self.oe_input_ids.gpu[
+                    :total_oe_num_tokens_padded
+                ]
+
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
@@ -5083,6 +5223,51 @@ class GPUModelRunner(
                 dummy_metadata,
             )
         return sampler_output
+
+    def _precompute_vocab_mods(self, base_vocab_size: int):
+        """Precompute modular arithmetic values for polynomial rolling hash
+
+        For each OE head, compute the powers of vocab_size modulo the head's vocab size.
+        These are used in polynomial rolling hash computation.
+        """
+        for head_idx in range(self.oe_total_heads):
+            current_ngram = (head_idx // self.n_head_per_ngram) + 2
+            current_vocab_size = self.oe_vocab_size_for_head[head_idx]
+            current_mods = [1]  # mods[0] = self.base_vocab_size ^ 0 = 1
+            power_mod = 1
+            for _ in range(current_ngram - 1):
+                power_mod = (power_mod * base_vocab_size) % current_vocab_size
+                current_mods.append(power_mod)
+            current_mods.reverse()
+            self.oe_vocab_mods.append(
+                torch.tensor(current_mods, dtype=torch.int64).unsqueeze(1)
+            )
+
+    def _initialize_vocab_sizes_for_oe(self):
+        """Get vocab sizes for each OE head as prime numbers.
+
+        For each n-gram type(2-gram, 3-gram, ..., max_ngram_size-gram), we
+        have `n_head_per_ngram` heads.
+
+        Each head gets a unique prime vocab size starting from oe_vocab_size
+        """
+
+        def is_prime(n: int) -> bool:
+            if n < 2:
+                return False
+            if n == 2:
+                return True
+            if n % 2 == 0:
+                return False
+            return all(n % i != 0 for i in range(3, int(n**0.5) + 1, 2))
+
+        current = max(2, self.oe_vocab_size)
+        while True:
+            if is_prime(current):
+                self.oe_vocab_size_for_head.append(current)
+                if len(self.oe_vocab_size_for_head) == self.oe_total_heads:
+                    return
+            current += 1
 
     def _dummy_pooler_run_task(
         self,
@@ -5803,6 +5988,10 @@ class GPUModelRunner(
                 logitsprocs=self.input_batch.logitsprocs,
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
+                max_ngram_size=self.max_ngram_size if self.enable_oe_embedding else 0,
+                oe_padding_token_id=self.oe_padding_token_id
+                if self.enable_oe_embedding
+                else 0,
             )
 
     def _allocate_kv_cache_tensors(

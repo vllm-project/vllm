@@ -321,6 +321,11 @@ class CommonAttentionMetadata:
 
     causal: bool = True
 
+    sink_seq_lens: torch.Tensor | None = None
+    """(batch_size,), the number of sink tokens for each request"""
+    max_sink_seq_len: int = 0
+    """Longest sink context length. It's same for all requets"""
+
     # Needed by FastPrefillAttentionBuilder
     logits_indices_padded: torch.Tensor | None = None
     num_logits_indices: int | None = None

@@ -212,6 +212,10 @@ class FlashAttentionMetadata:
     prefix_kv_lens: torch.Tensor | None
     suffix_kv_lens: torch.Tensor | None
 
+    # for sink tokens
+    sink_seq_lens: torch.Tensor | None
+    max_sink_seq_len: int
+
     # For GQA DCP
     max_dcp_context_kv_len: int | None = None
     dcp_context_kv_lens: torch.Tensor | None = None
@@ -522,6 +526,8 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            max_sink_seq_len=common_attn_metadata.max_sink_seq_len,
+            sink_seq_lens=common_attn_metadata.sink_seq_lens,
         )
         return attn_metadata
 
@@ -556,6 +562,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
         sinks: torch.Tensor | None = None,
+        enable_sinks_kv: bool = False,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -600,6 +607,14 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.supports_quant_query_input = True
+        self.enable_sinks_kv = enable_sinks_kv
+
+    def populate_sinks_kv(self, sinks_k: torch.Tensor, sinks_v: torch.Tensor):
+        assert sinks_k.shape[2] == self.num_kv_heads
+        assert sinks_k.shape[3] == self.head_size
+
+        self.sinks_k = sinks_k
+        self.sinks_v = sinks_v
 
     def forward(
         self,
@@ -713,29 +728,41 @@ class FlashAttentionImpl(AttentionImpl):
                     if self.sliding_window is not None
                     else None
                 )
-                flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key_cache,
-                    v=value_cache,
-                    out=output[:num_actual_tokens],
-                    cu_seqlens_q=cu_seqlens_q,
-                    max_seqlen_q=max_seqlen_q,
-                    seqused_k=seqused_k,
-                    max_seqlen_k=max_seqlen_k,
-                    softmax_scale=self.scale,
-                    causal=attn_metadata.causal,
-                    alibi_slopes=self.alibi_slopes,
-                    window_size=sliding_window_size,
-                    block_table=block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=scheduler_metadata,
-                    fa_version=self.vllm_flash_attn_version,
-                    q_descale=q_descale,
-                    k_descale=k_descale,
-                    v_descale=v_descale,
-                    num_splits=attn_metadata.max_num_splits,
-                    s_aux=self.sinks,
-                )
+                if self.enable_sinks_kv:
+                    self._forward_with_sink_tokens(
+                        query=query[:num_actual_tokens],
+                        key_cache=key_cache,
+                        value_cache=value_cache,
+                        output=output[:num_actual_tokens],
+                        attn_metadata=attn_metadata,
+                        q_descale=q_descale,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                    )
+                else:
+                    flash_attn_varlen_func(
+                        q=query[:num_actual_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:num_actual_tokens],
+                        cu_seqlens_q=cu_seqlens_q,
+                        max_seqlen_q=max_seqlen_q,
+                        seqused_k=seqused_k,
+                        max_seqlen_k=max_seqlen_k,
+                        softmax_scale=self.scale,
+                        causal=attn_metadata.causal,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=sliding_window_size,
+                        block_table=block_table,
+                        softcap=self.logits_soft_cap,
+                        scheduler_metadata=scheduler_metadata,
+                        fa_version=self.vllm_flash_attn_version,
+                        q_descale=q_descale,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                        num_splits=attn_metadata.max_num_splits,
+                        s_aux=self.sinks,
+                    )
                 return output
 
         # Cascade attention (rare case).
@@ -885,6 +912,87 @@ class FlashAttentionImpl(AttentionImpl):
             context_lse_cor,
             query_attn_out,
             query_lse,
+        )
+
+    def _forward_with_sink_tokens(
+        self,
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        q_descale: torch.Tensor | None = None,
+        k_descale: torch.Tensor | None = None,
+        v_descale: torch.Tensor | None = None,
+    ):
+        assert self.vllm_flash_attn_version is not None, (
+            "To support sink token on attention, you should provide flash attn"
+        )
+
+        cu_seqlens_q = attn_metadata.query_start_loc
+        seqused_k = attn_metadata.seq_lens
+        num_seqs = len(attn_metadata.seq_lens)
+
+        max_seqlen_q = attn_metadata.max_query_len
+        max_seqlen_k = attn_metadata.max_seq_len
+        scheduler_metadata = attn_metadata.scheduler_metadata
+
+        # sink-related metadata
+        sink_seqused_k = attn_metadata.sink_seq_lens
+        max_seqlen_sink = attn_metadata.max_sink_seq_len
+
+        # sink token output
+        # NOTE: scheduler_metadata is computed for normal attention params
+        # (seq_lens, max_seq_len), not for sink attention params
+        # (sink_seqused_k, max_seqlen_sink). Passing it here causes FA3
+        # shape mismatch. Use None to let FA3 compute its own schedule.
+        sink_attn_output, sink_attn_lse = flash_attn_varlen_func(
+            q=query,
+            k=self.sinks_k[:num_seqs],
+            v=self.sinks_v[:num_seqs],
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=sink_seqused_k,
+            max_seqlen_k=max_seqlen_sink,
+            softmax_scale=self.scale,
+            block_table=None,
+            return_softmax_lse=True,
+            causal=False,
+            softcap=self.logits_soft_cap,
+            scheduler_metadata=None,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+        )
+
+        # normal attention
+        attn_output, attn_lse = flash_attn_varlen_func(
+            q=query,
+            k=key_cache,
+            v=value_cache,
+            out=None,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=self.scale,
+            causal=attn_metadata.causal,
+            alibi_slopes=self.alibi_slopes,
+            block_table=attn_metadata.block_table,
+            return_softmax_lse=True,
+            softcap=self.logits_soft_cap,
+            scheduler_metadata=scheduler_metadata,
+            fa_version=self.vllm_flash_attn_version,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
+            num_splits=attn_metadata.max_num_splits,
+        )
+        # Merge sink_attn and attn outputs, and store the result in output.
+        merge_attn_states(
+            output, sink_attn_output, sink_attn_lse, attn_output, attn_lse
         )
 
     def _forward_encoder_attention(

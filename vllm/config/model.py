@@ -1267,6 +1267,27 @@ class ModelConfig:
 
         return chunk_size
 
+    def get_enable_oe_embedding(self) -> bool:
+        return getattr(self.hf_text_config, "use_over_encoding", False)
+
+    def get_oe_eos_token_id(self) -> int:
+        return getattr(self.hf_text_config, "eos_token_id", 151645)
+
+    def get_num_sink_tokens(self) -> int:
+        return getattr(self.hf_text_config, "num_sink_tokens", 0)
+
+    def get_oe_vocab_size(self) -> int:
+        return getattr(self.hf_text_config, "oe_vocab_size", 0)
+
+    def get_n_head_per_ngram(self) -> int:
+        return getattr(self.hf_text_config, "n_head_per_ngram", 0)
+
+    def get_max_ngram_size(self) -> int:
+        return getattr(self.hf_text_config, "max_ngram_size", 0)
+
+    def get_oe_padding_token_id(self) -> int:
+        return getattr(self.hf_text_config, "oe_padding_token_id", 0)
+
     def get_multimodal_config(self) -> MultiModalConfig:
         """
         Get the multimodal configuration of the model.

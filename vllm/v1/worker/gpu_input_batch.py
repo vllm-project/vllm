@@ -95,6 +95,8 @@ class InputBatch:
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
+        max_ngram_size: int = 1,
+        oe_padding_token_id: int = 0,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -268,6 +270,18 @@ class InputBatch:
         # (e.g. penalties).
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
+
+        # NOTE(yxing): fill oe
+        self.max_ngram_size = max_ngram_size
+        if self.max_ngram_size > 1:
+            self.oe_ngram_token_ids_cpu_tensor = torch.full(
+                (self.max_ngram_size, self.max_num_reqs, self.max_model_len),
+                oe_padding_token_id,
+                dtype=torch.int32,
+                device="cpu",
+                pin_memory=False,
+            )
+            self.oe_ngram_token_ids_cpu = self.oe_ngram_token_ids_cpu_tensor.numpy()
 
     @property
     def req_ids(self) -> list[str]:
@@ -685,6 +699,11 @@ class InputBatch:
             self.token_ids_cpu[empty_index, :num_tokens] = self.token_ids_cpu[
                 last_req_index, :num_tokens
             ]
+            if self.max_ngram_size > 1:
+                self.oe_ngram_token_ids_cpu[0, empty_index, :num_tokens] = (
+                    self.token_ids_cpu[last_req_index, :num_tokens]
+                )
+
             self.is_token_ids[empty_index, :num_tokens] = self.is_token_ids[
                 last_req_index, :num_tokens
             ]
@@ -752,6 +771,27 @@ class InputBatch:
         del self._req_ids[num_reqs:]
         del self.req_output_token_ids[num_reqs:]
         del self.spec_token_ids[num_reqs:]
+
+    def shift_ngram_tokens(
+        self,
+        ngram_idx: int,
+        num_scheduled_tokens: list[int],
+    ):
+        # NOTE(yxing): for over encoding
+        # token sequence:  token_i    token_a    token_b   token_c
+        # shift 1:         token_i-1  token_i    token_a   token_b
+        # shift 2:         token_i-2  token_i-1  token_i   token_a
+        # shift 3:         token_i-3  token_i-2  token_i-1 token_i
+        for seq_idx in range(len(num_scheduled_tokens)):
+            computed_tokens_for_seq = self.num_computed_tokens_cpu[seq_idx]
+            scheduled_tokens_for_seq = num_scheduled_tokens[seq_idx]
+            seq_len = computed_tokens_for_seq + scheduled_tokens_for_seq
+            if seq_len <= ngram_idx - 1:
+                continue
+
+            self.oe_ngram_token_ids_cpu[
+                ngram_idx - 1, seq_idx, ngram_idx - 1 : seq_len
+            ] = self.token_ids_cpu[seq_idx, 0 : seq_len - ngram_idx + 1]
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""

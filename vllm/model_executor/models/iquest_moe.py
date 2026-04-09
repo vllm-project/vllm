@@ -1,59 +1,57 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-#
-# Inference-only IquestMoe model compatible with HuggingFace weights.
-# Architecture: MoE with always-enabled shared expert, QK-norm attention,
-# top-K then softmax routing. Same structure as Qwen3MoE with shared expert.
 
-import typing
-from collections.abc import Callable, Iterable
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Inference-only OLMoE model compatible with HuggingFace weights."""
+
+from collections.abc import Iterable
 from itertools import islice
-from typing import Any
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.distributed import (
-    get_ep_group,
-    get_pp_group,
+    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_gather,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
-from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.oe_embedding import OEEmbedding
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-)
-from vllm.model_executor.models.utils import sequence_parallel_chunk
-from vllm.sequence import IntermediateTensors
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import extract_layer_index
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import SupportsLoRA
 from .utils import (
     AutoWeightsLoader,
-    PPMissingLayer,
-    extract_layer_index,
     is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
@@ -61,273 +59,227 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-def _iquest_moe_topk_then_softmax_routing(
-    hidden_states: torch.Tensor,
-    gating_output: torch.Tensor,
-    topk: int,
-    renormalize: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    topk_logits, selected_experts = torch.topk(gating_output, topk, dim=-1)
-    routing_weights = torch.softmax(topk_logits, dim=-1, dtype=torch.float32)
-    if renormalize:
-        routing_weights = routing_weights / routing_weights.sum(dim=-1, keepdim=True)
-    return routing_weights, selected_experts
+class IquestMoeRMSNorm(nn.Module):
+    """RMSNorm (equivalent to T5LayerNorm)."""
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        input_dtype = hidden_states.dtype
+        hidden_states = hidden_states.to(torch.float32)
+        variance = hidden_states.pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        result = (self.weight * hidden_states).to(input_dtype)
+        return result
+
+    def extra_repr(self):
+        return f"{tuple(self.weight.shape)}, eps={self.variance_epsilon}"
 
 
-class IquestMoeMLP(nn.Module):
-    """MLP for dense layers and optional shared expert (with optional gate)."""
+class IquestMoEBlock(nn.Module):
+    """A tensor-parallel MoE implementation for Olmoe that shards each expert
+    across all ranks.
+
+    Each expert's weights are sharded across all ranks and a fused MoE
+    kernel is used for the forward pass, and finally we reduce the outputs
+    across ranks.
+    """
 
     def __init__(
         self,
+        num_experts: int,
+        top_k: int,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str,
+        params_dtype: torch.dtype | None = None,
         quant_config: QuantizationConfig | None = None,
-        reduce_results: bool = True,
-        expert_gate: nn.Linear | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
-        )
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            reduce_results=reduce_results,
-            prefix=f"{prefix}.down_proj",
-        )
-        if hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only silu is supported."
-            )
-        self.act_fn = SiluAndMul()
-        self.expert_gate = expert_gate
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up, _ = self.gate_up_proj(x)
-        out = self.act_fn(gate_up)
-        out, _ = self.down_proj(out)
-        if self.expert_gate is not None:
-            out = F.sigmoid(self.expert_gate(x)[0]) * out
-        return out
-
-
-class IquestMoeSparseMoeBlock(nn.Module):
-    """Sparse MoE with always-enabled shared expert (optional shared_expert_gate)."""
-
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
+        tp_size: int | None = None,
         prefix: str = "",
     ):
         super().__init__()
+        self.hidden_size = hidden_size
 
-        config = vllm_config.model_config.hf_text_config
-        parallel_config = vllm_config.parallel_config
-        quant_config = vllm_config.quant_config
-
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.ep_group = get_ep_group().device_group
-        self.ep_rank = get_ep_group().rank_in_group
-        self.ep_size = self.ep_group.size()
-        self.n_routed_experts = config.num_experts
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
-
-        if self.tp_size > config.num_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}."
-            )
-
-        vllm_config = get_current_vllm_config()
-        eplb_config = vllm_config.parallel_config.eplb_config
-        self.enable_eplb = parallel_config.enable_eplb
-
-        self.n_logical_experts = self.n_routed_experts
-        self.n_redundant_experts = eplb_config.num_redundant_experts
-        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
-        self.n_local_physical_experts = self.n_physical_experts // self.ep_size
-
-        self.physical_expert_start = self.ep_rank * self.n_local_physical_experts
-        self.physical_expert_end = (
-            self.physical_expert_start + self.n_local_physical_experts
-        )
-
+        # Gate always runs at half / full precision for now.
         self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.num_experts,
+            hidden_size,
+            num_experts,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
-        # Same as HF: always-enabled shared expert (no condition on size).
-        shared_expert_intermediate_size = getattr(
-            config, "shared_expert_intermediate_size", config.moe_intermediate_size
-        )
-        if shared_expert_intermediate_size <= 0:
-            shared_expert_intermediate_size = config.moe_intermediate_size
-        use_shared_expert_gate = getattr(
-            config, "use_shared_expert_gate", False)
-
-        if use_shared_expert_gate:
-            self.shared_expert_gate = ReplicatedLinear(
-                config.hidden_size,
-                1,
-                bias=False,
-                quant_config=None,
-                prefix=f"{prefix}.shared_expert_gate",
-            )
-        else:
-            self.shared_expert_gate = None
-        self.shared_expert = IquestMoeMLP(
-            hidden_size=config.hidden_size,
-            intermediate_size=shared_expert_intermediate_size,
-            hidden_act=config.hidden_act,
+        self.experts = FusedMoE(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            reduce_results=True,
+            renormalize=True,
             quant_config=quant_config,
-            reduce_results=False,
-            expert_gate=self.shared_expert_gate,
-            prefix=f"{prefix}.shared_expert",
-        )
-
-        self.experts = SharedFusedMoE(
-            shared_experts=self.shared_expert,
-            gate=self.gate,
-            num_experts=self.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            custom_routing_function=_iquest_moe_topk_then_softmax_routing,
-            quant_config=quant_config,
+            tp_size=tp_size,
             prefix=f"{prefix}.experts",
-            enable_eplb=self.enable_eplb,
-            num_redundant_experts=self.n_redundant_experts,
-            is_sequence_parallel=self.is_sequence_parallel,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        assert hidden_states.dim() <= 2, (
-            "IquestMoeSparseMoeBlock only supports 1D or 2D inputs"
-        )
-        is_input_1d = hidden_states.dim() == 1
-        num_tokens, hidden_dim = hidden_states.shape
+        # NOTE: hidden_states can have either 1D or 2D shape.
+        orig_shape = hidden_states.shape
+        hidden_dim = hidden_states.shape[-1]
         hidden_states = hidden_states.view(-1, hidden_dim)
-
-        if self.is_sequence_parallel:
-            hidden_states = sequence_parallel_chunk(hidden_states)
-
+        # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        # logger.info(
-        #     "[vLLM] router_logits first3=%s",
-        #     router_logits,
-        # )
-        shared_out, fused_out = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        final_hidden_states = (
-            shared_out + fused_out if shared_out is not None else fused_out
-        )
-
-        if self.is_sequence_parallel:
-            final_hidden_states = tensor_model_parallel_all_gather(
-                final_hidden_states, 0
-            )
-            final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
-
-        return (
-            final_hidden_states.squeeze(
-                0) if is_input_1d else final_hidden_states
-        )
+        return final_hidden_states.view(orig_shape)
 
 
 class IquestMoeAttention(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_parameters: dict[str, Any],
-        max_position_embeddings: int = 8192,
-        head_dim: int | None = None,
-        rms_norm_eps: float = 1e-06,
-        qkv_bias: bool = False,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        dual_chunk_attention_config: dict[str, Any] | None = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-        self.hidden_size = hidden_size
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.cache_config = vllm_config.cache_config
+
+        self.hidden_size = config.hidden_size
+        max_position_embeddings = getattr(config, "max_position_embeddings", 4096)
+
+        num_heads = config.num_attention_heads
+        num_kv_heads = config.num_key_value_heads
+
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
             assert self.total_num_kv_heads % tp_size == 0
         else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
-        self.head_dim = head_dim or (hidden_size // self.total_num_heads)
+        self.head_dim = config.head_dim
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
-        self.dual_chunk_attention_config = dual_chunk_attention_config
 
         self.qkv_proj = QKVParallelLinear(
-            hidden_size,
+            self.hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=qkv_bias,
+            bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        self.tp_size = tp_size
+        self.tp_rank = get_tensor_model_parallel_rank()
+        self.q_norm = IquestMoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
-            hidden_size,
+            self.hidden_size,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
+
+        # NOTE(yxing): check partial rope
+        self.rotary_dim = getattr(config, "rotary_dim", None)
+        rope_parameters = getattr(config, "rope_parameters", None)
+        if self.rotary_dim is not None:
+            partial_rotary_factor = self.rotary_dim / self.head_dim
+            if rope_parameters is None:
+                rope_parameters = {"partial_rotary_factor": partial_rotary_factor}
+            else:
+                rope_parameters["partial_rotary_factor"] = partial_rotary_factor
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            dual_chunk_attention_config=dual_chunk_attention_config,
+            is_neox_style=True,
         )
+        # NOTE(yxing): check shared kv cache
+        self.shared_kv_num_layers = config.shared_kv_num_layers
+        kv_sharing_target_layer_name = None
+        self.cross_kv_cache = False
+        layer_idx = extract_layer_index(prefix)
+        self.layer_idx = layer_idx
+        if self.shared_kv_num_layers:
+            # use shared kv cache
+            # attn name is like:
+            # 'model.layers.0.self_attn.attn', 'model.layers.1.self_attn.attn'
+            self.shared_kv_source_begin = config.shared_kv_source_begin
+            self.shared_kv_target_begin = config.shared_kv_target_begin
+            if (
+                layer_idx >= self.shared_kv_target_begin
+                and layer_idx < self.shared_kv_target_begin + self.shared_kv_num_layers
+            ):
+                current_layer_name = f"{prefix}.attn"
+                layer_offset = layer_idx - self.shared_kv_target_begin
+                target_layer_idx = self.shared_kv_source_begin + layer_offset
+                kv_sharing_target_layer_name = current_layer_name.replace(
+                    f"layers.{layer_idx}", f"layers.{target_layer_idx}"
+                )
+                self.cross_kv_cache = True
+                self.k_norm = None
+            else:
+                self.k_norm = IquestMoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        else:
+            self.k_norm = IquestMoeRMSNorm(self.head_dim, eps=config.rms_norm_eps)
+
+        # NOTE(yxing): sink tokens
+        self.num_sink_tokens = config.num_sink_tokens
+        self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        if self.num_sink_tokens:
+            # TODO(yxing): refactor it to use cascade attention
+            # use lse to merge attn states from sink_k and normal kv
+            self.sink_k = torch.nn.Parameter(
+                torch.zeros(
+                    (self.num_sink_tokens, self.num_kv_heads, self.head_dim),
+                    device=current_platform.current_device(),
+                    dtype=config.torch_dtype,
+                ),
+                requires_grad=False,
+            )
+            set_weight_attrs(self.sink_k, {"weight_loader": self.sinks_k_weight_loader})
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            cache_config=cache_config,
+            cache_config=self.cache_config,
             quant_config=quant_config,
+            attn_type=AttentionType.DECODER,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             prefix=f"{prefix}.attn",
-            **{
-                "layer_idx": extract_layer_index(prefix),
-                "dual_chunk_attention_config": dual_chunk_attention_config,
-            }
-            if dual_chunk_attention_config
-            else {},
+            enable_sinks_kv=self.num_sink_tokens > 0,
         )
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+
+    def sinks_k_weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
+        weight_shard_start = self.tp_rank * self.num_kv_heads
+        weight_shard_end = (self.tp_rank + 1) * self.num_kv_heads
+        loaded_weight = loaded_weight[weight_shard_start:weight_shard_end]
+
+        # NOTE(yxing): load model with supporting tensor parallel
+        new_loaded_weight = loaded_weight[:, None].expand(-1, self.head_dim)
+        loaded_weight = new_loaded_weight[None, :, :]
+        assert len(loaded_weight.shape) == 3, (
+            f"expect shape of loaded_weight is 3-dim, now is {loaded_weight.shape}"
+        )
+        param.copy_(loaded_weight)
+        self.sinks_k = (
+            param.unsqueeze(0).expand(self.max_num_seqs, -1, -1, -1).contiguous()
+        )
+        self.sinks_v = torch.zeros_like(self.sinks_k)
+        self.attn.populate_sinks_kv(sinks_k=self.sinks_k, sinks_v=self.sinks_v)
 
     def forward(
         self,
@@ -336,112 +288,89 @@ class IquestMoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q_by_head = q.view(
-            *q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim
-        )
+        # Add qk-norm
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim, self.head_dim)
         q_by_head = self.q_norm(q_by_head)
         q = q_by_head.view(q.shape)
-        k_by_head = k.view(
-            *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
-        )
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+
+        if self.cross_kv_cache:
+            q, _ = self.rotary_emb(positions, q, None)
+            attn_output = self.attn(q, None, None)
+        else:
+            k_by_head = k.view(
+                *k.shape[:-1], k.shape[-1] // self.head_dim, self.head_dim
+            )
+            k_by_head = self.k_norm(k_by_head)
+            k = k_by_head.view(k.shape)
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
 
 class IquestMoeDecoderLayer(nn.Module):
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
-
-        config = vllm_config.model_config.hf_text_config
-        cache_config = vllm_config.cache_config
+        config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.hidden_size = config.hidden_size
-        max_position_embeddings = getattr(
-            config, "max_position_embeddings", 8192
-        )
-        dual_chunk_attention_config = getattr(
-            config, "dual_chunk_attention_config", None
-        )
-
-        rope_parameters = getattr(config, "rope_parameters", None)
-        if rope_parameters is None:
-            rope_scaling = getattr(config, "rope_scaling", None)
-            if isinstance(rope_scaling, dict):
-                rope_parameters = dict(rope_scaling)
-                if "type" in rope_parameters and "rope_type" not in rope_parameters:
-                    rope_parameters["rope_type"] = rope_parameters["type"]
-            else:
-                rope_parameters = {"rope_type": "default"}
-            if getattr(config, "rope_theta", None) is not None:
-                rope_parameters["rope_theta"] = config.rope_theta
+        self.layer_idx = extract_layer_index(prefix)
 
         self.self_attn = IquestMoeAttention(
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            rope_parameters=rope_parameters,
-            max_position_embeddings=max_position_embeddings,
-            rms_norm_eps=config.rms_norm_eps,
-            qkv_bias=getattr(config, "attention_bias", False),
-            head_dim=getattr(config, "head_dim", None),
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix=f"{prefix}.self_attn",
-            dual_chunk_attention_config=dual_chunk_attention_config,
         )
 
-        layer_idx = extract_layer_index(prefix)
-        mlp_only_layers = getattr(config, "mlp_only_layers", []) or []
-        if (layer_idx not in mlp_only_layers) and (
-            config.num_experts > 0
-            and (layer_idx + 1) % config.decoder_sparse_step == 0
-        ):
-            self.mlp = IquestMoeSparseMoeBlock(
-                vllm_config=vllm_config, prefix=f"{prefix}.mlp"
-            )
-        else:
-            self.mlp = IquestMoeMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
-        self.input_layernorm = RMSNorm(
+        self.mlp = IquestMoEBlock(
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+        self.attention_norm = IquestMoeRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_attention_layernorm = RMSNorm(
+        self.attn_out_norm = IquestMoeRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        self.feed_forward_norm = IquestMoeRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        if self.layer_idx == 0:
+            self.ffn_out_norm = IquestMoeRMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        index: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = hidden_states
-        hidden_states = self.input_layernorm(hidden_states)
+    ) -> torch.Tensor:
+        # Self Attention
+        # NOTE(yxing): post-norm is different for first layer and non-first layers
+        if self.layer_idx == 0:
+            norm_hidden_states = self.attention_norm(hidden_states)
+            attn_output = self.self_attn(
+                positions=positions, hidden_states=norm_hidden_states
+            )
+            h = hidden_states + self.attn_out_norm(attn_output)
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
+            # fully connected
+            hidden_states = self.mlp(self.feed_forward_norm(h))
+            output = h + self.ffn_out_norm(hidden_states)
+            return output
+        else:
+            x = self.attention_norm(hidden_states)
+            attn_output = self.self_attn(positions=positions, hidden_states=x)
+            h = x + self.attn_out_norm(attn_output)
 
-        hidden_states = residual + hidden_states
-
-        residual = hidden_states
-        hidden_states = self.post_attention_layernorm(hidden_states)
-
-        hidden_states = self.mlp(hidden_states)
-
-        hidden_states = residual + hidden_states
-        return hidden_states
+            # fully connected
+            ffn_out = self.mlp(self.feed_forward_norm(h))
+            output = h + ffn_out
+            return output
 
 
 @support_torch_compile
@@ -451,196 +380,242 @@ class IquestMoeModel(nn.Module):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        decoder_layer_type: type[nn.Module] = IquestMoeDecoderLayer,
+        layer_type: type[nn.Module] = IquestMoeDecoderLayer,
     ):
         super().__init__()
 
-        config = vllm_config.model_config.hf_text_config
-        quant_config = vllm_config.quant_config
-        parallel_config = vllm_config.parallel_config
-        eplb_config = parallel_config.eplb_config
-        self.num_redundant_experts = eplb_config.num_redundant_experts
+        config = vllm_config.model_config.hf_config
 
-        self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
         self.config = config
-        self.quant_config = quant_config
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            quant_config=quant_config,
-            prefix=f"{prefix}.embed_tokens",
-        )
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda *, prefix: decoder_layer_type(vllm_config=vllm_config, prefix=prefix),
-            prefix=f"{prefix}.layers",
-        )
-        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size
-            )
         )
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: layer_type(vllm_config=vllm_config, prefix=prefix),
+            prefix=f"{prefix}.layers",
+        )
+        self.norm = IquestMoeRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+        self.use_oe_embedding = vllm_config.model_config.get_enable_oe_embedding()
+        if self.use_oe_embedding:
+            self.over_encoding = OEEmbedding(config)
+
+        self.num_sink_tokens = vllm_config.model_config.get_num_sink_tokens()
+
+    def embed_input_ids(
+        self, input_ids: torch.Tensor, oe_input_ids: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        embed_tokens = self.embed_tokens(input_ids)
+        if self.use_oe_embedding:
+            # TODO(yxing): currently, the input_ids should be tokens. In the
+            # future, we need to support token embeddings
+            return self.over_encoding(embed_tokens, oe_input_ids)
+        else:
+            return embed_tokens
 
     def forward(
         self,
-        input_ids: torch.Tensor | None,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.embed_input_ids(input_ids)
+        oe_input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # TODO(yxing): support inputs_embeds later
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
         else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
+            hidden_states = self.embed_input_ids(input_ids, oe_input_ids=oe_input_ids)
 
-        for i, layer in enumerate(
-                islice(self.layers, self.start_layer, self.end_layer)):
-            layer_idx = self.start_layer + i
-            hidden_states = layer(positions, hidden_states, layer_idx)
-
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors(
-                {"hidden_states": hidden_states}
+        for layer in islice(self.layers, self.start_layer, self.end_layer):
+            hidden_states = layer(
+                positions,
+                hidden_states,
             )
+
         hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        return SharedFusedMoE.make_expert_params_mapping(
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        return FusedMoE.make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_experts,
-            num_redundant_experts=self.num_redundant_experts,
         )
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
         ]
-        ignore_suffixes = (
-            ".bias",
-            "_bias",
-            ".k_scale",
-            "_k_scale",
-            ".v_scale",
-            "_v_scale",
-            ".weight_scale",
-            "_weight_scale",
-            ".input_scale",
-            "_input_scale",
-        )
+
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
-
+        # NOTE(yxing): for each expert, it includes
+        # ('experts.w13_', 'experts.layer_idx.gate_proj.', expert_idx, 'w1'),
+        # ('experts.w2_', 'experts.layer_idx.down_proj.', expert_idx, 'w2'),
+        # ('experts.w13_', 'experts.layer_idx.up_proj.', expert_idx, 'w3')
+        total_oe_heads = 0
+        if self.use_oe_embedding:
+            total_oe_heads = self.over_encoding.get_oe_total_heads()
+        oe_heads_counter = 0
         for name, loaded_weight in weights:
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
-                assert loaded_weight.numel() == 1, (
-                    f"KV scale numel {loaded_weight.numel()} != 1"
-                )
-                loaded_weight = loaded_weight.squeeze()
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
+                # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
+                # We have mlp.experts[0].gate_proj in the checkpoint.
+                # Since we handle the experts below in expert_params_mapping,
+                # we need to skip here BEFORE we update the name, otherwise
+                # name will be updated to mlp.experts[0].gate_up_proj, which
+                # will then be updated below in expert_params_mapping
+                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
                 if "mlp.experts" in name:
                     continue
                 name = name.replace(weight_name, param_name)
-                if name.endswith(ignore_suffixes) and name not in params_dict:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Skip layers on other devices.
                 if is_pp_missing_parameter(name, self):
                     continue
-                if name.endswith("scale"):
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
                 if name not in params_dict:
                     continue
+
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
-                if weight_loader == default_weight_loader:
-                    weight_loader(param, loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight, shard_id)
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                is_expert_weight = False
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
-                    is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    if (
-                        name_mapped.endswith(ignore_suffixes)
-                        and name_mapped not in params_dict
-                    ):
-                        continue
-                    param = params_dict[name_mapped]
-                    weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
-                    )
-                    success = weight_loader(
-                        param,
-                        loaded_weight,
-                        name_mapped,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
-                    )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        continue
-                    if name.endswith(ignore_suffixes) and name not in params_dict:
-                        continue
+                    name = name.replace(weight_name, param_name)
+                    # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(
+                        param,
+                        loaded_weight,
+                        name,
+                        shard_id=shard_id,
+                        expert_id=expert_id,
+                    )
+                    break
+                else:
+                    if not self.num_sink_tokens and "sink_k" in name:
+                        logger.warning_once("sink attention feature is disabled")
+                        continue
+
+                    if "experts.fc" in name:
+                        # NOTE(yxing): for sonic moe model
+                        # experts.fc -> experts.w13_.
+                        # the shape of experts.fc is
+                        #   [experts, 2 * intermidiate_size, hidden_size]
+                        name = name.replace("experts.fc", "experts.w13_weight")
+                        param = params_dict[name]
+                        weight_loader = param.weight_loader
+                        for expert_id in range(self.config.num_experts):
+                            # w1 shard
+                            weight_loader(
+                                param,
+                                loaded_weight[expert_id][
+                                    : self.config.intermediate_size
+                                ],
+                                name,
+                                shard_id="w1",
+                                expert_id=expert_id,
+                            )
+                            # w3 shard
+                            weight_loader(
+                                param,
+                                loaded_weight[expert_id][
+                                    self.config.intermediate_size :
+                                ],
+                                name,
+                                shard_id="w3",
+                                expert_id=expert_id,
+                            )
+                        loaded_params.add(name)
+                        continue
+
+                    if not self.use_oe_embedding and "over_encoding" in name:
+                        logger.warning_once("over encoding feature is disabled")
+                        continue
+
+                    if self.use_oe_embedding and "embedders" in name:
+                        # NOTE(yxing): for over-encoding weights loader
+                        # over_encoding.embedders.0.weight
+                        # over_encoding.oe_embeder.weight
+                        shard_id = int(name.split(".")[-2])
+                        name = name.split(".")[0] + ".oe_embeder.weight"
+                        param = params_dict[name]
+                        weight_loader = param.weight_loader
+                        weight_loader(param, loaded_weight, shard_id)
+                        oe_heads_counter += 1
+                        if oe_heads_counter == total_oe_heads:
+                            loaded_params.add(name)
+                        continue
+
+                    if "experts.proj" in name:
+                        # NOTE(yxing): for sonic moe model
+                        # experts.proj -> experts.w2_w2.
+                        # the shape of experts.proj is
+                        #       [experts, hidden_size, intermidiate_size]
+                        name = name.replace("experts.proj", "experts.w2_weight")
+                        param = params_dict[name]
+                        weight_loader = param.weight_loader
+                        for expert_id in range(self.config.num_experts):
+                            weight_loader(
+                                param,
+                                loaded_weight[expert_id],
+                                name,
+                                shard_id="w2",
+                                expert_id=expert_id,
+                            )
+                        loaded_params.add(name)
+                        continue
+
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+                    # Skip layers on other devices.
+                    if is_pp_missing_parameter(name, self):
+                        continue
+                    # Remapping the name of FP8 kv-scale.
                     if name.endswith("kv_scale"):
                         remapped_kv_scale_name = name.replace(
                             ".kv_scale", ".attn.kv_scale"
                         )
                         if remapped_kv_scale_name not in params_dict:
                             logger.warning_once(
-                                "Found kv scale in the checkpoint (e.g. %s), "
-                                "but not found the expected name in the model "
-                                "(e.g. %s). kv-scale is not loaded.",
+                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
                                 name,
                                 remapped_kv_scale_name,
                             )
                             continue
-                        name = remapped_kv_scale_name
+                        else:
+                            name = remapped_kv_scale_name
+
+                    # NOTE(yxing): for sonic moe model, the router name is:
+                    #    layers.0.mlp.router.weight. We need to convert it to
+                    #    layers.0.mlp.gate.weight
+                    if "router.weight" in name:
+                        name = name.replace("router.weight", "gate.weight")
+
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -650,27 +625,31 @@ class IquestMoeModel(nn.Module):
         return loaded_params
 
 
-class IquestMoeForCausalLM(
-    nn.Module, SupportsPP, SupportsLoRA, MixtureOfExperts
-):
+class IquestMoeV11ForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
-        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
-        "gate_up_proj": ["gate_proj", "up_proj"],
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ]
     }
-    embedding_modules = {
-        "embed_tokens": "input_embeddings",
-        "lm_head": "output_embeddings",
-    }
-    fall_back_to_pt_during_load = False
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] = IquestMoeDecoderLayer,
+    ):
         super().__init__()
-        config = vllm_config.model_config.hf_text_config
+        config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
         self.model = IquestMoeModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+            layer_type=layer_type,
         )
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -678,87 +657,30 @@ class IquestMoeForCausalLM(
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        if self.config.tie_word_embeddings:
-            self.lm_head.weight = self.model.embed_tokens.weight
+        if config.tie_word_embeddings:
+            self.lm_head = self.lm_head.tie_weights(self.model.embed_tokens)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
-
-        self.expert_weights = []
-        self.moe_layers = []
-        example_layer = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-            assert isinstance(layer, IquestMoeDecoderLayer)
-            if isinstance(layer.mlp, IquestMoeSparseMoeBlock):
-                example_layer = layer.mlp
-                self.moe_layers.append(layer.mlp.experts)
-        if example_layer is None:
-            raise RuntimeError("No IquestMoe MoE layer found in the model.")
-
-        self.num_moe_layers = len(self.moe_layers)
-        self.num_expert_groups = 1
-        self.num_shared_experts = (
-            1
-            if getattr(config, "shared_expert_intermediate_size", 0) > 0
-            else 0
-        )
-        self.num_logical_experts = example_layer.n_logical_experts
-        self.num_physical_experts = example_layer.n_physical_experts
-        self.num_local_physical_experts = example_layer.n_local_physical_experts
-        self.num_routed_experts = example_layer.n_routed_experts
-        self.num_redundant_experts = example_layer.n_redundant_experts
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = (
-            num_physical_experts - self.num_logical_experts
-        )
-        for layer in self.model.layers:
-            if isinstance(layer.mlp, IquestMoeSparseMoeBlock):
-                moe = layer.mlp
-                moe.n_local_physical_experts = num_local_physical_experts
-                moe.n_physical_experts = num_physical_experts
-                moe.n_redundant_experts = self.num_redundant_experts
-                moe.experts.update_expert_map()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
-        input_ids: torch.Tensor | None,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
+        intermediate_tensors: torch.Tensor | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
-        return self.model(
-            input_ids, positions, intermediate_tensors, inputs_embeds
-        )
+        oe_input_ids: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.model(input_ids, positions, inputs_embeds, oe_input_ids)
+        return hidden_states
 
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return logits
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=(
-                ["lm_head."] if self.config.tie_word_embeddings else None
-            ),
-        )
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:

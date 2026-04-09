@@ -377,6 +377,12 @@ class Attention(nn.Module, AttentionLayerBase):
                 else GroupShape.PER_TENSOR,
             )
 
+    def populate_sinks_kv(self, sinks_k: torch.Tensor, sinks_v: torch.Tensor):
+        assert self.attn_backend.get_name() == "FLASH_ATTN", (
+            f"sink run on flash attn only, but now is {self.attn_backend.get_name()}"
+        )
+        self.impl.populate_sinks_kv(sinks_k, sinks_v)
+
     def forward(
         self,
         query: torch.Tensor,
