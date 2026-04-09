@@ -6,14 +6,16 @@ import os
 import platform
 import subprocess
 import sys
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import psutil
 import torch
 
-from vllm import envs
 from vllm.logger import init_logger
+from vllm.utils.cpu_resource_utils import (
+    DEVICE_CONTROL_ENV_VAR,
+    get_memory_node_info,
+)
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -38,43 +40,13 @@ def get_max_threads(pid=0):
         raise NotImplementedError("Unsupported OS")
 
 
-@dataclass
-class LogicalCPUInfo:
-    id: int = -1
-    physical_core: int = -1
-    numa_node: int = -1
-
-    @classmethod
-    def _int(cls, value: str) -> int:
-        try:
-            int_value = int(value)
-        except Exception:
-            int_value = -1
-        return int_value
-
-    @staticmethod
-    def json_decoder(obj_dict: dict):
-        id = obj_dict.get("cpu")
-        physical_core = obj_dict.get("core")
-        numa_node = obj_dict.get("node")
-
-        if not (id is None or physical_core is None or numa_node is None):
-            return LogicalCPUInfo(
-                id=LogicalCPUInfo._int(id),
-                physical_core=LogicalCPUInfo._int(physical_core),
-                numa_node=LogicalCPUInfo._int(numa_node),
-            )
-        else:
-            return obj_dict
-
-
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_name: str = "cpu"
     device_type: str = "cpu"
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
-    device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
+    device_control_env_var = DEVICE_CONTROL_ENV_VAR
     omp_process_manager = None
     # Simultaneous Multithreading (SMT) level for OpenMP:
     # 4 on PowerPC, 1 on non-PowerPC architectures
@@ -123,29 +95,9 @@ class CpuPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        from vllm.utils.mem_constants import GiB_bytes
-        from vllm.utils.mem_utils import format_gib
+        meminfo = get_memory_node_info(device_id)
 
-        kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
-        node_dir = "/sys/devices/system/node"
-        if kv_cache_space is None:
-            nodes = (
-                [d for d in os.listdir(node_dir) if d.startswith("node")]
-                if os.path.exists(node_dir)
-                else []
-            )
-            num_numa_nodes = len(nodes) or 1
-            free_cpu_memory = psutil.virtual_memory().total // num_numa_nodes
-            DEFAULT_CPU_MEM_UTILIZATION = 0.5
-            kv_cache_space = int(free_cpu_memory * DEFAULT_CPU_MEM_UTILIZATION)
-            logger.warning_once(
-                "VLLM_CPU_KVCACHE_SPACE not set. Using %s GiB for KV cache.",
-                format_gib(kv_cache_space),
-            )
-        else:
-            kv_cache_space *= GiB_bytes
-
-        return kv_cache_space
+        return meminfo.total_memory
 
     @classmethod
     def set_device(cls, device: torch.device) -> None:
@@ -180,6 +132,12 @@ class CpuPlatform(Platform):
                 "otherwise the performance is not optimized."
             )
 
+        # Lagecy setting
+        env_key = "VLLM_CPU_KVCACHE_SPACE"
+        if env_key in os.environ and os.environ[env_key] != "":
+            kv_cache_space = int(os.environ[env_key])
+            cache_config.kv_cache_memory_bytes = kv_cache_space * GiB_bytes
+
         scheduler_config = vllm_config.scheduler_config
         # async scheduling is not required on CPU
         scheduler_config.async_scheduling = False
@@ -197,8 +155,6 @@ class CpuPlatform(Platform):
                 "CPU backend doesn't support KV cache quantization fallback to auto."
             )
             cache_config.cache_dtype = "auto"
-
-        cache_config.cpu_kvcache_space_bytes = CpuPlatform.get_device_total_memory()
 
         parallel_config = vllm_config.parallel_config
         # OMP requires the MP executor to function correctly, UniProc is not
