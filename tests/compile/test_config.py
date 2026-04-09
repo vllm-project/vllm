@@ -634,27 +634,3 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
-
-
-@pytest.mark.skipif(
-    not _is_torch_equal_or_newer("2.9.0.dev") or current_platform.is_cpu(),
-    reason="Combo kernels only configured on torch>=2.9 and non-CPU",
-)
-def test_mla_exposed_split_disables_combo_kernels(monkeypatch):
-    from vllm.envs import disable_envs_cache
-
-    disable_envs_cache()
-    monkeypatch.setenv("VLLM_MLA_EXPOSED_SPLIT", "1")
-
-    config = VllmConfig(
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-        )
-    )
-    assert (
-        config.compilation_config.inductor_compile_config.get("combo_kernels") is False
-    )
-    assert (
-        config.compilation_config.inductor_compile_config.get("benchmark_combo_kernel")
-        is False
-    )

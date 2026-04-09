@@ -501,6 +501,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 _encode_layer_name(self.layer_name),
             )
 
+        if output_shape is None:
+            output_shape = torch.Size((q.shape[0], self.num_heads * self.v_head_dim))
+
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
             attn_metadata = forward_context.attn_metadata
