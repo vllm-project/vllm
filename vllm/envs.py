@@ -149,6 +149,7 @@ if TYPE_CHECKING:
     VLLM_HUMMING_ONLINE_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_INPUT_QUANT_CONFIG: dict[str, Any] | None = None
     VLLM_HUMMING_USE_F16_ACCUM: bool = False
+    VLLM_HUMMING_MOE_PREFER_INDEXED: bool | None = None
     VLLM_USE_HUMMING: bool = False
     VLLM_MXFP4_USE_MARLIN: bool | None = None
     VLLM_DEEPEPLL_NVFP4_DISPATCH: bool = False
@@ -1187,6 +1188,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use fp16 accumulator mma
     "VLLM_HUMMING_USE_F16_ACCUM": lambda: maybe_convert_bool(
         os.environ.get("VLLM_HUMMING_USE_F16_ACCUM", "0")
+    ),
+    # Whether to use indexed gemm for humming moe
+    # if 1, force use indexed gemm
+    # if 0, force use grouped gemm
+    # if None, choose better gemm type automatically
+    "VLLM_HUMMING_MOE_PREFER_INDEXED": lambda: maybe_convert_bool(
+        os.environ.get("VLLM_HUMMING_MOE_PREFER_INDEXED", None)
     ),
     # Whether to use DeepEPLL kernels for NVFP4 quantization and dispatch method
     # only supported on Blackwell GPUs and with
