@@ -241,6 +241,7 @@ def mteb_test_rerank_models(
 
     with vllm_runner(
         model_info.name,
+        revision=model_info.revision,
         runner="pooling",
         max_model_len=None,
         max_num_seqs=8,
@@ -286,7 +287,9 @@ def mteb_test_rerank_models(
     # Accelerate mteb test by setting
     # SentenceTransformers mteb score to a constant
     if model_info.mteb_score is None:
-        with hf_runner(model_info.name, dtype=model_info.hf_dtype) as hf_model:
+        with hf_runner(
+            model_info.name, revision=model_info.revision, dtype=model_info.hf_dtype
+        ) as hf_model:
             hf_model.chat_template = chat_template
             st_main_score = run_mteb_rerank(
                 hf_model,
