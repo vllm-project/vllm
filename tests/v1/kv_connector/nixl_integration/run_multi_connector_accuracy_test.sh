@@ -49,7 +49,8 @@ KV_CONFIG_NORMAL='{
   "kv_connector_extra_config":{
     "connectors":[
       {"kv_connector":"NixlConnector","kv_role":"kv_both"},
-      {"kv_connector":"OffloadingConnector","kv_role":"kv_both"}
+      {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
+       "kv_connector_extra_config":{"cpu_bytes_to_use":1000000000}}
     ]
   }
 }'
@@ -64,7 +65,8 @@ KV_CONFIG_CROSS_LAYERS='{
     "connectors":[
       {"kv_connector":"NixlConnector","kv_role":"kv_both",
        "kv_connector_extra_config":{"enable_cross_layers_blocks":"True"}},
-      {"kv_connector":"OffloadingConnector","kv_role":"kv_both"}
+      {"kv_connector":"OffloadingConnector","kv_role":"kv_both",
+       "kv_connector_extra_config":{"cpu_bytes_to_use":1000000000}}
     ]
   }
 }'
