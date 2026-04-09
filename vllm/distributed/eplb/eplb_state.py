@@ -26,6 +26,7 @@ MoE layer. If we have 32 EP ranks, then each GPU will hold 288 / 32 = 9 local
 physical experts.
 """
 
+import sys
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -48,6 +49,7 @@ from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
 from .eplb_communicator import EplbCommunicator, create_eplb_communicator
+from .eplb_utils import heat_cell
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     RecvMetadata,
@@ -516,6 +518,106 @@ class EplbState:
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 
+    def _dump(
+        self,
+        num_tokens_per_rank: torch.Tensor,
+        verbose: bool = False,
+    ) -> None:
+        """Print EPLB balancedness stats to stderr."""
+        layer_means = num_tokens_per_rank.mean(dim=1, dtype=torch.float64)
+        layer_maxes = num_tokens_per_rank.max(dim=1).values.to(torch.float64)
+        valid_layers = layer_means > 0
+
+        # Compute balancedness ratio:
+        # for each layer:
+        #   (max load across ranks) / (mean load across ranks)
+        # then average over active layers.
+        if valid_layers.any():
+            layer_ratios = layer_maxes[valid_layers] / layer_means[valid_layers]
+            balancedness = layer_ratios.mean().item()
+        else:
+            balancedness = 1.0
+        steps_left = (
+            self.expert_rearrangement_step_interval - self.expert_rearrangement_step
+        )
+        step = self.expert_rearrangement_step
+
+        if not verbose:
+            print(
+                f"EPLB: step={step}, balancedness={balancedness:.2f}x, "
+                f"\nNext rearrangement in {steps_left} steps",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+
+        # ---- verbose dump ----
+        lines: list[str] = [
+            "=== EPLB dump ===",
+            f"step={step}, balancedness={balancedness:.2f}x",
+            f"Next rearrangement in {steps_left} steps",
+        ]
+
+        num_ranks = num_tokens_per_rank.shape[1]
+        if num_ranks == 0:
+            lines += ["No EP ranks.", "=== end EPLB dump ==="]
+            print("\n".join(lines), file=sys.stderr, flush=True)
+            return
+
+        # Per-layer / per-rank token table
+        table = num_tokens_per_rank.long().cpu()  # [n_layers, num_ranks]
+        n_layers = table.shape[0]
+        total = int(table.sum().item())
+        if total > 0:
+            row_sums = table.sum(dim=1)
+            col_sums = table.sum(dim=0)
+
+            # Auto-size columns to fit the widest value
+            biggest_value = max(int(table.max().item()), int(col_sums.max().item()))
+            val_w = max(6, len(str(biggest_value)))
+            sum_w = max(6, len(str(total)))
+            label_w = len(f"Layer{n_layers - 1}")
+
+            # Header
+            lines.append("Tokens per MoE layer and EP rank:")
+            rank_hdr = " ".join(f"{'rank' + str(r):>{val_w}}" for r in range(num_ranks))
+            lines.append(f"{'':{label_w}} {rank_hdr}  {'sum':>{sum_w}}  max/mean")
+
+            # One row per MoE layer
+            for i in range(n_layers):
+                row = table[i]
+                row_min = int(row.min().item())
+                row_max = int(row.max().item())
+                row_total = int(row_sums[i].item())
+                row_mean = row_total / num_ranks
+                ratio = row_max / row_mean if row_mean > 0 else float("inf")
+                vals = [int(row[r].item()) for r in range(num_ranks)]
+                cells = " ".join(
+                    heat_cell(f"{v:>{val_w}}", v, row_min, row_max) for v in vals
+                )
+                lines.append(
+                    f"{'Layer' + str(i):{label_w}} {cells}"
+                    f"  {row_total:>{sum_w}}  {ratio:.2f}x"
+                )
+
+            # Totals row
+            mean_per_rank = total / num_ranks
+            totals_max = int(col_sums.max().item())
+            totals_ratio = (
+                totals_max / mean_per_rank if mean_per_rank > 0 else float("inf")
+            )
+            totals_cells = " ".join(
+                f"{int(col_sums[r].item()):>{val_w}}" for r in range(num_ranks)
+            )
+            sigma = "\u03a3"
+            lines.append(
+                f"{sigma:{label_w}} {totals_cells}"
+                f"  {total:>{sum_w}}  {totals_ratio:.2f}x"
+            )
+
+        lines.append("=== end EPLB dump ===")
+        print("\n".join(lines), file=sys.stderr, flush=True)
+
     def step(
         self,
         is_dummy: bool = False,
@@ -534,12 +636,6 @@ class EplbState:
                 `profile_run` to reserve enough memory
                 for the communication buffer.
             log_stats (bool): If `True`, log the expert load metrics.
-
-        # Stats
-            The metrics are all summed up across layers.
-            - `avg_tokens`: The average load across ranks.
-            - `max_tokens`: The maximum load across ranks.
-            - `balancedness`: The ratio of average load to maximum load.
         """
         ep_group = get_ep_group().device_group
         if is_profile:
@@ -573,34 +669,10 @@ class EplbState:
                     .float()
                 )
 
-                # Compute balancedness ratio:
-                # for each layer:
-                #   (mean load across ranks) / (max load across ranks)
-                # then average over active layers.
-                per_layer_mean = num_tokens_per_rank.mean(dim=1, dtype=torch.float64)
-                per_layer_max = num_tokens_per_rank.max(dim=1).values.to(torch.float64)
-                active = per_layer_max > 0
-                if active.any():
-                    balancedness = (
-                        (per_layer_mean[active] / per_layer_max[active]).mean().item()
-                    )
-                else:
-                    balancedness = 0.0
-                avg_tokens = per_layer_mean.sum().item()
-                max_tokens = per_layer_max.sum().item()
-
                 if ep_group.rank() == 0:
-                    logger.info(
-                        "EPLB step: %d for model %s: avg_tokens=%.2f, "
-                        "max_tokens=%d, balancedness=%.4f, "
-                        "steps until the next rearrangement: %d",
-                        self.expert_rearrangement_step,
-                        eplb_model_state.model_name,
-                        avg_tokens,
-                        max_tokens,
-                        balancedness,
-                        self.expert_rearrangement_step_interval
-                        - self.expert_rearrangement_step,
+                    self._dump(
+                        num_tokens_per_rank,
+                        verbose=self.parallel_config.eplb_config.log_balancedness_verbose,
                     )
 
         # Update the expert load sliding window

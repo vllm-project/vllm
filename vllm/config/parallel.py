@@ -75,6 +75,13 @@ class EPLBConfig:
     """
     Interval for logging the balancedness.
     """
+    log_balancedness_verbose: bool = False
+    """
+    When True (together with ``log_balancedness``), log a multi-line EPLB report
+    per interval step: per-rank routed expert layout, replication summary,
+    and a per-layer / per-rank token table.
+    Off by default to avoid large logs and extra CPU work on rank 0.
+    """
     use_async: bool = False
     """
     Whether to use non-blocking EPLB.
