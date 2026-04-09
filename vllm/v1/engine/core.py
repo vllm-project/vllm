@@ -1686,14 +1686,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
         self.pending_pause = True
 
-        if not self.engines_running:
-            # Kick-start all engines into the stepping loop so they reach
-            # the all-reduce consensus checkpoint.
-            self.engines_running = True
-            if self.has_coordinator:
-                self.output_queue.put_nowait(
-                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
-                )
+        # Kick-start this engine into the stepping loop so it can
+        # reach the all-reduce consensus checkpoint.
+        self.engines_running = True
 
         future: Future[Any] = Future()
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
