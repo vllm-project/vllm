@@ -5,6 +5,7 @@ import json
 from collections.abc import Generator
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -49,41 +50,62 @@ def qwen3_tool_parser_parametrized(qwen3_tool_parser, qwen3_xml_tool_parser, req
         return qwen3_xml_tool_parser
 
 
-@pytest.fixture
-def sample_tools():
-    return [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "get_current_weather",
-                "description": "Get the current weather",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "city": {"type": "string", "description": "The city name"},
-                        "state": {"type": "string", "description": "The state code"},
-                        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
-                    },
-                    "required": ["city", "state"],
+WEATHER_PARAMS = {
+    "type": "object",
+    "properties": {
+        "city": {"type": "string", "description": "The city name"},
+        "state": {"type": "string", "description": "The state code"},
+        "unit": {"type": "string", "enum": ["fahrenheit", "celsius"]},
+    },
+    "required": ["city", "state"],
+}
+
+AREA_PARAMS = {
+    "type": "object",
+    "properties": {
+        "shape": {"type": "string"},
+        "dimensions": {"type": "object"},
+        "precision": {"type": "integer"},
+    },
+}
+
+
+@pytest.fixture(params=["chat_completion", "responses_api"])
+def sample_tools(request):
+    if request.param == "chat_completion":
+        return [
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "get_current_weather",
+                    "description": "Get the current weather",
+                    "parameters": WEATHER_PARAMS,
                 },
-            },
-        ),
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "calculate_area",
-                "description": "Calculate area of a shape",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "shape": {"type": "string"},
-                        "dimensions": {"type": "object"},
-                        "precision": {"type": "integer"},
-                    },
+            ),
+            ChatCompletionToolsParam(
+                type="function",
+                function={
+                    "name": "calculate_area",
+                    "description": "Calculate area of a shape",
+                    "parameters": AREA_PARAMS,
                 },
-            },
-        ),
-    ]
+            ),
+        ]
+    else:
+        return [
+            FunctionTool(
+                type="function",
+                name="get_current_weather",
+                description="Get the current weather",
+                parameters=WEATHER_PARAMS,
+            ),
+            FunctionTool(
+                type="function",
+                name="calculate_area",
+                description="Calculate area of a shape",
+                parameters=AREA_PARAMS,
+            ),
+        ]
 
 
 def assert_tool_calls(
@@ -337,12 +359,11 @@ circle
 )
 def test_extract_tool_calls(
     qwen3_tool_parser_parametrized,
-    sample_tools,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
     )
@@ -354,7 +375,7 @@ def test_extract_tool_calls(
 
 
 def test_extract_tool_calls_fallback_no_tags(
-    qwen3_tool_parser_parametrized, sample_tools
+    qwen3_tool_parser_parametrized,
 ):
     """Test fallback parsing when XML tags are missing"""
     model_output = """<function=get_current_weather>
@@ -366,7 +387,7 @@ TX
 </parameter>
 </function>"""
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
     )
@@ -427,208 +448,6 @@ hello world
     assert args["bool_param"] is True
     assert args["str_param"] == "hello world"
     assert args["obj_param"] == {"key": "value"}
-
-
-def test_extract_tool_calls_anyof_type_conversion(qwen3_tool_parser):
-    """Test type conversion for anyOf/oneOf nullable schemas (Pydantic v2).
-
-    Pydantic v2 emits anyOf for Optional[T] fields, e.g.:
-        Optional[int] -> {"anyOf": [{"type": "integer"}, {"type": "null"}]}
-    The parser must extract the non-null type and apply the correct
-    conversion (int(), float(), etc.) instead of returning a raw string.
-    """
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "test_anyof",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "anyof_int": {
-                            "anyOf": [
-                                {"type": "integer"},
-                                {"type": "null"},
-                            ],
-                            "default": 5,
-                        },
-                        "anyof_str": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "null"},
-                            ],
-                        },
-                        "anyof_array": {
-                            "anyOf": [
-                                {"type": "array", "items": {"type": "string"}},
-                                {"type": "null"},
-                            ],
-                        },
-                        "anyof_obj": {
-                            "anyOf": [
-                                {"type": "object"},
-                                {"type": "null"},
-                            ],
-                        },
-                        "type_as_array": {
-                            "type": ["integer", "null"],
-                        },
-                        "multi_non_null": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "integer"},
-                                {"type": "null"},
-                            ],
-                        },
-                        "ref_param": {
-                            "$ref": "#/$defs/ToolInput",
-                        },
-                    },
-                },
-            },
-        )
-    ]
-
-    model_output = """<tool_call>
-<function=test_anyof>
-<parameter=anyof_int>
-5
-</parameter>
-<parameter=anyof_str>
-hello
-</parameter>
-<parameter=anyof_array>
-["a", "b", "c"]
-</parameter>
-<parameter=anyof_obj>
-{"key": "value"}
-</parameter>
-<parameter=type_as_array>
-42
-</parameter>
-<parameter=multi_non_null>
-some text
-</parameter>
-<parameter=ref_param>
-{"city": "Paris"}
-</parameter>
-</function>
-</tool_call>"""
-
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-    extracted = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
-
-    args = json.loads(extracted.tool_calls[0].function.arguments)
-    assert args["anyof_int"] == 5
-    assert isinstance(args["anyof_int"], int)
-    assert args["anyof_str"] == "hello"
-    assert isinstance(args["anyof_str"], str)
-    assert args["anyof_array"] == ["a", "b", "c"]
-    assert isinstance(args["anyof_array"], list)
-    assert args["anyof_obj"] == {"key": "value"}
-    assert isinstance(args["anyof_obj"], dict)
-    assert args["type_as_array"] == 42
-    assert isinstance(args["type_as_array"], int)
-    # Multi non-null: anyOf[string, integer, null] → first non-null is string
-    assert args["multi_non_null"] == "some text"
-    assert isinstance(args["multi_non_null"], str)
-    # $ref: treated as object, parsed via json.loads
-    assert args["ref_param"] == {"city": "Paris"}
-    assert isinstance(args["ref_param"], dict)
-
-
-def test_extract_tool_calls_anyof_type_conversion_streaming(
-    qwen3_tool_parser, qwen3_tokenizer
-):
-    """Test streaming e2e for anyOf/oneOf nullable schemas (Pydantic v2).
-
-    Verifies that the full streaming pipeline — tokenize, incrementally
-    decode, extract_tool_calls_streaming — correctly resolves types from
-    anyOf schemas and produces valid JSON with properly typed values.
-    """
-    tools = [
-        ChatCompletionToolsParam(
-            type="function",
-            function={
-                "name": "search_web",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "null"},
-                            ],
-                        },
-                        "count": {
-                            "anyOf": [
-                                {"type": "integer"},
-                                {"type": "null"},
-                            ],
-                            "default": 5,
-                        },
-                        "verbose": {
-                            "anyOf": [
-                                {"type": "boolean"},
-                                {"type": "null"},
-                            ],
-                        },
-                        "filters": {
-                            "$ref": "#/$defs/SearchFilters",
-                        },
-                    },
-                },
-            },
-        )
-    ]
-
-    model_output = """<tool_call>
-<function=search_web>
-<parameter=query>
-vllm tool parser
-</parameter>
-<parameter=count>
-10
-</parameter>
-<parameter=verbose>
-true
-</parameter>
-<parameter=filters>
-{"lang": "en", "year": 2025}
-</parameter>
-</function>
-</tool_call>"""
-
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
-
-    tool_states = {}
-    for delta_message in stream_delta_message_generator(
-        qwen3_tool_parser, qwen3_tokenizer, model_output, request
-    ):
-        if delta_message.tool_calls:
-            for tool_call in delta_message.tool_calls:
-                idx = tool_call.index
-                if idx not in tool_states:
-                    tool_states[idx] = {"name": None, "arguments": ""}
-                if tool_call.function:
-                    if tool_call.function.name:
-                        tool_states[idx]["name"] = tool_call.function.name
-                    if tool_call.function.arguments is not None:
-                        tool_states[idx]["arguments"] += tool_call.function.arguments
-
-    assert len(tool_states) == 1
-    assert tool_states[0]["name"] == "search_web"
-    assert tool_states[0]["arguments"] is not None
-    args = json.loads(tool_states[0]["arguments"])
-    assert args["query"] == "vllm tool parser"
-    assert isinstance(args["query"], str)
-    assert args["count"] == 10
-    assert isinstance(args["count"], int)
-    assert args["verbose"] is True
-    assert isinstance(args["verbose"], bool)
-    # $ref: treated as object, parsed via json.loads
-    assert args["filters"] == {"lang": "en", "year": 2025}
-    assert isinstance(args["filters"], dict)
 
 
 @pytest.mark.parametrize(
@@ -809,13 +628,12 @@ circle
 def test_extract_tool_calls_streaming(
     qwen3_tool_parser_parametrized,
     qwen3_tokenizer,
-    sample_tools,
     model_output,
     expected_tool_calls,
     expected_content,
 ):
     """Test incremental streaming behavior including typed parameters"""
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
     tool_states = {}  # Track state per tool index
@@ -885,7 +703,7 @@ def test_extract_tool_calls_streaming(
 
 
 def test_extract_tool_calls_missing_closing_parameter_tag(
-    qwen3_tool_parser_parametrized, sample_tools
+    qwen3_tool_parser_parametrized,
 ):
     """Test handling of missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -903,7 +721,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
     extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
         model_output, request=request
     )
@@ -927,7 +745,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_missing_closing_tag(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
+    qwen3_tool_parser_parametrized, qwen3_tokenizer
 ):
     """Test streaming with missing closing </parameter> tag"""
     # Using get_current_weather from sample_tools but with malformed XML
@@ -945,7 +763,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
     tool_states = {}
@@ -1002,7 +820,7 @@ fahrenheit
 
 
 def test_extract_tool_calls_streaming_incremental(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
+    qwen3_tool_parser_parametrized, qwen3_tokenizer
 ):
     """Test that streaming is truly incremental"""
     model_output = """I'll check the weather.<tool_call>
@@ -1016,7 +834,7 @@ TX
 </function>
 </tool_call>"""
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     chunks = []
     for delta_message in stream_delta_message_generator(
@@ -1099,7 +917,7 @@ def test_extract_tool_calls_complex_type_with_single_quote(
 
 
 def test_extract_tool_calls_streaming_missing_opening_tag(
-    qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
+    qwen3_tool_parser_parametrized, qwen3_tokenizer
 ):
     """Test streaming with missing opening <tool_call> tag
 
@@ -1121,7 +939,7 @@ fahrenheit
 </function>
 </tool_call>"""
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     other_content = ""
     tool_states = {}
@@ -1178,7 +996,7 @@ fahrenheit
     assert args["unit"] == "fahrenheit"
 
 
-def test_malformed_xml_no_gt_delimiter(qwen3_tool_parser, sample_tools):
+def test_malformed_xml_no_gt_delimiter(qwen3_tool_parser):
     """Regression: malformed XML without '>' must not crash (PR #36774)."""
     model_output = (
         "<tool_call>\n"
@@ -1188,14 +1006,14 @@ def test_malformed_xml_no_gt_delimiter(qwen3_tool_parser, sample_tools):
         "</tool_call>"
     )
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
     result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
     assert result is not None
     assert isinstance(result.tool_calls, list)
     assert all(tc is not None for tc in result.tool_calls)
 
 
-def test_none_tool_calls_filtered(qwen3_tool_parser, sample_tools):
+def test_none_tool_calls_filtered(qwen3_tool_parser):
     """Regression: None tool calls filtered from output (PR #36774)."""
     model_output = (
         "<tool_call>\n"
@@ -1210,7 +1028,7 @@ def test_none_tool_calls_filtered(qwen3_tool_parser, sample_tools):
         "</tool_call>"
     )
 
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
     result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
     assert all(tc is not None for tc in result.tool_calls)
     assert result.tools_called
@@ -1260,11 +1078,9 @@ def test_anyof_parameter_not_double_encoded(qwen3_tokenizer):
     assert args["data"] == {"key": "value", "count": 42}
 
 
-def test_streaming_multi_param_single_chunk(
-    qwen3_tool_parser, qwen3_tokenizer, sample_tools
-):
+def test_streaming_multi_param_single_chunk(qwen3_tool_parser, qwen3_tokenizer):
     """Regression: speculative decode delivering multiple params at once (PR #35615)."""
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=sample_tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     deltas = [
         "<tool_call>",

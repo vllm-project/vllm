@@ -57,7 +57,8 @@ void merge_attn_states(
     torch::Tensor& output, std::optional<torch::Tensor> output_lse,
     const torch::Tensor& prefix_output, const torch::Tensor& prefix_lse,
     const torch::Tensor& suffix_output, const torch::Tensor& suffix_lse,
-    const std::optional<int64_t> prefill_tokens_with_context);
+    const std::optional<int64_t> prefill_tokens_with_context,
+    const std::optional<torch::Tensor>& output_scale = std::nullopt);
 #ifndef USE_ROCM
 void convert_vertical_slash_indexes(
     torch::Tensor& block_count,      // [BATCH, N_HEADS, NUM_ROWS]
@@ -113,9 +114,9 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           int64_t numRows, int64_t stride0, int64_t stride1,
                           int64_t topK);
 
-void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
-                        const torch::Tensor& lengths,
-                        std::optional<torch::Tensor> row_starts_opt);
+void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+                     torch::Tensor& output, torch::Tensor& workspace, int64_t k,
+                     int64_t max_seq_len);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,

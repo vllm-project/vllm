@@ -35,6 +35,7 @@ from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
+    EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
@@ -589,8 +590,9 @@ class MPClient(EngineCoreClient):
                         f"timeout, set the environment variable: "
                         f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                     )
-                identity, _ = sync_input_socket.recv_multipart()
+                identity, payload = sync_input_socket.recv_multipart()
                 identities.remove(identity)
+                self._apply_ready_response(payload)
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -661,6 +663,34 @@ class MPClient(EngineCoreClient):
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
+
+    def _apply_ready_response(self, payload: bytes) -> None:
+        """Decode an EngineCoreReadyResponse and sync any post-initialization
+        config changes (e.g. auto-fitted max_model_len) back to the frontend."""
+        if not payload:
+            return
+        vllm_config = self.vllm_config
+        response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        if response.max_model_len is not None:
+            vllm_config.model_config.max_model_len = min(
+                vllm_config.model_config.max_model_len,
+                response.max_model_len,
+            )
+
+        # Setup KV cache config with initialization state from
+        # engine core process. Sum values from all engines in DP case.
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
+        num_gpu_blocks += response.num_gpu_blocks
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+
+        # In external DP LB mode, the coordinator address that the
+        # front-end procs connect to is obtained by each engine via it's
+        # initial handshake with the rank 0 front-end.
+        if response.dp_stats_address is not None:
+            if self.stats_update_address is None:
+                self.stats_update_address = response.dp_stats_address
+            else:
+                assert response.dp_stats_address == self.stats_update_address
 
 
 def _process_utility_output(
@@ -1582,8 +1612,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     f"timeout, set the environment variable: "
                     f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                 )
-            identity, _ = sync_input_socket.recv_multipart()
+            identity, payload = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)
+            self._apply_ready_response(payload)
 
         # NOTE(yongji): Before we schedule any requests on the new workers,
         # we should wait for them to switch to the new setup.
