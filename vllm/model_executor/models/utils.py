@@ -285,6 +285,11 @@ class AutoWeightsLoader:
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
+        # Include buffers (e.g., layer_scalar in Gemma4) so checkpoint
+        # tensors registered via register_buffer() can be loaded.
+        for buf_name, buf in module.named_buffers(recurse=False):
+            if buf_name not in child_params and buf_name not in child_modules:
+                child_params[buf_name] = buf
 
         # Add missing tensors the weight loader needs to be able to load
         # that aren't registered as params, e.g., batchnorm statistics.

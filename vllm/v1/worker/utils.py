@@ -410,15 +410,35 @@ def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> 
     )
 
     if init_snapshot.free_memory < requested_memory:
-        raise ValueError(
-            f"Free memory on device {init_snapshot.device_} "
-            f"({format_gib(init_snapshot.free_memory)}/"
-            f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
-            f"is less than desired GPU memory utilization "
-            f"({cache_config.gpu_memory_utilization}, "
-            f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
-            f"utilization or reduce GPU memory used by other processes."
+        # Allow up to 6 GiB of CUDA driver/NCCL overhead that is consumed
+        # before model weights load (observed ~5.17 GiB on GB10 unified-memory
+        # GPUs). If free memory is within that tolerance, cap the budget at
+        # actual free memory and warn instead of failing — model weights may
+        # still fit since vLLM does not enforce this budget during loading.
+        driver_overhead_tolerance = 6 * (1 << 30)  # 6 GiB in bytes
+        if init_snapshot.free_memory < requested_memory - driver_overhead_tolerance:
+            raise ValueError(
+                f"Free memory on device {init_snapshot.device_} "
+                f"({format_gib(init_snapshot.free_memory)}/"
+                f"{format_gib(init_snapshot.total_memory)} GiB) on startup "
+                f"is less than desired GPU memory utilization "
+                f"({cache_config.gpu_memory_utilization}, "
+                f"{format_gib(requested_memory)} GiB). Decrease GPU memory "
+                f"utilization or reduce GPU memory used by other processes."
+            )
+        logger.warning(
+            "Free memory on device %s (%s/%s GiB) is less than requested "
+            "(%s GiB at gpu_memory_utilization=%.2f), but within driver "
+            "overhead tolerance (%.1f GiB). Capping KV cache budget at "
+            "actual free memory. KV cache will be very limited.",
+            init_snapshot.device_,
+            format_gib(init_snapshot.free_memory),
+            format_gib(init_snapshot.total_memory),
+            format_gib(requested_memory),
+            cache_config.gpu_memory_utilization,
+            driver_overhead_tolerance / (1 << 30),
         )
+        requested_memory = init_snapshot.free_memory
 
     return requested_memory
 

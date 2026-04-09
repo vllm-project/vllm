@@ -37,8 +37,9 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
   
   # Generate Dockerfile graph
   echo "Running dockerfilegraph tool..."
-  docker run \
+  if ! docker run \
     --rm \
+    --platform linux/amd64 \
     --user "$(id -u):$(id -g)" \
     --workdir /workspace \
     --volume "$(pwd -P)":/workspace \
@@ -47,7 +48,10 @@ if printf '%s\n' "${FILES[@]}" | grep -q "^docker/Dockerfile$"; then
     --dpi 200 \
     --max-label-length 50 \
     --filename docker/Dockerfile \
-    --legend
+    --legend; then
+    echo "Warning: dockerfilegraph failed (platform may not support amd64 emulation). Skipping graph update."
+    exit 0
+  fi
   
   echo "Finding generated PNG file..."
   # Check for Dockerfile.png in the root directory (most likely location)
