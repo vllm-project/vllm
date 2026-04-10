@@ -93,6 +93,7 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         self,
         classifier: ClassifierFn | None = None,
         logit_bias: float | None = None,
+        logit_scale: float | None = None,
         head_dtype: torch.dtype | str | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
@@ -100,6 +101,7 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
 
         self.classifier = classifier
         self.logit_bias = logit_bias
+        self.logit_scale = logit_scale
         self.head_dtype = head_dtype
         self.activation = activation
 
@@ -127,6 +129,8 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
 
         if self.logit_bias is not None:
             logits -= self.logit_bias
+        if self.logit_scale is not None:
+            logits *= self.logit_scale
 
         if self.activation is not None and pooling_param.use_activation:
             logits = self.activation(logits)

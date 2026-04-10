@@ -123,7 +123,7 @@ steps:
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - requirements/nightly_torch_test.txt
+  - requirements/test/nightly-torch.txt
   - vllm/platforms/rocm.py
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
