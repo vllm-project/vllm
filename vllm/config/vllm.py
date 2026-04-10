@@ -213,7 +213,6 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "fuse_minimax_qk_norm": True,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -233,7 +232,6 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "fuse_minimax_qk_norm": True,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -1628,7 +1626,9 @@ class VllmConfig:
                 MAX_TOKEN_NUM,
             )
 
-            max_token_num = MAX_TOKEN_NUM
+            max_token_num = min(
+                MAX_TOKEN_NUM, self.scheduler_config.max_num_batched_tokens
+            )
             if compile_range_end is not None and max_token_num < compile_range_end:
                 computed_compile_ranges_endpoints.append(max_token_num)
             else:
