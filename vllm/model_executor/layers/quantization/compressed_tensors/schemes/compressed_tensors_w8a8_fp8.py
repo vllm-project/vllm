@@ -16,6 +16,9 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    STRATEGY_TO_PARAMETER_TYPE,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
@@ -34,19 +37,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
-from vllm.model_executor.parameter import (
-    BlockQuantScaleParameter,
-    ChannelQuantScaleParameter,
-    PerTensorScaleParameter,
-)
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
-
-strategy_to_parameter_type = {
-    QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
-    QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
-    QuantizationStrategy.TENSOR: PerTensorScaleParameter,
-}
 
 STATIC_QUANT = True
 DYNAMIC_QUANT = False
@@ -130,7 +122,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # WEIGHT SCALE
         weight_scale = create_fp8_scale_parameter(
-            strategy_to_parameter_type[self.strategy],
+            STRATEGY_TO_PARAMETER_TYPE[self.strategy],
             output_partition_sizes,
             input_size_per_partition,
             layer.weight_block_size,
