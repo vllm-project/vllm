@@ -112,10 +112,10 @@ def _find_string_value_end(args_str: str, value_start: int) -> tuple[int, bool]:
     Returns:
         Tuple of (end_position, is_closing_delimiter) where:
         - end_position: Position where the string value ends (or -1 if
-          no delimiter found for unterminated strings)
+        no delimiter found for unterminated strings)
         - is_closing_delimiter: True if end_position points to a valid closing
-          delimiter, False if it points to a comma (malformed input) or if
-          no delimiter found (end_position will be -1 for unterminated strings)
+        delimiter, False if it points to a comma (malformed input) or if
+        no delimiter found (end_position will be -1 for unterminated strings)
 
     Examples:
         Well-formed:
