@@ -380,6 +380,10 @@ _MULTIMODAL_MODELS = {
         "FireRedASR2ForConditionalGeneration",
     ),
     "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),
+    "FireRedLIDForConditionalGeneration": (
+        "fireredlid",
+        "FireRedLIDForConditionalGeneration",
+    ),
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
