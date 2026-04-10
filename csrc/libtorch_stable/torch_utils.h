@@ -6,7 +6,12 @@
 #include <torch/csrc/stable/tensor.h>
 #include <torch/headeronly/util/shim_utils.h>
 
-#include <cuda_runtime.h>
+#ifdef USE_ROCM
+  #include <hip/hip_runtime.h>
+typedef hipStream_t cudaStream_t;
+#else
+  #include <cuda_runtime.h>
+#endif
 
 // Stable ABI equivalent of TORCH_CHECK_NOT_IMPLEMENTED.
 #define STD_TORCH_CHECK_NOT_IMPLEMENTED(cond, ...) \

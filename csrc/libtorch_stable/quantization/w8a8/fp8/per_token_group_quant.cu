@@ -2,12 +2,22 @@
 #include <torch/csrc/stable/ops.h>
 #include <torch/headeronly/util/Exception.h>
 #include <torch/headeronly/core/ScalarType.h>
-
+#include "../../../../cuda_compat.h"
 #include "libtorch_stable/quantization/w8a8/per_token_group_quant_8bit.h"
 
 #include <cmath>
 
-#include <cuda_fp8.h>
+#ifndef USE_ROCM
+  #include <cuda_fp8.h>
+#else
+  #include <hip/hip_fp8.h>
+
+  #if HIP_FP8_TYPE_OCP
+typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
+  #else
+typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3;
+  #endif
+#endif
 
 #include "libtorch_stable/quantization/vectorization.cuh"
 #include "libtorch_stable/quantization/vectorization_utils.cuh"
@@ -15,13 +25,30 @@
 #include "libtorch_stable/torch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
-  unsigned mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
+  if constexpr (WARP_SIZE == 32) {
+#ifdef USE_ROCM
+    const auto mask = threadIdx.x % 32 >= 16 ? 0x00000000'ffff0000ull
+                                             : 0x00000000'0000ffffull;
+#else
+    const auto mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
+#endif
 
-  val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
-  val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
-  val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
-  val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
-  return val;
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+    return val;
+  } else {
+    const auto mask = threadIdx.x % 64 >= 32 ? 0xffffffff'00000000ull
+                                             : 0x00000000'ffffffffull;
+
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 16));
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
+    val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+    return val;
+  }
 }
 
 template <typename T, bool SCALE_UE8M0>
