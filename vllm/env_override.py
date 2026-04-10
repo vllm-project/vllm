@@ -558,31 +558,37 @@ if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0"):
     import builtins as _builtins
     import pickle
 
-    from torch._dynamo.convert_frame import GraphCaptureOutput
+    try:
+        from torch._dynamo.convert_frame import GraphCaptureOutput
+    except ImportError:
+        GraphCaptureOutput = None  # type: ignore[assignment]
 
-    _original_get_runtime_env = GraphCaptureOutput.get_runtime_env
+    if GraphCaptureOutput is not None and hasattr(
+        GraphCaptureOutput, "get_runtime_env"
+    ):
+        _original_get_runtime_env = GraphCaptureOutput.get_runtime_env
 
-    def _safe_builtins_dict(builtins_dict: dict) -> dict:
-        """Filter a builtins dict to only picklable entries for serialization."""
-        result = {}
-        for k, v in builtins_dict.items():
-            try:
-                pickle.dumps(v)
-                result[k] = v
-            except Exception:
-                pass
-        return result
+        def _safe_builtins_dict(builtins_dict: dict) -> dict:
+            """Filter a builtins dict to only picklable entries for serialization."""
+            result = {}
+            for k, v in builtins_dict.items():
+                try:
+                    pickle.dumps(v)
+                    result[k] = v
+                except Exception:
+                    pass
+            return result
 
-    def _patched_get_runtime_env(self):  # type: ignore[no-untyped-def]
-        runtime_env = _original_get_runtime_env(self)
-        for ref in runtime_env.external_refs:
-            if ref not in runtime_env.used_globals:
-                if ref.startswith("__builtins_dict__") and ref in self.f_globals:
-                    runtime_env.used_globals[ref] = _safe_builtins_dict(
-                        self.f_globals[ref]
-                    )
-                elif hasattr(_builtins, ref):
-                    runtime_env.used_globals[ref] = getattr(_builtins, ref)
-        return runtime_env
+        def _patched_get_runtime_env(self):  # type: ignore[no-untyped-def]
+            runtime_env = _original_get_runtime_env(self)
+            for ref in runtime_env.external_refs:
+                if ref not in runtime_env.used_globals:
+                    if ref.startswith("__builtins_dict__") and ref in self.f_globals:
+                        runtime_env.used_globals[ref] = _safe_builtins_dict(
+                            self.f_globals[ref]
+                        )
+                    elif hasattr(_builtins, ref):
+                        runtime_env.used_globals[ref] = getattr(_builtins, ref)
+            return runtime_env
 
-    GraphCaptureOutput.get_runtime_env = _patched_get_runtime_env
+        GraphCaptureOutput.get_runtime_env = _patched_get_runtime_env
