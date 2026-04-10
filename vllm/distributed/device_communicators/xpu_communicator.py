@@ -4,6 +4,7 @@
 
 import torch
 import torch.distributed as dist
+import torch.distributed._functional_collectives as funcol
 from torch.distributed import ProcessGroup
 
 from vllm.logger import init_logger
@@ -48,8 +49,16 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 logger.info("Using AgRs manager on XPU device.")
 
     def all_reduce(self, input_) -> torch.Tensor:
-        dist.all_reduce(input_, group=self.device_group)
-        return input_
+        if torch.compiler.is_compiling():
+            # Use functional all_reduce so torch.compile can correctly track the
+            # output as a new tensor rather than an in-place mutation of `input_`.
+            # In-place dist.all_reduce (even on a clone) causes precision issues
+            # under torch.compile due to incorrect aliasing / mutation analysis.
+            output = funcol.all_reduce(input_, reduceOp="sum", group=self.device_group)
+            return funcol.wait_tensor(output)
+        else:
+            dist.all_reduce(input_, group=self.device_group)
+            return input_
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
