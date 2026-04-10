@@ -2,12 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import pytest
 
 from vllm import LLM
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
+from vllm.v1.engine import EngineCoreOutputs
+from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.output_processor import OutputProcessorOutput
 from vllm.v1.metrics.reader import Counter, Gauge, Histogram, Metric, Vector
+from vllm.v1.metrics.stats import SchedulerStats
 
 if TYPE_CHECKING:
     from tests.conftest import VllmRunner
@@ -147,6 +152,44 @@ def test_parallel_sampling(vllm_model, example_prompts) -> None:
                 f"{len(completion_counts)} unique completions; expected"
                 f" {n}. Repeats: {repeats}"
             )
+
+
+def test_records_scheduler_stats_with_empty_outputs():
+    llm_engine = object.__new__(LLMEngine)
+    llm_engine.should_execute_dummy_batch = False
+    llm_engine.log_stats = True
+    llm_engine.engine_core = Mock()
+    llm_engine.output_processor = Mock()
+    llm_engine.logger_manager = Mock()
+    llm_engine.renderer = Mock()
+    llm_engine.do_log_stats_with_interval = Mock()
+
+    scheduler_stats = SchedulerStats()
+    llm_engine.engine_core.get_output.return_value = EngineCoreOutputs(
+        outputs=[],
+        scheduler_stats=scheduler_stats,
+    )
+    llm_engine.output_processor.process_outputs.return_value = OutputProcessorOutput(
+        request_outputs=[], reqs_to_abort=[]
+    )
+    llm_engine.renderer.stat_mm_cache.return_value = None
+
+    outputs = llm_engine.step()
+
+    assert outputs == []
+    llm_engine.output_processor.update_scheduler_stats.assert_called_once_with(
+        scheduler_stats
+    )
+    llm_engine.engine_core.abort_requests.assert_called_once_with([])
+    llm_engine.logger_manager.record.assert_called_once()
+    assert llm_engine.logger_manager.record.call_args.kwargs["scheduler_stats"] is (
+        scheduler_stats
+    )
+    assert (
+        llm_engine.logger_manager.record.call_args.kwargs["iteration_stats"] is not None
+    )
+    assert llm_engine.logger_manager.record.call_args.kwargs["mm_cache_stats"] is None
+    llm_engine.do_log_stats_with_interval.assert_called_once()
 
 
 def test_engine_metrics(vllm_runner, example_prompts):
