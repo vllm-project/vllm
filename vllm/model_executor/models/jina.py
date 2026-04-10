@@ -3,8 +3,6 @@
 # Adapted from https://huggingface.co/jinaai/jina-reranker-v3/blob/main/modeling.py
 # ruff: noqa: E501
 
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
 
 import torch
 from torch import nn
@@ -23,9 +21,6 @@ from ..layers.pooler.tokwise import (
 from .interfaces import SupportsLateInteraction
 from .qwen3 import Qwen3Model
 from .utils import maybe_prefix
-
-if TYPE_CHECKING:
-    pass
 
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):
@@ -108,70 +103,3 @@ class JinaForRankingPool(StepPool):
                 embeds_list.append(embeds)
 
         return embeds_list
-
-
-def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
-    for token in special_tokens.values():
-        text = text.replace(token, "")
-    return text
-
-
-def format_docs_prompts_func(
-    query: str,
-    docs: list[str],
-    special_tokens: dict[str, str] | None = None,
-    instruction: str | None = None,
-    no_thinking: bool = True,
-) -> str:
-    # TODO: Try converting the code below into a chat template.
-
-    default_special_tokens = {
-        "query_embed_token": "<|rerank_token|>",
-        "doc_embed_token": "<|embed_token|>",
-    }
-    if special_tokens is None:
-        special_tokens = default_special_tokens
-
-    query = sanitize_input(query, special_tokens)
-    docs = [sanitize_input(doc, special_tokens) for doc in docs]
-
-    prefix = (
-        "<|im_start|>system\n"
-        "You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. "
-        "If the query is a question, how relevant a passage is depends on how well it answers the question. "
-        "If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. "
-        "If an instruction is provided, you should follow the instruction when determining the ranking."
-        "<|im_end|>\n<|im_start|>user\n"
-    )
-    suffix = "<|im_end|>\n<|im_start|>assistant\n"
-    if no_thinking:
-        suffix += "<think>\n\n</think>\n\n"
-
-    doc_emb_token = special_tokens["doc_embed_token"]
-    query_emb_token = special_tokens["query_embed_token"]
-
-    prompt = (
-        f"I will provide you with {len(docs)} passages, each indicated by a numerical identifier. "
-        f"Rank the passages based on their relevance to query: {query}\n"
-    )
-
-    if instruction:
-        prompt += f"<instruct>\n{instruction}\n</instruct>\n"
-
-    doc_prompts = [
-        f'<passage id="{i}">\n{doc}{doc_emb_token}\n</passage>'
-        for i, doc in enumerate(docs)
-    ]
-    prompt += "\n".join(doc_prompts) + "\n"
-    prompt += f"<query>\n{query}{query_emb_token}\n</query>"
-
-    return prefix + prompt + suffix
-
-
-def ensure_str(data: Sequence[Any]) -> list[str]:
-    text: list[str] = []
-    for prompt in data:
-        if not isinstance(prompt, str):
-            raise ValueError("The JinaForRanking model only supports text as input.")
-        text.append(prompt)
-    return text

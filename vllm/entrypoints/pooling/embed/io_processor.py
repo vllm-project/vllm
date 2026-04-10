@@ -24,6 +24,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
+from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingMixin
 from vllm.entrypoints.pooling.typing import (
     OfflineInputsContext,
     PoolingChatLikeRequest,
@@ -560,14 +561,9 @@ class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
 
 
-class JinaRankingTokenEmbedIOProcessor(TokenEmbedIOProcessor):
+class JinaRankingTokenEmbedIOProcessor(TokenEmbedIOProcessor, JinaRankingMixin):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-        from vllm.model_executor.models.jina import ensure_str, format_docs_prompts_func
-
-        self.format_docs_prompts_func = format_docs_prompts_func
-        self.ensure_str = ensure_str
 
     def pre_process_online(self, ctx: PoolingServeContext):
         request = ctx.request
