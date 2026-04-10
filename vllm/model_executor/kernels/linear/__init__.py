@@ -223,6 +223,10 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     "fbgemm": {
         FbgemmNvFp4LinearKernel,
     },
+    "emulation": {
+        EmulationMxfp8LinearKernel,
+        EmulationNvFp4LinearKernel,
+    },
 }
 
 
