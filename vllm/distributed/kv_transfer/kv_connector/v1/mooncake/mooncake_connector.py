@@ -22,12 +22,13 @@ from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
     TpKVTopology,
-    get_current_attn_backend,
+    get_current_attn_backends,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
@@ -41,10 +42,17 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheSpec,
+    MambaSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import RequestStatus
 
 logger = init_logger(__name__)
@@ -327,7 +335,7 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_send[request_id] = (transfer_id, local_block_ids)
 
 
-class MooncakeConnector(KVConnectorBase_V1):
+class MooncakeConnector(KVConnectorBase_V1, SupportsHMA):
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -342,12 +350,14 @@ class MooncakeConnector(KVConnectorBase_V1):
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: MooncakeConnectorScheduler | None = (
-                MooncakeConnectorScheduler(vllm_config, self.engine_id)
+                MooncakeConnectorScheduler(vllm_config, self.engine_id, kv_cache_config)
             )
             self.connector_worker: MooncakeConnectorWorker | None = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
-            self.connector_worker = MooncakeConnectorWorker(vllm_config, self.engine_id)
+            self.connector_worker = MooncakeConnectorWorker(
+                vllm_config, self.engine_id, kv_cache_config
+            )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: VllmConfig):
@@ -402,6 +412,14 @@ class MooncakeConnector(KVConnectorBase_V1):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
 
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.request_finished_all_groups(request, block_ids)
+
     ############################################################
     # Worker Side Methods
     ############################################################
@@ -442,7 +460,12 @@ class MooncakeConnector(KVConnectorBase_V1):
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig | None" = None,
+    ):
         self.vllm_config = vllm_config
 
         assert vllm_config.kv_transfer_config
@@ -462,6 +485,93 @@ class MooncakeConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
+
+        # HMA: check whether hybrid KV cache manager is active.
+        # When HMA is enabled (hybrid attention models like Llama-4 with
+        # full attention + sliding window), block_ids come as a tuple of
+        # per-group lists, and we must clip SWA groups to their window size.
+        self._is_hma_required = (
+            kv_cache_config is not None
+            and not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            and any(
+                not isinstance(g.kv_cache_spec, FullAttentionSpec)
+                for g in kv_cache_config.kv_cache_groups
+            )
+        )
+
+        # Gather sliding window sizes per kv cache group (in blocks).
+        # Non-SWA groups get 0 (meaning: keep all blocks).
+        block_size = vllm_config.cache_config.block_size
+        if kv_cache_config is not None:
+            sw_sizes_tokens: list[tuple[int, int]] = [
+                (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+                if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+                else (0, block_size)
+                for g in kv_cache_config.kv_cache_groups
+            ]
+            # cdiv(n_tokens, block_size) + 1 accounts for boundary overlap.
+            self.blocks_per_sw: list[int] = [
+                cdiv(n_tokens, bs) + 1 if n_tokens else 0
+                for n_tokens, bs in sw_sizes_tokens
+            ]
+            # Find the index of the first FullAttentionSpec group.
+            # For HMA models (e.g. Qwen3.5 with GDN/Mamba layers), the
+            # full-attention group may not be group[0]; we must locate it
+            # explicitly so _flatten_block_ids picks the right block list.
+            self._full_attn_group_idx: int = next(
+                (
+                    i
+                    for i, g in enumerate(kv_cache_config.kv_cache_groups)
+                    if isinstance(g.kv_cache_spec, FullAttentionSpec)
+                ),
+                0,  # fallback to 0 if no FullAttentionSpec found
+            )
+        else:
+            self.blocks_per_sw = []
+            self._full_attn_group_idx = 0
+
+    def get_sw_clipped_blocks(
+        self, block_ids: tuple[list[int], ...]
+    ) -> tuple[list[int], ...]:
+        """Clip block lists for SWA groups to their sliding window size.
+
+        For non-hybrid models (single group, no SWA) returns the input
+        unchanged. For hybrid attention models the KV cache manager
+        initially allocates blocks for the full sequence length and later
+        zeroes out blocks outside the window; here we trim those trailing
+        null/SWA blocks before handing them to the transfer layer.
+        """
+        if not self._is_hma_required or len(block_ids) == 0:
+            return block_ids
+        assert len(block_ids) == len(self.blocks_per_sw), (
+            "Number of KV cache groups must match blocks_per_sw length"
+        )
+        return tuple(
+            blocks[-self.blocks_per_sw[i] :] if self.blocks_per_sw[i] > 0 else blocks
+            for i, blocks in enumerate(block_ids)
+        )
+
+    def _flatten_block_ids(self, block_ids: tuple[list[int], ...]) -> list[int]:
+        """Flatten a multi-group block_ids tuple into a single list.
+
+        For HMA models the block ids from the full-attention group are used
+        for the actual KV transfer since all groups share the same physical
+        block pool; the per-group lists correspond to different logical views
+        of the same blocks. We use _full_attn_group_idx (not necessarily [0])
+        because some HMA models (e.g. Qwen3.5 with GDN/Mamba layers) place
+        the full-attention group at a non-zero index.
+        """
+        if not self._is_hma_required:
+            assert len(block_ids) == 1, (
+                "Expected a single KV cache group for non-HMA models"
+            )
+            return block_ids[0]
+        # For HMA, use the FullAttentionSpec group as the canonical block id
+        # list sent to the worker / remote side.
+        if not block_ids:
+            return []
+        idx = min(self._full_attn_group_idx, len(block_ids) - 1)
+        return block_ids[idx]
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -527,9 +637,17 @@ class MooncakeConnectorScheduler:
                 # If remote_blocks and num_external_tokens = 0, we have
                 # a full prefix cache hit on the D worker. We need to call
                 # send_notif in _read_blocks to free the memory on the P.
-                local_block_ids = (
-                    blocks.get_unhashed_block_ids() if num_external_tokens > 0 else []
-                )
+                if num_external_tokens > 0:
+                    if self._is_hma_required:
+                        # HMA: get per-group unhashed blocks, then clip SWA
+                        # groups and flatten to a single list for the worker.
+                        raw_groups = blocks.get_unhashed_block_ids_all_groups()
+                        clipped = self.get_sw_clipped_blocks(tuple(raw_groups))
+                        local_block_ids = self._flatten_block_ids(clipped)
+                    else:
+                        local_block_ids = blocks.get_unhashed_block_ids()
+                else:
+                    local_block_ids = []
                 # Get unhashed blocks to pull from remote.
                 self._reqs_need_recv[request.request_id] = (request, local_block_ids)
             else:
@@ -586,9 +704,25 @@ class MooncakeConnectorScheduler:
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
+        """Single-group variant kept for backward compatibility.
+
+        Delegates to request_finished_all_groups by wrapping block_ids in a
+        one-element tuple.
+        """
+        return self.request_finished_all_groups(request, (block_ids,))
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
+
+        Supports both non-HMA (single group) and HMA (multiple groups for
+        hybrid attention models such as Llama-4 with full + sliding-window
+        attention).
         """
 
         params = request.kv_transfer_params
@@ -625,12 +759,19 @@ class MooncakeConnectorScheduler:
             self._reqs_not_processed.add(params["transfer_id"])
             return False, None
 
+        # Clip SWA groups and flatten to a single list for the worker.
+        if self._is_hma_required and len(block_ids) > 0:
+            clipped = self.get_sw_clipped_blocks(block_ids)
+            flat_block_ids = self._flatten_block_ids(clipped)
+        else:
+            flat_block_ids = block_ids[0] if block_ids else []
+
         # TODO: check whether block_ids actually ever be 0. If not we could
         # remove the conditional below
-        delay_free_blocks = len(block_ids) > 0
+        delay_free_blocks = len(flat_block_ids) > 0
 
         if delay_free_blocks:
-            self._reqs_need_send[request.request_id] = (request, block_ids)
+            self._reqs_need_send[request.request_id] = (request, flat_block_ids)
 
         return delay_free_blocks, None
 
@@ -638,7 +779,12 @@ class MooncakeConnectorScheduler:
 class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        engine_id: str,
+        kv_cache_config: "KVCacheConfig | None" = None,
+    ):
         if TransferEngine is None:
             logger.error("Mooncake is not available")
             raise RuntimeError("Mooncake is not available")
@@ -662,10 +808,19 @@ class MooncakeConnectorWorker:
         protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "mooncake_protocol", "rdma"
         )
-        logger.info(
-            "The Mooncake Transfer Engine is using %s as its protocol.", protocol
+        # Optional: specify RDMA device name (e.g. "mlx5_0").
+        # Leave empty to let Mooncake auto-select.
+        device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
+            "mooncake_device", ""
         )
-        ret_value = self.engine.initialize(self.hostname, "P2PHANDSHAKE", protocol, "")
+        logger.info(
+            "The Mooncake Transfer Engine is using %s as its protocol, device: '%s'.",
+            protocol,
+            device_name if device_name else "(auto)",
+        )
+        ret_value = self.engine.initialize(
+            self.hostname, "P2PHANDSHAKE", protocol, device_name
+        )
         if ret_value != 0:
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
@@ -744,25 +899,54 @@ class MooncakeConnectorWorker:
         self.cache_config = vllm_config.cache_config
         self.use_mla = self.model_config.use_mla
 
-        # Get the attention backend from the first layer
-        # NOTE (NickLucche) models with multiple backends are not supported yet
-        backend = get_current_attn_backend(vllm_config)
-        self.backend_name = backend.get_name()
+        # Resolve attention backends here using the same fallback path as
+        # NixlConnector: get_current_attn_backends() falls back to reading
+        # vllm_config.attention_config.backend (set via --attention-backend)
+        # when static_forward_context is not yet populated, so this always
+        # returns the correct backend class (e.g. FlashAttentionBackend).
+        self.attn_backends = get_current_attn_backends(vllm_config)
+        self.backend_name: str = self.attn_backends[0].get_name()
         self.kv_cache_layout = get_kv_cache_layout()
-        logger.debug("Detected attention backend %s", self.backend_name)
-        logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
+        logger.info("Detected attention backend %s", self.backend_name)
+        logger.info("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
-        self.kv_topo = TpKVTopology(
-            tp_rank=self.tp_rank,
-            engine_id=self.engine_id,
-            remote_tp_size=self._tp_size,  # shared state
-            remote_block_size=self._block_size,  # shared state
-            is_mla=self.use_mla,
-            total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
-            attn_backends=[backend],
-        )
+        # kv_topo is initialized lazily in register_kv_caches()
+        self.kv_topo: TpKVTopology | None = None
+
+        # Detect whether this model has Mamba/GDN layers (hybrid models like
+        # Qwen3.5). When True, TpKVTopology must be built with is_mamba=True
+        # to skip get_kv_cache_shape(), which is not implemented for Mamba
+        # backends (e.g. GDNAttentionBackend). Mirrors NixlConnectorWorker.
+        self._layer_specs: dict[str, KVCacheSpec] = {}
+        self._is_mamba_group: list[bool] = []
+        self._has_mamba: bool = False
+        self._block_len_from_config: int | None = None
+        if kv_cache_config is not None:
+            self._layer_specs = {
+                layer: group.kv_cache_spec
+                for group in kv_cache_config.kv_cache_groups
+                for layer in group.layer_names
+            }
+            self._is_mamba_group = [
+                isinstance(g.kv_cache_spec, MambaSpec)
+                for g in kv_cache_config.kv_cache_groups
+            ]
+            self._has_mamba = any(self._is_mamba_group)
+            # For hybrid models (e.g. Qwen3.5 with HMA), attention and Mamba
+            # layers share the same physical KV tensor (same data_ptr), so the
+            # attention tensor will be deduplicated in register_kv_caches and
+            # we cannot derive block_len from its shape at runtime.
+            # Pre-compute block_len from the config here as a fallback.
+            # page_size_bytes is already unified across groups by
+            # unify_kv_cache_spec_page_size, so any group's spec works.
+            if kv_cache_config.kv_cache_groups:
+                self._block_len_from_config = kv_cache_config.kv_cache_groups[
+                    0
+                ].kv_cache_spec.page_size_bytes
+            # num_blocks is known at construction time from kv_cache_config.
+            self.num_blocks = kv_cache_config.num_blocks
 
         self.async_zmq_ctx = zmq.asyncio.Context()
         self._encoder = msgspec.msgpack.Encoder()
@@ -1217,19 +1401,54 @@ class MooncakeConnectorWorker:
 
         logger.info("Registering KV_Caches. use_mla: %s", self.use_mla)
 
+        # Lazily build kv_topo using the backends resolved during __init__.
+        # (mirrors NixlConnector's pattern)
+        if self.kv_topo is None:
+            self.kv_topo = TpKVTopology(
+                tp_rank=self.tp_rank,
+                engine_id=self.engine_id,
+                remote_tp_size=self._tp_size,  # shared state
+                remote_block_size=self._block_size,  # shared state
+                is_mla=self.use_mla,
+                total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
+                attn_backends=self.attn_backends,
+                # For hybrid models (e.g. Qwen3.5) that have Mamba/GDN layers,
+                # set is_mamba=True and omit tensor_shape so that
+                # TpKVTopology.__post_init__ skips get_kv_cache_shape().
+                # This mirrors NixlConnector's handling of _has_mamba.
+                tensor_shape=next(iter(kv_caches.values())).shape
+                if not self._has_mamba
+                else None,
+                is_mamba=self._has_mamba,
+            )
         kv_data_ptrs = []
         kv_data_lens = []
         seen_base_addresses = []
         self.block_len_per_layer = []
 
         split_k_and_v = self.kv_topo.split_k_and_v
-        tensor_size_bytes = None
+        attn_tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
-            cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+            # Check if this layer is a Mamba/GDN layer. Mamba state tensors
+            # have a different shape than attention KV cache tensors, so we
+            # skip the block_size / tensor_size assertions for them.
+            layer_spec = self._layer_specs.get(layer_name)
+            is_mamba_layer = isinstance(layer_spec, MambaSpec)
+
+            if is_mamba_layer:
+                # Mamba cache is a tuple (conv, ssm); register only the first
+                # tensor (conv) which covers the shared memory region.
+                # This mirrors NixlConnector's get_transfer_cache_regions().
+                cache_list = [cache_or_caches[0]]
+            else:
+                cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
+
             logger.debug(
-                "registering layer %s with %d cache tensor(s)",
+                "registering layer %s with shape %s",
                 layer_name,
-                len(cache_list),
+                [c.shape for c in cache_list]
+                if is_mamba_layer
+                else cache_or_caches.shape,
             )
 
             for cache in cache_list:
@@ -1241,22 +1460,25 @@ class MooncakeConnectorWorker:
                 seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.nbytes
 
-                if tensor_size_bytes is None:
-                    tensor_size_bytes = curr_tensor_size_bytes
-                    self.num_blocks = cache.shape[0]
-                assert cache.shape[0] == self.num_blocks, (
-                    "All kv cache tensors must have the same number of blocks"
-                )
-                assert curr_tensor_size_bytes % self.num_blocks == 0, (
-                    "Mooncake expects each kv cache tensor size to be "
-                    "divisible by the number of blocks."
-                )
-                self.block_len_per_layer.append(
-                    curr_tensor_size_bytes // self.num_blocks
-                )
+                if not is_mamba_layer:
+                    # Only use attention tensors to derive num_blocks / block_len.
+                    if attn_tensor_size_bytes is None:
+                        attn_tensor_size_bytes = curr_tensor_size_bytes
+                        self.num_blocks = cache.shape[0]
+                    assert cache.shape[0] == self.num_blocks, (
+                        "All kv cache tensors must have the same number of blocks"
+                    )
+                    assert curr_tensor_size_bytes % self.num_blocks == 0, (
+                        "Mooncake expects each kv cache tensor size to be "
+                        "divisible by the number of blocks."
+                    )
+                    self.block_len_per_layer.append(
+                        curr_tensor_size_bytes // self.num_blocks
+                    )
 
-                kernel_block_size = cache.shape[-2 if self.use_mla else -3]
-                assert self.block_size == kernel_block_size
+                    kernel_block_size = cache.shape[-2 if self.use_mla else -3]
+                    assert self.block_size == kernel_block_size
+
                 kv_data_ptrs.append(base_addr)
                 kv_data_lens.append(curr_tensor_size_bytes)
 
@@ -1267,8 +1489,30 @@ class MooncakeConnectorWorker:
         if ret_value != 0:
             raise RuntimeError("Mooncake batch memory registration failed.")
 
-        assert tensor_size_bytes is not None
-        assert self.num_blocks != 0
+        if attn_tensor_size_bytes is not None:
+            # Derived block_len from an attention tensor we saw in this loop.
+            assert self.num_blocks != 0
+            self.block_len = attn_tensor_size_bytes // self.num_blocks
+        elif self._block_len_from_config is not None:
+            # Hybrid HMA case: attention and Mamba tensors share the same
+            # physical memory (same data_ptr), so all attention base addresses
+            # were deduplicated by seen_base_addresses and we never recorded
+            # attn_tensor_size_bytes. Fall back to the pre-computed page_size.
+            assert self.num_blocks != 0, "num_blocks must be set from kv_cache_config"
+            self.block_len = self._block_len_from_config
+            # block_len_per_layer was not populated in the loop above because
+            # all attention tensors shared physical addresses with Mamba tensors
+            # and were deduplicated. Reconstruct it: each registered base_addr
+            # corresponds to one KV region, and all share the same block_len.
+            if not self.block_len_per_layer:
+                self.block_len_per_layer = [self._block_len_from_config] * len(
+                    seen_base_addresses
+                )
+        else:
+            raise RuntimeError(
+                "Could not determine block_len: no attention tensors were seen "
+                "and kv_cache_config was not provided to MooncakeConnectorWorker."
+            )
         self.device_kv_caches = kv_caches
         logger.debug(
             "registered num_blocks=%d block_lens=%s",
