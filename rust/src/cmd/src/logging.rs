@@ -136,14 +136,15 @@ impl VllmEventFormatter {
         writer: &mut Writer<'_>,
         file: Option<&str>,
         line: Option<u32>,
+        full_path: bool,
         ansi: bool,
     ) -> fmt::Result {
-        // TODO: logging the entire file path is too long, but logging just the filename
-        //     (as we do in python) is often ambiguous.
-        // let Some(file) = file.map(|f| f.rsplit_once('/').map_or(f, |(_, name)| name)) else {
-        let Some(file) = file else {
+        let Some(mut file) = file else {
             return Ok(());
         };
+        if !full_path {
+            file = file.rsplit_once('/').map_or(file, |(_, name)| name)
+        }
         if ansi {
             writer.write_str(GREY)?;
         }
@@ -209,7 +210,11 @@ where
         writer.write_char(' ')?;
         self.write_timestamp(&mut writer, ansi)?;
         writer.write_char(' ')?;
-        self.write_location(&mut writer, meta.file(), meta.line(), ansi)?;
+        // Use the full file path only when DEBUG (or more verbose) is enabled anywhere,
+        // independent of the level of this particular event. Filenames alone are often
+        // ambiguous, but full paths are too noisy for normal INFO-level operation.
+        let full_path = LevelFilter::current() >= LevelFilter::DEBUG;
+        self.write_location(&mut writer, meta.file(), meta.line(), full_path, ansi)?;
         writer.write_char(' ')?;
         self.write_scope(ctx, &mut writer)?;
         ctx.format_fields(writer.by_ref(), event)?;
