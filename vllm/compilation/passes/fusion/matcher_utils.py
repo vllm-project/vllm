@@ -375,6 +375,23 @@ class MatcherQuantFP8(MatcherCustomOp):
         return [input]
 
 
+def make_group_scale(
+    input: torch.Tensor,
+    group_shape: GroupShape,
+    column_major: bool,
+) -> torch.Tensor:
+    normalized = _normalize_quant_group_shape(input, group_shape)
+    scale_shape = (
+        input.shape[0] // normalized[0],
+        input.shape[1] // normalized[1],
+    )
+    if column_major:
+        return torch.empty(
+            tuple(reversed(scale_shape)), dtype=torch.float32, device=input.device
+        ).permute(-1, -2)
+    return torch.empty(scale_shape, dtype=torch.float32, device=input.device)
+
+
 class MatcherSiluAndMul(MatcherCustomOp):
     def __init__(self, enabled: bool | None = None) -> None:
         if enabled is None:
