@@ -1667,6 +1667,8 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                     previous_delta_messages = []
 
+                tool_call_item_started = False
+
                 if (
                     previous_delta_messages
                     and previous_delta_messages[-1].reasoning is not None
@@ -1743,6 +1745,7 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                     current_content_index = 0
                     previous_delta_messages = []
+                    tool_call_item_started = True
 
                 if (
                     previous_delta_messages
@@ -1815,6 +1818,7 @@ class OpenAIServingResponses(OpenAIServing):
                     )
                     current_content_index = 0
                     previous_delta_messages = []
+                    tool_call_item_started = True
 
                 if delta_message.tool_calls and delta_message.tool_calls[0].function:
                     if delta_message.tool_calls[0].function.arguments:
@@ -1827,7 +1831,10 @@ class OpenAIServingResponses(OpenAIServing):
                                 delta=delta_message.tool_calls[0].function.arguments,
                             )
                         )
-                    elif delta_message.tool_calls[0].function.name:
+                    elif (
+                        delta_message.tool_calls[0].function.name
+                        and not tool_call_item_started
+                    ):
                         yield _increment_sequence_number_and_return(
                             ResponseTextDoneEvent(
                                 type="response.output_text.done",
