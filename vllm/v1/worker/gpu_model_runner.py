@@ -5356,11 +5356,17 @@ class GPUModelRunner(
         attn_metadata: PerLayerAttnMetadata | None = None
 
         slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
-            num_tokens_padded=num_tokens,
+            num_tokens_padded=num_tokens_padded,
             num_reqs_padded=num_reqs_padded,
             num_tokens_unpadded=num_tokens_unpadded,
             ubatch_slices=ubatch_slices_padded,
         )
+
+        # Dummy runs have no real slot assignments — fill with -1 so
+        # concat_and_cache kernels skip the KV write.
+        if slot_mappings_by_group is not None:
+            for sm in slot_mappings_by_group.values():
+                sm.fill_(-1)
 
         # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
         # etc.) with execute_model.  It must participate in the same event
