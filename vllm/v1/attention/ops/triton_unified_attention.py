@@ -38,62 +38,27 @@ def _prepare_kv_tile(
     data,
     Q,
     tensor_scale,
-    scale_cache_ptr,
-    physical_block_idx,
-    seq_offset,
-    kv_head_idx,
-    stride_s_blk,
-    stride_s_slot,
-    stride_s_head,
-    tile_mask,
-    BLOCK_SIZE: tl.constexpr,
     KV_QUANT_MODE: tl.constexpr,
 ):
     """Prepare a loaded KV tile for attention computation.
 
-    Casts the raw KV data to Q's dtype and loads per-token-head scales
-    when applicable:
+    The core kernel only handles two modes:
 
     - ``KV_QUANT_MODE == 0``: cast only (no-op for bf16/fp16).
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize inline
-      using the tensor-wide scale.
-    - ``KV_QUANT_MODE >= 2`` (per-token-head int8/fp8): cast to Q's
-      dtype and return per-head scales separately — the caller applies
-      them after the dot product for better numerical efficiency.
-    - ``KV_QUANT_MODE == 4`` (INT4 packed): handled entirely by the
-      caller via split-dot product with asymmetric zero-point correction.
-    - ``KV_QUANT_MODE == 5`` (INT2 Hadamard + Lloyd-Max): 4-way split-dot with
-      Lloyd-Max centroid lookup.  Handled by caller.
-      This function is NOT called for modes 4, 5.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize inline using
+      the tensor-wide scale.
 
-    Returns ``(data, token_head_scales)``.  *token_head_scales* is only
-    meaningful when ``KV_QUANT_MODE >= 2``; callers gate its use on
-    the same constexpr so the compiler eliminates dead code.
+    All per-(token, head) and packed-int modes (INT8 / FP8 per-token-head,
+    INT4, INT2) are dispatched to dedicated backends in
+    :mod:`vllm.v1.attention.ops.triton_quant_kv` before reaching this kernel.
     """
-    # KV_QUANT_MODE values: 0=none, 1=fp8 per-tensor,
-    #                       2=int8 per-token-head, 3=fp8 per-token-head,
-    #                       4=int4 (RHT + asymmetric), 5=int2 (Hadamard)
-
-    # Placeholder scales (float32) — never read when KV_QUANT_MODE < 2.
-    unused_scales = tile_mask.to(tl.float32)
-
     if KV_QUANT_MODE == 1:  # FP8 per-tensor
         if Q.dtype.is_fp8():
-            return data.to(Q.dtype), unused_scales
-        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype), unused_scales
-    if KV_QUANT_MODE >= 2:  # per-token-head (int8 or fp8)
-        scale_idx = (
-            physical_block_idx * stride_s_blk
-            + (seq_offset % BLOCK_SIZE) * stride_s_slot
-            + kv_head_idx * stride_s_head
-        )
-        token_head_scales = tl.load(
-            scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
-        )
-        return data.to(Q.dtype), token_head_scales
+            return data.to(Q.dtype)
+        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
     # .to(Q.dtype) is a no-op when data is already Q's type (bf16/fp16),
     # but required so Triton sees consistent return types across branches.
-    return data.to(Q.dtype), unused_scales
+    return data.to(Q.dtype)
 
 
 @triton.jit
@@ -117,21 +82,6 @@ def find_seq_idx(
             right = mid
 
     return left - 1
-
-
-# ---------------------------------------------------------------------------
-# INT2: Lloyd-Max centroid dequantization for attention kernels
-# ---------------------------------------------------------------------------
-
-
-@triton.jit
-def _lloyd_max_dequant_4(idx):
-    """Look up INT2 Lloyd-Max centroid for N(0,1).  idx in [0..3]."""
-    return tl.where(
-        idx < 2,
-        tl.where(idx == 0, -1.5104, -0.4528),
-        tl.where(idx == 2, 0.4528, 1.5104),
-    )
 
 
 @triton.jit
@@ -184,23 +134,13 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    # KV cache quantization: 0=none, 1=fp8, 2+=per-token-head,
-    # 4=int4 (RHT + asymmetric), 5=int2 (Hadamard + Lloyd-Max)
+    # KV cache quantization mode handled inside this kernel.  Only modes
+    # NONE (0) and FP8_PER_TENSOR (1) reach the core; per-token-head and
+    # packed modes (2+) are dispatched to backends in
+    # ``vllm.v1.attention.ops.triton_quant_kv`` by the wrapper.
     KV_QUANT_MODE: tl.constexpr = 0,
-    HALF_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 2 (for INT4)
-    QUARTER_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 4 (for INT2)
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
-    # Per-token-head scale caches (KV_QUANT_MODE >= 2)
-    # Shape: [num_blocks, block_size, num_kv_heads]
-    k_scale_cache_ptr=None,
-    v_scale_cache_ptr=None,
-    stride_ks_blk=0,
-    stride_ks_slot=0,
-    stride_ks_head=0,
-    stride_vs_blk=0,
-    stride_vs_slot=0,
-    stride_vs_head=0,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -245,71 +185,6 @@ def kernel_unified_attention_2d(
         other=0.0,
     )
 
-    # Split-dot prologue: split Q for packed quantization modes.
-    # Mode 4 (INT4 RHT + asymmetric): 2-way split.
-    # Mode 5 (INT2 Hadamard + Lloyd-Max): 4-way split.
-    if KV_QUANT_MODE == 4:
-        half_offs = tl.arange(0, HALF_HEAD_PADDED)
-        even_head_offs = half_offs * 2
-        odd_head_offs = half_offs * 2 + 1
-        even_head_mask = tl.where(even_head_offs < HEAD_SIZE, 1, 0).to(tl.int1)
-        odd_head_mask = tl.where(odd_head_offs < HEAD_SIZE, 1, 0).to(tl.int1)
-        half_dim_mask = tl.where(half_offs < HEAD_SIZE // 2, 1, 0).to(tl.int1)
-        q_base = (
-            query_offset_0[:, None] * query_stride_0
-            + query_offset_1[:, None] * query_stride_1
-        )
-        q_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        Q_even = tl.load(
-            query_ptr + q_base + even_head_offs[None, :],
-            mask=even_head_mask[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_odd = tl.load(
-            query_ptr + q_base + odd_head_offs[None, :],
-            mask=odd_head_mask[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        if KV_QUANT_MODE == 4:
-            Q_sum = tl.sum(Q_even, axis=1) + tl.sum(Q_odd, axis=1)
-
-    if KV_QUANT_MODE == 5:
-        qtr_offs = tl.arange(0, QUARTER_HEAD_PADDED)
-        offs_q0 = qtr_offs * 4
-        offs_q1 = qtr_offs * 4 + 1
-        offs_q2 = qtr_offs * 4 + 2
-        offs_q3 = qtr_offs * 4 + 3
-        mask_q0 = tl.where(offs_q0 < HEAD_SIZE, 1, 0).to(tl.int1)
-        mask_q1 = tl.where(offs_q1 < HEAD_SIZE, 1, 0).to(tl.int1)
-        mask_q2 = tl.where(offs_q2 < HEAD_SIZE, 1, 0).to(tl.int1)
-        mask_q3 = tl.where(offs_q3 < HEAD_SIZE, 1, 0).to(tl.int1)
-        qtr_dim_mask = tl.where(qtr_offs < HEAD_SIZE // 4, 1, 0).to(tl.int1)
-        q_base = (
-            query_offset_0[:, None] * query_stride_0
-            + query_offset_1[:, None] * query_stride_1
-        )
-        q_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        Q_s0 = tl.load(
-            query_ptr + q_base + offs_q0[None, :],
-            mask=mask_q0[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_s1 = tl.load(
-            query_ptr + q_base + offs_q1[None, :],
-            mask=mask_q1[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_s2 = tl.load(
-            query_ptr + q_base + offs_q2[None, :],
-            mask=mask_q2[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_s3 = tl.load(
-            query_ptr + q_base + offs_q3[None, :],
-            mask=mask_q3[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-
     block_table_offset = seq_idx * block_table_stride
 
     if not USE_SINKS:
@@ -323,14 +198,6 @@ def kernel_unified_attention_2d(
 
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
-    if KV_QUANT_MODE == 4:
-        acc_even = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
-        acc_odd = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
-    if KV_QUANT_MODE == 5:
-        acc_s0 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
-        acc_s1 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
-        acc_s2 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
-        acc_s3 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
 
     # sequence len for this particular sequence
     seq_len = tl.load(seq_lens_ptr + seq_idx)
@@ -405,165 +272,30 @@ def kernel_unified_attention_2d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        # ---- INT4 2-way split: mode 4 (RHT + asymmetric)
-        if KV_QUANT_MODE == 4:
-            slot_in_blk = seq_offset % BLOCK_SIZE
-            k_off_i4 = (
-                physical_block_idx[None, :] * stride_k_cache_0
-                + kv_head_idx * stride_k_cache_2
-                + half_offs[:, None] * stride_k_cache_3
-                + slot_in_blk[None, :] * stride_k_cache_1
-            )
-            K_packed = tl.load(
-                key_cache_ptr + k_off_i4,
-                mask=half_dim_mask[:, None] & tile_mask[None, :],
-                other=0,
-            )
-            K_lo_raw = K_packed & 0xF
-            K_hi_raw = (K_packed >> 4) & 0xF
-            v_off_i4 = (
-                physical_block_idx[:, None] * stride_v_cache_0
-                + kv_head_idx * stride_v_cache_2
-                + half_offs[None, :] * stride_v_cache_3
-                + slot_in_blk[:, None] * stride_v_cache_1
-            )
-            V_packed = tl.load(
-                value_cache_ptr + v_off_i4,
-                mask=half_dim_mask[None, :] & tile_mask[:, None],
-                other=0,
-            )
-            V_lo_raw = V_packed & 0xF
-            V_hi_raw = (V_packed >> 4) & 0xF
-            ks_idx = (
-                physical_block_idx * stride_ks_blk
-                + slot_in_blk * stride_ks_slot
-                + kv_head_idx * stride_ks_head
-            )
-            ks_raw = tl.load(k_scale_cache_ptr + ks_idx, mask=tile_mask, other=0)
-            vs_idx = (
-                physical_block_idx * stride_vs_blk
-                + slot_in_blk * stride_vs_slot
-                + kv_head_idx * stride_vs_head
-            )
-            vs_raw = tl.load(v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0)
-
-            if KV_QUANT_MODE == 4:
-                # Asymmetric: extract zp via steganography.
-                K_lo = K_lo_raw.to(Q_even.dtype)
-                K_hi = K_hi_raw.to(Q_odd.dtype)
-                V_lo = V_lo_raw.to(Q_even.dtype)
-                V_hi = V_hi_raw.to(Q_odd.dtype)
-                ks_bits = ks_raw.to(tl.int32, bitcast=True)
-                k_zp = (ks_bits & 0xF).to(tl.float32)
-                k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
-                vs_bits = vs_raw.to(tl.int32, bitcast=True)
-                v_zp = (vs_bits & 0xF).to(tl.float32)
-                v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
-
-        # ---- INT2: 4-way split, Lloyd-Max centroid lookup
-        if KV_QUANT_MODE == 5:
-            slot_in_blk = seq_offset % BLOCK_SIZE
-            k_off_i2 = (
-                physical_block_idx[None, :] * stride_k_cache_0
-                + kv_head_idx * stride_k_cache_2
-                + qtr_offs[:, None] * stride_k_cache_3
-                + slot_in_blk[None, :] * stride_k_cache_1
-            )
-            K_pk = tl.load(
-                key_cache_ptr + k_off_i2,
-                mask=qtr_dim_mask[:, None] & tile_mask[None, :],
-                other=0,
-            )
-            KC0 = _lloyd_max_dequant_4(K_pk & 0x3).to(tl.float32)
-            KC1 = _lloyd_max_dequant_4((K_pk >> 2) & 0x3).to(tl.float32)
-            KC2 = _lloyd_max_dequant_4((K_pk >> 4) & 0x3).to(tl.float32)
-            KC3 = _lloyd_max_dequant_4((K_pk >> 6) & 0x3).to(tl.float32)
-            v_off_i2 = (
-                physical_block_idx[:, None] * stride_v_cache_0
-                + kv_head_idx * stride_v_cache_2
-                + qtr_offs[None, :] * stride_v_cache_3
-                + slot_in_blk[:, None] * stride_v_cache_1
-            )
-            V_pk = tl.load(
-                value_cache_ptr + v_off_i2,
-                mask=qtr_dim_mask[None, :] & tile_mask[:, None],
-                other=0,
-            )
-            VC0 = _lloyd_max_dequant_4(V_pk & 0x3).to(tl.float32)
-            VC1 = _lloyd_max_dequant_4((V_pk >> 2) & 0x3).to(tl.float32)
-            VC2 = _lloyd_max_dequant_4((V_pk >> 4) & 0x3).to(tl.float32)
-            VC3 = _lloyd_max_dequant_4((V_pk >> 6) & 0x3).to(tl.float32)
-            ks_idx = (
-                physical_block_idx * stride_ks_blk
-                + slot_in_blk * stride_ks_slot
-                + kv_head_idx * stride_ks_head
-            )
-            k_token_head_scales = tl.load(
-                k_scale_cache_ptr + ks_idx, mask=tile_mask, other=0
-            )
-            vs_idx = (
-                physical_block_idx * stride_vs_blk
-                + slot_in_blk * stride_vs_slot
-                + kv_head_idx * stride_vs_head
-            )
-            v_token_head_scales = tl.load(
-                v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0
-            )
-
-        # ---- Non-split-dot path (modes 0, 1, 2, 3) ----------------------
-        if KV_QUANT_MODE < 4:
-            v_offset = (
-                physical_block_idx[:, None] * stride_v_cache_0
-                + kv_head_idx * stride_v_cache_2
-                + offs_d[None, :] * stride_v_cache_3
-                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
-            )
-            k_offset = (
-                physical_block_idx[None, :] * stride_k_cache_0
-                + kv_head_idx * stride_k_cache_2
-                + offs_d[:, None] * stride_k_cache_3
-                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-            )
-            K_load = tl.load(
-                key_cache_ptr + k_offset,
-                mask=dim_mask[:, None] & tile_mask[None, :],
-                other=0.0,
-            )
-            K, k_token_head_scales = _prepare_kv_tile(
-                K_load,
-                Q,
-                k_scale,
-                k_scale_cache_ptr,
-                physical_block_idx,
-                seq_offset,
-                kv_head_idx,
-                stride_ks_blk,
-                stride_ks_slot,
-                stride_ks_head,
-                tile_mask,
-                BLOCK_SIZE,
-                KV_QUANT_MODE,
-            )
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0.0,
-            )
-            V, v_token_head_scales = _prepare_kv_tile(
-                V_load,
-                Q,
-                v_scale,
-                v_scale_cache_ptr,
-                physical_block_idx,
-                seq_offset,
-                kv_head_idx,
-                stride_vs_blk,
-                stride_vs_slot,
-                stride_vs_head,
-                tile_mask,
-                BLOCK_SIZE,
-                KV_QUANT_MODE,
-            )
+        v_offset = (
+            physical_block_idx[:, None] * stride_v_cache_0
+            + kv_head_idx * stride_v_cache_2
+            + offs_d[None, :] * stride_v_cache_3
+            + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+        )
+        k_offset = (
+            physical_block_idx[None, :] * stride_k_cache_0
+            + kv_head_idx * stride_k_cache_2
+            + offs_d[:, None] * stride_k_cache_3
+            + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+        )
+        K_load = tl.load(
+            key_cache_ptr + k_offset,
+            mask=dim_mask[:, None] & tile_mask[None, :],
+            other=0.0,
+        )
+        K = _prepare_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+        V_load = tl.load(
+            value_cache_ptr + v_offset,
+            mask=dim_mask[None, :] & tile_mask[:, None],
+            other=0.0,
+        )
+        V = _prepare_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -600,27 +332,7 @@ def kernel_unified_attention_2d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-
-        # Per-token-head quant: fuse softmax_scale with per-head k_scale
-        # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-        if KV_QUANT_MODE == 4:
-            raw_dot = tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)
-            S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
-                scale * k_token_head_scales[None, :]
-            )
-        elif KV_QUANT_MODE == 5:
-            # INT2: 4-way split-dot with Lloyd-Max centroids
-            raw_dot = (
-                tl.dot(Q_s0, KC0)
-                + tl.dot(Q_s1, KC1)
-                + tl.dot(Q_s2, KC2)
-                + tl.dot(Q_s3, KC3)
-            )
-            S += raw_dot * (scale * k_token_head_scales[None, :])
-        elif KV_QUANT_MODE >= 2:
-            S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
-        else:
-            S += scale * tl.dot(Q, K)
+        S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -671,132 +383,36 @@ def kernel_unified_attention_2d(
         alpha = tl.exp(M - m_j)
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        if KV_QUANT_MODE == 4:
-            acc_even = acc_even * alpha[:, None]
-            acc_odd = acc_odd * alpha[:, None]
-        if KV_QUANT_MODE == 5:
-            acc_s0 = acc_s0 * alpha[:, None]
-            acc_s1 = acc_s1 * alpha[:, None]
-            acc_s2 = acc_s2 * alpha[:, None]
-            acc_s3 = acc_s3 * alpha[:, None]
-        if KV_QUANT_MODE < 4:
-            acc = acc * alpha[:, None]
+        acc = acc * alpha[:, None]
 
         # update constants
         L = L * alpha + l_j
         M = m_j
 
-        if KV_QUANT_MODE == 4:
-            if SLIDING_WINDOW:
-                qpos_lo = q_block_local_idx * BLOCK_Q
-                sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
-                V_lo = tl.where(sw_mask[:, None], V_lo, 0.0)
-                V_hi = tl.where(sw_mask[:, None], V_hi, 0.0)
-            P_v = (P * v_token_head_scales[None, :]).to(V_lo.dtype)
-            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
-            acc_even += tl.dot(P_v, V_lo) - Pv_zp_sum[:, None]
-            acc_odd += tl.dot(P_v, V_hi) - Pv_zp_sum[:, None]
-        if KV_QUANT_MODE == 5:
-            if SLIDING_WINDOW:
-                qpos_lo = q_block_local_idx * BLOCK_Q
-                sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
-                VC0 = tl.where(sw_mask[:, None], VC0, 0.0)
-                VC1 = tl.where(sw_mask[:, None], VC1, 0.0)
-                VC2 = tl.where(sw_mask[:, None], VC2, 0.0)
-                VC3 = tl.where(sw_mask[:, None], VC3, 0.0)
-            P_v = (P * v_token_head_scales[None, :]).to(tl.float32)
-            acc_s0 += tl.dot(P_v, VC0)
-            acc_s1 += tl.dot(P_v, VC1)
-            acc_s2 += tl.dot(P_v, VC2)
-            acc_s3 += tl.dot(P_v, VC3)
-        if KV_QUANT_MODE < 4:
-            if SLIDING_WINDOW:
-                qpos_lo = q_block_local_idx * BLOCK_Q
-                V = tl.where(
-                    (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
-                    V,
-                    0.0,
-                )
-            if KV_QUANT_MODE >= 2:
-                P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
-                acc += tl.dot(P_v, V)
-            else:
-                acc += tl.dot(P.to(V.dtype), V)
+        if SLIDING_WINDOW:
+            qpos_lo = q_block_local_idx * BLOCK_Q
+            V = tl.where(
+                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
+                V,
+                0.0,
+            )
+        acc += tl.dot(P.to(V.dtype), V)
 
     # epilogue
-    if KV_QUANT_MODE == 4:
-        acc_even = acc_even / L[:, None]
-        acc_odd = acc_odd / L[:, None]
-        if USE_FP8:
-            out_s = tl.load(out_scale)
-            acc_even = tl.clamp(acc_even * out_s, FP8_MIN, FP8_MAX)
-            acc_odd = tl.clamp(acc_odd * out_s, FP8_MIN, FP8_MAX)
-        out_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        out_base = (
-            query_offset_0[:, None] * output_stride_0
-            + query_offset_1[:, None] * output_stride_1
-        )
-        tl.store(
-            output_ptr + out_base + even_head_offs[None, :],
-            acc_even,
-            mask=even_head_mask[None, :] & out_mask,
-        )
-        tl.store(
-            output_ptr + out_base + odd_head_offs[None, :],
-            acc_odd,
-            mask=odd_head_mask[None, :] & out_mask,
-        )
-    if KV_QUANT_MODE == 5:
-        acc_s0 = acc_s0 / L[:, None]
-        acc_s1 = acc_s1 / L[:, None]
-        acc_s2 = acc_s2 / L[:, None]
-        acc_s3 = acc_s3 / L[:, None]
-        if USE_FP8:
-            out_s = tl.load(out_scale)
-            acc_s0 = tl.clamp(acc_s0 * out_s, FP8_MIN, FP8_MAX)
-            acc_s1 = tl.clamp(acc_s1 * out_s, FP8_MIN, FP8_MAX)
-            acc_s2 = tl.clamp(acc_s2 * out_s, FP8_MIN, FP8_MAX)
-            acc_s3 = tl.clamp(acc_s3 * out_s, FP8_MIN, FP8_MAX)
-        out_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        out_base = (
-            query_offset_0[:, None] * output_stride_0
-            + query_offset_1[:, None] * output_stride_1
-        )
-        tl.store(
-            output_ptr + out_base + offs_q0[None, :],
-            acc_s0,
-            mask=mask_q0[None, :] & out_mask,
-        )
-        tl.store(
-            output_ptr + out_base + offs_q1[None, :],
-            acc_s1,
-            mask=mask_q1[None, :] & out_mask,
-        )
-        tl.store(
-            output_ptr + out_base + offs_q2[None, :],
-            acc_s2,
-            mask=mask_q2[None, :] & out_mask,
-        )
-        tl.store(
-            output_ptr + out_base + offs_q3[None, :],
-            acc_s3,
-            mask=mask_q3[None, :] & out_mask,
-        )
-    if KV_QUANT_MODE < 4:
-        acc = acc / L[:, None]
-        if USE_FP8:
-            acc = acc * tl.load(out_scale)
-            acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
-        output_offset = (
-            query_offset_0[:, None] * output_stride_0
-            + query_offset_1[:, None] * output_stride_1
-            + offs_d[None, :]
-        )
-        tl.store(
-            output_ptr + output_offset,
-            acc,
-            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        )
+    acc = acc / L[:, None]
+    if USE_FP8:
+        acc = acc * tl.load(out_scale)
+        acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
+    output_offset = (
+        query_offset_0[:, None] * output_stride_0
+        + query_offset_1[:, None] * output_stride_1
+        + offs_d[None, :]
+    )
+    tl.store(
+        output_ptr + output_offset,
+        acc,
+        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+    )
 
 
 @triton.jit
@@ -849,21 +465,11 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
-    # KV cache quantization: 0=none, 1=fp8, 2+=per-token-head,
-    # 4=int4 (RHT + asymmetric), 5=int2 (Hadamard + Lloyd-Max)
+    # KV cache quantization mode handled inside this kernel.  Only modes
+    # NONE (0) and FP8_PER_TENSOR (1) reach the core; per-token-head and
+    # packed modes (2+) are dispatched to backends in
+    # ``vllm.v1.attention.ops.triton_quant_kv`` by the wrapper.
     KV_QUANT_MODE: tl.constexpr = 0,
-    HALF_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 2 (for INT4)
-    QUARTER_HEAD_PADDED: tl.constexpr = 0,  # HEAD_SIZE_PADDED // 4 (for INT2)
-    # Per-token-head scale caches (KV_QUANT_MODE >= 2)
-    # Shape: [num_blocks, block_size, num_kv_heads]
-    k_scale_cache_ptr=None,
-    v_scale_cache_ptr=None,
-    stride_ks_blk=0,
-    stride_ks_slot=0,
-    stride_ks_head=0,
-    stride_vs_blk=0,
-    stride_vs_slot=0,
-    stride_vs_head=0,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -919,69 +525,6 @@ def kernel_unified_attention_3d(
         other=0.0,
     )
 
-    # Split-dot prologue (3D kernel) — same logic as 2D.
-    if KV_QUANT_MODE == 4:
-        half_offs = tl.arange(0, HALF_HEAD_PADDED)
-        even_head_offs = half_offs * 2
-        odd_head_offs = half_offs * 2 + 1
-        even_head_mask = tl.where(even_head_offs < HEAD_SIZE, 1, 0).to(tl.int1)
-        odd_head_mask = tl.where(odd_head_offs < HEAD_SIZE, 1, 0).to(tl.int1)
-        half_dim_mask = tl.where(half_offs < HEAD_SIZE // 2, 1, 0).to(tl.int1)
-        q_base = (
-            query_offset_0[:, None] * query_stride_0
-            + query_offset_1[:, None] * query_stride_1
-        )
-        q_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        Q_even = tl.load(
-            query_ptr + q_base + even_head_offs[None, :],
-            mask=even_head_mask[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_odd = tl.load(
-            query_ptr + q_base + odd_head_offs[None, :],
-            mask=odd_head_mask[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        if KV_QUANT_MODE == 4:
-            Q_sum = tl.sum(Q_even, axis=1) + tl.sum(Q_odd, axis=1)
-
-    if KV_QUANT_MODE == 5:
-        qtr_offs = tl.arange(0, QUARTER_HEAD_PADDED)
-        offs_q0 = qtr_offs * 4
-        offs_q1 = qtr_offs * 4 + 1
-        offs_q2 = qtr_offs * 4 + 2
-        offs_q3 = qtr_offs * 4 + 3
-        mask_q0 = tl.where(offs_q0 < HEAD_SIZE, 1, 0).to(tl.int1)
-        mask_q1 = tl.where(offs_q1 < HEAD_SIZE, 1, 0).to(tl.int1)
-        mask_q2 = tl.where(offs_q2 < HEAD_SIZE, 1, 0).to(tl.int1)
-        mask_q3 = tl.where(offs_q3 < HEAD_SIZE, 1, 0).to(tl.int1)
-        qtr_dim_mask = tl.where(qtr_offs < HEAD_SIZE // 4, 1, 0).to(tl.int1)
-        q_base = (
-            query_offset_0[:, None] * query_stride_0
-            + query_offset_1[:, None] * query_stride_1
-        )
-        q_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        Q_s0 = tl.load(
-            query_ptr + q_base + offs_q0[None, :],
-            mask=mask_q0[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_s1 = tl.load(
-            query_ptr + q_base + offs_q1[None, :],
-            mask=mask_q1[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_s2 = tl.load(
-            query_ptr + q_base + offs_q2[None, :],
-            mask=mask_q2[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-        Q_s3 = tl.load(
-            query_ptr + q_base + offs_q3[None, :],
-            mask=mask_q3[None, :] & q_mask,
-            other=0.0,
-        ).to(tl.float32)
-
     block_table_offset = seq_idx * block_table_stride
 
     if USE_SINKS:
@@ -998,14 +541,6 @@ def kernel_unified_attention_3d(
 
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
-    if KV_QUANT_MODE == 4:
-        acc_even = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
-        acc_odd = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
-    if KV_QUANT_MODE == 5:
-        acc_s0 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
-        acc_s1 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
-        acc_s2 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
-        acc_s3 = tl.zeros([BLOCK_M, QUARTER_HEAD_PADDED], dtype=tl.float32)
 
     # context length for this particular sequences
     context_len = seq_len - cur_batch_query_len
@@ -1075,165 +610,30 @@ def kernel_unified_attention_3d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
-        # ---- INT4 2-way split: mode 4 (RHT + asymmetric)
-        if KV_QUANT_MODE == 4:
-            slot_in_blk = seq_offset % BLOCK_SIZE
-            k_off_i4 = (
-                physical_block_idx[None, :] * stride_k_cache_0
-                + kv_head_idx * stride_k_cache_2
-                + half_offs[:, None] * stride_k_cache_3
-                + slot_in_blk[None, :] * stride_k_cache_1
-            )
-            K_packed = tl.load(
-                key_cache_ptr + k_off_i4,
-                mask=half_dim_mask[:, None] & tile_mask[None, :],
-                other=0,
-            )
-            K_lo_raw = K_packed & 0xF
-            K_hi_raw = (K_packed >> 4) & 0xF
-            v_off_i4 = (
-                physical_block_idx[:, None] * stride_v_cache_0
-                + kv_head_idx * stride_v_cache_2
-                + half_offs[None, :] * stride_v_cache_3
-                + slot_in_blk[:, None] * stride_v_cache_1
-            )
-            V_packed = tl.load(
-                value_cache_ptr + v_off_i4,
-                mask=half_dim_mask[None, :] & tile_mask[:, None],
-                other=0,
-            )
-            V_lo_raw = V_packed & 0xF
-            V_hi_raw = (V_packed >> 4) & 0xF
-            ks_idx = (
-                physical_block_idx * stride_ks_blk
-                + slot_in_blk * stride_ks_slot
-                + kv_head_idx * stride_ks_head
-            )
-            ks_raw = tl.load(k_scale_cache_ptr + ks_idx, mask=tile_mask, other=0)
-            vs_idx = (
-                physical_block_idx * stride_vs_blk
-                + slot_in_blk * stride_vs_slot
-                + kv_head_idx * stride_vs_head
-            )
-            vs_raw = tl.load(v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0)
-
-            if KV_QUANT_MODE == 4:
-                # Asymmetric: extract zp via steganography.
-                K_lo = K_lo_raw.to(Q_even.dtype)
-                K_hi = K_hi_raw.to(Q_odd.dtype)
-                V_lo = V_lo_raw.to(Q_even.dtype)
-                V_hi = V_hi_raw.to(Q_odd.dtype)
-                ks_bits = ks_raw.to(tl.int32, bitcast=True)
-                k_zp = (ks_bits & 0xF).to(tl.float32)
-                k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
-                vs_bits = vs_raw.to(tl.int32, bitcast=True)
-                v_zp = (vs_bits & 0xF).to(tl.float32)
-                v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
-
-        # ---- INT2: 4-way split, Lloyd-Max centroid lookup
-        if KV_QUANT_MODE == 5:
-            slot_in_blk = seq_offset % BLOCK_SIZE
-            k_off_i2 = (
-                physical_block_idx[None, :] * stride_k_cache_0
-                + kv_head_idx * stride_k_cache_2
-                + qtr_offs[:, None] * stride_k_cache_3
-                + slot_in_blk[None, :] * stride_k_cache_1
-            )
-            K_pk = tl.load(
-                key_cache_ptr + k_off_i2,
-                mask=qtr_dim_mask[:, None] & tile_mask[None, :],
-                other=0,
-            )
-            KC0 = _lloyd_max_dequant_4(K_pk & 0x3).to(tl.float32)
-            KC1 = _lloyd_max_dequant_4((K_pk >> 2) & 0x3).to(tl.float32)
-            KC2 = _lloyd_max_dequant_4((K_pk >> 4) & 0x3).to(tl.float32)
-            KC3 = _lloyd_max_dequant_4((K_pk >> 6) & 0x3).to(tl.float32)
-            v_off_i2 = (
-                physical_block_idx[:, None] * stride_v_cache_0
-                + kv_head_idx * stride_v_cache_2
-                + qtr_offs[None, :] * stride_v_cache_3
-                + slot_in_blk[:, None] * stride_v_cache_1
-            )
-            V_pk = tl.load(
-                value_cache_ptr + v_off_i2,
-                mask=qtr_dim_mask[None, :] & tile_mask[:, None],
-                other=0,
-            )
-            VC0 = _lloyd_max_dequant_4(V_pk & 0x3).to(tl.float32)
-            VC1 = _lloyd_max_dequant_4((V_pk >> 2) & 0x3).to(tl.float32)
-            VC2 = _lloyd_max_dequant_4((V_pk >> 4) & 0x3).to(tl.float32)
-            VC3 = _lloyd_max_dequant_4((V_pk >> 6) & 0x3).to(tl.float32)
-            ks_idx = (
-                physical_block_idx * stride_ks_blk
-                + slot_in_blk * stride_ks_slot
-                + kv_head_idx * stride_ks_head
-            )
-            k_token_head_scales = tl.load(
-                k_scale_cache_ptr + ks_idx, mask=tile_mask, other=0
-            )
-            vs_idx = (
-                physical_block_idx * stride_vs_blk
-                + slot_in_blk * stride_vs_slot
-                + kv_head_idx * stride_vs_head
-            )
-            v_token_head_scales = tl.load(
-                v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0
-            )
-
-        # ---- Non-split-dot path (modes 0, 1, 2, 3) ----------------------
-        if KV_QUANT_MODE < 4:
-            v_offset = (
-                physical_block_idx[:, None] * stride_v_cache_0
-                + kv_head_idx * stride_v_cache_2
-                + offs_d[None, :] * stride_v_cache_3
-                + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
-            )
-            k_offset = (
-                physical_block_idx[None, :] * stride_k_cache_0
-                + kv_head_idx * stride_k_cache_2
-                + offs_d[:, None] * stride_k_cache_3
-                + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
-            )
-            K_load = tl.load(
-                key_cache_ptr + k_offset,
-                mask=dim_mask[:, None] & tile_mask[None, :],
-                other=0.0,
-            )
-            K, k_token_head_scales = _prepare_kv_tile(
-                K_load,
-                Q,
-                k_scale,
-                k_scale_cache_ptr,
-                physical_block_idx,
-                seq_offset,
-                kv_head_idx,
-                stride_ks_blk,
-                stride_ks_slot,
-                stride_ks_head,
-                tile_mask,
-                BLOCK_SIZE,
-                KV_QUANT_MODE,
-            )
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0.0,
-            )
-            V, v_token_head_scales = _prepare_kv_tile(
-                V_load,
-                Q,
-                v_scale,
-                v_scale_cache_ptr,
-                physical_block_idx,
-                seq_offset,
-                kv_head_idx,
-                stride_vs_blk,
-                stride_vs_slot,
-                stride_vs_head,
-                tile_mask,
-                BLOCK_SIZE,
-                KV_QUANT_MODE,
-            )
+        v_offset = (
+            physical_block_idx[:, None] * stride_v_cache_0
+            + kv_head_idx * stride_v_cache_2
+            + offs_d[None, :] * stride_v_cache_3
+            + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
+        )
+        k_offset = (
+            physical_block_idx[None, :] * stride_k_cache_0
+            + kv_head_idx * stride_k_cache_2
+            + offs_d[:, None] * stride_k_cache_3
+            + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
+        )
+        K_load = tl.load(
+            key_cache_ptr + k_offset,
+            mask=dim_mask[:, None] & tile_mask[None, :],
+            other=0.0,
+        )
+        K = _prepare_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+        V_load = tl.load(
+            value_cache_ptr + v_offset,
+            mask=dim_mask[None, :] & tile_mask[:, None],
+            other=0.0,
+        )
+        V = _prepare_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -1270,27 +670,7 @@ def kernel_unified_attention_3d(
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-
-        # Per-token-head quant: fuse softmax_scale with per-head k_scale
-        # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-        if KV_QUANT_MODE == 4:
-            raw_dot = tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)
-            S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
-                scale * k_token_head_scales[None, :]
-            )
-        elif KV_QUANT_MODE == 5:
-            # INT2: 4-way split-dot with Lloyd-Max centroids
-            raw_dot = (
-                tl.dot(Q_s0, KC0)
-                + tl.dot(Q_s1, KC1)
-                + tl.dot(Q_s2, KC2)
-                + tl.dot(Q_s3, KC3)
-            )
-            S += raw_dot * (scale * k_token_head_scales[None, :])
-        elif KV_QUANT_MODE >= 2:
-            S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
-        else:
-            S += scale * tl.dot(Q, K)
+        S += scale * tl.dot(Q, K)
 
         if USE_SOFTCAP:
             S = apply_softcap(S, softcap)
@@ -1341,118 +721,34 @@ def kernel_unified_attention_3d(
         alpha = tl.exp(M - m_j)
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        if KV_QUANT_MODE == 4:
-            acc_even = acc_even * alpha[:, None]
-            acc_odd = acc_odd * alpha[:, None]
-        if KV_QUANT_MODE == 5:
-            acc_s0 = acc_s0 * alpha[:, None]
-            acc_s1 = acc_s1 * alpha[:, None]
-            acc_s2 = acc_s2 * alpha[:, None]
-            acc_s3 = acc_s3 * alpha[:, None]
-        if KV_QUANT_MODE < 4:
-            acc = acc * alpha[:, None]
+        acc = acc * alpha[:, None]
 
         # update constants
         L = L * alpha + l_j
         M = m_j
 
-        if KV_QUANT_MODE == 4:
-            if SLIDING_WINDOW:
-                qpos_lo = q_block_local_idx * BLOCK_Q
-                sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
-                V_lo = tl.where(sw_mask[:, None], V_lo, 0.0)
-                V_hi = tl.where(sw_mask[:, None], V_hi, 0.0)
-            P_v = (P * v_token_head_scales[None, :]).to(V_lo.dtype)
-            Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
-            acc_even += tl.dot(P_v, V_lo) - Pv_zp_sum[:, None]
-            acc_odd += tl.dot(P_v, V_hi) - Pv_zp_sum[:, None]
-        if KV_QUANT_MODE == 5:
-            if SLIDING_WINDOW:
-                qpos_lo = q_block_local_idx * BLOCK_Q
-                sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
-                VC0 = tl.where(sw_mask[:, None], VC0, 0.0)
-                VC1 = tl.where(sw_mask[:, None], VC1, 0.0)
-                VC2 = tl.where(sw_mask[:, None], VC2, 0.0)
-                VC3 = tl.where(sw_mask[:, None], VC3, 0.0)
-            P_v = (P * v_token_head_scales[None, :]).to(tl.float32)
-            acc_s0 += tl.dot(P_v, VC0)
-            acc_s1 += tl.dot(P_v, VC1)
-            acc_s2 += tl.dot(P_v, VC2)
-            acc_s3 += tl.dot(P_v, VC3)
-        if KV_QUANT_MODE < 4:
-            if SLIDING_WINDOW:
-                qpos_lo = q_block_local_idx * BLOCK_Q
-                V = tl.where(
-                    (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
-                    V,
-                    0.0,
-                )
-            if KV_QUANT_MODE >= 2:
-                P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
-                acc += tl.dot(P_v, V)
-            else:
-                acc += tl.dot(P.to(V.dtype), V)
+        if SLIDING_WINDOW:
+            qpos_lo = q_block_local_idx * BLOCK_Q
+            V = tl.where(
+                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW,
+                V,
+                0.0,
+            )
+        acc += tl.dot(P.to(V.dtype), V)
 
     # 3D kernel output: store segment results
-    if KV_QUANT_MODE == 4:
-        segm_base = (
-            query_offset_0[:, None].to(tl.int64)
-            * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + segm_idx * HEAD_SIZE_PADDED
-        )
-        out_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        tl.store(
-            segm_output_ptr + segm_base + even_head_offs[None, :],
-            acc_even,
-            mask=even_head_mask[None, :] & out_mask,
-        )
-        tl.store(
-            segm_output_ptr + segm_base + odd_head_offs[None, :],
-            acc_odd,
-            mask=odd_head_mask[None, :] & out_mask,
-        )
-    if KV_QUANT_MODE == 5:
-        segm_base = (
-            query_offset_0[:, None].to(tl.int64)
-            * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + segm_idx * HEAD_SIZE_PADDED
-        )
-        out_mask = query_mask_0[:, None] & query_mask_1[:, None]
-        tl.store(
-            segm_output_ptr + segm_base + offs_q0[None, :],
-            acc_s0,
-            mask=mask_q0[None, :] & out_mask,
-        )
-        tl.store(
-            segm_output_ptr + segm_base + offs_q1[None, :],
-            acc_s1,
-            mask=mask_q1[None, :] & out_mask,
-        )
-        tl.store(
-            segm_output_ptr + segm_base + offs_q2[None, :],
-            acc_s2,
-            mask=mask_q2[None, :] & out_mask,
-        )
-        tl.store(
-            segm_output_ptr + segm_base + offs_q3[None, :],
-            acc_s3,
-            mask=mask_q3[None, :] & out_mask,
-        )
-    if KV_QUANT_MODE < 4:
-        segm_output_offset = (
-            query_offset_0[:, None].to(tl.int64)
-            * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-            + segm_idx * HEAD_SIZE_PADDED
-            + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
-        )
-        tl.store(
-            segm_output_ptr + segm_output_offset,
-            acc,
-            mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
-        )
+    segm_output_offset = (
+        query_offset_0[:, None].to(tl.int64)
+        * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+        + segm_idx * HEAD_SIZE_PADDED
+        + tl.arange(0, HEAD_SIZE_PADDED)[None, :]
+    )
+    tl.store(
+        segm_output_ptr + segm_output_offset,
+        acc,
+        mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
+    )
     segm_offset = (
         query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
         + query_offset_1 * NUM_SEGMENTS_PER_SEQ
@@ -1622,28 +918,43 @@ def unified_attention(
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
-    # Transform Q to match stored KV domain.
-    # INT2: plain Hadamard + Lloyd-Max (scale norm/d^1.5 absorbs d factor).
-    # INT4: single RHT + asymmetric (softmax_scale/d compensates).
-    is_rotated_kv = kv_quant_mode in (
-        KVQuantMode.INT2_PER_TOKEN_HEAD,
-        KVQuantMode.INT4_PER_TOKEN_HEAD,
-    )
-    if is_rotated_kv:
-        q_orig_dtype = q.dtype
-        if kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
-            from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-                fast_hadamard_transform,
-            )
+    # Per-token-head modes (INT8 / FP8 / INT4 / INT2) live in their own
+    # backend modules under ``vllm.v1.attention.ops.triton_quant_kv``.  The core
+    # kernel only handles modes NONE and FP8_PER_TENSOR.
+    if kv_quant_mode.is_per_token_head:
+        from vllm.v1.attention.ops.triton_quant_kv import get_backend
 
-            q = fast_hadamard_transform(q.float()).to(q_orig_dtype)
-        else:
-            from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-                _single_rht,
-            )
-
-            q = _single_rht(q.float()).to(q_orig_dtype)
-            softmax_scale = softmax_scale / q.shape[2]
+        backend = get_backend(kv_quant_mode)
+        if sinks is not None:
+            assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
+        backend.unified_attention(
+            q=q,
+            k_cache=k,
+            v_cache=v,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            max_seqlen_k=max_seqlen_k,
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=softcap,
+            sinks=sinks,
+            alibi_slopes=alibi_slopes,
+            use_alibi_sqrt=use_alibi_sqrt,
+            qq_bias=qq_bias,
+            output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+        )
+        return
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
@@ -1771,16 +1082,6 @@ def unified_attention(
             BLOCK_M=BLOCK_M,
             USE_FP8=output_scale is not None,
             KV_QUANT_MODE=kv_quant_mode,
-            HALF_HEAD_PADDED=triton.next_power_of_2(head_size) // 2,
-            QUARTER_HEAD_PADDED=triton.next_power_of_2(head_size) // 4,
-            k_scale_cache_ptr=k_scale_cache,
-            v_scale_cache_ptr=v_scale_cache,
-            stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
-            stride_ks_slot=k_scale_cache.stride(1) if k_scale_cache is not None else 0,
-            stride_ks_head=k_scale_cache.stride(2) if k_scale_cache is not None else 0,
-            stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
-            stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
-            stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
         )
     else:
         kernel_unified_attention_3d[
@@ -1834,16 +1135,6 @@ def unified_attention(
             BLOCK_M=BLOCK_M,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             KV_QUANT_MODE=kv_quant_mode,
-            HALF_HEAD_PADDED=triton.next_power_of_2(head_size) // 2,
-            QUARTER_HEAD_PADDED=triton.next_power_of_2(head_size) // 4,
-            k_scale_cache_ptr=k_scale_cache,
-            v_scale_cache_ptr=v_scale_cache,
-            stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
-            stride_ks_slot=k_scale_cache.stride(1) if k_scale_cache is not None else 0,
-            stride_ks_head=k_scale_cache.stride(2) if k_scale_cache is not None else 0,
-            stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
-            stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
-            stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
@@ -1865,11 +1156,3 @@ def unified_attention(
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
         )
-
-    # Apply inverse transform to output.
-    if is_rotated_kv:
-        if kv_quant_mode == KVQuantMode.INT2_PER_TOKEN_HEAD:
-            out_f = fast_hadamard_transform(out.float())
-        else:
-            out_f = _single_rht(out.float(), inverse=True) / head_size
-        out.copy_(out_f.to(q_orig_dtype))
