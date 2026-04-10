@@ -350,6 +350,8 @@ def _per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
+# TODO: Replace with direct IR op call once deep_gemm_moe.py is refactored
+# to not use out_q
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
