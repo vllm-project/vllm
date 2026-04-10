@@ -518,43 +518,45 @@ class EplbState:
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 
-    def _dump(
+    def _log_balancedness(
         self,
         num_tokens_per_rank: torch.Tensor,
+        model_name: str,
         verbose: bool = False,
     ) -> None:
         """Print EPLB balancedness stats to stderr."""
         layer_means = num_tokens_per_rank.mean(dim=1, dtype=torch.float64)
         layer_maxes = num_tokens_per_rank.max(dim=1).values.to(torch.float64)
-        valid_layers = layer_means > 0
 
         # Compute balancedness ratio:
         # for each layer:
-        #   (max load across ranks) / (mean load across ranks)
-        # then average over active layers.
-        if valid_layers.any():
-            layer_ratios = layer_maxes[valid_layers] / layer_means[valid_layers]
-            balancedness = layer_ratios.mean().item()
-        else:
-            balancedness = 1.0
-        steps_left = (
-            self.expert_rearrangement_step_interval - self.expert_rearrangement_step
-        )
+        #   (mean load across ranks) / (max load across ranks)
+        avg_tokens = layer_means.sum().item()
+        max_tokens = layer_maxes.sum().item()
+        balancedness = avg_tokens / max_tokens if max_tokens > 0 else 0.0
+
         step = self.expert_rearrangement_step
+        steps_left = self.expert_rearrangement_step_interval - step
 
         if not verbose:
-            print(
-                f"EPLB: step={step}, balancedness={balancedness:.2f}x, "
-                f"\nNext rearrangement in {steps_left} steps",
-                file=sys.stderr,
-                flush=True,
+            logger.info(
+                "EPLB step: %d for model %s: avg_tokens=%.2f, "
+                "max_tokens=%d, balancedness=%.4f, "
+                "steps until the next rearrangement: %d",
+                step,
+                model_name,
+                avg_tokens,
+                max_tokens,
+                balancedness,
+                steps_left,
             )
             return
 
         # ---- verbose dump ----
         lines: list[str] = [
             "=== EPLB dump ===",
-            f"step={step}, balancedness={balancedness:.2f}x",
+            f"model={model_name}, step={step}, avg_tokens={avg_tokens:.2f}, "
+            f"max_tokens={int(max_tokens)}, balancedness={balancedness:.4f}",
             f"Next rearrangement in {steps_left} steps",
         ]
 
@@ -636,6 +638,12 @@ class EplbState:
                 `profile_run` to reserve enough memory
                 for the communication buffer.
             log_stats (bool): If `True`, log the expert load metrics.
+
+        # Stats
+            The metrics are summed across layers.
+            - `avg_tokens`: The average load across ranks.
+            - `max_tokens`: The maximum load across ranks.
+            - `balancedness`: The ratio of average load to maximum load.
         """
         ep_group = get_ep_group().device_group
         if is_profile:
@@ -670,8 +678,9 @@ class EplbState:
                 )
 
                 if ep_group.rank() == 0:
-                    self._dump(
+                    self._log_balancedness(
                         num_tokens_per_rank,
+                        model_name=eplb_model_state.model_name,
                         verbose=self.parallel_config.eplb_config.log_balancedness_verbose,
                     )
 

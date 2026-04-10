@@ -88,39 +88,3 @@ def heat_cell(text: str, val: float, vmin: float, vmax: float) -> str:
     t = max(0.0, min(1.0, (val - vmin) / (vmax - vmin)))
     r, g = int(220 * t), int(220 * (1 - t))
     return f"\033[38;2;{r};{g};30m{text}\033[0m"
-
-
-def human_tokens(n: float) -> str:
-    """1234 -> '1234', 12345 -> '12k', 1234567 -> '1235k'."""
-    v = int(round(n))
-    return str(v) if v < 10_000 else f"{round(v / 1000)}k"
-
-
-def compact_int_list(items: list) -> str:
-    """Format mixed str/int list with run compression: [shared, 0..63, 123]."""
-    if not items:
-        return "[]"
-    parts: list[str] = []
-    rs: int | None = None
-    re: int | None = None
-
-    def _flush() -> None:
-        if rs is not None:
-            parts.append(str(rs) if rs == re else f"{rs}..{re}")
-
-    for item in items:
-        if isinstance(item, str):
-            _flush()
-            rs = re = None
-            parts.append(item)
-        else:
-            x = int(item)
-            if rs is None or re is None:
-                rs = re = x
-            elif x == re + 1:
-                re = x
-            elif x != re:
-                _flush()
-                rs = re = x
-    _flush()
-    return "[" + ", ".join(parts) + "]"
