@@ -24,11 +24,11 @@ from .utils import maybe_prefix
 class JinaForRanking(nn.Module, SupportsLateInteraction):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.projector_dim = 512
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
         self.config = config
+        self.projector_dim: int = config.embedding_size
 
         self.vllm_config = vllm_config
         self.quant_config = quant_config

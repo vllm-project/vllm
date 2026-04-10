@@ -21,7 +21,7 @@ documents = [
     "Le thé vert est riche en antioxydants et peut améliorer la fonction cérébrale.",
 ]
 
-
+EMBEDDING_SIZE = 512
 REFERENCE_1_VS_1 = [
     0.345703125,
     -0.10498046,
@@ -48,6 +48,7 @@ def test_offline(vllm_runner):
         _test_offline_1_v_n(llm)
         _test_offline_n_v_n(llm)
         _test_offline_token_embed_illegal_inputs(llm)
+        assert llm.model_config.embedding_size == EMBEDDING_SIZE
 
 
 def test_online():
@@ -68,6 +69,7 @@ def _test_offline_1_v_1(llm):
     outputs = llm.encode(documents[:1] + [query], pooling_task="token_embed")
     embeds = outputs[0].outputs.data.float()
     assert embeds.shape[0] == 2
+    assert embeds.shape[-1] == EMBEDDING_SIZE
 
     doc_embeds = embeds[:-1]
     query_embeds = embeds[-1]
@@ -175,6 +177,7 @@ def _test_online_1_v_1(server):
     # test pooling api
     embeds = _get_embeds(server, [documents[0], query])
     assert embeds.shape[0] == 2
+    assert embeds.shape[-1] == EMBEDDING_SIZE
 
     doc_embeds = embeds[:-1]
     query_embeds = embeds[-1]
