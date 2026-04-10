@@ -1,12 +1,12 @@
 <!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
-vLLM contains pre-compiled C++ and CUDA (12.8) binaries.
+vLLM contains pre-compiled C++ and CUDA (12.9) binaries.
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
 
-- GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
+- GPU: compute capability 7.5 or higher (e.g., T4, RTX20xx, A100, L4, H100, B200, etc.)
 
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
