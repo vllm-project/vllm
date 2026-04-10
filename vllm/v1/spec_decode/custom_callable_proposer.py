@@ -75,9 +75,9 @@ class CustomCallableProposer:
     def propose(
         self,
         sampled_token_ids: list[list[int]],
-        num_tokens_no_spec,
-        token_ids_cpu,
-        slot_mappings=None,
+        num_tokens_no_spec:int,
+        token_ids_cpu:torch.Tensor,
+        slot_mappings:Optional[torch.Tensor] = None,
     ) -> list[list[int]]:
         """Generate draft tokens using the user-provided function.
 
