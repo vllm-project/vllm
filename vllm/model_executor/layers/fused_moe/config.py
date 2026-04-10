@@ -805,6 +805,8 @@ def fp8_w8a16_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     block_shape: list[int] | None = None,
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and fp8 weights.
@@ -814,10 +816,20 @@ def fp8_w8a16_moe_quant_config(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w1_scale, None, None
+            current_platform.fp8_dtype(),
+            group_shape,
+            w1_scale,
+            None,
+            None,
+            w1_bias,
         ),
         _w2=FusedMoEQuantDesc(
-            current_platform.fp8_dtype(), group_shape, w2_scale, None, None
+            current_platform.fp8_dtype(),
+            group_shape,
+            w2_scale,
+            None,
+            None,
+            w2_bias,
         ),
     )
 

@@ -400,6 +400,12 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
         replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
         replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
 
+        w13_bias = None
+        w2_bias = None
+        if self.moe.has_bias:
+            w13_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
+
         self.moe_quant_config = make_fp8_moe_quant_config(
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
@@ -407,17 +413,10 @@ class _Fp8OnlineMoEBase(FusedMoEMethodBase):
             w2_scale=w2_scale,
             a1_scale=w13_input_scale,
             a2_scale=w2_input_scale,
+            w1_bias=w13_bias,
+            w2_bias=w2_bias,
             block_shape=self.weight_block_size,
         )
-        # Inject biases into the quant config if the model has them
-        # (e.g. GPT-OSS biased MoE)
-        if self.moe.has_bias:
-            w13_bias = getattr(layer, "w13_bias", None)
-            w2_bias = getattr(layer, "w2_bias", None)
-            if w13_bias is not None:
-                self.moe_quant_config._w1.bias = w13_bias
-            if w2_bias is not None:
-                self.moe_quant_config._w2.bias = w2_bias
 
         assert self.experts_cls is not None
         self.moe_kernel = make_fp8_moe_kernel(
