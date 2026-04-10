@@ -98,9 +98,9 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if (
-                params.thinking_token_budget is not None
-                and self.vllm_config.reasoning_config is None
+            if params.thinking_token_budget is not None and (
+                self.vllm_config.reasoning_config is None
+                or not self.vllm_config.reasoning_config.enabled
             ):
                 raise ValueError(
                     "thinking_token_budget is set but reasoning_config is "
