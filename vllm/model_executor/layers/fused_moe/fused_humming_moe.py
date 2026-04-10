@@ -183,6 +183,9 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         num_experts = self.num_experts
         N = self.layer.intermediate_size
         K = self.layer.hidden_size
+        assert isinstance(num_experts, int)
+        assert isinstance(N, int)
+        assert isinstance(K, int)
 
         # hidden_states
         # (-> quanted_gate_up_input) (if not BF16/FP16 activation)
