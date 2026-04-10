@@ -88,12 +88,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             layer=self.layer,
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
+            gemm_type=self.humming_gemm_type,
             sublayer_name="w13",
         )
         self.w2_tuning_config = HummingMethod.get_default_tunning_configs(
             layer=self.layer,
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
+            gemm_type=self.humming_gemm_type,
             sublayer_name="w2",
         )
         self.compute_config_str = json.dumps(self.compute_config)
