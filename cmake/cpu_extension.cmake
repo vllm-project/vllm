@@ -160,14 +160,17 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
             endforeach()
             if(_best GREATER 0)
                 set(VLLM_RVV_VLEN ${_best})
-            elseif(RVV_FP16_FOUND OR RVV_BF16_FOUND)
-                message(FATAL_ERROR
-                    "RISC-V RVV is available but /proc/cpuinfo does not "
-                    "report zvl<N>b. Please specify VLEN explicitly:\n"
-                    "  -DVLLM_RVV_VLEN=128   (for VLEN=128 hardware)\n"
-                    "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)\n"
-                    "  -DVLLM_RVV_VLEN=0     (force scalar, no RVV)")
             endif()
+        endif()
+        # If auto-detect failed (no /proc/cpuinfo or no zvl<N>b reported)
+        # but the compiler supports RVV, require explicit specification.
+        if(NOT DEFINED VLLM_RVV_VLEN AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+            message(FATAL_ERROR
+                "RISC-V RVV is available but VLEN could not be auto-detected. "
+                "Please specify VLEN explicitly:\n"
+                "  -DVLLM_RVV_VLEN=128   (for VLEN=128 hardware)\n"
+                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)\n"
+                "  -DVLLM_RVV_VLEN=0     (force scalar, no RVV)")
         endif()
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
