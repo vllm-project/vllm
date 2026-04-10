@@ -30,15 +30,6 @@ def init_pooling_io_processors(
 
         processors["token_classify"] = TokenClassifyIOProcessor
 
-        processors["classify"] = ClassifyIOProcessor
-
-    if "token_classify" in supported_tasks:
-        from vllm.entrypoints.pooling.classify.io_processor import (
-            TokenClassifyIOProcessor,
-        )
-
-        processors["token_classify"] = TokenClassifyIOProcessor
-
     if "embed" in supported_tasks:
         from .embed.io_processor import EmbedIOProcessor
 
@@ -46,23 +37,6 @@ def init_pooling_io_processors(
 
     if "token_embed" in supported_tasks:
         from vllm.entrypoints.pooling.embed.io_processor import TokenEmbedIOProcessor
-
-        processors["token_embed"] = TokenEmbedIOProcessor
-
-    if enable_scoring_api(supported_tasks, model_config):
-        score_type = model_config.score_type
-
-        if score_type is not None and score_type in ScoringIOProcessors:
-            processors[score_type] = ScoringIOProcessors[score_type]
-
-    if model_config.architecture == "JinaForRanking":
-        from vllm.entrypoints.pooling.embed.io_processor import (
-            JinaRankingTokenEmbedIOProcessor,
-        )
-
-        processors["late-interaction"] = ScoringIOProcessors["jina-reranking-scoring"]
-        processors["token_embed"] = JinaRankingTokenEmbedIOProcessor
-        from .embed.io_processor import TokenEmbedIOProcessor
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
@@ -84,6 +58,13 @@ def init_pooling_io_processors(
 
         if score_type is not None and score_type in ScoringIOProcessors:
             processors[score_type] = ScoringIOProcessors[score_type]
+
+    if model_config.architecture == "JinaForRanking":
+        from .embed.io_processor import JinaRankingTokenEmbedIOProcessor
+        from .scoring.io_processor import ScoringIOProcessors
+
+        processors["token_embed"] = JinaRankingTokenEmbedIOProcessor
+        processors["late-interaction"] = ScoringIOProcessors["jina-reranking-scoring"]
 
     return {
         task: processor_cls(
