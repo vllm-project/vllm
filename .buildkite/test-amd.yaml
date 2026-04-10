@@ -3827,10 +3827,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/mlp_speculator.py
-  - tests/v1/spec_decode/test_acceptance_length.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
@@ -3843,9 +3841,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/detokenizer
-  - tests/multimodal
-  - tests/utils_
+  - tests/
   commands:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
@@ -3860,17 +3856,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/test_inputs.py
-  - tests/test_outputs.py
-  - tests/test_pooling_params.py
-  - tests/test_ray_env.py
-  - tests/multimodal
-  - tests/renderers
-  - tests/standalone_tests/lazy_imports.py
-  - tests/tokenizers_
-  - tests/tool_parsers
-  - tests/transformers_utils
-  - tests/config
+  - tests/
   commands:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
@@ -3894,9 +3880,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/basic_correctness/test_basic_correctness
-  - tests/basic_correctness/test_cpu_offload
-  - tests/basic_correctness/test_cumem.py
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s basic_correctness/test_cumem.py
@@ -3913,8 +3897,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/test_utils.py
-  - tests/models/test_vision.py
+  - tests/
   commands:
   - pytest -v -s models/test_utils.py models/test_vision.py
 
@@ -3927,12 +3910,8 @@ steps:
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/layers/
-  - tests/models/test_initialization.py
-  - tests/models/registry.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
@@ -3945,8 +3924,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/test_initialization.py
-  - tests/models/registry.py
+  - tests/
   commands:
   - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
@@ -3959,9 +3937,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/test_terratorch.py
-  - tests/models/test_transformers.py
-  - tests/models/test_registry.py
+  - tests/
   commands:
   - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
 
@@ -3972,8 +3948,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
-  - benchmarks/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - bash scripts/run-benchmarks.sh
 
@@ -3985,7 +3961,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/benchmarks/
+  - tests/
   commands:
   - pytest -v -s benchmarks/
 
@@ -3996,11 +3972,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - tests/v1/cudagraph
-  - vllm/v1/cudagraph_dispatcher.py
-  - vllm/config/compilation.py
-  - vllm/compilation
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
   - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
@@ -4013,16 +3986,8 @@ steps:
   num_gpus: 1
   working_dir: "/vllm-workspace"
   source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/quantization/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/backends/mla/
-  - vllm/v1/attention/selector.py
-  - .buildkite/scripts/scheduled_integration_test/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
 
@@ -4034,9 +3999,8 @@ steps:
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed
-  - tests/distributed
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s distributed/test_comm_ops.py
   - pytest -v -s distributed/test_shm_broadcast.py
@@ -4050,9 +4014,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/distributed/eplb
-  - tests/distributed/test_eplb_algo.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
 
@@ -4064,11 +4027,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/engine
-  - tests/test_sequence
-  - tests/test_config
-  - tests/test_logger
-  - tests/test_vllm_port
+  - tests/
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
@@ -4079,9 +4038,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/engine/
-  - tests/v1/engine/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/engine/test_preprocess_error_handling.py
   - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
@@ -4096,9 +4054,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/rpc
-  - tests/entrypoints/serve/instrumentator
-  - tests/tool_use
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/serve/instrumentator
@@ -4115,8 +4071,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/chat_completion --ignore=entrypoints/openai/chat_completion/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/chat_completion/test_oot_registration.py
@@ -4131,8 +4086,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/completion --ignore=entrypoints/openai/completion/test_tensorizer_entrypoint.py
@@ -4149,8 +4103,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/openai
-  - tests/entrypoints/test_chat_utils
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
@@ -4165,8 +4118,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/llm
-  - tests/entrypoints/offline_mode
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
@@ -4183,7 +4135,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/pooling
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
@@ -4198,7 +4150,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/entrypoints/openai/responses
+  - tests/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/responses
@@ -4211,9 +4163,8 @@ steps:
   fast_check: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/entrypoints
-  - tests/entrypoints/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
   - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/serve/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
@@ -4225,10 +4176,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
-  - vllm/entrypoints
-  - vllm/multimodal
-  - examples/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
     - pip install tensorizer
     # Basic
@@ -4260,15 +4209,8 @@ steps:
   num_gpus: 1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/quantization/
-  - vllm/compilation/
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/model_executor/layers/activation.py
-  - vllm/model_executor/layers/attention/attention.py
-  - vllm/model_executor/layers/quantization/input_quant_fp8.py
-  - tests/compile/fusions_e2e/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - rocm-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
@@ -4281,13 +4223,8 @@ steps:
   num_gpus: 1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - csrc/quantization/
-  - vllm/model_executor/
-  - vllm/v1/attention/
-  - vllm/compilation/
-  - tests/compile/fusions_e2e/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - rocm-smi
   # Run all models and attn backends but only Inductor partition and native custom ops
@@ -4303,13 +4240,8 @@ steps:
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/attention/
-  - vllm/v1/attention
-  - vllm/model_executor/layers/attention
-  - tests/kernels/attention
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -4320,13 +4252,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/
-  - tests/kernels/core
-  - tests/kernels/test_top_k_per_row.py
-  - tests/kernels/test_concat_mla_q.py
-  - vllm/model_executor/layers/rotary_embedding/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s kernels/core kernels/test_top_k_per_row.py
 
@@ -4337,9 +4264,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/utils/import_utils.py
-  - tests/kernels/helion/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pip install helion==0.3.3
   - pytest -v -s kernels/helion/
@@ -4352,15 +4278,8 @@ steps:
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/cutlass_w8a8/moe/
-  - csrc/moe/
-  - tests/kernels/moe
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/distributed/device_communicators/
-  - vllm/envs.py
-  - vllm/config
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
@@ -4372,10 +4291,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/mamba/
-  - tests/kernels/mamba
-  - vllm/model_executor/layers/mamba/ops
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s kernels/mamba
 
@@ -4387,13 +4304,8 @@ steps:
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/quantization/
-  - vllm/model_executor/layers/quantization
-  - tests/kernels/quantization
-  - tests/kernels/quantization/test_rocm_skinny_gemms.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/kernels/
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
@@ -4404,14 +4316,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
@@ -4422,14 +4328,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-small-rocm.txt
 
@@ -4441,7 +4341,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/language/generation
+  - tests/
   commands:
   - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
@@ -4455,7 +4355,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/language/pooling
+  - tests/
   commands:
   - pytest -v -s models/language/pooling -m 'not core_model'
 
@@ -4467,7 +4367,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/language/pooling_mteb_test
+  - tests/
   commands:
   - pytest -v -s models/language/pooling_mteb_test
 
@@ -4479,7 +4379,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/language/generation_ppl_test
+  - tests/
   commands:
   - pytest -v -s models/language/generation_ppl_test
 
@@ -4492,16 +4392,8 @@ steps:
   parallelism: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - tests/models/language/pooling/test_embedding.py
-  - tests/models/language/generation/test_common.py
-  - tests/models/language/pooling/test_classification.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pip freeze | grep -E 'torch'
   - export TORCH_NCCL_BLOCKING_WAIT=1
@@ -4517,7 +4409,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/language/generation
+  - tests/
   commands:
   - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
@@ -4532,7 +4424,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/language
+  - tests/
   commands:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
@@ -4545,9 +4437,8 @@ steps:
   parallelism: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/lora
-  - tests/lora
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py
 
@@ -4560,7 +4451,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/v1/tracing
+  - tests/
   commands:
   - "pip install \
       'opentelemetry-sdk>=1.26.0' \
@@ -4577,13 +4468,8 @@ steps:
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/engine/arg_utils.py
-  - vllm/config/model.py
-  - vllm/model_executor
-  - tests/model_executor
-  - tests/entrypoints/openai/completion/test_tensorizer_entrypoint.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - apt-get update && apt-get install -y curl libsodium23
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -4597,11 +4483,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
-  - vllm/multimodal/
-  - vllm/inputs/
-  - vllm/v1/core/
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/model_loader/
+  - vllm/
+  - tests/
   commands:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
@@ -4613,8 +4496,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/generation
-  - tests/models/multimodal/test_mapping.py
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation -m 'not core_model' --ignore models/multimodal/generation/test_common.py
@@ -4628,7 +4510,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/generation
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
@@ -4641,7 +4523,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/generation
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
@@ -4654,7 +4536,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/pooling
+  - tests/
   commands:
   - pytest -v -s models/multimodal/pooling -m 'not core_model'
 
@@ -4667,7 +4549,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2"
@@ -4682,7 +4564,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen3 or gemma"
@@ -4697,8 +4579,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/generation
-  - tests/models/multimodal/test_mapping.py
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma"
@@ -4713,7 +4594,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal/generation
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
@@ -4727,8 +4608,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
-  - tests/models/registry.py
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
@@ -4742,8 +4622,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/models/multimodal
-  - tests/models/registry.py
+  - tests/
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
@@ -4755,15 +4634,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/
-  - vllm/entrypoints/openai/
-  - vllm/model_executor/models/whisper.py
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/model_loader/
+  - vllm/
+  - tests/
   commands:
   - bash ../tools/install_torchcodec_rocm.sh || exit 1
   - pytest -s entrypoints/openai/correctness/
@@ -4776,7 +4648,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/cuda
+  - tests/
   commands:
   - pytest -v -s cuda/test_cuda_context.py
   - pytest -v -s cuda/test_platform_no_cuda_init.py
@@ -4789,7 +4661,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/compile/passes
+  - tests/
   commands:
   - pytest -s -v compile/passes --ignore compile/passes/distributed
 
@@ -4801,15 +4673,8 @@ steps:
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/compilation/
-  - vllm/model_executor/layers/
-  - vllm/v1/worker/
-  - vllm/v1/attention/
-  - vllm/v1/cudagraph_dispatcher.py
-  - vllm/config/compilation.py
-  - csrc/
-  - tests/compile
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - "find compile/ -maxdepth 1 -name 'test_*.py' -print0 | xargs -0 -n1 -I{} pytest -s -v '{}'"
 
@@ -4821,13 +4686,8 @@ steps:
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/compilation/
-  - vllm/model_executor/
-  - vllm/v1/attention/
-  - vllm/config/compilation.py
-  - csrc/
-  - tests/compile
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s compile/fullgraph/test_full_graph.py -k 'not test_fp8_kv_scale_compile'
 
@@ -4839,13 +4699,8 @@ steps:
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/compilation/
-  - vllm/model_executor/
-  - vllm/v1/attention/
-  - vllm/config/compilation.py
-  - csrc/
-  - tests/compile
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - "find compile/fullgraph/ -name 'test_*.py' -not -name 'test_full_graph.py' -exec pytest -s -v {} \\\\;"
 
@@ -4856,9 +4711,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - tests/standalone_tests/python_only_compile.sh
-  - setup.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - bash standalone_tests/python_only_compile.sh
 
@@ -4870,8 +4724,8 @@ steps:
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - requirements/nightly_torch_test.txt
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
 
@@ -4882,11 +4736,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/quantization
+  - vllm/
+  - tests/
   commands:
 
   # temporary install here since we need nightly, will move to requirements/test.in
@@ -4907,23 +4758,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - tests/quantization/test_gfx3xx_moe.py
-  - vllm/model_executor/models/deepseek_v2.py
-  - vllm/model_executor/models/gpt_oss.py
-  - vllm/model_executor/models/llama4.py
-  - vllm/model_executor/layers/fused_moe
-  - vllm/model_executor/layers/quantization/compressed_tensors
-  - vllm/model_executor/layers/quantization/modelopt.py
-  - vllm/model_executor/layers/quantization/mxfp4.py
-  - vllm/v1/attention/backends/triton_attn.py
-  - vllm/v1/attention/backends/rocm_attn.py
-  - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - vllm/v1/attention/backends/mla/
-  - vllm/v1/attention/selector.py
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/model_loader/
+  - vllm/
+  - tests/
   commands:
   - pytest -s -v tests/quantization/test_gfx3xx_moe.py
 
@@ -4934,11 +4770,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/model_executor/layers/quantization
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/quantization
-  - vllm/model_executor/model_loader/
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s models/quantization
 
@@ -4949,12 +4782,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
-  - tests/rocm/aiter/
-  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
-  - vllm/v1/attention/selector.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s rocm/aiter/
 
@@ -4965,9 +4794,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/"
   source_file_dependencies:
-  - requirements/
-  - setup.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - bash /vllm-workspace/.buildkite/scripts/check-ray-compatibility.sh
 
@@ -4979,7 +4807,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/test_regression
+  - tests/
   commands:
   - pip install modelscope
   - pytest -v -s test_regression.py
@@ -4991,14 +4819,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
-  - vllm/v1/sample/
-  - vllm/beam_search.py
-  - tests/samplers
-  - tests/conftest.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s samplers
 
@@ -5009,13 +4831,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/v1/worker/gpu/spec_decode/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/sample/
-  - vllm/model_executor/layers/
-  - tests/v1/e2e/spec_decode/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
 
@@ -5026,13 +4843,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/v1/worker/gpu/spec_decode/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/sample/
-  - vllm/model_executor/layers/
-  - tests/v1/e2e/spec_decode/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
 
@@ -5043,13 +4855,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/v1/worker/gpu/spec_decode/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/sample/
-  - vllm/model_executor/layers/
-  - tests/v1/e2e/spec_decode/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "ngram or suffix"
 
@@ -5060,14 +4867,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/v1/worker/gpu/spec_decode/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/sample/
-  - vllm/model_executor/layers/
-  - vllm/transformers_utils/configs/speculators/
-  - tests/v1/e2e/spec_decode/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
 
@@ -5078,16 +4879,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/multimodal/
-  - vllm/model_executor/layers/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - tests/models/
-  - examples/
+  - vllm/
+  - tests/
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
   - pytest -v -s tests/models/test_initialization.py
@@ -5106,13 +4899,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/v1/core
-  - tests/v1/executor
-  - tests/v1/kv_offload
-  - tests/v1/worker
-  - tests/v1/kv_connector/unit
-  - tests/v1/metrics
-  - tests/entrypoints/openai/correctness/test_lmeval.py
+  - tests/
   commands:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - pytest -v -s -m 'not cpu_test' v1/core
@@ -5133,11 +4920,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/v1/sample
-  - tests/v1/logits_processors
-  - tests/v1/test_oracle.py
-  - tests/v1/test_request.py
-  - tests/v1/test_outputs.py
+  - tests/
   commands:
   - pytest -v -s v1/sample
   - pytest -v -s v1/logits_processors
@@ -5153,7 +4936,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/v1/spec_decode
+  - tests/
   commands:
   - pytest -v -s -m 'not slow_test' v1/spec_decode
 
@@ -5164,12 +4947,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/
-  - vllm/v1/attention/
-  - vllm/model_executor/layers/
-  - tests/v1/spec_decode/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s -m 'slow_test' v1/spec_decode/test_eagle.py
   - pytest -v -s -m 'slow_test' v1/spec_decode/test_extract_hidden_states.py
@@ -5186,13 +4965,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/config/attention.py
-  - vllm/model_executor/layers/attention
-  - vllm/v1/attention
-  - tests/v1/attention
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/attention
 
@@ -5205,7 +4979,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
-  - tests/v1
+  - tests/
   commands:
   - pytest -v -s -m 'cpu_test' v1/core
   - pytest -v -s v1/structured_output
@@ -5220,9 +4994,8 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/
-  - tests/v1/e2e/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
 
@@ -5233,8 +5006,7 @@ steps:
   agent_pool: mi300_8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - vllm/v1/
-  - tests/v1/e2e/general/
-  - vllm/platforms/rocm.py
+  - vllm/
+  - tests/
   commands:
   - pytest -v -s v1/e2e/general/test_async_scheduling.py
