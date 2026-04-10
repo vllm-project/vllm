@@ -27,7 +27,7 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherSiluAndMul, make_group_scale
+from .matcher_utils import MatcherSiluAndMul
 from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i32
 
 logger = init_logger(__name__)
@@ -221,11 +221,18 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
             result = torch.empty(
                 output_shape, device=input.device, dtype=self.quant_dtype
             )
-            scale = make_group_scale(
-                torch.empty(output_shape, device=input.device),
-                self.quant_key.scale.group_shape,
-                is_scale_transposed,
-            )
+            if is_scale_transposed:
+                scale = torch.empty(
+                    (d // self.group_size, input.shape[0]),
+                    device=input.device,
+                    dtype=torch.float32,
+                ).permute(-1, -2)
+            else:
+                scale = torch.empty(
+                    (input.shape[0], d // self.group_size),
+                    device=input.device,
+                    dtype=torch.float32,
+                )
             at = auto_functionalized(
                 self.FUSED_OP,
                 out=result,
