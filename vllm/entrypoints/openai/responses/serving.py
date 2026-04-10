@@ -283,7 +283,9 @@ class OpenAIServingResponses(OpenAIServing):
             return prompt_token_ids
 
         max_model_len = self.model_config.max_model_len
-        max_output_tokens = request.max_output_tokens or 0
+        max_output_tokens = (request.max_output_tokens
+                             if request.max_output_tokens is not None else
+                             self.model_config.max_tokens)
         max_input_tokens = max_model_len - max_output_tokens
 
         if max_input_tokens <= 0:

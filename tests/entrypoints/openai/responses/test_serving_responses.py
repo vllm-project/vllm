@@ -1198,6 +1198,7 @@ class TestApplyHarmonyTruncation:
 
         model_config = MagicMock()
         model_config.max_model_len = 100
+        model_config.max_tokens = 20
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
@@ -1278,22 +1279,22 @@ class TestApplyHarmonyTruncation:
     def test_truncation_auto_with_no_max_output_tokens(
         self, serving_responses_instance
     ):
-        """When max_output_tokens is None, max_input_tokens = max_model_len."""
+        """When max_output_tokens is None, it should use the model's default."""
         request = ResponsesRequest(
             input="test input",
             truncation="auto",
             max_output_tokens=None,
         )
-        # max_model_len=100, max_output_tokens=0, max_input_tokens=100
+        # max_model_len=100, max_output_tokens=20 (from model_config.max_tokens), so max_input_tokens=80
         token_ids = list(range(150))
 
         result = serving_responses_instance._apply_harmony_truncation(
             token_ids, request
         )
 
-        # Should keep the last 100 tokens
-        assert len(result) == 100
-        assert result == list(range(50, 150))
+        # Should keep the last 80 tokens
+        assert len(result) == 80
+        assert result == list(range(70, 150))
 
     def test_truncation_auto_exact_boundary(
         self, serving_responses_instance
