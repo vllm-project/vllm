@@ -12,7 +12,9 @@ from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.batch_invariant_fp4_moe import (
+    NvFP4MoEWorkspace,
     _grouped_matmul_nvfp4_packed,
+    _map_extra_rows,
     fused_moe_batch_invariant_nvfp4,
 )
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
@@ -77,13 +79,33 @@ def _batch_invariant_fp4_workspaces(
         w1_row_dim, activation
     )
     m_total = m * topk
-    workspace13 = torch.empty(
-        (m_total, max(w1_row_dim, hidden_dim)), device=device, dtype=dtype
-    )
+    cols13 = max(w1_row_dim, hidden_dim)
+    extra = _map_extra_rows(m_total, cols13)
+    workspace13 = torch.empty((m_total + extra, cols13), device=device, dtype=dtype)
     workspace2 = torch.empty(
         (m_total, max(act_out_dim, hidden_dim)), device=device, dtype=dtype
     )
     return workspace13, workspace2
+
+
+def _make_nvfp4_workspace(
+    num_experts: int,
+    device: torch.device | str = DEVICE,
+) -> NvFP4MoEWorkspace:
+    """Create an ``NvFP4MoEWorkspace`` for test helpers."""
+    return NvFP4MoEWorkspace(
+        expert_offsets=torch.empty(num_experts + 1, dtype=torch.int32, device=device),
+        blockscale_offsets=torch.empty(
+            num_experts + 1, dtype=torch.int32, device=device
+        ),
+        problem_sizes1=torch.empty(num_experts, 3, dtype=torch.int32, device=device),
+        problem_sizes2=torch.empty(num_experts, 3, dtype=torch.int32, device=device),
+        tiles_per_expert=torch.empty(num_experts, dtype=torch.int32, device=device),
+        expert_tile_start=torch.zeros(
+            num_experts + 1, dtype=torch.int32, device=device
+        ),
+        dummy_bias=torch.empty(0, device=device, dtype=torch.float32),
+    )
 
 
 def _global_scale(x: torch.Tensor) -> torch.Tensor:
@@ -243,6 +265,7 @@ def test_batch_invariant_nvfp4_moe_matches_cutlass(
             workspace13=w13,
             workspace2=w2,
             output=fallback_out,
+            workspace=_make_nvfp4_workspace(8),
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
         torch.testing.assert_close(fallback_out, cutlass_out, atol=1e-1, rtol=1e-1)
@@ -340,6 +363,7 @@ def test_batch_invariant_nvfp4_moe_batch_size_invariance(
         workspace13=w13_1,
         workspace2=w2_1,
         output=out_single,
+        workspace=_make_nvfp4_workspace(e),
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
     out_batch = torch.empty_like(x_batch)
@@ -359,6 +383,7 @@ def test_batch_invariant_nvfp4_moe_batch_size_invariance(
         workspace13=w13_8,
         workspace2=w2_8,
         output=out_batch,
+        workspace=_make_nvfp4_workspace(e),
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
     assert torch.equal(out_single[0], out_batch[0])
@@ -424,6 +449,7 @@ def test_batch_invariant_nvfp4_moe_ignores_invalid_sentinel_routes() -> None:
         workspace13=w13,
         workspace2=w2,
         output=out_with_invalid,
+        workspace=_make_nvfp4_workspace(e),
     )
     out_valid_only = torch.empty_like(hidden_states)
     fused_moe_batch_invariant_nvfp4(
@@ -442,6 +468,7 @@ def test_batch_invariant_nvfp4_moe_ignores_invalid_sentinel_routes() -> None:
         workspace13=w13,
         workspace2=w2,
         output=out_valid_only,
+        workspace=_make_nvfp4_workspace(e),
     )
 
     torch.testing.assert_close(out_with_invalid, out_valid_only, atol=1e-1, rtol=1e-1)
@@ -529,6 +556,7 @@ def test_batch_invariant_nvfp4_moe_expert_map_invalidation_matches_local_routes(
         workspace13=w13_g,
         workspace2=w2_g,
         output=out_with_expert_map,
+        workspace=_make_nvfp4_workspace(e_local),
         expert_map=expert_map,
     )
 
@@ -551,6 +579,7 @@ def test_batch_invariant_nvfp4_moe_expert_map_invalidation_matches_local_routes(
         workspace13=w13_l,
         workspace2=w2_l,
         output=out_local_only,
+        workspace=_make_nvfp4_workspace(e_local),
         expert_map=None,
     )
 
@@ -606,6 +635,7 @@ def test_batch_invariant_nvfp4_moe_all_invalid_routes_return_zero() -> None:
         workspace13=w13_z,
         workspace2=w2_z,
         output=out,
+        workspace=_make_nvfp4_workspace(e),
     )
 
     torch.testing.assert_close(out, torch.zeros_like(out), atol=0.0, rtol=0.0)
@@ -696,6 +726,9 @@ def test_grouped_matmul_nvfp4_packed_matches_cutlass_reference() -> None:
         a_scale_offsets=a_scale_offsets_t,
         problem_sizes=problem_sizes_t,
         output=packed_out,
+        tiles_per_expert=torch.empty(E, dtype=torch.int32, device=DEVICE),
+        expert_tile_start=torch.zeros(E + 1, dtype=torch.int32, device=DEVICE),
+        dummy_bias=torch.empty(0, device=DEVICE, dtype=torch.float32),
     )
     if packed_out.shape[1] != N:
         packed_out = packed_out[:, :N].contiguous()

@@ -3,6 +3,7 @@
 """Batch-invariant NVFP4 fused MoE expert implementations."""
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from enum import Enum
 
 import torch
@@ -38,6 +39,42 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.platform_utils import num_compute_units
 
 logger = init_logger(__name__)
+
+
+def _map_extra_rows(m_total: int, cols: int) -> int:
+    """Extra workspace13 rows needed to embed ``a_map`` and ``c_map``.
+
+    Both maps are ``[M_total]`` int32 tensors.  We pack them into the
+    trailing rows of the bfloat16 workspace13 buffer so they are managed
+    by the workspace-manager and sized correctly for CUDA-graph capture.
+    """
+    bytes_needed = 2 * m_total * 4  # 2 maps × M_total × sizeof(int32)
+    row_bytes = cols * 2  # cols × sizeof(bfloat16)
+    return (bytes_needed + row_bytes - 1) // row_bytes
+
+
+@dataclass
+class NvFP4MoEWorkspace:
+    """Pre-allocated scratch buffers for batch-invariant NVFP4 MoE.
+
+    Expert-count-dependent tensors are allocated once in
+    ``BatchInvariantNvfp4Experts.__init__`` and reused across forward calls
+    to avoid hot-path allocations and stay compatible with CUDA graph
+    capture.
+
+    The M-dependent ``a_map`` / ``c_map`` buffers are carved out of the
+    extra rows appended to ``workspace13`` by ``workspace_shapes`` (see
+    ``_map_extra_rows``), so they inherit the workspace-manager's
+    pre-allocation and CUDA-graph-safe lifetime.
+    """
+
+    expert_offsets: torch.Tensor  # [E+1] int32
+    blockscale_offsets: torch.Tensor  # [E+1] int32
+    problem_sizes1: torch.Tensor  # [E, 3] int32
+    problem_sizes2: torch.Tensor  # [E, 3] int32
+    tiles_per_expert: torch.Tensor  # [E] int32
+    expert_tile_start: torch.Tensor  # [E+1] int32
+    dummy_bias: torch.Tensor  # [0] float32
 
 
 class _GroupedGemmAMode(Enum):
@@ -507,6 +544,9 @@ def _grouped_matmul_nvfp4_packed(
     problem_sizes: torch.Tensor,
     *,
     output: torch.Tensor,
+    tiles_per_expert: torch.Tensor,
+    expert_tile_start: torch.Tensor,
+    dummy_bias: torch.Tensor,
     a_scale_offsets: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Packed grouped NVFP4 GEMM with expert-local problem metadata.
@@ -593,18 +633,17 @@ def _grouped_matmul_nvfp4_packed(
 
     # Pre-compute tile-to-expert mapping (all device-side, no host sync).
     # N and K are uniform across experts; only M varies.
+    # Reuse pre-allocated tiles_per_expert and expert_tile_start buffers.
     M_per_expert = problem_sizes[:, 0].to(torch.int32)
-    tiles_per_expert = (
-        torch.div(
-            M_per_expert + BLOCK_SIZE_M - 1,
-            BLOCK_SIZE_M,
-            rounding_mode="floor",
-        )
-        * max_tiles_n
-        * (M_per_expert > 0).to(torch.int32)
+    torch.div(
+        M_per_expert + BLOCK_SIZE_M - 1,
+        BLOCK_SIZE_M,
+        rounding_mode="floor",
+        out=tiles_per_expert,
     )
-    expert_tile_start = torch.zeros(E + 1, dtype=torch.int32, device=a_fp4.device)
-    expert_tile_start[1:] = torch.cumsum(tiles_per_expert, dim=0)
+    tiles_per_expert.mul_(max_tiles_n)
+    tiles_per_expert.mul_((M_per_expert > 0).to(torch.int32))
+    torch.cumsum(tiles_per_expert, dim=0, out=expert_tile_start[1:])
 
     # Flatten B [E, N, K] -> [E*N, K] and B-scale [E, Np, Ks] -> [E*Np, Ks]
     # for a single global TMA descriptor.
@@ -612,7 +651,6 @@ def _grouped_matmul_nvfp4_packed(
     b_scale_flat = b_scale.reshape(-1, b_scale.shape[2])
 
     grid = (min(NUM_SMS, worst_case_tiles),)
-    dummy_bias = torch.empty(0, device=a_fp4.device, dtype=torch.float32)
     _grouped_matmul_fp4_packed_persistent_kernel[grid](
         a_fp4,
         a_scale,
@@ -685,6 +723,7 @@ def fused_moe_batch_invariant_nvfp4(
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
     output: torch.Tensor,
+    workspace: NvFP4MoEWorkspace,
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
     quant_backend: str = "cutlass",
@@ -762,7 +801,6 @@ def fused_moe_batch_invariant_nvfp4(
     else:
         packed_hidden_states = hidden_states
 
-    device = hidden_states.device
     w1_output_size = w13_weight.shape[1]
     activation_out_dim = (
         w1_output_size // 2 if activation_kind.is_gated else w1_output_size
@@ -784,15 +822,18 @@ def fused_moe_batch_invariant_nvfp4(
             f"Need at least ({M_total}, {required_workspace2_cols}), "
             f"got {tuple(workspace2.shape)}."
         )
-    # Per-expert metadata/permutations for packed grouped-GEMM.
-    expert_offsets = torch.empty((num_experts + 1), dtype=torch.int32, device=device)
-    blockscale_offsets = torch.empty(
-        (num_experts + 1), dtype=torch.int32, device=device
-    )
-    problem_sizes1 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
-    problem_sizes2 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
-    a_map = torch.zeros((M_total,), dtype=torch.int32, device=device)
-    c_map = torch.empty((M_total,), dtype=torch.int32, device=device)
+    # Reuse pre-allocated workspace buffers for routing/GEMM dispatch.
+    expert_offsets = workspace.expert_offsets
+    blockscale_offsets = workspace.blockscale_offsets
+    problem_sizes1 = workspace.problem_sizes1
+    problem_sizes2 = workspace.problem_sizes2
+    # a_map and c_map are carved from the extra rows that workspace_shapes
+    # appended to workspace13.  This keeps them inside the workspace-manager's
+    # pre-allocation so they are CUDA-graph safe.
+    map_i32 = workspace13[M_total:].flatten().view(torch.int32)[: 2 * M_total]
+    a_map = map_i32[:M_total]
+    c_map = map_i32[M_total:]
+    a_map.zero_()
     ops.get_cutlass_moe_mm_data(
         routed_topk_ids,
         expert_offsets,
@@ -834,6 +875,9 @@ def fused_moe_batch_invariant_nvfp4(
         a_scale_offsets=blockscale_offsets,
         problem_sizes=problem_sizes1,
         output=workspace13,
+        tiles_per_expert=workspace.tiles_per_expert,
+        expert_tile_start=workspace.expert_tile_start,
+        dummy_bias=workspace.dummy_bias,
     )
     if gemm1_out.shape[-1] != w1_output_size:
         gemm1_out = gemm1_out[:, :w1_output_size].contiguous()
@@ -873,6 +917,9 @@ def fused_moe_batch_invariant_nvfp4(
         a_scale_offsets=blockscale_offsets,
         problem_sizes=problem_sizes2,
         output=workspace2,
+        tiles_per_expert=workspace.tiles_per_expert,
+        expert_tile_start=workspace.expert_tile_start,
+        dummy_bias=workspace.dummy_bias,
     )
     if gemm2_out.shape[-1] != w2_output_size:
         gemm2_out = gemm2_out[:, :w2_output_size].contiguous()
@@ -961,8 +1008,11 @@ class _BatchInvariantFP4ExpertsBase(mk.FusedMoEExpertsModular, ABC):
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         act_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace13 = (M * topk, max(N, K))
-        workspace2 = (M * topk, max(act_out_dim, K))
+        m_total = M * topk
+        cols13 = max(N, K)
+        extra = _map_extra_rows(m_total, cols13)
+        workspace13 = (m_total + extra, cols13)
+        workspace2 = (m_total, max(act_out_dim, K))
         output_shape = (M, K)
         return (workspace13, workspace2, output_shape)
 
@@ -1052,6 +1102,18 @@ class BatchInvariantNvfp4Experts(_BatchInvariantFP4ExpertsBase):
             tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
         ) = None
 
+        E = moe_config.num_local_experts
+        device = moe_config.device
+        self._workspace = NvFP4MoEWorkspace(
+            expert_offsets=torch.empty(E + 1, dtype=torch.int32, device=device),
+            blockscale_offsets=torch.empty(E + 1, dtype=torch.int32, device=device),
+            problem_sizes1=torch.empty(E, 3, dtype=torch.int32, device=device),
+            problem_sizes2=torch.empty(E, 3, dtype=torch.int32, device=device),
+            tiles_per_expert=torch.empty(E, dtype=torch.int32, device=device),
+            expert_tile_start=torch.zeros(E + 1, dtype=torch.int32, device=device),
+            dummy_bias=torch.empty(0, device=device, dtype=torch.float32),
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fuse activation scales into w_scale_2 in-place so that
         # g1/g2_alphas (which reference the same tensor) stay in sync
@@ -1109,6 +1171,7 @@ class BatchInvariantNvfp4Experts(_BatchInvariantFP4ExpertsBase):
             workspace13=workspace13,
             workspace2=workspace2,
             output=output,
+            workspace=self._workspace,
             apply_router_weight_on_input=bool(apply_router_weight_on_input),
             expert_map=expert_map,
         )
