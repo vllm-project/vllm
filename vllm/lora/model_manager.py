@@ -270,9 +270,9 @@ class LoRAModelManager:
             return False
         first_free_slot = next(
             (
-                (i, active_lora_id)
-                for i, active_lora_id in enumerate(self.lora_index_to_id)
-                if active_lora_id is None
+                (i, lora_id)
+                for i, lora_id in enumerate(self.lora_index_to_id)
+                if lora_id is None
             ),
             None,
         )
