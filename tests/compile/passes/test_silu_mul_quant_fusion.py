@@ -18,7 +18,6 @@ from vllm.compilation.passes.fusion.act_quant_fusion import (
     SILU_MUL_OP,
     ActivationQuantFusionPass,
 )
-from vllm.compilation.passes.fusion.rms_quant_fusion import QUANT_OPS
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -126,7 +125,7 @@ class TestSiluMulNvfp4QuantModel(torch.nn.Module):
     def ops_in_model_before(self):
         return [
             SILU_MUL_OP if self.enable_silu_mul_custom_op else torch.ops.aten.mul,
-            QUANT_OPS[kNvfp4Dynamic],
+            torch.ops._C.scaled_fp4_quant.out,
         ]
 
     def ops_in_model_after(self):

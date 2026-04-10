@@ -18,7 +18,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
-from .rms_quant_fusion import QUANT_OPS
 
 logger = init_logger(__name__)
 
@@ -134,7 +133,7 @@ class MLAAttnNvfp4QuantPattern(
         self._qk_head_dim = layer.qk_nope_head_dim + layer.qk_rope_head_dim
         self._output_dim = layer.num_heads * layer.v_head_dim
         self._dtype = dtype
-        self._QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
+        self._QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
     @property
     def pattern(

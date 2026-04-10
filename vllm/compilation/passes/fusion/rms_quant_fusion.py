@@ -18,10 +18,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     ScaleDesc,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
-    kFp8DynamicTensorSym,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
-    kNvfp4Dynamic,
     kStaticTensorScale,
 )
 from vllm.platforms import current_platform
@@ -55,17 +53,6 @@ def empty_i64(*args: Any, **kwargs: Any) -> torch.Tensor:
 
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
-
-QUANT_OPS: dict[QuantKey, OpOverload] = {
-    kFp8StaticTensorSym: torch.ops._C.static_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTensorSym: torch.ops._C.dynamic_scaled_fp8_quant.default,  # noqa: E501
-    kFp8DynamicTokenSym: torch.ops._C.dynamic_per_token_scaled_fp8_quant.default,  # noqa: E501
-}
-if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant"):
-    QUANT_OPS[kNvfp4Dynamic] = torch.ops._C.scaled_fp4_quant.out
-if current_platform.is_cuda():
-    QUANT_OPS[kFp8Dynamic128Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
-    QUANT_OPS[kFp8Dynamic64Sym] = torch.ops._C.per_token_group_fp8_quant.default  # noqa: E501
 
 
 class FusedRMSQuantKey(NamedTuple):

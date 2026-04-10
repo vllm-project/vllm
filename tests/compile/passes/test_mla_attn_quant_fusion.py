@@ -9,7 +9,6 @@ from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
-from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.mla_attn_quant_fusion import (
     MLA_ATTN_OP,
     MLAAttnQuantFusionPass,
@@ -467,14 +466,10 @@ def test_mla_attention_quant_pattern(
     )
 
     # Check quantization ops in the graph
-    if "-quant_fp8" in custom_ops_list:
-        # Custom op disabled → forward_native → IR ops
-        if quant_key.scale.static:
-            quant_op = torch.ops.vllm_ir.static_quant_fp8
-        else:
-            quant_op = torch.ops.vllm_ir.dynamic_quant_fp8
+    if quant_key.scale.static:
+        quant_op = torch.ops.vllm_ir.static_quant_fp8
     else:
-        quant_op = QUANT_OPS[quant_key]
+        quant_op = torch.ops.vllm_ir.dynamic_quant_fp8
     test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)

@@ -28,7 +28,7 @@ from vllm.platforms import current_platform
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherSiluAndMul, make_group_scale
-from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
+from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i32
 
 logger = init_logger(__name__)
 
@@ -129,7 +129,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 
     def __init__(self) -> None:
         super().__init__(kNvfp4Dynamic)
-        self.QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
+        self.QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
     def get_inputs(self) -> list[torch.Tensor]:
         result = self.empty_quant(5, 32)

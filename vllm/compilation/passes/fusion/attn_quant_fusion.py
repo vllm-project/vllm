@@ -20,7 +20,6 @@ from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
 from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
-from .rms_quant_fusion import QUANT_OPS
 
 logger = init_logger(__name__)
 
@@ -139,7 +138,7 @@ class AttnNvfp4QuantPattern(
         self._num_heads = layer.num_heads
         self._head_size = layer.head_size
         self._dtype = dtype
-        self._QUANT_OP = QUANT_OPS[kNvfp4Dynamic]
+        self._QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
     @property
     def pattern(self) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
