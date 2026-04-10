@@ -529,6 +529,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_model_len=4096,
         is_available_online=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "vllm upgraded transformers above v5.4 where "
+                "validate_rope() no longer accepts ignore_keys param"
+            )
+        },
     ),
     "SeedOssForCausalLM": _HfExamplesInfo(
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
