@@ -285,6 +285,8 @@ class InputBatch:
         self.sampled_token_ids_cpu: torch.Tensor | None = None
         self.async_copy_ready_event: torch.Event | None = None
 
+        self._num_reqs_padded: int | None = None
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -680,6 +682,7 @@ class InputBatch:
             self._req_ids.clear()
             self.req_output_token_ids.clear()
             self.spec_token_ids.clear()
+            self._num_reqs_padded = None
             return
 
         # NOTE(woosuk): This function assumes that the empty_req_indices
@@ -789,6 +792,8 @@ class InputBatch:
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
+
+        self._num_reqs_padded = None
 
         if self.is_pooling_model:
             batch_changed = self.batch_update_builder.reset()
@@ -1051,6 +1056,16 @@ class InputBatch:
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
+
+    @property
+    def num_reqs_padded(self) -> int:
+        if self._num_reqs_padded is None:
+            return self.num_reqs
+        return self._num_reqs_padded
+
+    @num_reqs_padded.setter
+    def num_reqs_padded(self, num_reqs_padded: int) -> None:
+        self._num_reqs_padded = num_reqs_padded
 
     @property
     def all_greedy(self) -> bool:
