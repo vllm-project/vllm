@@ -42,15 +42,6 @@ def _prep_static_scale(scale: Tensor, x: Tensor) -> Tensor:
     return scale
 
 
-def quant_fp8(x: Tensor, scale: Tensor, fp8_dtype: torch.dtype) -> Tensor:
-    fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
-    out = (
-        x.to(torch.float32)
-        * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
-    )
-    return out.clamp(fp8_min, fp8_max).to(fp8_dtype)
-
-
 def _pad_token_dim(out: Tensor, num_token_padding: int | None) -> Tensor:
     # This currently generates an extra Triton kernel in compilation.
     # Fortunately, we don't use padding if compiling.
@@ -70,8 +61,17 @@ def static_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
+    fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
     scale = _prep_static_scale(scale, x)
-    return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding)
+    out = (
+        (
+            x.to(torch.float32)
+            * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
+        )
+        .clamp(fp8_min, fp8_max)
+        .to(fp8_dtype)
+    )
+    return _pad_token_dim(out, num_token_padding)
 
 
 @register_op
@@ -81,8 +81,17 @@ def static_group_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
+    fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
     scale = _prep_static_scale(scale, x)
-    return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding)
+    out = (
+        (
+            x.to(torch.float32)
+            * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
+        )
+        .clamp(fp8_min, fp8_max)
+        .to(fp8_dtype)
+    )
+    return _pad_token_dim(out, num_token_padding)
 
 
 @register_op
@@ -102,8 +111,17 @@ def dynamic_quant_fp8(
             x_max = x_max.clamp(max=scale_ub)
     else:
         x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
+
     scale = (x_max / fp8_max).clamp(min=fp8_min_scaling_factor)
-    return _pad_token_dim(quant_fp8(x, scale, fp8_dtype), num_token_padding), scale
+    out = (
+        (
+            x.to(torch.float32)
+            * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
+        )
+        .clamp(fp8_min, fp8_max)
+        .to(fp8_dtype)
+    )
+    return _pad_token_dim(out, num_token_padding), scale
 
 
 @register_op
