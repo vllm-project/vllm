@@ -461,6 +461,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         is_available_online=False,
     ),
+    "Param2MoEForCausalLM": _HfExamplesInfo(
+        "bharatgenai/Param2-17B-A2.4B-Thinking",
+        trust_remote_code=True,
+    ),
     "PersimmonForCausalLM": _HfExamplesInfo("adept/persimmon-8b-chat"),
     "PhiForCausalLM": _HfExamplesInfo("microsoft/phi-2"),
     "Phi3ForCausalLM": _HfExamplesInfo("microsoft/Phi-3-mini-4k-instruct"),
@@ -644,7 +648,6 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
-        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
@@ -810,8 +813,15 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         revision="refs/pr/17",
     ),
+    "Exaone4_5_ForConditionalGeneration": _HfExamplesInfo(
+        "LGAI-EXAONE/EXAONE-4.5-33B",
+        min_transformers_version="5.6.0",
+    ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
+    ),
+    "FireRedLIDForConditionalGeneration": _HfExamplesInfo(
+        "PatchyTisa/FireRedLID-vllm",
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
@@ -1246,6 +1256,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
         max_model_len=10240,
     ),
+    "Eagle3MiniMaxM2ForCausalLM": _HfExamplesInfo(
+        "MiniMaxAI/MiniMax-M2",
+        trust_remote_code=True,
+        speculative_model="yuhuili/EAGLE3-LLaMA3.1-Instruct-8B",
+        tokenizer="MiniMaxAI/MiniMax-M2",
+    ),
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
@@ -1296,6 +1312,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
         min_transformers_version="5.1.0",
         enable_prefix_caching=False,
+    ),
+    "Exaone4_5_MTP": _HfExamplesInfo(
+        "LGAI-EXAONE/EXAONE-4.5-33B",
+        speculative_model="LGAI-EXAONE/EXAONE-4.5-33B",
+        min_transformers_version="5.6.0",
     ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
