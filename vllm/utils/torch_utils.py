@@ -365,8 +365,9 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        from vllm.platforms import current_platform
+
+        current_platform.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
