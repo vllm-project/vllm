@@ -38,6 +38,7 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
+    from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -136,6 +137,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]
+
+            if self.pass_config.fuse_minimax_qk_norm:
+                self.passes += [MiniMaxQKNormPass(config)]
 
             if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]

@@ -20,7 +20,20 @@ steps:
   - tests/kernels/core
   - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py
+
+- label: Kernels MiniMax Reduce RMS Test (2 GPUs)
+  timeout_in_minutes: 15
+  num_devices: 2
+  device: h100
+  source_file_dependencies:
+  - csrc/minimax_reduce_rms_kernel.cu
+  - csrc/minimax_reduce_rms_kernel.h
+  - vllm/model_executor/layers/mamba/linear_attn.py
+  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - tests/kernels/core/test_minimax_reduce_rms.py
+  commands:
+    - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35

@@ -309,3 +309,15 @@ int64_t qr_max_size();
 void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
                        torch::Tensor const& mat_b);
 #endif
+
+#ifndef USE_ROCM
+torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
+                                    torch::Tensor const& norm_weight,
+                                    torch::Tensor workspace, int64_t const rank,
+                                    int64_t const nranks, double const eps);
+std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
+    torch::Tensor qkv, torch::Tensor const& norm_weight_q,
+    torch::Tensor const& norm_weight_k, torch::Tensor workspace,
+    int64_t const q_size, int64_t const kv_size, int64_t const rank,
+    int64_t const nranks, double const eps);
+#endif
