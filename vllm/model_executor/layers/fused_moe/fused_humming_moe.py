@@ -197,6 +197,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         # Neighboring nodes are required to utilize distinct workspaces.
         # The output must be derived from workspace1.
 
+        output_shape: tuple[int, ...]
         if self.is_batched:
             max_num_tokens = self.max_num_tokens
             num_dispatchers = self.num_dispatchers
