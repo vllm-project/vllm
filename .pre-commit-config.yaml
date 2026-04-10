@@ -41,14 +41,14 @@ repos:
     - id: pip-compile
       args: [
         requirements/test/cuda.in,
-        -c, requirements/common.txt,
+        -c, requirements/cuda.txt,
         -o, requirements/test/cuda.txt,
         --index-strategy, unsafe-best-match,
         --torch-backend, cu130,
         --python-platform, x86_64-manylinux_2_28,
         --python-version, "3.12",
       ]
-      files: ^requirements/test/cuda\.(in|txt)$
+      files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
@@ -117,7 +117,7 @@ repos:
         --no-emit-package, nvidia-nvshmem-cu13,
         --no-emit-package, nvidia-nvtx-cu13,
       ]
-      files: ^requirements/test/rocm\.(in|txt)$
+      files: ^requirements/(common|rocm|test/rocm)\.(in|txt)$
     - id: pip-compile
       alias: pip-compile-xpu
       name: pip-compile-xpu
@@ -130,7 +130,7 @@ repos:
         --python-platform, x86_64-manylinux_2_39,
         --python-version, "3.12",
       ]
-      files: ^requirements/test/xpu\.(in|txt)$
+      files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
 - repo: local
   hooks:
   - id: format-torch-nightly-test
