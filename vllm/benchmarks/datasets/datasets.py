@@ -1692,7 +1692,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     timed_trace_group.add_argument(
         "--sec-multiplier",
         type=float,
-        default=0.001,
+        default=1,
         help=(
             "What multiplier to use when converting timestamps to "
             "seconds. We will multiply timestamps by this."
