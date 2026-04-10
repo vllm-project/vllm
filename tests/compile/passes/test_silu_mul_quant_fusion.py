@@ -7,7 +7,7 @@ import pytest
 import torch
 
 import vllm.envs as envs
-import vllm.ir.ops  # noqa: F401 — registers torch.ops.vllm_ir ops
+import vllm.ir.ops  # noqa: F401
 from tests.compile.backend import TestBackend
 from tests.kernels.quantization.nvfp4_utils import quant_nvfp4_tensor
 from tests.utils import TestFP8Layer

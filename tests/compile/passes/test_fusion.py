@@ -11,6 +11,7 @@ import vllm.plugins
 from tests.compile.backend import TestBackend
 from tests.utils import TestFP8Layer
 from vllm._aiter_ops import IS_AITER_FOUND, rocm_aiter_ops
+from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
     FUSED_OPS,
     FusedRMSQuantKey,
@@ -192,12 +193,7 @@ class TestModel(torch.nn.Module):
         return y4
 
     def ops_in_model_before(self):
-        if self.group_shape.is_per_group():
-            return [torch.ops.vllm_ir.dynamic_group_quant_fp8]
-        if self.activation_quant_key.scale.static:
-            return [torch.ops.vllm_ir.static_quant_fp8]
-        else:
-            return [torch.ops.vllm_ir.dynamic_quant_fp8]
+        return [QUANT_OPS[self.activation_quant_key]]
 
     def ops_in_model_after(self):
         if self.use_aiter_fusion:

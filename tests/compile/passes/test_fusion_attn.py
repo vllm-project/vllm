@@ -13,6 +13,7 @@ from vllm.compilation.passes.fusion.attn_quant_fusion import (
     ATTN_OP,
     AttnQuantFusionPass,
 )
+from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fx_utils import find_op_nodes
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
@@ -428,16 +429,11 @@ def test_attention_quant_pattern(
     )
 
     # Check quantization ops in the graph before and after fusion
-    if quant_key is kNvfp4Dynamic:
-        quant_op = torch.ops._C.scaled_fp4_quant.out
-    elif quant_key.scale.static:
-        quant_op = torch.ops.vllm_ir.static_quant_fp8
-    else:
-        quant_op = torch.ops.vllm_ir.dynamic_quant_fp8
-
     # Note: for fp8, fully_replaced=False because query quant ops remain in graph.
     # Only output quant ops are fused into attention.
-    test_backend.check_before_ops([quant_op], fully_replaced=quant_key is kNvfp4Dynamic)
+    test_backend.check_before_ops(
+        [QUANT_OPS[quant_key]], fully_replaced=quant_key is kNvfp4Dynamic
+    )
 
     # access the underlying `AttnQuantFusionPass` on the `LazyInitPass`
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)

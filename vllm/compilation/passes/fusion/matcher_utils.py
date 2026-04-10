@@ -12,13 +12,32 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    QuantKey,
     _normalize_quant_group_shape,
+    kFp8Dynamic64Sym,
+    kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.platforms import current_platform
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
+
+QUANT_OPS: dict[QuantKey, object] = {
+    kFp8StaticTensorSym: torch.ops.vllm_ir.static_quant_fp8,
+    kFp8DynamicTokenSym: torch.ops.vllm_ir.dynamic_quant_fp8,
+    kFp8Dynamic128Sym: torch.ops.vllm_ir.dynamic_group_quant_fp8,
+    kFp8Dynamic64Sym: torch.ops.vllm_ir.dynamic_group_quant_fp8,
+    **(
+        {kNvfp4Dynamic: torch.ops._C.scaled_fp4_quant.out}
+        if current_platform.is_cuda() and hasattr(torch.ops._C, "scaled_fp4_quant")
+        else {}
+    ),
+}
 
 SILU_MUL_OP = torch.ops._C.silu_and_mul.default
 
