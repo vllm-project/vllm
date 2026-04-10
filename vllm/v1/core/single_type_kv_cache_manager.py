@@ -558,16 +558,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             # `num_contiguous_blocks < sliding_window_contiguous_blocks`.
             for computed in computed_blocks:
                 del computed[num_contiguous_blocks:]
-            while (
-                block_size != alignment_tokens  # Faster for common case.
-                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-            ):
-                for computed in computed_blocks:
-                    computed.pop()
         if use_eagle and computed_blocks[0]:
-            assert kv_cache_spec.block_size == alignment_tokens, (
-                "aligned_length is not compatible with eagle now"
-            )
+            # Need to drop the last matched block if eagle is enabled.
+            for computed in computed_blocks:
+                computed.pop()
+        while (
+            block_size != alignment_tokens  # Faster for common case.
+            and computed_blocks[0]
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
             for computed in computed_blocks:
                 computed.pop()
         return computed_blocks
