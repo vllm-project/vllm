@@ -267,9 +267,34 @@ You can modify the `problem_type` via problem_type in the Hugging Face config. T
 
 Implement alignment with transformers [ForSequenceClassificationLoss](https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92).
 
-### Logit bias
+### Affine Score Calibration
 
-You can modify the `logit_bias` (aka `sigmoid_normalize`) through the logit_bias parameter in `vllm.config.PoolerConfig`.
+Affine Score Calibration, also known as [Platt Scaling](https://en.wikipedia.org/wiki/Platt_scaling) (Platt, 1999), is the most widely used method for calibrating classifier outputs into well-calibrated probabilities.
+
+The calibration follows the transformation:
+
+`activation(logit_scale * (logit - logit_bias))`
+
+| Parameter | Default | Description |
+| --------- | ------- | ----------- |
+| `logit_bias` | `None` | Bias subtracted from logits before activation |
+| `logit_scale` | `None` | Scale factor applied to logits after bias subtraction |
+
+Note: `logit_bias` is **subtracted** from the logits (not added), consistent with the `sigmoid_normalize` convention where `sigmoid(x - bias)` centers the sigmoid around the bias value.
+
+The computation order is as follows:
+
+```python
+logits -= logit_bias    # subtract bias (center scores)
+logits *= logit_scale   # scale logits
+logits = activation(logits)  # e.g. sigmoid
+```
+
+Example configuration:
+
+```bash
+--pooler-config '{"use_activation": true, "logit_bias": 4.5, "logit_scale": 1.0}'
+```
 
 ## Removed Features
 
