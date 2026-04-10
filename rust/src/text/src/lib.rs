@@ -46,21 +46,29 @@ pub struct TextLlm {
     llm: Llm,
     /// Tokenizer/model metadata backend responsible for prompt encode/decode and sampling hints.
     backend: DynTextBackend,
-    /// Optional override for the backend-derived context window size.
+    /// Context window size derived by the backend or from engine startup handshake, with optional
+    /// override from config.
     max_model_len: Option<u32>,
 }
 
 impl TextLlm {
     /// Create a new text-generation facade from a shared LLM client plus a text backend.
     pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
+        // Prefer the engine-reported max_model_len because it reflects the post-profiling,
+        // auto-fitted KV cache limit rather than static frontend metadata.
+        let max_model_len = llm.engine_core_client().max_model_len();
+
         Self {
             llm,
             backend,
-            max_model_len: None,
+            max_model_len,
         }
     }
 
-    /// Override the maximum model context length, taking priority over tokenizer/model metadata.
+    /// Override the maximum model context length explicitly.
+    ///
+    /// This takes priority over both the engine-reported default and any tokenizer/model metadata
+    /// exposed by the backend.
     pub fn with_max_model_len(mut self, max_model_len: u32) -> Self {
         self.max_model_len = Some(max_model_len);
         self

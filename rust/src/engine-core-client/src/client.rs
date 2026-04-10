@@ -390,11 +390,11 @@ impl EngineCoreClient {
     ///
     /// This is the auto-fitted value after KV cache profiling and may differ from
     /// the originally configured value.
-    pub fn max_model_len(&self) -> Option<u64> {
+    pub fn max_model_len(&self) -> Option<u32> {
         self.engines
             .iter()
             .filter_map(|e| e.ready_response.as_ref())
-            .map(|r| r.max_model_len)
+            .map(|r| r.max_model_len as u32)
             .min()
     }
 

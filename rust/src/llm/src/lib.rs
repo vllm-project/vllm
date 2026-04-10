@@ -24,25 +24,29 @@ use crate::request_metrics::RequestMetricsTracker;
 pub struct Llm {
     client: EngineCoreClient,
     randomize_request_id: bool,
-    _stats_logger: Option<StatsLogger>,
+    stats_logger: Option<StatsLogger>,
 }
 
 impl Llm {
     /// Create a new minimal LLM facade from an already connected engine-core client.
     pub fn new(client: EngineCoreClient) -> Self {
-        let stats_logger =
-            StatsLogger::start(client.model_name().to_string(), client.engine_count());
         Self {
             client,
             randomize_request_id: true,
-            _stats_logger: Some(stats_logger),
+            stats_logger: None,
         }
     }
 
-    /// Disable periodic stats logging (equivalent to `--disable-log-stats`).
-    pub fn with_disable_log_stats(mut self, disable: bool) -> Self {
-        if disable {
-            self._stats_logger = None;
+    /// Enable or disable periodic stats logging.
+    pub fn with_log_stats(mut self, enabled: bool) -> Self {
+        if enabled {
+            let stats_logger = StatsLogger::start(
+                self.client.model_name().to_string(),
+                self.client.engine_count(),
+            );
+            self.stats_logger = Some(stats_logger);
+        } else {
+            self.stats_logger = None;
         }
         self
     }
