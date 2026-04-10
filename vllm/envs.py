@@ -257,6 +257,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA: bool = False
 
 
 def get_default_cache_root():
@@ -1702,6 +1703,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
+    ),
+    # enable LORA per Request Async Loading for GPU Accelerators
+    "VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": lambda: bool(
+        int(os.getenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "0"))
     ),
     # Whether to enable dual cuda streams for LoRA computation
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(

@@ -165,7 +165,7 @@ cryptography==46.0.5
     #   azure-storage-blob
     #   msal
     #   pyjwt
-cuda-bindings==13.0.3
+cuda-bindings==13.2.0
     # via torch
 cuda-pathfinder==1.3.3
     # via cuda-bindings

@@ -38,7 +38,7 @@ MODEL_PATH = "meta-llama/Llama-3.2-3B-Instruct"
 def do_sample(
     llm: vllm.LLM,
     lora_path: str,
-    lora_id: int,
+    lora_id: list[int | None] | int | None = None,
     tensorizer_config_dict: dict | None = None,
 ) -> list[str]:
     prompts = [
@@ -55,37 +55,50 @@ def do_sample(
     sampling_params = vllm.SamplingParams(
         temperature=0, max_tokens=64, stop=["<|im_end|>"]
     )
-    if tensorizer_config_dict is not None:
-        outputs = llm.generate(
-            prompts,
-            sampling_params,
-            lora_request=LoRARequest(
-                str(lora_id),
-                lora_id,
+
+    lora_request = None
+    if isinstance(lora_id, int):
+        lora_request = LoRARequest(
+            str(lora_id),
+            lora_id,
+            lora_path,
+            tensorizer_config_dict=tensorizer_config_dict,
+        )
+
+    elif isinstance(lora_id, list):
+        lora_request = [
+            LoRARequest(
+                str(i),
+                i,
                 lora_path,
                 tensorizer_config_dict=tensorizer_config_dict,
             )
-            if lora_id
-            else None,
-        )
+            if i is not None
+            else None
+            for i in lora_id
+        ]
+
+    outputs = llm.generate(
+        prompts,
+        sampling_params,
+        lora_request=lora_request,
+    )
+
+    # Normalize to per-output list for verification
+    if isinstance(lora_request, list):
+        expected_requests = lora_request
     else:
-        outputs = llm.generate(
-            prompts,
-            sampling_params,
-            lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-            if lora_id
-            else None,
-        )
-    lora_request = LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None
+        expected_requests = [lora_request] * len(prompts)
+
     generated_texts: list[str] = []
-    for output in outputs:
+    for i, output in enumerate(outputs):
+        expected_req = expected_requests[i]
         prompt = output.prompt
         generated_text = output.outputs[0].text
-        # The output should include  correct lora_request info
-        if lora_request is not None:
-            assert output.lora_request.lora_name == lora_request.lora_name
-            assert output.lora_request.lora_int_id == lora_request.lora_int_id
-            assert output.lora_request.lora_path == lora_request.lora_path
+        if expected_req is not None:
+            assert output.lora_request.lora_name == expected_req.lora_name
+            assert output.lora_request.lora_int_id == expected_req.lora_int_id
+            assert output.lora_request.lora_path == expected_req.lora_path
         else:
             assert output.lora_request is None
         generated_texts.append(generated_text)
@@ -94,30 +107,43 @@ def do_sample(
 
 
 def generate_and_test(
-    llm, llama32_lora_files, tensorizer_config_dict: dict | None = None
+    llm,
+    llama32_lora_files,
+    lora_id: list[int | None] | int | None = None,
+    tensorizer_config_dict: dict | None = None,
 ):
-    print("lora adapter created")
-    print("lora 1")
-    assert (
-        do_sample(
-            llm,
-            llama32_lora_files,
-            tensorizer_config_dict=tensorizer_config_dict,
-            lora_id=1,
+    if lora_id is None:
+        print("lora 1")
+        assert (
+            do_sample(
+                llm,
+                llama32_lora_files,
+                tensorizer_config_dict=tensorizer_config_dict,
+                lora_id=1,
+            )
+            == EXPECTED_LORA_OUTPUT
         )
-        == EXPECTED_LORA_OUTPUT
-    )
 
-    print("lora 2")
-    assert (
-        do_sample(
-            llm,
-            llama32_lora_files,
-            tensorizer_config_dict=tensorizer_config_dict,
-            lora_id=2,
+        print("lora 2")
+        assert (
+            do_sample(
+                llm,
+                llama32_lora_files,
+                tensorizer_config_dict=tensorizer_config_dict,
+                lora_id=2,
+            )
+            == EXPECTED_LORA_OUTPUT
         )
-        == EXPECTED_LORA_OUTPUT
-    )
+    else:
+        assert (
+            do_sample(
+                llm,
+                llama32_lora_files,
+                tensorizer_config_dict=tensorizer_config_dict,
+                lora_id=lora_id,
+            )
+            == EXPECTED_LORA_OUTPUT
+        )
 
     print("removing lora")
 
@@ -236,3 +262,25 @@ def test_tp2_serialize_and_deserialize_lora(
         )
         == EXPECTED_LORA_OUTPUT
     )
+
+
+@pytest.mark.parametrize("async_loading", [True, False])
+def test_llama_batch_lora(llama32_lora_files, monkeypatch, async_loading):
+    with monkeypatch.context() as m:
+        if async_loading:
+            m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
+            m.setenv("VLLM_LORA_ENABLE_DUAL_STREAM", "1")
+
+        llm = vllm.LLM(
+            MODEL_PATH,
+            enable_lora=True,
+            max_num_seqs=8,
+            max_loras=4,
+            max_cpu_loras=8,
+            max_model_len=1024,
+            tensor_parallel_size=4,
+            fully_sharded_loras=True,
+        )
+
+        generate_and_test(llm, llama32_lora_files, lora_id=[1, 2, 3, 4])
+        generate_and_test(llm, llama32_lora_files, lora_id=[5, 6, 7, 8])

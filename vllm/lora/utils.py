@@ -118,6 +118,7 @@ def from_layer(
         ):
             instance_layer = lora_cls(layer)
             instance_layer.create_lora_weights(max_loras, lora_config, model_config)
+            instance_layer.create_lora_flag(instance_layer.device)
             return instance_layer
     return layer
 
@@ -137,6 +138,7 @@ def from_layer_logits_processor(
         lm_head.get_sharded_to_full_mapping(),
     )
     ret.create_lora_weights(max_loras, lora_config, model_config)
+    ret.create_lora_flag(ret.device)
     return ret
 
 

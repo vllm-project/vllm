@@ -217,3 +217,50 @@ def test_olmoe_lora_tp4(olmoe_lora_files, fully_sharded_loras):
     generate_and_test(
         llm, olmoe_lora_files, lora_id=2, compare_lower=fully_sharded_loras
     )
+
+
+def test_olmoe_lora_async_loading_sync(olmoe_lora_files, monkeypatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
+
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=1,
+            max_cpu_loras=4,
+            enforce_eager=True,
+            trust_remote_code=True,
+            enable_chunked_prefill=True,
+        )
+
+        # Request with LoRA ID 1 - first load from disk to CPU to GPU
+        generate_and_test(llm, olmoe_lora_files, lora_id=1)
+
+        # Request LoRA ID 2 - evict LoRA 1, async load LoRA 2 from CPU
+        generate_and_test(llm, olmoe_lora_files, lora_id=2)
+
+        # Switch back to LoRA 1 - evict LoRA 2, async reload from CPU cache
+        generate_and_test(llm, olmoe_lora_files, lora_id=3)
+
+
+@pytest.mark.parametrize("async_loading", [True, False])
+def test_olmoe_batch_lora(olmoe_lora_files, monkeypatch, async_loading):
+    with monkeypatch.context() as m:
+        if async_loading:
+            m.setenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "1")
+
+        llm = vllm.LLM(
+            MODEL_PATH,
+            max_model_len=1024,
+            enable_lora=True,
+            max_loras=4,
+            max_cpu_loras=8,
+            enforce_eager=True,
+            trust_remote_code=True,
+            enable_chunked_prefill=True,
+        )
+
+        generate_and_test(llm, olmoe_lora_files, lora_id=[1, 2, 3, 4])
+
+        generate_and_test(llm, olmoe_lora_files, lora_id=[5, 6, 7, 8])
