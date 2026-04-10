@@ -11,7 +11,6 @@ import regex as re
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
-    ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -24,8 +23,10 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
+    Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import find_tool_properties
 
 logger = init_logger(__name__)
 
@@ -40,7 +41,7 @@ class StreamingXMLToolCallParser:
         self.reset_streaming_state()
 
         # Tool configuration information
-        self.tools: list[ChatCompletionToolsParam] | None = None
+        self.tools: list[Tool] | None = None
         self.tool_call_start_token: str = "<tool_call>"
         self.tool_call_end_token: str = "</tool_call>"
         self.function_start_token: str = "<function="
@@ -961,7 +962,7 @@ class StreamingXMLToolCallParser:
         self.parser.EndElementHandler = self._end_element
         self.parser.CharacterDataHandler = self._char_data
 
-    def set_tools(self, tools: list[ChatCompletionToolsParam] | None):
+    def set_tools(self, tools: list[Tool] | None):
         """Set tool configuration information"""
         self.tools = tools
 
@@ -1000,33 +1001,11 @@ class StreamingXMLToolCallParser:
         if not self.tools or not self.current_function_name:
             return "string"
 
-        for tool in self.tools:
-            if not hasattr(tool, "type") or not (
-                hasattr(tool, "function") and hasattr(tool.function, "name")
-            ):
-                continue
-            if (
-                tool.type == "function"
-                and tool.function.name == self.current_function_name
-            ):
-                if not hasattr(tool.function, "parameters"):
-                    return "string"
-                params = tool.function.parameters
-                if isinstance(params, dict) and "properties" in params:
-                    properties = params["properties"]
-                    if param_name in properties and isinstance(
-                        properties[param_name], dict
-                    ):
-                        return self.repair_param_type(
-                            str(properties[param_name].get("type", "string"))
-                        )
-                elif isinstance(params, dict) and param_name in params:
-                    param_config = params[param_name]
-                    if isinstance(param_config, dict):
-                        return self.repair_param_type(
-                            str(param_config.get("type", "string"))
-                        )
-                break
+        properties = find_tool_properties(self.tools, self.current_function_name)
+        if param_name in properties and isinstance(properties[param_name], dict):
+            return self.repair_param_type(
+                str(properties[param_name].get("type", "string"))
+            )
         return "string"
 
     def repair_param_type(self, param_type: str) -> str:
@@ -1167,8 +1146,8 @@ class StreamingXMLToolCallParser:
 
 
 class Qwen3XMLToolParser(ToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         self.parser = StreamingXMLToolCallParser()
 
         # Add missing attributes for compatibility with serving_chat.py
@@ -1188,8 +1167,7 @@ class Qwen3XMLToolParser(ToolParser):
         # Reset tool call tracking arrays for new extraction
         self.prev_tool_call_arr = []
         self.streamed_args_for_tool = []
-        if request:
-            self.parser.set_tools(request.tools)
+        self.parser.set_tools(self.tools)
         result = self.parser.parse_single_streaming_chunks(model_output)
         if not result.tool_calls:
             return ExtractedToolCallInformation(
@@ -1260,8 +1238,7 @@ class Qwen3XMLToolParser(ToolParser):
             # Reset tool call tracking arrays for new streaming session
             self.prev_tool_call_arr = []
             self.streamed_args_for_tool = []
-            if request:
-                self.parser.set_tools(request.tools)
+            self.parser.set_tools(self.tools)
 
         # Model sometimes outputs separately causing delta_text to be empty.
         # If there were tool_calls before and all current tool_calls have ended,

@@ -349,6 +349,7 @@ endif()
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
     "csrc/cpu/utils.cpp"
+    "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
@@ -373,6 +374,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp")
@@ -382,6 +384,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -394,6 +397,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2 
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
