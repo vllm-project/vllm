@@ -11,7 +11,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 class DraftTokensHandler:
     def __init__(self, device: torch.device | None = None):
         self.device = device
-        self.copy_stream = torch.cuda.Stream(device)
+        self.copy_stream = torch.Stream(device)
         self.copy_event = torch.cuda.Event()
 
         self.req_ids: list[str] = []

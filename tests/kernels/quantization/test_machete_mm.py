@@ -434,7 +434,7 @@ def test_machete_cuda_graph():
     output_ref = torch.matmul(a, w_ref)
 
     # Run the model with a cuda graph
-    stream = torch.cuda.Stream()
+    stream = torch.Stream()
     with torch.cuda.stream(stream):
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):

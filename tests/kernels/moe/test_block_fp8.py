@@ -305,7 +305,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
 
         if use_cudagraph:
             out.fill_(0)
-            stream = torch.cuda.Stream()
+            stream = torch.Stream()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph, stream=stream):
                 out = deep_gemm_moe_fp8_fn(

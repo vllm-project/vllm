@@ -133,8 +133,8 @@ class P2pNcclEngine:
         self.send_queue_cv = threading.Condition()
         self.recv_store_cv = threading.Condition()
 
-        self.send_stream = torch.cuda.Stream()
-        self.recv_stream = torch.cuda.Stream()
+        self.send_stream = torch.Stream()
+        self.recv_stream = torch.Stream()
 
         mem_pool_size_gb = float(
             self.config.get_from_extra_config(
@@ -601,7 +601,7 @@ class P2pNcclEngine:
                 ncclDataTypeEnum.from_torch(tensor.dtype),
                 dst,
                 comm,
-                cudaStream_t(stream.cuda_stream),
+                cudaStream_t(stream.native_handle),
             )
         stream.synchronize()
 
@@ -620,7 +620,7 @@ class P2pNcclEngine:
                 ncclDataTypeEnum.from_torch(tensor.dtype),
                 src,
                 comm,
-                cudaStream_t(stream.cuda_stream),
+                cudaStream_t(stream.native_handle),
             )
         stream.synchronize()
 

@@ -50,7 +50,7 @@ class NCCLTrainerSendWeightsArgs:
     """Whether to use packed tensor broadcasting for efficiency.
     When True, multiple tensors are batched together before broadcasting
     to reduce NCCL communication overhead."""
-    stream: torch.cuda.Stream | None = None
+    stream: torch.Stream | None = None
     """CUDA stream to use for broadcasting if packed is False.
     If packed is True, new streams will be created for each buffer."""
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
