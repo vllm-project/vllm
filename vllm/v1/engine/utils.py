@@ -23,7 +23,10 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
 from vllm.utils import numa_utils
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
+    make_zmq_socket,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.executor import Executor
@@ -1068,39 +1071,55 @@ def launch_core_engines(
         local_handshake_address = handshake_address
         client_handshake_address = None
 
-    with zmq_socket_ctx(
-        local_handshake_address, zmq.ROUTER, bind=True
-    ) as handshake_socket:
-        # Start local engines.
-        if local_engine_count:
-            local_engine_manager = CoreEngineProcManager(
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                log_stats=log_stats,
-                handshake_address=handshake_address,
-                client_handshake_address=client_handshake_address,
-                local_client=True,
-                local_engine_count=local_engine_count,
-                start_index=dp_rank,
-                local_start_index=local_start_index or 0,
-                tensor_queue=tensor_queue,
-            )
-        else:
-            local_engine_manager = None
-
-        yield local_engine_manager, coordinator, addresses, tensor_queue
-
-        # Now wait for engines to start.
-        wait_for_engine_startup(
-            handshake_socket,
-            addresses,
-            engines_to_handshake,
-            parallel_config,
-            dp_size > 1 and vllm_config.model_config.is_moe,
-            vllm_config.cache_config,
-            local_engine_manager,
-            coordinator.proc if coordinator else None,
+    handshake_ctx = zmq.Context()  # type: ignore[attr-defined]
+    try:
+        handshake_socket, bound_handshake_address = cast(
+            tuple[zmq.Socket, str],
+            make_zmq_socket(
+                handshake_ctx,
+                local_handshake_address,
+                zmq.ROUTER,
+                bind=True,
+                return_address=True,
+            ),
         )
+        if client_handshake_address is None:
+            handshake_address = bound_handshake_address
+        try:
+            # Start local engines.
+            if local_engine_count:
+                local_engine_manager = CoreEngineProcManager(
+                    vllm_config=vllm_config,
+                    executor_class=executor_class,
+                    log_stats=log_stats,
+                    handshake_address=handshake_address,
+                    client_handshake_address=client_handshake_address,
+                    local_client=True,
+                    local_engine_count=local_engine_count,
+                    start_index=dp_rank,
+                    local_start_index=local_start_index or 0,
+                    tensor_queue=tensor_queue,
+                )
+            else:
+                local_engine_manager = None
+
+            yield local_engine_manager, coordinator, addresses, tensor_queue
+
+            # Now wait for engines to start.
+            wait_for_engine_startup(
+                handshake_socket,
+                addresses,
+                engines_to_handshake,
+                parallel_config,
+                dp_size > 1 and vllm_config.model_config.is_moe,
+                vllm_config.cache_config,
+                local_engine_manager,
+                coordinator.proc if coordinator else None,
+            )
+        finally:
+            handshake_socket.close(linger=0)
+    finally:
+        handshake_ctx.destroy(linger=0)
 
 
 def wait_for_engine_startup(

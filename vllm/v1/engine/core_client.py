@@ -521,15 +521,20 @@ class MPClient(EngineCoreClient):
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
-                self.input_socket = self.resources.input_socket = make_zmq_socket(
+                self.input_socket, addresses.inputs[0] = make_zmq_socket(
                     self.ctx,
                     addresses.inputs[0],
                     zmq.ROUTER,
                     bind=True,
                     router_handover=enable_input_socket_handover,
+                    return_address=True,
                 )
-                self.resources.output_socket = make_zmq_socket(
-                    self.ctx, addresses.outputs[0], zmq.PULL
+                self.resources.input_socket = self.input_socket
+                self.resources.output_socket, addresses.outputs[0] = make_zmq_socket(
+                    self.ctx,
+                    addresses.outputs[0],
+                    zmq.PULL,
+                    return_address=True,
                 )
 
                 with launch_core_engines(

@@ -12,6 +12,7 @@ from vllm.utils.network_utils import (
     join_host_port,
     make_zmq_path,
     make_zmq_socket,
+    normalize_last_endpoint,
     split_host_port,
     split_zmq_path,
 )
@@ -144,3 +145,67 @@ def test_split_host_port():
 def test_join_host_port():
     assert join_host_port("127.0.0.1", 5555) == "127.0.0.1:5555"
     assert join_host_port("::1", 5555) == "[::1]:5555"
+
+
+def test_split_zmq_path_port_zero():
+    """Port 0 is a valid wildcard port for late binding."""
+    scheme, host, port = split_zmq_path("tcp://127.0.0.1:0")
+    assert scheme == "tcp"
+    assert host == "127.0.0.1"
+    assert port == "0"
+
+
+def test_zmq_late_binding_assigns_real_port():
+    """Binding to port 0 should assign a concrete non-zero port."""
+    ctx = zmq.Context()
+    try:
+        sock = ctx.socket(zmq.PULL)
+        sock.bind("tcp://127.0.0.1:0")
+        endpoint = sock.last_endpoint.decode("utf-8")
+        _, _, port_str = split_zmq_path(endpoint)
+        port = int(port_str)
+        assert port > 0
+        assert port <= 65535
+    finally:
+        sock.close()
+        ctx.term()
+
+
+def test_zmq_late_binding_ipv6_port_parsing():
+    """IPv6 late-bound endpoint should parse with the correct port."""
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        s.close()
+    except OSError:
+        pytest.skip("IPv6 not supported on this system")
+
+    ctx = zmq.Context()
+    try:
+        sock = ctx.socket(zmq.PULL)
+        sock.setsockopt(zmq.IPV6, 1)
+        sock.bind("tcp://[::1]:0")
+        endpoint = sock.last_endpoint.decode("utf-8")
+        _, _, port_str = split_zmq_path(endpoint)
+        port = int(port_str)
+        assert port > 0
+    finally:
+        sock.close()
+        ctx.term()
+
+
+def test_get_tcp_uri_preserves_port_zero():
+    """TCP URI builder must preserve port=0 for late binding."""
+    addr = get_tcp_uri("127.0.0.1", 0)
+    assert addr == "tcp://127.0.0.1:0"
+
+
+def test_normalize_last_endpoint_preserves_original_host():
+    """Wildcard binds should keep the caller-visible host after binding."""
+
+    class DummySocket:
+        last_endpoint = b"tcp://0.0.0.0:45678"
+
+    assert (
+        normalize_last_endpoint(DummySocket(), "tcp://127.0.0.1:0")
+        == "tcp://127.0.0.1:45678"
+    )
