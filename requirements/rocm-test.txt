@@ -383,7 +383,7 @@ h5py==3.16.0
     # via terratorch
 harfile==0.4.0
     # via schemathesis
-hf-xet==1.4.2
+hf-xet==1.4.3
     # via huggingface-hub
 hiredis==3.3.1
     # via tensorizer
@@ -410,7 +410,7 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.8.0
+huggingface-hub==1.10.1
     # via
     #   accelerate
     #   datasets

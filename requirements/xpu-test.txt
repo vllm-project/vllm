@@ -135,7 +135,7 @@ harfile==0.4.0
     # via schemathesis
 hf-transfer==0.1.9
     # via -r requirements/xpu-test.in
-hf-xet==1.4.2
+hf-xet==1.4.3
     # via huggingface-hub
 html2text==2025.4.15
     # via gpt-oss
@@ -145,7 +145,7 @@ httpx==0.28.1
     # via
     #   datasets
     #   schemathesis
-huggingface-hub==0.36.2
+huggingface-hub==1.10.1
     # via
     #   accelerate
     #   datasets
@@ -665,7 +665,7 @@ tqdm==4.67.3
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers==4.57.6
+transformers==5.5.1
     # via
     #   -c requirements/common.txt
     #   sentence-transformers
