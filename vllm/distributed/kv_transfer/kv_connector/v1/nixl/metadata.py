@@ -11,15 +11,29 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
-    NIXL_CONNECTOR_VERSION,
-)
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 TransferHandle = int
 ReqId = str
+
+GET_META_MSG = b"get_meta_msg"
+#
+# NIXL Connector Version
+#
+# Increment this version whenever there is an incompatible change to:
+#   - NixlAgentMetadata schema
+#   - kv_transfer_params schema or semantics
+#   - NIXL transfer protocol or wire format
+#   - KV cache memory layout or block organization
+#   - Any other change that breaks P/D interoperability
+#
+# Version History:
+#   1: Initial version with compatibility checking
+#   2: Add remote_request_id to kv_transfer_params
+#
+NIXL_CONNECTOR_VERSION: int = 2
 
 
 @dataclass

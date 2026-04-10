@@ -16,23 +16,6 @@ from vllm.utils.network_utils import make_zmq_socket
 
 logger = init_logger(__name__)
 
-#
-# NIXL Connector Version
-#
-# Increment this version whenever there is an incompatible change to:
-#   - NixlAgentMetadata schema
-#   - kv_transfer_params schema or semantics
-#   - NIXL transfer protocol or wire format
-#   - KV cache memory layout or block organization
-#   - Any other change that breaks P/D interoperability
-#
-# Version History:
-#   1: Initial version with compatibility checking
-#   2: Add remote_request_id to kv_transfer_params
-#
-NIXL_CONNECTOR_VERSION: int = 2
-
-GET_META_MSG = b"get_meta_msg"
 
 # Lazy import nixl_wrapper to avoid loading nixl_bindings if nixl is not used
 try:
@@ -92,6 +75,7 @@ _NIXL_SUPPORTED_DEVICE = {
 _NIXL_SUPPORTED_DEVICE.update(current_platform.get_nixl_supported_devices())
 
 
+# TODO: merge with vllm.utils.network_utils.zmq_socket_ctx
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""

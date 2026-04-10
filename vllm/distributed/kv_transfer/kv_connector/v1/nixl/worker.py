@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+    GET_META_MSG,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
@@ -44,7 +45,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
-    GET_META_MSG,
     NixlWrapper,
     nixl_agent_config,
     zmq_ctx,
