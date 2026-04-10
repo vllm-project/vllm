@@ -182,7 +182,7 @@ def _nvfp4_moe_map_experts(
     valid = (flat_ids >= 0) & (flat_ids < expert_map.numel())
     clamped = flat_ids.clamp(min=0, max=max(0, expert_map.numel() - 1))
     remapped = expert_map.to(torch.long).index_select(0, clamped)
-    mapped = torch.where(valid, remapped, torch.full_like(remapped, -1))
+    mapped = torch.where(valid, remapped, -1)
     return mapped.reshape(topk_ids.shape).to(dtype=torch.int32)
 
 
@@ -752,9 +752,7 @@ def fused_moe_batch_invariant_nvfp4(
         routed_topk_ids = _nvfp4_moe_map_experts(topk_ids, expert_map)
     # Out-of-range IDs are treated as invalid routes.
     valid_routes = (routed_topk_ids >= 0) & (routed_topk_ids < num_experts)
-    routed_topk_ids = torch.where(
-        valid_routes, routed_topk_ids, torch.full_like(routed_topk_ids, -1)
-    )
+    routed_topk_ids = torch.where(valid_routes, routed_topk_ids, -1)
     routed_topk_weights = topk_weights
 
     if apply_router_weight_on_input:
