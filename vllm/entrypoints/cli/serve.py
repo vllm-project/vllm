@@ -285,7 +285,7 @@ def run_multi_api_server(args: argparse.Namespace):
     # Use mp context to match APIServerProcessManager
     if args.max_unfinished_requests is not None and num_api_servers > 1:
         mp_context = get_mp_context()
-        shared_unfinished_requests = mp_context.Array("i", num_api_servers)
+        shared_unfinished_requests = mp_context.Array("i", num_api_servers, lock=False)
         # Initialize all slots to 0
         for i in range(num_api_servers):
             shared_unfinished_requests[i] = 0

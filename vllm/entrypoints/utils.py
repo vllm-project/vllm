@@ -133,12 +133,14 @@ def load_aware_call(func):
         if not hasattr(raw_request.app.state, "server_load_metrics"):
             raw_request.app.state.server_load_metrics = 0
 
-        # Check max_unfinished_requests limit before incrementing counter
         max_unfinished = getattr(raw_request.app.state, "max_unfinished_requests", None)
+        shared_array = getattr(
+            raw_request.app.state, "shared_unfinished_requests", None
+        )
+
+        raw_request.app.state.server_load_metrics += 1
+
         if max_unfinished is not None:
-            shared_array = getattr(
-                raw_request.app.state, "shared_unfinished_requests", None
-            )
             if shared_array is not None:
                 # Multi-server: update shared array and check total
                 server_index = getattr(raw_request.app.state, "server_index", 0)
@@ -148,10 +150,9 @@ def load_aware_call(func):
                 # Single server: check local count directly
                 total_unfinished = raw_request.app.state.server_load_metrics
 
-            if total_unfinished >= max_unfinished:
+            if total_unfinished > max_unfinished:
+                raw_request.app.state.server_load_metrics -= 1
                 return _make_overloaded_response()
-
-        raw_request.app.state.server_load_metrics += 1
         try:
             response = await func(*args, **kwargs)
         except Exception:
