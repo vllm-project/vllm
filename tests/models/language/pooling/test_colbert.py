@@ -109,6 +109,14 @@ def _load_hf_model(model_name: str, hf_spec: dict, device: torch.device):
         **extra,
     ).to(device)
     model.eval()
+
+    # Transformers 5.0 weight materialization can clear non-persistent
+    # buffers (e.g. rotary inv_freq) that were registered with
+    # persistent=False.  Re-compute them so the model produces valid output.
+    for mod in model.modules():
+        if hasattr(mod, "_compute_inv_freq") and hasattr(mod, "inv_freq"):
+            mod.inv_freq = mod._compute_inv_freq(device=device)
+
     return model
 
 
