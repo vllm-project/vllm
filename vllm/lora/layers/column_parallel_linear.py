@@ -290,6 +290,56 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         )
 
 
+class DeepSeekV2FusedQkvAProjLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
+    """LoRA wrapper for DeepSeek's fused qkv_a_proj custom merged linear.
+
+    This layer has a custom forward path in the base layer. Preserve that
+    behavior and add the LoRA delta on top of the base layer's actual output.
+    """
+
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        base_output = self.base_layer(x)
+        output = base_output[0] if isinstance(base_output, tuple) else base_output
+
+        original_shape = output.shape if output.ndim == 3 else None
+        if x.ndim == 3 and output.ndim == 3:
+            output = output.flatten(0, 1)
+            x = x.flatten(0, 1)
+
+        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
+            output,
+            x,
+            self.lora_a_stacked,
+            self.lora_b_stacked,
+            1.0,
+            self.output_slices,
+        )
+        if not current_platform.can_update_inplace():
+            output = lora_output
+
+        if original_shape is not None:
+            output = output.reshape(original_shape)
+
+        return output
+
+    @classmethod
+    @_not_fully_sharded_can_replace
+    def can_replace_layer(
+        cls,
+        source_layer: nn.Module,
+        lora_config: LoRAConfig,
+        packed_modules_list: list,
+        model_config: PretrainedConfig | None = None,
+    ) -> bool:
+        return (
+            any(
+                layer_cls.__name__ == "DeepSeekV2FusedQkvAProjLinear"
+                for layer_cls in type(source_layer).mro()
+            )
+            and len(packed_modules_list) == 2
+        )
+
+
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     """
     ColumnParallelLinear layer that is specifically designed for

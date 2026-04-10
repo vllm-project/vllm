@@ -213,8 +213,11 @@ def select_unquantized_moe_backend(
     # backend here ensures weights stay in a LoRA-compatible layout instead of
     # being permuted for a backend like FlashInfer or AITER during load.
     if moe_config.is_lora_enabled:
+        backend = UnquantizedMoeBackend.TRITON
+        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            backend = UnquantizedMoeBackend.BATCHED_TRITON
         return _return_or_raise(
-            UnquantizedMoeBackend.TRITON,
+            backend,
             moe_config,
             activation_format,
         )

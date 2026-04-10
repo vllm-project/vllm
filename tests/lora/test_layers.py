@@ -15,6 +15,7 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    DeepSeekV2FusedQkvAProjLinearWithLoRA,
     LogitsProcessorWithLoRA,
     LoRAMapping,
     MergedColumnParallelLinearVariableSliceWithLoRA,
@@ -44,6 +45,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
     get_masked_input_and_mask,
 )
+from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -1394,9 +1396,23 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         f"for 2 packed modules, got {type(selected_layer_merged).__name__}"
     )
 
-    # Case 5: Subclass of MergedColumnParallelLinear with 2 packed modules
-    # (DeepSeek's fused_qkv_a_proj is a real-world example)
-    # -> MergedColumnParallelLinearWithLoRA should still be selected
+    # Case 5: DeepSeek's fused_qkv_a_proj should use its dedicated wrapper
+    deepseek_fused_layer = DeepSeekV2FusedQkvAProjLinear(
+        4096, [2048, 2048], prefix="model.layers.0.self_attn.fused_qkv_a_proj"
+    )
+    selected_deepseek_layer = from_layer(
+        deepseek_fused_layer,
+        max_loras=8,
+        lora_config=lora_config,
+        packed_modules_list=packed_modules_two,
+    )
+    assert isinstance(selected_deepseek_layer, DeepSeekV2FusedQkvAProjLinearWithLoRA), (
+        "from_layer should select DeepSeekV2FusedQkvAProjLinearWithLoRA "
+        f"for DeepSeek fused_qkv_a_proj, got {type(selected_deepseek_layer).__name__}"
+    )
+
+    # Case 6: Generic subclass of MergedColumnParallelLinear with 2 packed
+    # modules should still use the generic merged wrapper.
     class CustomMergedColumnParallelLinear(MergedColumnParallelLinear):
         pass
 
@@ -1420,7 +1436,7 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         f"for subclassed merged layers, got {type(selected_custom_layer).__name__}"
     )
 
-    # Case 6: Plain ColumnParallelLinear (not merged) - common in many models
+    # Case 7: Plain ColumnParallelLinear (not merged) - common in many models
     # -> ColumnParallelLinearWithLoRA should be selected
     plain_column_parallel = ColumnParallelLinear(
         4096, 4096, bias=False, params_dtype=torch.float16
@@ -1453,7 +1469,7 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         f"for plain ColumnParallelLinear, got {type(selected_plain).__name__}"
     )
 
-    # Case 7: MergedColumnParallelLinear with exactly 2 output sizes
+    # Case 8: MergedColumnParallelLinear with exactly 2 output sizes
     # and empty packed_modules_list
     # -> ColumnParallelLinearWithLoRA should NOT match (packed_modules_list != 1)
     # -> MergedColumnParallelLinearVariableSliceWithLoRA should NOT match (< 3 slices)
@@ -1484,3 +1500,81 @@ def test_get_and_maybe_dequant_weights_accepts_lora_wrappers(dist_init):
     # Should work with LoRA wrappers and return [out, in] weights.
     dequant_weight = get_and_maybe_dequant_weights(lora_linear, out_dtype=torch.float16)
     assert dequant_weight.shape == linear.weight.shape
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("stage", STAGES)
+def test_deepseek_fused_qkv_a_proj_lora_preserves_base_forward(
+    default_vllm_config, dist_init, device, stage
+):
+    if current_platform.is_cuda_alike():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    dtype = torch.float16 if current_platform.is_cuda_alike() else torch.float32
+    max_loras = 8
+    lora_config = LoRAConfig(max_loras=max_loras, max_lora_rank=8, lora_dtype=dtype)
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+    assert check_punica_wrapper(punica_wrapper)
+
+    class OffsetDeepSeekFusedQkvAProjLinear(DeepSeekV2FusedQkvAProjLinear):
+        def forward(self, input_):
+            output, output_bias = super().forward(input_)
+            return output + 1, output_bias
+
+    layer = OffsetDeepSeekFusedQkvAProjLinear(
+        32, [16, 16], prefix="model.layers.0.self_attn.fused_qkv_a_proj"
+    )
+    layer.weight.data = torch.rand_like(layer.weight.data, dtype=dtype)
+
+    lora_layer = DeepSeekV2FusedQkvAProjLinearWithLoRA(layer)
+    lora_layer.create_lora_weights(max_loras, lora_config)
+    lora_layer.set_mapping(punica_wrapper)
+
+    id_to_index = get_random_id_to_index(1, max_loras, log=False)
+    active_slot = next(i for i, lora_id in enumerate(id_to_index) if lora_id == 1)
+    lora_a = [
+        torch.rand(8, 32, dtype=dtype, device=device),
+        torch.rand(8, 32, dtype=dtype, device=device),
+    ]
+    lora_b = [
+        torch.rand(16, 8, dtype=dtype, device=device),
+        torch.rand(16, 8, dtype=dtype, device=device),
+    ]
+    lora_layer.set_lora(active_slot, lora_a=lora_a, lora_b=lora_b)
+
+    inputs, index_mapping, prompt_mapping = create_random_inputs(
+        active_lora_ids=[1],
+        num_inputs=4,
+        input_size=(1, 32),
+        input_range=(0, 1),
+        input_type=dtype,
+        device=device,
+    )
+    lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+    punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
+
+    lora_result = lora_layer(torch.cat(inputs))[0]
+
+    expected_results = []
+    for input_ in inputs:
+        result = layer(input_)[0]
+        result[:, :16] += input_ @ lora_a[0].T @ lora_b[0].T
+        result[:, 16:] += input_ @ lora_a[1].T @ lora_b[1].T
+        expected_results.append(result)
+
+    rtol, atol = TOLERANCES[lora_result.dtype]
+    torch.testing.assert_close(
+        lora_result, torch.cat(expected_results), rtol=rtol, atol=atol
+    )
+
+    merged_layer = OffsetDeepSeekFusedQkvAProjLinear(
+        32, [16, 16], prefix="model.layers.0.self_attn.fused_qkv_a_proj"
+    )
+    merged_layer.weight.data = layer.weight.data.clone()
+    merged_layer.weight.data[:16].add_(lora_b[0] @ lora_a[0])
+    merged_layer.weight.data[16:].add_(lora_b[1] @ lora_a[1])
+    merged_result = merged_layer(torch.cat(inputs))[0]
+
+    torch.testing.assert_close(lora_result, merged_result, rtol=rtol, atol=atol)

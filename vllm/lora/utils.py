@@ -19,6 +19,7 @@ from vllm.lora.layers import (
     BaseLayerWithLoRA,
     ColumnParallelLinearWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
+    DeepSeekV2FusedQkvAProjLinearWithLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
     LogitsProcessorWithLoRA,
@@ -73,7 +74,10 @@ def get_lora_id():
     return _GLOBAL_LORA_ID
 
 
-_all_lora_classes: set[type[BaseLayerWithLoRA]] = {
+# Order matters here: more specific wrappers must be checked before generic
+# merged/column-parallel wrappers in from_layer().
+_all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
+    DeepSeekV2FusedQkvAProjLinearWithLoRA,
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -90,7 +94,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
     FusedMoE3DWithLoRA,
-}
+)
 
 
 def is_moe_model(model: nn.Module) -> bool:
