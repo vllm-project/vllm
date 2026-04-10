@@ -216,12 +216,14 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            splitting_ops=["vllm::unified_attention"],
+            splitting_ops=["vllm::unified_attention_with_output"],
         )
     )
     # with inductor partition we use splitting_ops directly for
     # partition rules
-    assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
+    assert config.compilation_config.splitting_ops == [
+        "vllm::unified_attention_with_output"
+    ]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(
@@ -281,7 +283,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
             splitting_ops=[
-                "vllm::unified_attention",
+                "vllm::unified_attention_with_output",
                 "vllm::moe_forward",
                 "vllm::moe_forward_shared",
             ],
@@ -289,7 +291,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     )
     splitting_ops = config.compilation_config.splitting_ops
     assert splitting_ops == [
-        "vllm::unified_attention",
+        "vllm::unified_attention_with_output",
         "vllm::moe_forward",
         "vllm::moe_forward_shared",
     ]
@@ -412,7 +414,7 @@ def test_cudagraph_sizes_post_init(
 
     with (
         ctx,
-        patch("vllm.config.parallel.cuda_device_count_stateless", return_value=tp_size),
+        patch.object(current_platform, "device_count", return_value=tp_size),
     ):
         kwargs = {}
         if cudagraph_capture_sizes is not None:

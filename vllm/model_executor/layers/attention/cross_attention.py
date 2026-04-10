@@ -18,7 +18,11 @@ from vllm.v1.attention.backend import (
     subclass_attention_backend_with_overrides,
 )
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import CrossAttentionSpec, KVCacheSpec
+from vllm.v1.kv_cache_interface import (
+    CrossAttentionSpec,
+    KVCacheSpec,
+    get_kv_quant_mode,
+)
 
 logger = init_logger(__name__)
 
@@ -129,7 +133,7 @@ def create_cross_attention_backend(
             value: torch.Tensor,
             kv_cache: torch.Tensor,
             attn_metadata: AttentionMetadata,
-            output: torch.Tensor | None = None,
+            output: torch.Tensor,
             output_scale: torch.Tensor | None = None,
             output_block_scale: torch.Tensor | None = None,
         ) -> torch.Tensor:
@@ -220,4 +224,5 @@ class CrossAttention(Attention):
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )

@@ -154,6 +154,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "functiongemma_tool_parser",
         "FunctionGemmaToolParser",
     ),
+    "gemma4": (
+        "gemma4_tool_parser",
+        "Gemma4ToolParser",
+    ),
 }
 
 

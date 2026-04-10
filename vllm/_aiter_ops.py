@@ -336,9 +336,13 @@ def _rocm_aiter_fused_topk_fake(
     router_logits: torch.Tensor,
     top_k: int,
     gate_up: bool,
-) -> None:
-    # tuple[torch.Tensor, torch.Tensor]:
-    pass
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = x.shape[0]
+    topk_weights = torch.empty(
+        (num_tokens, top_k), dtype=torch.float32, device=x.device
+    )
+    topk_indices = torch.empty((num_tokens, top_k), dtype=torch.int32, device=x.device)
+    return topk_weights, topk_indices
 
 
 # Cache whether aiter supports FP8 MLA parameters
@@ -1918,7 +1922,7 @@ class rocm_aiter_ops:
 
     @staticmethod
     def shuffle_weight(
-        self, tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
+        tensor: torch.Tensor, layout: tuple[int, int] = (16, 16)
     ) -> torch.Tensor:
         from aiter.ops.shuffle import shuffle_weight
 
@@ -2068,6 +2072,57 @@ class rocm_aiter_ops:
             K_QScale=K_QScale,
             V_QScale=V_QScale,
             out_=out_,
+        )
+
+    @staticmethod
+    def paged_attention_common(
+        Q: torch.Tensor,
+        K: torch.Tensor,
+        V: torch.Tensor,
+        tmp_out: torch.Tensor,
+        max_logits: torch.Tensor,
+        exp_sums: torch.Tensor,
+        max_seq_len: int,
+        block_tables: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_tables_stride0: int,
+        scale: float,
+        K_QScale_hip: torch.Tensor,
+        V_QScale_hip: torch.Tensor,
+        K_QScale_asm: torch.Tensor,
+        V_QScale_asm: torch.Tensor,
+        out_: torch.Tensor,
+        kv_cache_dtype: str,
+    ):
+        """
+        Paged attention common function.
+
+        This function is NOT wrapped with @is_aiter_supported decorator
+        to allow explicit backend selection via attention_config to work
+        even when VLLM_ROCM_USE_AITER=0.
+
+        Note: This performs lazy import of aiter.paged_attention_common
+        """
+        from aiter import paged_attention_common
+
+        return paged_attention_common(
+            Q=Q,
+            K=K,
+            V=V,
+            tmp_out=tmp_out,
+            max_logits=max_logits,
+            exp_sums=exp_sums,
+            max_seq_len=max_seq_len,
+            block_tables=block_tables,
+            context_lens=context_lens,
+            block_tables_stride0=block_tables_stride0,
+            scale=scale,
+            K_QScale_hip=K_QScale_hip,
+            V_QScale_hip=V_QScale_hip,
+            K_QScale_asm=K_QScale_asm,
+            V_QScale_asm=V_QScale_asm,
+            out_=out_,
+            kv_cache_dtype=kv_cache_dtype,
         )
 
 
