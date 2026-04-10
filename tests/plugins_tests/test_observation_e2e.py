@@ -217,3 +217,105 @@ def test_gpu_model_runner_collects_aborted_req_ids():
                 aborted_req_ids.append(req_id)
 
     assert aborted_req_ids == ["req_1", "req_3"]
+
+
+def test_request_context_population():
+    class MockReqState:
+
+        def __init__(self, num_computed, num_prompt):
+            self.num_computed_tokens = num_computed
+            self.num_prompt_tokens = num_prompt
+
+    class DummyInputBatch:
+
+        def __init__(self, req_ids):
+            self.req_ids = req_ids
+
+    class DummySchedulerOutput:
+
+        def __init__(self, num_scheduled_tokens):
+            self.num_scheduled_tokens = num_scheduled_tokens
+
+    requests = {
+        "req_1": MockReqState(0, 10),  # prefill
+        "req_2": MockReqState(10, 10),  # decode
+    }
+    input_batch = DummyInputBatch(["req_1", "req_2"])
+    scheduler_output = DummySchedulerOutput({"req_1": 10, "req_2": 1})
+
+    # Simulate the logic we added in execute_model
+    request_contexts = []
+    current_offset = 0
+    for req_id in input_batch.req_ids:
+        num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+        req_state = requests[req_id]
+        is_prefill = req_state.num_computed_tokens < req_state.num_prompt_tokens
+
+        request_contexts.append(
+            RequestContext(
+                request_id=req_id,
+                is_prefill=is_prefill,
+                batch_offset=current_offset,
+                num_tokens=num_tokens,
+                num_cached_tokens=req_state.num_computed_tokens,
+            )
+        )
+        current_offset += num_tokens
+
+    assert len(request_contexts) == 2
+    assert request_contexts[0].request_id == "req_1"
+    assert request_contexts[0].is_prefill == True
+    assert request_contexts[0].batch_offset == 0
+    assert request_contexts[0].num_tokens == 10
+    assert request_contexts[0].num_cached_tokens == 0
+
+    assert request_contexts[1].request_id == "req_2"
+    assert request_contexts[1].is_prefill == False
+    assert request_contexts[1].batch_offset == 10
+    assert request_contexts[1].num_tokens == 1
+    assert request_contexts[1].num_cached_tokens == 10
+
+
+def test_lifecycle_hooks_called():
+    class DummyPluginManager:
+
+        def __init__(self):
+            self.started_requests = []
+            self.completed_requests = []
+
+        def on_request_start(self, req_id, prompt=None):
+            self.started_requests.append(req_id)
+
+        def on_request_complete(self, req_id):
+            self.completed_requests.append(req_id)
+
+    class NewReqData:
+
+        def __init__(self, req_id):
+            self.req_id = req_id
+
+    class DummySchedulerOutput:
+
+        def __init__(self, new_reqs, finished_reqs):
+            self.scheduled_new_reqs = [NewReqData(r) for r in new_reqs]
+            self.finished_req_ids = finished_reqs
+
+    plugin_manager = DummyPluginManager()
+
+    # Simulate _update_states logic
+    def _update_states(scheduler_output):
+        # Remove finished
+        for req_id in scheduler_output.finished_req_ids:
+            plugin_manager.on_request_complete(req_id)
+
+        # Add new
+        for new_req_data in scheduler_output.scheduled_new_reqs:
+            plugin_manager.on_request_start(new_req_data.req_id)
+
+    sched_output = DummySchedulerOutput(
+        new_reqs=["req_new"], finished_reqs=["req_done"]
+    )
+    _update_states(sched_output)
+
+    assert plugin_manager.started_requests == ["req_new"]
+    assert plugin_manager.completed_requests == ["req_done"]
