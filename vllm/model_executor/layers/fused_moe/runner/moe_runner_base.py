@@ -32,15 +32,15 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
-    HAS_OPAQUE_TYPE,
-    ModuleName,
+    _USE_LAYERNAME,
+    LayerName,
     direct_register_custom_op,
 )
 
 
 def get_layer_from_name(layer_name: str) -> torch.nn.Module:
     forward_context: ForwardContext = get_forward_context()
-    if not HAS_OPAQUE_TYPE and layer_name == "from_forward_context":
+    if not _USE_LAYERNAME and layer_name == "from_forward_context":
         all_moe_layers = forward_context.all_moe_layers
         assert all_moe_layers is not None
         moe_layer_index = forward_context.moe_layer_index
@@ -55,21 +55,21 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
     return forward_context.no_compile_layers[layer_name]
 
 
-# On torch >= 2.11, layer_name is a hoisted ModuleName opaque object;
+# On torch >= 2.11, layer_name is a hoisted LayerName opaque object;
 # on older versions it remains a plain str.
 if TYPE_CHECKING:
     from typing import TypeAlias
 
-    _layer_name_type: TypeAlias = str | ModuleName
+    _layer_name_type: TypeAlias = str | LayerName
 else:
-    _layer_name_type = ModuleName if HAS_OPAQUE_TYPE else str
+    _layer_name_type = LayerName if _USE_LAYERNAME else str
 
 
 @torch.compiler.assume_constant_result
-def _resolve_layer_name(layer_name: str | ModuleName) -> str:
+def _resolve_layer_name(layer_name: str | LayerName) -> str:
     from torch._library.fake_class_registry import FakeScriptObject
 
-    if isinstance(layer_name, ModuleName):
+    if isinstance(layer_name, LayerName):
         return layer_name.value
     elif isinstance(layer_name, FakeScriptObject):
         return layer_name.real_obj.value
@@ -331,9 +331,9 @@ class MoERunnerBase(MoERunner):
             assert len(trunc_sizes) == 1
             return func(states, trunc_sizes[0])
 
-    def _encode_layer_name(self) -> str | ModuleName:
-        if HAS_OPAQUE_TYPE:
-            return ModuleName(self.layer_name)
+    def _encode_layer_name(self) -> str | LayerName:
+        if _USE_LAYERNAME:
+            return LayerName(self.layer_name)
         # Can be unavailable or None in unittests
         if (
             is_forward_context_available()

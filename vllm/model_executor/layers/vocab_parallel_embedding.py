@@ -15,7 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.batch_invariant import (
     linear_batch_invariant,
 )
@@ -188,8 +188,8 @@ def get_masked_input_and_mask(
 
 
 # --8<-- [start:vocab_parallel_embedding]
-@CustomOp.register("vocab_parallel_embedding")
-class VocabParallelEmbedding(CustomOp):
+@PluggableLayer.register("vocab_parallel_embedding")
+class VocabParallelEmbedding(PluggableLayer):
     """Embedding parallelized in the vocabulary dimension.
 
     Adapted from torch.nn.Embedding, note that we pad the vocabulary size to
@@ -467,7 +467,7 @@ class VocabParallelEmbedding(CustomOp):
         param[: loaded_weight.shape[0]].data.copy_(loaded_weight)
         param[loaded_weight.shape[0] :].data.fill_(0)
 
-    def forward_native(self, input_):
+    def forward(self, input_):
         if self.tp_size > 1:
             # Build the mask.
             masked_input, input_mask = get_masked_input_and_mask(
@@ -489,9 +489,6 @@ class VocabParallelEmbedding(CustomOp):
         output = tensor_model_parallel_all_reduce(output_parallel)
         return output
 
-    def forward_cuda(self, input_):
-        return self.forward_native(input_)
-
     def extra_repr(self) -> str:
         s = f"num_embeddings={self.num_embeddings_per_partition}"
         s += f", embedding_dim={self.embedding_dim}"
@@ -502,7 +499,7 @@ class VocabParallelEmbedding(CustomOp):
 
 
 # --8<-- [start:parallel_lm_head]
-@CustomOp.register("parallel_lm_head")
+@PluggableLayer.register("parallel_lm_head")
 class ParallelLMHead(VocabParallelEmbedding):
     """Parallelized LM head.
 
