@@ -51,6 +51,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.machete import (
 from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
     MarlinLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.triton_w4a16 import (
+    TritonW4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
@@ -177,6 +180,21 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
     ],
 }
 
+_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        MarlinFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        # To be added
+    ],
+    PlatformEnum.CPU: [
+        # To be added
+    ],
+    PlatformEnum.XPU: [
+        # To be added
+    ],
+}
+
 # in priority/performance order (when available)
 _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     PlatformEnum.CUDA: [
@@ -188,6 +206,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         ExllamaLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        TritonW4A16LinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
     ],
@@ -463,6 +482,41 @@ def choose_mp_linear_kernel(
     )
 
 
+def init_wfp8_a16_linear_kernel(
+    weight_quant_key: QuantKey,
+    activation_quant_key: QuantKey,
+    weight_shape: tuple[int, int],
+    input_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    module_name: str | None = None,
+) -> FP8ScaledMMLinearKernel:
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
+        weight_shape=weight_shape,
+        input_dtype=input_dtype,
+        out_dtype=out_dtype,
+    )
+
+    kernel_type = choose_scaled_mm_linear_kernel(
+        config, _POSSIBLE_WFP8A16_KERNELS, force_kernel=force_kernel
+    )
+
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
+        )
+
+    return kernel_type(
+        config,
+        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
+    )
+
+
 # Maps VLLM_NVFP4_GEMM_BACKEND env var values to kernel classes.
 _NVFP4_BACKEND_TO_KERNEL: dict[str, type[NvFp4LinearKernel]] = {
     "flashinfer-cutlass": FlashInferCutlassNvFp4LinearKernel,
@@ -588,6 +642,7 @@ __all__ = [
     "init_nvfp4_linear_kernel",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
+    "init_wfp8_a16_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
     "ScaledMMLinearKernel",
@@ -616,6 +671,7 @@ __all__ = [
     "ExllamaLinearKernel",
     "MacheteLinearKernel",
     "MarlinLinearKernel",
+    "TritonW4A16LinearKernel",
     "XPUW4A8IntLinearKernel",
     "XPUwNa16LinearKernel",
     "CutlassNvFp4LinearKernel",
