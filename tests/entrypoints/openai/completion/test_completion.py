@@ -607,6 +607,107 @@ async def test_echo_logprob_completion(
     "model_name",
     [MODEL_NAME],
 )
+async def test_zero_budget_echo_completion_hides_helper_token(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    prompt = "Hello, my name is"
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+    completion = await client.completions.create(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=0,
+        temperature=0.0,
+        echo=True,
+        logprobs=1,
+        extra_body={"return_token_ids": True},
+    )
+
+    choice = completion.choices[0]
+
+    # With return_token_ids=True, the echoed prompt is surfaced via
+    # prompt_token_ids rather than duplicated in the text field.
+    assert choice.text == ""
+    assert choice.prompt_token_ids is not None
+    assert prompt in tokenizer.decode(choice.prompt_token_ids)
+    assert choice.token_ids == []
+    assert choice.logprobs is not None
+    assert len(choice.logprobs.tokens) == len(choice.prompt_token_ids)
+    assert completion.usage.prompt_tokens == len(choice.prompt_token_ids)
+    assert completion.usage.completion_tokens == 0
+    assert completion.usage.total_tokens == completion.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_zero_budget_echo_stream_hides_helper_token(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    prompt = "Hello, my name is"
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+
+    stream = await client.completions.create(
+        model=model_name,
+        prompt=prompt,
+        max_tokens=0,
+        temperature=0.0,
+        echo=True,
+        logprobs=1,
+        stream=True,
+        stream_options={
+            "include_usage": True,
+            "continuous_usage_stats": True,
+        },
+        extra_body={"return_token_ids": True},
+    )
+
+    choice_chunks = []
+    final_usage_chunk = None
+
+    async for chunk in stream:
+        assert chunk.usage is not None
+        assert chunk.usage.completion_tokens == 0
+        assert chunk.usage.total_tokens == chunk.usage.prompt_tokens
+
+        if chunk.choices:
+            choice_chunks.append(chunk)
+        else:
+            final_usage_chunk = chunk
+
+    assert choice_chunks
+    assert final_usage_chunk is not None
+    assert final_usage_chunk.choices == []
+    assert final_usage_chunk.usage is not None
+    assert final_usage_chunk.usage.completion_tokens == 0
+
+    first_choice = choice_chunks[0].choices[0]
+    # With return_token_ids=True, the echoed prompt is surfaced via
+    # prompt_token_ids rather than duplicated in the text field.
+    assert first_choice.prompt_token_ids is not None
+    assert prompt in tokenizer.decode(first_choice.prompt_token_ids)
+    assert first_choice.text == ""
+    assert first_choice.token_ids == []
+    assert first_choice.logprobs is not None
+    assert len(first_choice.logprobs.tokens) == len(first_choice.prompt_token_ids)
+
+    for chunk in choice_chunks[1:]:
+        choice = chunk.choices[0]
+        assert choice.prompt_token_ids is None
+        assert choice.text == ""
+        assert choice.token_ids == []
+        assert choice.logprobs is None
+
+    assert choice_chunks[-1].choices[0].finish_reason == "length"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_invalid_json_schema(client: openai.AsyncOpenAI, model_name: str) -> None:
     invalid_json_schema = {
         "$defs": {
