@@ -241,6 +241,41 @@ def load_deepseek_ocr(question: str, image_urls: list[str]) -> ModelRequestData:
     )
 
 
+# exaone4_5
+def load_exaone4_5(question: str, image_urls: list[str]) -> ModelRequestData:
+    model_name = "LGAI-EXAONE/EXAONE-4.5-33B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={"image": len(image_urls)},
+    )
+
+    placeholders = [{"type": "image", "image": url} for url in image_urls]
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                *placeholders,
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+
+    processor = AutoProcessor.from_pretrained(model_name)
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+        image_data=[fetch_image(url) for url in image_urls],
+    )
+
+
 def load_gemma3(question: str, image_urls: list[str]) -> ModelRequestData:
     model_name = "google/gemma-3-4b-it"
 
@@ -1450,6 +1485,7 @@ model_example_map = {
     "command_a_vision": load_command_a_vision,
     "deepseek_vl_v2": load_deepseek_vl2,
     "deepseek_ocr": load_deepseek_ocr,
+    "exaone4_5": load_exaone4_5,
     "gemma3": load_gemma3,
     "h2ovl_chat": load_h2ovl,
     "hunyuan_vl": load_hunyuan_vl,
