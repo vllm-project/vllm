@@ -1154,7 +1154,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"},
     ),
     "Phi4ForCausalLMV": _HfExamplesInfo(
-        "microsoft/Phi-4-reasoning-vision-15B", trust_remote_code=True
+        "microsoft/Phi-4-reasoning-vision-15B",
+        trust_remote_code=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "vllm upgraded transformers above v5.4 where HF model "
+                "custom code uses siglip2 internals "
+                "(filter_out_non_signature_kwargs) removed "
+                "by huggingface/transformers#43514"
+            )
+        },
     ),
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
