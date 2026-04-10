@@ -499,6 +499,15 @@ class GPUModelRunner(
                     self.pp_sampled_token_recv_group = pair_group
             self._warmup_pp_sampled_token_groups()
 
+        # Pending irecv state for deferred PP sampled-token sync.
+        # Set by ray_utils.execute_model_ray() and consumed inside
+        # execute_model() just before _prepare_inputs() so that Stage 0 can
+        # overlap CPU pre-processing (_update_states, buffer allocation) with
+        # Stages 1-N of the previous batch, narrowing the blocking window.
+        self._pending_pp_irecv: (
+            tuple[Any, torch.Tensor, dict[str, int]] | None
+        ) = None
+        
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
 
@@ -3883,6 +3892,19 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
+            # Deferred PP irecv completion: waiting here (rather than at the
+            # top of execute_model_ray) lets Stage 0 overlap CPU preprocessing
+            # — _update_states, buffer allocation — with Stages 1-N running the
+            # previous batch's forward pass. The blocking window is now as short
+            # as possible: we only stall until the last rank's isend fires, and
+            # only right before the GPU kernel that needs prev_sampled_token_ids.
+            if self._pending_pp_irecv is not None:
+                work, recv_buf, prev_req_id_to_index = self._pending_pp_irecv
+                self._pending_pp_irecv = None
+                work.wait()
+                self.input_batch.prev_sampled_token_ids = recv_buf
+                self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
@@ -4478,16 +4500,16 @@ class GPUModelRunner(
 
         return work, recv_buf, prev_req_id_to_index
 
-    def _pp_complete_irecv(
-        self,
-        work: Any,
-        recv_buf: torch.Tensor,
-        prev_req_id_to_index: dict[str, int],
-    ) -> None:
-        """Finish a previously-posted sampled-token recv."""
-        work.wait()
-        self.input_batch.prev_sampled_token_ids = recv_buf
-        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+    # def _pp_complete_irecv(
+    #     self,
+    #     work: Any,
+    #     recv_buf: torch.Tensor,
+    #     prev_req_id_to_index: dict[str, int],
+    # ) -> None:
+    #     """Finish a previously-posted sampled-token recv."""
+    #     work.wait()
+    #     self.input_batch.prev_sampled_token_ids = recv_buf
+    #     self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def _get_pp_sampled_token_send_group(self, dst_global_rank: int):
         pp = get_pp_group()

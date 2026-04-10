@@ -114,7 +114,7 @@ class RayDistributedExecutor(Executor):
         """
         pp_size = self.parallel_config.pipeline_parallel_size
         if self.scheduler_config.async_scheduling and pp_size > 1:
-            return pp_size + 1  # one for the driver, one for the async scheduler
+            return pp_size + 1  # one for the deferred irecv, one for the async scheduler
         return 2 if pp_size <= 1 and self.scheduler_config.async_scheduling else pp_size
 
     def shutdown(self) -> None:
@@ -467,12 +467,6 @@ class RayDistributedExecutor(Executor):
         logger.info(f"get_async_refs worker: {worker}")
         return worker.execute_method.remote("get_execute_model_output")
 
-    @staticmethod
-    def _get_async_refs_with_rank(refs, workers, timeout=None):
-        step_id, output_rank = ray.get(refs, timeout=timeout)
-        return workers[output_rank].execute_method.remote(
-            "get_execute_model_output", step_id
-        )
 
     def _execute_dag(
         self,

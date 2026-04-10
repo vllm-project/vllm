@@ -169,15 +169,18 @@ try:
 
             try:
                 start_ns = time.monotonic_ns()
-                # Complete the irecv that was posted after the previous step's
-                # forward pass. Using a dedicated process group keeps this
-                # overlap away from Ray's compiled-DAG PP communicator.
+                # Hand the pending irecv to the model runner for deferred
+                # completion inside execute_model(), just before _prepare_inputs().
+                # This lets Stage 0 overlap CPU preprocessing (_update_states,
+                # buffer allocation) with Stages 1-N running the previous batch,
+                # narrowing the blocking window to as close to the GPU kernel
+                # as possible instead of stalling at the actor entry point.
                 if (use_async_pp and not is_last_rank
                         and self._pp_irecv_work is not None):
                     with pp_trace.span("pp_recv",
                                        pp_rank=pp_rank, step=step_id,
                                        tokens=num_tokens):
-                        self.worker.model_runner._pp_complete_irecv(
+                        self.worker.model_runner._pending_pp_irecv = (
                             self._pp_irecv_work,
                             self._pp_irecv_buf,
                             self._pp_pending_prev_req_id_to_index,
