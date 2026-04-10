@@ -279,14 +279,6 @@ class TorchProfilerWrapper(WorkerProfiler):
     @override
     def _start(self) -> None:
         self.profiler.start()
-        try:
-            from vllm.v1.executor import pp_trace
-
-            if pp_trace.is_enabled():
-                with torch.profiler.record_function("vllm_pp_trace_clock_sync"):
-                    pp_trace.emit_profiler_clock_sync()
-        except Exception:
-            logger.debug("Failed to emit PP/torch clock sync marker", exc_info=True)
 
     @override
     def _stop(self) -> None:

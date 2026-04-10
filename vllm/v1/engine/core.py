@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import atexit
 import os
 import queue
 import signal
@@ -67,7 +68,7 @@ from vllm.v1.engine.utils import (
     SignalCallback,
     get_device_indices,
 )
-from vllm.v1.executor import Executor, pp_trace
+from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
@@ -83,6 +84,7 @@ HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
+from viztracer import VizTracer, get_tracer
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""
@@ -214,12 +216,6 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        # Step counter used by pp_trace to flush the driver-side trace
-        # periodically (same cadence as worker-side flushing).
-        self._pp_trace_step_count: int = 0
-        if pp_trace.is_enabled():
-            pp_trace.set_process_name("driver")
-
         self._idle_state_callbacks: list[Callable] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
@@ -230,6 +226,84 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+        self.trace_dir = self._get_trace_dir()
+        self.tracer = VizTracer(
+                                include_files=["*vllm*"],
+                                # ignore_c_function=True,
+                                # ignore_frozen=True,
+                                verbose=1)
+        self.tracer.start()
+        self.trace_path = self._get_trace_path("engine")
+        self._final_trace_saved = False
+        self._stop_worker_profiler_on_first_finish = False
+        self._worker_profiler_stopped = False
+        logger.info("Engine viztrace will be saved to %s", self.trace_path)
+        atexit.register(self._save_trace)
+        self.model_executor.tracer = self.tracer
+        self.scheduler.tracer = self.tracer
+        self._checkpoint_trace()
+        if vllm_config.profiler_config.profiler is not None:
+            if vllm_config.profiler_config.profiler == "torch":
+                vllm_config.profiler_config.torch_profiler_dir = self.trace_dir
+                logger.info(
+                    "Worker torch profiler traces will be saved to %s",
+                    self.trace_dir,
+                )
+            logger.info(
+                "Auto-starting %s profiler in workers.",
+                vllm_config.profiler_config.profiler,
+            )
+            self.model_executor.profile(True, "auto_worker")
+            self._stop_worker_profiler_on_first_finish = True
+
+    def _get_trace_dir(self) -> str:
+        trace_dir = os.path.abspath(os.path.join(os.getcwd(), "viztraces"))
+        os.makedirs(trace_dir, exist_ok=True)
+        return trace_dir
+
+    def _get_trace_path(self, prefix: str) -> str:
+        return os.path.join(self.trace_dir, f"{prefix}_{time.time()}_trace.json")
+
+    def _checkpoint_trace(self) -> None:
+        tracer_enabled = getattr(self.tracer, "enable", False)
+        if tracer_enabled:
+            self.tracer.stop()
+        self.tracer.save(output_file=self.trace_path)
+        if tracer_enabled:
+            self.tracer.start()
+
+    def _save_trace(self) -> None:
+        if self._final_trace_saved:
+            return
+        tracer_enabled = getattr(self.tracer, "enable", False)
+        if tracer_enabled:
+            self.tracer.stop(stop_option="flush_as_finish")
+        self.tracer.save(output_file=self.trace_path)
+        self._final_trace_saved = True
+
+    def _maybe_checkpoint_trace(
+        self, engine_core_outputs: dict[int, EngineCoreOutputs] | None
+    ) -> None:
+        if not engine_core_outputs:
+            return
+        if any(
+            eco.finished_requests or any(output.finished for output in eco.outputs)
+            for eco in engine_core_outputs.values()
+        ):
+            self._checkpoint_trace()
+            checkpoint_trace = getattr(self.model_executor, "checkpoint_trace", None)
+            if callable(checkpoint_trace):
+                checkpoint_trace()
+            if (
+                self._stop_worker_profiler_on_first_finish
+                and not self._worker_profiler_stopped
+            ):
+                logger.info(
+                    "Stopping worker profiler after first finished request."
+                )
+                self.model_executor.profile(False)
+                self._worker_profiler_stopped = True
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -444,12 +518,7 @@ class EngineCore:
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
-        with pp_trace.span(
-            "step_with_batch_queue",
-            queue_len=len(batch_queue),
-            batch_queue_size=self.batch_queue_size,
-            has_requests=self.scheduler.has_requests(),
-        ):
+        with self.tracer.log_event("step with batch queue"):
             # Try to schedule a new batch if the batch queue is not full, but
             # the scheduler may return an empty batch if all requests are scheduled.
             # Note that this is not blocking.
@@ -458,16 +527,11 @@ class EngineCore:
             model_executed = False
             deferred_scheduler_output = None
             if self.scheduler.has_requests():
-                with pp_trace.span("schedule"):
-                    scheduler_output = self.scheduler.schedule()
+                scheduler_output = self.scheduler.schedule()
                 with self.log_error_detail(scheduler_output):
-                    with pp_trace.span(
-                        "execute_model_submit",
-                        tokens=scheduler_output.total_num_scheduled_tokens,
-                    ):
-                        exec_future = self.model_executor.execute_model(
-                            scheduler_output, non_block=True
-                        )
+                    exec_future = self.model_executor.execute_model(
+                        scheduler_output, non_block=True
+                    )
                 if self.is_ec_consumer:
                     model_executed = (
                         scheduler_output.total_num_scheduled_tokens > 0
@@ -480,17 +544,12 @@ class EngineCore:
                     if not scheduler_output.pending_structured_output_tokens:
                         # We aren't waiting for any tokens, get any grammar output
                         # and sample immediately.
-                        with pp_trace.span("get_grammar_bitmask"):
-                            grammar_output = self.scheduler.get_grammar_bitmask(
-                                scheduler_output
-                            )
-                        with pp_trace.span(
-                            "sample_tokens_submit",
-                            tokens=scheduler_output.total_num_scheduled_tokens,
-                        ):
-                            future = self.model_executor.sample_tokens(
-                                grammar_output, non_block=True
-                            )
+                        grammar_output = self.scheduler.get_grammar_bitmask(
+                            scheduler_output
+                        )
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
                     else:
                         # We need to defer sampling until we have processed the
                         # model output from the prior step.
@@ -519,31 +578,23 @@ class EngineCore:
             with (
                 self.log_error_detail(scheduler_output),
                 self.log_iteration_details(scheduler_output),
-            ):
-                model_output = future.result()
-                if model_output is None:
-                    # None from sample_tokens() implies that the original
-                    # execute_model() call failed - raise that exception.
-                    exec_model_fut.result()
-                    raise RuntimeError("unexpected error")
+            ):  
+                with self.tracer.log_event("wait ray dag return model output"):
+                    model_output = future.result()
+                    if model_output is None:
+                        # None from sample_tokens() implies that the original
+                        # execute_model() call failed - raise that exception.
+                        exec_model_fut.result()
+                        raise RuntimeError("unexpected error")
 
             # Before processing the model output, process any aborts that happened
             # during the model execution.
             self._process_aborts_queue()
-            with pp_trace.span(
-                "update_from_output",
-                tokens=scheduler_output.total_num_scheduled_tokens,
-            ):
+            with self.tracer.log_event("update scheduler from output"):
                 engine_core_outputs = self.scheduler.update_from_output(
                     scheduler_output, model_output
                 )
 
-            # Periodic driver-side trace flush — same cadence as workers.
-            # Events accumulate across flushes (non-destructive), so every flush
-            # writes the complete history. The atexit handler in pp_trace catches
-            # any remaining events on process exit.
-            self._pp_trace_step_count += 1
-            pp_trace.maybe_flush(self._pp_trace_step_count)
 
             # NOTE(nick): We can either handle the deferred tasks here or save
             # in a field and do it immediately once step_with_batch_queue is
@@ -573,7 +624,7 @@ class EngineCore:
                     (future, deferred_scheduler_output, exec_future)
                 )
 
-            return engine_core_outputs, model_executed
+        return engine_core_outputs, model_executed
 
     def _process_aborts_queue(self):
         if not self.aborts_queue.empty():
@@ -591,6 +642,7 @@ class EngineCore:
             self.model_executor.shutdown()
         if self.scheduler:
             self.scheduler.shutdown()
+        self._save_trace()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         self.model_executor.profile(is_start, profile_prefix)
@@ -1221,6 +1273,7 @@ class EngineCoreProc(EngineCore):
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
+        self._maybe_checkpoint_trace(outputs)
         # Post-step hook.
         self.post_step(model_executed)
 

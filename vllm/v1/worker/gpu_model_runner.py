@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import atexit
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -19,6 +21,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 from tqdm import tqdm
+from viztracer import VizTracer, get_tracer
 
 import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
@@ -177,7 +180,6 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.executor import pp_trace
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
@@ -508,6 +510,26 @@ class GPUModelRunner(
         self._pending_pp_irecv: (
             tuple[Any, torch.Tensor, dict[str, int]] | None
         ) = None
+        self.tracer = None
+        self._owns_tracer = False
+        self._final_trace_saved = False
+        self.trace_path: str | None = None
+        if self.use_async_scheduling and pp_group.world_size > 1:
+            self.tracer = get_tracer()
+            if self.tracer is None:
+                self.tracer = VizTracer(
+                    include_files=["*vllm*"],
+                    verbose=1,
+                )
+                self.tracer.start()
+                self._owns_tracer = True
+            if self._owns_tracer:
+                self.trace_path = self._get_trace_path()
+                logger.info(
+                    "GPU model runner viztrace will be saved to %s",
+                    self.trace_path,
+                )
+                atexit.register(self._save_trace)
         
         # Sampler
         self.sampler = Sampler(logprobs_mode=self.model_config.logprobs_mode)
@@ -3810,6 +3832,8 @@ class GPUModelRunner(
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
+        if scheduler_output.finished_req_ids:
+            self._checkpoint_trace()
         if self.execute_model_state is not None:
             raise RuntimeError(
                 "State error: sample_tokens() must be called "
@@ -3902,38 +3926,30 @@ class GPUModelRunner(
                 )
             else:
                 _max_kv = 0
-            pp_trace.instant(
-                "batch_stats",
-                pp_rank=get_pp_group().rank,
-                step=_pp_step_id,
-                num_reqs=num_reqs,
-                num_tokens=num_tokens_unpadded,
-                max_kv_len=_max_kv,
-            )
 
-            # Deferred PP irecv completion: waiting here (rather than at the
-            # top of execute_model_ray) lets Stage 0 overlap CPU preprocessing
-            # — _update_states, buffer allocation — with Stages 1-N running the
-            # previous batch's forward pass. The blocking window is now as short
-            # as possible: we only stall until the last rank's isend fires, and
-            # only right before the GPU kernel that needs prev_sampled_token_ids.
+            # Deferred PP irecv completion
             if self._pending_pp_irecv is not None:
                 work, recv_buf, prev_req_id_to_index = self._pending_pp_irecv
                 self._pending_pp_irecv = None
-                with pp_trace.span(
-                    "pp_irecv_wait",
-                    pp_rank=get_pp_group().rank,
-                    step=_pp_step_id,
-                    num_reqs=num_reqs,
-                ):
+                if self.tracer is not None:
+                    with self.tracer.log_event("gpu_model_runner.wait_pending_pp_irecv"):
+                        work.wait()
+                else:
                     work.wait()
                 self.input_batch.prev_sampled_token_ids = recv_buf
                 self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
-            )
+            if self.tracer is not None:
+                with self.tracer.log_event("gpu_model_runner.prepare_inputs"):
+                    logits_indices, spec_decode_metadata = self._prepare_inputs(
+                        scheduler_output,
+                        num_scheduled_tokens_np,
+                    )
+            else:
+                logits_indices, spec_decode_metadata = self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                )
 
             cascade_attn_prefix_lens = None
             # Disable cascade attention when using microbatching (DBO)
@@ -4106,13 +4122,23 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
-            model_output = self._model_forward(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
+            if self.tracer is not None:
+                with self.tracer.log_event("gpu_model_runner.model_forward"):
+                    model_output = self._model_forward(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
+                    )
+            else:
+                model_output = self._model_forward(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4240,7 +4266,11 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            if self.tracer is not None:
+                with self.tracer.log_event("gpu_model_runner.sample"):
+                    sampler_output = self._sample(logits, spec_decode_metadata)
+            else:
+                sampler_output = self._sample(logits, spec_decode_metadata)
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
@@ -4350,22 +4380,41 @@ class GPUModelRunner(
                 propose_drafts_after_bookkeeping = input_fits_in_drafter
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
-            (
-                num_nans_in_logits,
-                logprobs_lists,
-                valid_sampled_token_ids,
-                prompt_logprobs_dict,
-                req_ids_output_copy,
-                req_id_to_index_output_copy,
-                invalid_req_indices,
-            ) = self._bookkeeping_sync(
-                scheduler_output,
-                sampler_output,
-                logits,
-                hidden_states,
-                scheduler_output.total_num_scheduled_tokens,
-                spec_decode_metadata,
-            )
+            if self.tracer is not None:
+                with self.tracer.log_event("gpu_model_runner.bookkeeping_sync"):
+                    (
+                        num_nans_in_logits,
+                        logprobs_lists,
+                        valid_sampled_token_ids,
+                        prompt_logprobs_dict,
+                        req_ids_output_copy,
+                        req_id_to_index_output_copy,
+                        invalid_req_indices,
+                    ) = self._bookkeeping_sync(
+                        scheduler_output,
+                        sampler_output,
+                        logits,
+                        hidden_states,
+                        scheduler_output.total_num_scheduled_tokens,
+                        spec_decode_metadata,
+                    )
+            else:
+                (
+                    num_nans_in_logits,
+                    logprobs_lists,
+                    valid_sampled_token_ids,
+                    prompt_logprobs_dict,
+                    req_ids_output_copy,
+                    req_id_to_index_output_copy,
+                    invalid_req_indices,
+                ) = self._bookkeeping_sync(
+                    scheduler_output,
+                    sampler_output,
+                    logits,
+                    hidden_states,
+                    scheduler_output.total_num_scheduled_tokens,
+                    spec_decode_metadata,
+                )
 
         if propose_drafts_after_bookkeeping:
             # ngram and other speculative decoding methods use the sampled
@@ -4445,92 +4494,86 @@ class GPUModelRunner(
         non-last rank can post its recv whenever it is ready — no global
         synchronisation needed.
         """
-        pp = get_pp_group()
-        assert pp.is_last_rank
-        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
-        assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
-            "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
-        )
-        # Post a non-blocking isend to each non-last PP rank.  Clone the tensor
-        # so that the original can be freed while the NCCL transfer is in flight.
-        _isend_t0 = pp_trace._now_us() if pp_trace.is_enabled() else 0.0
-        works = []
-        for rank_in_group in range(pp.world_size - 1):
-            dst_global_rank = pp.ranks[rank_in_group]
-            sampled_token_group = self._get_pp_sampled_token_send_group(
-                dst_global_rank)
-            work = torch.distributed.isend(
-                sampled_token_ids.clone(),
-                dst=dst_global_rank,
-                group=sampled_token_group,
+        with self.tracer.log_event("gpu_model_runner.pp_broadcast_sampled_tokens"):
+            pp = get_pp_group()
+            assert pp.is_last_rank
+            # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+            assert sampled_token_ids.dim() == 2 and sampled_token_ids.shape[-1] == 1, (
+                "PP+async expects sampled_token_ids to have shape [num_reqs, 1]"
             )
-            works.append(work)
-        pp_trace.record_complete(
-            "pp_isend_sampled_token",
-            _isend_t0,
-            pp_rank=pp.rank,
-            dst_ranks=str([pp.ranks[r] for r in range(pp.world_size - 1)]),
-        )
-        # Store works so the cloned tensors are kept alive until NCCL is done.
-        self._pp_send_works = works
+            works = []
+            for rank_in_group in range(pp.world_size - 1):
+                dst_global_rank = pp.ranks[rank_in_group]
+                sampled_token_group = self._get_pp_sampled_token_send_group(
+                    dst_global_rank)
+                work = torch.distributed.isend(
+                    sampled_token_ids.clone(),
+                    dst=dst_global_rank,
+                    group=sampled_token_group,
+                )
+                works.append(work)
+            # Store works so the cloned tensors are kept alive until NCCL is done.
+            self._pp_send_works = works
 
     def _pp_receive_prev_sampled_token_ids_to_input_batch(self) -> None:
         """Receive sampled token ids sent from the last PP stage (P2P recv)."""
-        pp = get_pp_group()
-        sampled_token_group = self._get_pp_sampled_token_recv_group()
-        assert not pp.is_last_rank
-        num_reqs = self.input_batch.num_reqs
-        # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
-        recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
-        torch.distributed.recv(
-            recv, src=pp.last_rank, group=sampled_token_group
-        )
-        self.input_batch.prev_sampled_token_ids = recv
+        with self.tracer.log_event("gpu_model_runner.pp_recv_sampled_tokens"):
+            pp = get_pp_group()
+            sampled_token_group = self._get_pp_sampled_token_recv_group()
+            assert not pp.is_last_rank
+            num_reqs = self.input_batch.num_reqs
+            # `prev_sampled_token_ids` is expected to have shape [num_reqs, 1].
+            recv = torch.empty((num_reqs, 1), dtype=torch.int32, device=self.device)
+            torch.distributed.recv(
+                recv, src=pp.last_rank, group=sampled_token_group
+            )
+            self.input_batch.prev_sampled_token_ids = recv
 
-        # construct `prev_req_id_to_index` here so `_prepare_input_ids`
-        # can map req_id -> previous batch row
-        discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
-        discard_req_indices_set = set(discard_req_indices)
-        prev_req_id_to_index: dict[str, int] = {}
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            if i in discard_req_indices_set:
-                continue
-            prev_req_id_to_index[req_id] = i
-            # PP+async scheduling: advance per-request local cached output length by
-            # appending a placeholder (-1) token id.
-            if (req_state := self.requests.get(req_id)) is not None:
-                req_state.output_token_ids.append(-1)
-        self.input_batch.prev_req_id_to_index = prev_req_id_to_index
+            # construct `prev_req_id_to_index` here so `_prepare_input_ids`
+            # can map req_id -> previous batch row
+            discard_req_indices = np.nonzero(self.discard_request_mask.np[:num_reqs])[0]
+            discard_req_indices_set = set(discard_req_indices)
+            prev_req_id_to_index: dict[str, int] = {}
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                if i in discard_req_indices_set:
+                    continue
+                prev_req_id_to_index[req_id] = i
+                # PP+async scheduling: advance per-request local cached output length by
+                # appending a placeholder (-1) token id.
+                if (req_state := self.requests.get(req_id)) is not None:
+                    req_state.output_token_ids.append(-1)
+            self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
     def _pp_post_irecv(
         self,
     ) -> tuple[Any, torch.Tensor, dict[str, int]]:
         """Post a non-blocking recv for next-step sampled token IDs."""
-        pp = get_pp_group()
-        sampled_token_group = self._get_pp_sampled_token_recv_group()
-        assert not pp.is_last_rank
+        with self.tracer.log_event("gpu_model_runner.pp_post_irecv"):
+            pp = get_pp_group()
+            sampled_token_group = self._get_pp_sampled_token_recv_group()
+            assert not pp.is_last_rank
 
-        num_reqs = self.input_batch.num_reqs
-        recv_buf = torch.empty(
-            (num_reqs, 1), dtype=torch.int32, device=self.device
-        )
-        work = torch.distributed.irecv(
-            recv_buf, src=pp.last_rank, group=sampled_token_group
-        )
+            num_reqs = self.input_batch.num_reqs
+            recv_buf = torch.empty(
+                (num_reqs, 1), dtype=torch.int32, device=self.device
+            )
+            work = torch.distributed.irecv(
+                recv_buf, src=pp.last_rank, group=sampled_token_group
+            )
 
-        discard_req_indices = np.nonzero(
-            self.discard_request_mask.np[:num_reqs]
-        )[0]
-        discard_req_indices_set = set(discard_req_indices)
-        prev_req_id_to_index: dict[str, int] = {}
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            if i in discard_req_indices_set:
-                continue
-            prev_req_id_to_index[req_id] = i
-            if (req_state := self.requests.get(req_id)) is not None:
-                req_state.output_token_ids.append(-1)
+            discard_req_indices = np.nonzero(
+                self.discard_request_mask.np[:num_reqs]
+            )[0]
+            discard_req_indices_set = set(discard_req_indices)
+            prev_req_id_to_index: dict[str, int] = {}
+            for i, req_id in enumerate(self.input_batch.req_ids):
+                if i in discard_req_indices_set:
+                    continue
+                prev_req_id_to_index[req_id] = i
+                if (req_state := self.requests.get(req_id)) is not None:
+                    req_state.output_token_ids.append(-1)
 
-        return work, recv_buf, prev_req_id_to_index
+            return work, recv_buf, prev_req_id_to_index
 
     # def _pp_complete_irecv(
     #     self,
@@ -4583,6 +4626,7 @@ class GPUModelRunner(
         get_pp_group().barrier()
 
     def shutdown(self) -> None:
+        self._save_trace()
         seen_groups = set()
         if self.pp_sampled_token_recv_group is not None:
             seen_groups.add(self.pp_sampled_token_recv_group)
@@ -4591,6 +4635,35 @@ class GPUModelRunner(
             torch.distributed.destroy_process_group(group)
         self.pp_sampled_token_recv_group = None
         self.pp_sampled_token_send_groups.clear()
+
+    def _get_trace_path(self) -> str:
+        trace_dir = os.path.abspath(os.path.join(os.getcwd(), "viztraces"))
+        os.makedirs(trace_dir, exist_ok=True)
+        return os.path.join(
+            trace_dir,
+            f"gpu_model_runner_{time.time()}_trace.json",
+        )
+
+    def _checkpoint_trace(self) -> None:
+        if not self._owns_tracer or self.trace_path is None:
+            return
+        assert self.tracer is not None
+        tracer_enabled = getattr(self.tracer, "enable", False)
+        if tracer_enabled:
+            self.tracer.stop()
+        self.tracer.save(output_file=self.trace_path)
+        if tracer_enabled:
+            self.tracer.start()
+
+    def _save_trace(self) -> None:
+        if not self._owns_tracer or self._final_trace_saved or self.trace_path is None:
+            return
+        assert self.tracer is not None
+        tracer_enabled = getattr(self.tracer, "enable", False)
+        if tracer_enabled:
+            self.tracer.stop(stop_option="flush_as_finish")
+        self.tracer.save(output_file=self.trace_path)
+        self._final_trace_saved = True
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         if not self.num_spec_tokens or not self._draft_token_req_ids:

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import atexit
 import os
 import time
 from collections import defaultdict, deque
@@ -8,7 +9,6 @@ from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any, Union
 
 import vllm.platforms
-from vllm.v1.executor import pp_trace
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
 from vllm.distributed.kv_transfer.kv_connector.utils import KVOutputAggregator
@@ -19,6 +19,7 @@ from vllm.utils.network_utils import get_ip
 from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.serial_utils import run_method
 from vllm.v1.worker.worker_base import WorkerWrapperBase
+from viztracer import VizTracer, get_tracer
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -46,6 +47,17 @@ try:
 
         def __init__(self, *args, **kwargs) -> None:
             super().__init__(*args, **kwargs)
+            self.tracer = get_tracer()
+            if self.tracer is None:
+                self.tracer = VizTracer(
+                    include_files=["*vllm*"],
+                    verbose=1,
+                )
+                self.tracer.start()
+            self.trace_path = self._get_trace_path()
+            self._final_trace_saved = False
+            logger.info("Ray worker viztrace will be saved to %s", self.trace_path)
+            atexit.register(self._save_trace)
             # Since the compiled DAG runs a main execution
             # in a different thread that calls cuda.set_device.
             # The flag indicates is set_device is called on
@@ -59,9 +71,38 @@ try:
             self._pp_irecv_work: Any = None
             self._pp_irecv_buf: Any = None
             self._pp_pending_prev_req_id_to_index: Any = None
-            # Number of execute_model_ray calls; used for trace flushing and
-            # lazy process-name registration.
-            self._pp_trace_step_count: int = 0
+
+        def _get_trace_path(self) -> str:
+            trace_dir = os.path.abspath(os.path.join(os.getcwd(), "viztraces"))
+            os.makedirs(trace_dir, exist_ok=True)
+            return os.path.join(
+                trace_dir,
+                f"ray_worker_{self.rpc_rank}_{time.time()}_trace.json",
+            )
+
+        def _checkpoint_trace(self) -> None:
+            tracer_enabled = getattr(self.tracer, "enable", False)
+            if tracer_enabled:
+                self.tracer.stop()
+            self.tracer.save(output_file=self.trace_path)
+            if tracer_enabled:
+                self.tracer.start()
+
+        def _save_trace(self) -> None:
+            if self._final_trace_saved:
+                return
+            tracer_enabled = getattr(self.tracer, "enable", False)
+            if tracer_enabled:
+                self.tracer.stop(stop_option="flush_as_finish")
+            self.tracer.save(output_file=self.trace_path)
+            self._final_trace_saved = True
+
+        def shutdown(self) -> None:
+            self._save_trace()
+            super().shutdown()
+
+        def checkpoint_trace(self) -> None:
+            self._checkpoint_trace()
 
         def adjust_rank(self, rank_mapping: dict[int, int]) -> None:
             """
@@ -71,6 +112,7 @@ try:
             """
             if self.rpc_rank in rank_mapping:
                 self.rpc_rank = rank_mapping[self.rpc_rank]
+                self.trace_path = self._get_trace_path()
 
         def execute_method(self, method: str | bytes, *args, **kwargs):
             try:
@@ -129,10 +171,7 @@ try:
             tuple[int, int],
             None,
         ]:
-            # This method is used by Ray Compiled Graph to execute the model,
-            # and it needs a special logic of self.setup_device_if_necessary()
-            self.setup_device_if_necessary()
-            assert self.worker is not None, "Worker is not initialized"
+            scheduler_output: "SchedulerOutput"
             step_id: int | None = None
             if len(execute_model_input) == 4:
                 scheduler_output, grammar_output, step_id, intermediate_tensors = (
@@ -148,77 +187,52 @@ try:
             else:
                 scheduler_output, grammar_output = execute_model_input
                 intermediate_tensors = None
-            assert self.worker.model_runner is not None
-            pp_rank = get_pp_group().rank
-            rpc_rank = getattr(self, "rpc_rank", None)
-            pp_world_size = get_pp_group().world_size
-            use_async_pp = (
-                self.vllm_config is not None
-                and self.vllm_config.scheduler_config.async_scheduling
-                and pp_world_size > 1
-            )
-            is_last_rank = get_pp_group().is_last_rank
-            num_tokens = scheduler_output.total_num_scheduled_tokens
+            if scheduler_output.finished_req_ids:
+                self._checkpoint_trace()
+            with self.tracer.log_event("ray_utils.execute_model_ray"):
+                # This method is used by Ray Compiled Graph to execute the model,
+                # and it needs a special logic of self.setup_device_if_necessary()
+                self.setup_device_if_necessary()
+                assert self.worker is not None, "Worker is not initialized"
+                assert self.worker.model_runner is not None
+                pp_world_size = get_pp_group().world_size
+                use_async_pp = (
+                    self.vllm_config is not None
+                    and self.vllm_config.scheduler_config.async_scheduling
+                    and pp_world_size > 1
+                )
+                is_last_rank = get_pp_group().is_last_rank
+                num_tokens = scheduler_output.total_num_scheduled_tokens
 
-            # Lazy one-time registration of this process's name in the trace.
-            if self._pp_trace_step_count == 0 and pp_trace.is_enabled():
-                pp_trace.set_process_name(f"pp_rank_{pp_rank}")
-
-            # Capture overall start time for the total span (see finally block).
-            _ray_t0 = time.monotonic() * 1_000_000.0
-
-            # Instant marker at the moment the Ray DAG delivers work to this
-            # actor.  Comparing timestamps across ranks reveals the inter-stage
-            # queuing delay that Ray's serialization and scheduling adds on top
-            # of the raw NCCL pipeline latency.
-            pp_trace.instant(
-                "dag_actor_start",
-                pp_rank=pp_rank,
-                step=step_id,
-                tokens=num_tokens,
-            )
-
-            try:
-                start_ns = time.monotonic_ns()
-                # Hand the pending irecv to the model runner for deferred
-                # completion inside execute_model(), just before _prepare_inputs().
-                # This lets Stage 0 overlap CPU preprocessing (_update_states,
-                # buffer allocation) with Stages 1-N running the previous batch,
-                # narrowing the blocking window to as close to the GPU kernel
-                # as possible instead of stalling at the actor entry point.
                 if (use_async_pp and not is_last_rank
                         and self._pp_irecv_work is not None):
-                    with pp_trace.span("pp_recv",
-                                       pp_rank=pp_rank, step=step_id,
-                                       tokens=num_tokens):
+                    with self.tracer.log_event("ray_utils.defer_pp_irecv"):
                         self.worker.model_runner._pending_pp_irecv = (
                             self._pp_irecv_work,
                             self._pp_irecv_buf,
                             self._pp_pending_prev_req_id_to_index,
                         )
-                    self._pp_irecv_work = None
-                    self._pp_irecv_buf = None
-                    self._pp_pending_prev_req_id_to_index = None
+                        self._pp_irecv_work = None
+                        self._pp_irecv_buf = None
+                        self._pp_pending_prev_req_id_to_index = None
 
                 # Best-effort debug context for model-runner level PP logs.
                 # This helps correlate broadcast/receive logs with Ray DAG step ids.
                 setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
-                with pp_trace.cuda_trace_step(step_id, pp_rank):
-                    with pp_trace.span("execute_model_forward",
-                                       pp_rank=pp_rank, step=step_id,
-                                       tokens=num_tokens):
-                        output = self.worker.model_runner.execute_model(
-                            scheduler_output, intermediate_tensors
-                        )
+                with self.tracer.log_event("ray_utils.worker_execute_model"):
+                    output = self.worker.model_runner.execute_model(
+                        scheduler_output, intermediate_tensors
+                    )
 
                 # Post the recv for the NEXT step's sampled tokens as early as
                 # possible so the transfer can overlap with Ray DAG scheduling.
                 if use_async_pp and not is_last_rank and num_tokens > 0:
-                    (
-                        self._pp_irecv_work,
-                        self._pp_irecv_buf,
-                        self._pp_pending_prev_req_id_to_index,
-                    ) = self.worker.model_runner._pp_post_irecv()
+                    with self.tracer.log_event("ray_utils.pp_post_irecv"):
+                        (
+                            self._pp_irecv_work,
+                            self._pp_irecv_buf,
+                            self._pp_pending_prev_req_id_to_index,
+                        ) = self.worker.model_runner._pp_post_irecv()
 
                 if self._is_intermediate_tensors(output):
                     if (
@@ -228,10 +242,6 @@ try:
                         # Strip mm_features before Ray forwards it to the next PP
                         # Stage.  PP Stage>0 only needs the intermediate tensors,
                         # not preprocessed multimodal data.
-
-                        # scheduled_new_reqs is a required field of
-                        # SchedulerOutput, so accessing it directly will raise
-                        # AttributeError if missing.
                         for req in scheduler_output.scheduled_new_reqs:
                             req.mm_features = []
                     if step_id is None:
@@ -248,9 +258,7 @@ try:
                         output = scheduler_output, grammar_output, step_id, None
                 elif output is None:
                     setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
-                    with pp_trace.span("sample_tokens",
-                                       pp_rank=pp_rank, step=step_id,
-                                       tokens=num_tokens):
+                    with self.tracer.log_event("ray_utils.worker_sample_tokens"):
                         output = self.worker.model_runner.sample_tokens(
                             grammar_output
                         )
@@ -271,14 +279,6 @@ try:
                     return None
 
                 return output
-            finally:
-                pp_trace.record_complete(
-                    "execute_model_ray", _ray_t0,
-                    pp_rank=pp_rank, step=step_id, tokens=num_tokens,
-                    is_last_rank=is_last_rank,
-                )
-                self._pp_trace_step_count += 1
-                pp_trace.maybe_flush_worker(self._pp_trace_step_count)
 
         def get_execute_model_output(
             self,
@@ -291,25 +291,26 @@ try:
             assert (
                 self.vllm_config and self.vllm_config.scheduler_config.async_scheduling
             )
-            if step_id is None:
-                logger.info(
-                    "get_execute_model_output step=None deque_len=%s",
-                    len(self._execute_model_outputs),
-                )
-                assert self._execute_model_outputs, "No execute_model output available"
-                output = self._execute_model_outputs.popleft()
-            else:
-                assert step_id in self._pp_execute_model_outputs, (
-                    f"No execute_model output available for step {step_id}"
-                )
-                output = self._pp_execute_model_outputs.pop(step_id)
-            if isinstance(output, AsyncModelRunnerOutput):
-                # Ensure outputs crossing Ray compiled DAG are serializable.
-                # AsyncModelRunnerOutput holds CUDA events and cannot be
-                # pickled.
-                output = output.get_output()
+            with self.tracer.log_event("ray_utils.get_execute_model_output"):
+                if step_id is None:
+                    logger.info(
+                        "get_execute_model_output step=None deque_len=%s",
+                        len(self._execute_model_outputs),
+                    )
+                    assert self._execute_model_outputs, "No execute_model output available"
+                    output = self._execute_model_outputs.popleft()
+                else:
+                    assert step_id in self._pp_execute_model_outputs, (
+                        f"No execute_model output available for step {step_id}"
+                    )
+                    output = self._pp_execute_model_outputs.pop(step_id)
+                if isinstance(output, AsyncModelRunnerOutput):
+                    # Ensure outputs crossing Ray compiled DAG are serializable.
+                    # AsyncModelRunnerOutput holds CUDA events and cannot be
+                    # pickled.
+                    output = output.get_output()
 
-            return output
+                return output
 
         def override_env_vars(self, vars: dict[str, str]):
             os.environ.update(vars)
@@ -369,6 +370,7 @@ class FutureWrapper(Future):
         super().__init__()
         self.ref_or_refs = ref_or_refs
         self.aggregator = aggregator
+        self.tracer = get_tracer()
 
     def is_callable(self, ref_or_refs):
         if isinstance(ref_or_refs, list):
@@ -383,7 +385,7 @@ class FutureWrapper(Future):
         return self.ref_or_refs
 
     def result(self, timeout=None):
-        with pp_trace.span("dag_wait"):
+        with self.tracer.log_event("ray_utils.future_result"):
             outputs = ray.get(self.get_refs(timeout), timeout=timeout)
         if self.aggregator is None:
             return outputs
