@@ -1,10 +1,4 @@
-# Design Document: LLM-Based Test Target Determination for vLLM CI
-
-**Author:** Avinash Singh
-**Date:** April 2026
-**Status:** Proposal / RFC
-
----
+# LLM-Based Test Target Determination for vLLM CI
 
 ## 1. Problem Statement
 
@@ -290,7 +284,7 @@ The LLM selector described above operates at the **job level** (~150 jobs). A fu
 - Requires changes to test_areas YAMLs and the pipeline generator
 - The job-level system needs to be proven first
 
-### Existing draft work (feature branch)
+### Existing draft work (feature branch, not commited yet). Related work in https://github.com/vllm-project/vllm/pull/31031
 
 - `.buildkite/PYTEST_MARKING_GUIDE.md` — 40+ mark definitions, usage guidelines
 - `.buildkite/scripts/mark_tests.py` — automation script for suggesting/applying marks
