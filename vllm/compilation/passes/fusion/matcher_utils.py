@@ -11,9 +11,7 @@ from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     QuantKey,
-    _normalize_quant_group_shape,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8DynamicTokenSym,
@@ -219,23 +217,6 @@ class MatcherFusedAddRMSNorm(MatcherCustomOp):
             input, self.epsilon, input.size(-1), self.model_dtype, weight, residual
         )
         return result
-
-
-def make_group_scale(
-    input: torch.Tensor,
-    group_shape: GroupShape,
-    column_major: bool,
-) -> torch.Tensor:
-    normalized = _normalize_quant_group_shape(input, group_shape)
-    scale_shape = (
-        input.shape[0] // normalized[0],
-        input.shape[1] // normalized[1],
-    )
-    if column_major:
-        return torch.empty(
-            tuple(reversed(scale_shape)), dtype=torch.float32, device=input.device
-        ).permute(-1, -2)
-    return torch.empty(scale_shape, dtype=torch.float32, device=input.device)
 
 
 class MatcherSiluAndMul(MatcherCustomOp):

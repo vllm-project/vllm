@@ -11,6 +11,7 @@ from torch._ops import OpOverload
 
 import vllm.ir.ops
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.kernels.vllm_c import make_group_quant_scales
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -26,10 +27,7 @@ from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import (
-    MatcherFusedAddRMSNorm,
-    make_group_scale,
-)
+from .matcher_utils import MatcherFusedAddRMSNorm
 
 logger = init_logger(__name__)
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -315,7 +313,12 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
-            scale = make_group_scale(input, self.group_shape, self.has_col_major_scales)
+            scale = make_group_quant_scales(
+                input,
+                self.group_shape[1],
+                self.has_col_major_scales,
+                4 if self.is_tma_aligned else 1,
+            )
             at = auto_functionalized(
                 self.FUSED_OP,
                 result=result,
@@ -391,7 +394,12 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             input = input.to(dtype=self.model_dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
-            scale = make_group_scale(input, self.group_shape, self.has_col_major_scales)
+            scale = make_group_quant_scales(
+                input,
+                self.group_shape[1],
+                self.has_col_major_scales,
+                4 if self.is_tma_aligned else 1,
+            )
             at = auto_functionalized(
                 self.FUSED_OP,
                 result=result,
