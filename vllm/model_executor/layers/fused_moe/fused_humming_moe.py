@@ -84,14 +84,14 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
             "gemm_type": self.humming_gemm_type.value,
         }
-        self.w13_tuning_config = HummingMethod.get_default_tunning_configs(
+        self.w13_tuning_config = HummingMethod.get_default_tuning_configs(
             layer=self.layer,
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
             gemm_type=self.humming_gemm_type,
             sublayer_name="w13",
         )
-        self.w2_tuning_config = HummingMethod.get_default_tunning_configs(
+        self.w2_tuning_config = HummingMethod.get_default_tuning_configs(
             layer=self.layer,
             use_f16_accum=envs.VLLM_HUMMING_USE_F16_ACCUM,
             use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
@@ -624,6 +624,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ):
+        assert expert_tokens_meta is not None
         valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
         valid_shape_m = math.ceil(valid_shape_m)
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
