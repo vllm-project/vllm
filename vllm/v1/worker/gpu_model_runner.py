@@ -4940,7 +4940,7 @@ class GPUModelRunner(
             spec_config.use_eagle()
             or spec_config.use_dflash()
             or spec_config.uses_draft_model()
-            or spec_config.uses_universal_draft():
+            or spec_config.uses_universal_draft()
         ):
             assert isinstance(
                 self.drafter,
