@@ -1110,12 +1110,10 @@ class FusedMoE(CustomOp):
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
         ):
-            if is_transposed or expert_id is not None:
+            if is_transposed and expert_id is not None:
                 loaded_weight = loaded_weight.t().contiguous()
             elif is_transposed and loaded_weight.ndim >= 3:
                 loaded_weight = loaded_weight.transpose(-1, -2).contiguous()
-            else:
-                loaded_weight = loaded_weight
 
         if shard_id not in ("w1", "w2", "w3", "w13"):
             err_msg = f"shard_id must be ['w1','w2','w3', 'w13'] but got {shard_id}."
@@ -1153,7 +1151,12 @@ class FusedMoE(CustomOp):
                     )
                 expert_data.copy_(loaded_weight)
             elif shard_id in ("w1", "w3", "w13"):
-                # BNB inflight quantization has already sharded the weights
+                # BnB stores weights as flat packed tensors.  _load_w13 is
+                # still used to split the w1/w3 portions along shard_dim.
+                # _narrow_expert_data_for_padding will be a no-op since
+                # packed sizes should already match; if DeepEP padding
+                # causes a mismatch the copy_() will fail with a clear
+                # shape error.
                 full_load = True
                 self._load_w13(
                     shard_id=shard_id,
