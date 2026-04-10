@@ -43,7 +43,7 @@ from vllm.logger import init_logger
 from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.tokenizers.mistral import MistralTokenizer, adapt_inplace_to_mistral_tool
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
@@ -242,9 +242,11 @@ class MistralToolParser(ToolParser):
             reasoning=self.model_can_reason
         )
 
-        tools = (
+        mistral_tools = (
             [
-                MistralTool.from_openai(openai_tool=tool.model_dump())
+                MistralTool.model_validate(
+                    adapt_inplace_to_mistral_tool(tool.model_dump())
+                )
                 for tool in request.tools
             ]
             if request.tools is not None
@@ -276,7 +278,7 @@ class MistralToolParser(ToolParser):
                 lark_grammar = grammar_factory.get_lark_from_jinja(
                     template=template,
                     mode=tool_choice,
-                    tools=tools,
+                    tools=mistral_tools,
                     json_schema=json_schema,
                     parallel_tool_calls=request.parallel_tool_calls,
                     json_only=False,
