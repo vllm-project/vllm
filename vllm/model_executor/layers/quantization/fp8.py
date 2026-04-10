@@ -517,10 +517,10 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         # TODO: remove this check once the following RFC is resolved.
         # https://github.com/vllm-project/vllm/issues/33314
-        # This check is required because Mxfp8OnlineLinearMethod inherits from
-        # Fp8OnlineLinearMethod but only calls super().create_weights(), so we must
-        # skip the fp8_linear kernel creation.
-        if hasattr(self, "mxfp8_linear"):
+        # Subclasses (e.g. Mxfp8OnlineLinearMethod) only need the weight
+        # registration above and manage their own kernel, so skip fp8_linear
+        # kernel creation for them.
+        if type(self) is not Fp8OnlineLinearMethod:
             return
 
         self.fp8_linear = init_fp8_linear_kernel(
