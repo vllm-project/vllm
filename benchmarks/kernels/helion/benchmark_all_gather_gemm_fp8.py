@@ -82,7 +82,7 @@ def do_bench_distributed(
     device: Optional[Union[torch.device, int]] = None,
     dist_group: Optional[dist.ProcessGroup] = None,
     return_mode: str = "mean",
-    warmup: int = 5,
+    warmup: int = 50,
     post_iteration_barrier: bool = False,
 ) -> Union[float, List[float]]:
     """
@@ -506,3 +506,16 @@ if __name__ == "__main__":
         if dist.is_initialized():
             dist.barrier(group=dist_group)  # ensure all ranks finished before cleanup
             dist.destroy_process_group()
+
+"""
+=== Final Distributed Benchmark Results ===
+rank | shape                        | baseline_ms | kernel_ms | speedup(x) | baseline_peak(MB) | kernel_peak(MB) | mem_improve(x)
+-----+------------------------------+-------------+-----------+------------+-------------------+-----------------+---------------
+ALL  | M=8192,N=2560,K=8192splits=1 | 0.915       | 0.866     | 1.056      | 414.05            | 414.02          | 1.000         
+ALL  | M=8192,N=2560,K=8192splits=2 | 0.929       | 0.857     | 1.084      | 414.05            | 414.02          | 1.000         
+ALL  | M=8192,N=2560,K=8192splits=4 | 0.901       | 0.902     | 0.999      | 414.05            | 414.02          | 1.000         
+
+ALL  | M=8192,N=14336,K=8192splits=1 | 1.845       | 1.810     | 1.019      | 1058.10           | 1058.07         | 1.000         
+ALL  | M=8192,N=14336,K=8192splits=2 | 1.971       | 1.863     | 1.058      | 1058.10           | 1058.07         | 1.000         
+ALL  | M=8192,N=14336,K=8192splits=4 | 1.832       | 1.854     | 0.988      | 1058.10           | 1058.07         | 1.000         
+"""
