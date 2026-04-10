@@ -8,7 +8,7 @@
 //     Load V[h] → FP8 convert → store v_cache  (fire-and-forget)
 //     Load K[h] → smem → RMSNorm → RoPE → store k_cache
 //   Phase 2 (per Q head):
-//     Load Q[h] → smem → RMSNorm → RoPE → store q_out
+//     Load Q[h] → smem → RMSNorm → RoPE → store query in-place
 //
 // V stores are non-blocking and overlap with K's RMSNorm computation,
 // effectively hiding V's store latency for free.
@@ -19,13 +19,18 @@
 //       sources=["csrc/fused_qk_norm_rope_cache_quant.cu"],
 //       extra_cuda_cflags=["-O3", "--use_fast_math"])
 
-#include <torch/extension.h>
-#include <ATen/cuda/CUDAContext.h>
+#include <algorithm>
+#include <cmath>
+#include <cuda_runtime.h>
+
 #include <c10/cuda/CUDAGuard.h>
-#include <cuda.h>
+#include <torch/all.h>
+#include <torch/cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
+
+#include "dispatch_utils.h"
 
 // FP8 header – available since CUDA 11.8.
 // HW-accelerated conversion requires SM >= 89 (Ada / Hopper).
@@ -114,12 +119,13 @@ __device__ __forceinline__ void write_cache_elem(
 
 template <typename scalar_t, bool IS_NEOX, bool IS_FP8>
 __global__ void fused_kernel(
-    // ── outputs ──
-    scalar_t* __restrict__ q_out,          // [T, num_heads_q * head_dim]
+    // ── outputs / mutated inputs ──
+    scalar_t* __restrict__ query,          // [T, num_heads_q, head_dim]
+    scalar_t* __restrict__ key,            // [T, num_heads_kv, head_dim]
     void* __restrict__ k_cache,            // NHD [B, blk_sz, nkv, hd]
-    void* __restrict__ v_cache,            // NHD [B, blk_sz, nkv, hd]
+    void* __restrict__ v_cache,            // NHD [B, blk_sz, nkv, hd_v]
     // ── inputs ──
-    const scalar_t* __restrict__ qkv,      // [T, (nq+2*nkv)*hd]
+    const scalar_t* __restrict__ value,    // [T, num_heads_kv, head_dim_v]
     const scalar_t* __restrict__ q_weight, // [head_dim]
     const scalar_t* __restrict__ k_weight, // [head_dim]
     const scalar_t* __restrict__ cos_sin_cache, // [max_pos, rot_dim]
@@ -128,19 +134,20 @@ __global__ void fused_kernel(
     // ── scalars ──
     const float k_scale, const float v_scale, const float epsilon,
     const int num_heads_q, const int num_heads_kv, const int head_dim,
-    const int block_size) {
+    const int head_dim_v, const int block_size) {
 
   const int token_idx = blockIdx.x;
   const int tid = threadIdx.x;
 
   const int q_size = num_heads_q * head_dim;
   const int kv_size = num_heads_kv * head_dim;
+  const int v_size = num_heads_kv * head_dim_v;
   const int embed_dim = head_dim / 2;  // rotary half
 
   // ── Token pointers ──
-  const scalar_t* q_in = qkv + (int64_t)token_idx * (q_size + 2 * kv_size);
-  const scalar_t* k_in = q_in + q_size;
-  const scalar_t* v_in = k_in + kv_size;
+  scalar_t* q_in = query + (int64_t)token_idx * q_size;
+  scalar_t* k_in = key + (int64_t)token_idx * kv_size;
+  const scalar_t* v_in = value + (int64_t)token_idx * v_size;
 
   // ── Cos / Sin for this position ──
   const int64_t pos = positions[token_idx];
@@ -175,7 +182,7 @@ __global__ void fused_kernel(
   };
 
   // =================================================================
-  //  Helper: RoPE from smem → write to model-dtype output (q_out)
+  //  Helper: RoPE from smem → write to model-dtype output
   // =================================================================
   auto do_rope_write_model = [&](scalar_t* dst) {
     for (int i = tid; i < head_dim; i += blockDim.x) {
@@ -203,9 +210,10 @@ __global__ void fused_kernel(
   };
 
   // =================================================================
-  //  Helper: RoPE from smem → write to KV cache (FP8 or model dtype)
+  //  Helper: RoPE from smem → write to model-dtype output and KV cache
   // =================================================================
-  auto do_rope_write_cache = [&](void* cache_ptr, float scale) {
+  auto do_rope_write_model_and_cache =
+      [&](scalar_t* model_dst, void* cache_ptr, float scale) {
     for (int i = tid; i < head_dim; i += blockDim.x) {
       float result;
       if constexpr (IS_NEOX) {
@@ -225,6 +233,7 @@ __global__ void fused_kernel(
         float y = head_buf[2 * pair + 1];
         result = (i & 1) == 0 ? (x * c - y * s) : (y * c + x * s);
       }
+      model_dst[i] = static_cast<scalar_t>(result);
       write_cache_elem<scalar_t, IS_FP8>(cache_ptr, i, result, scale);
     }
     __syncthreads();
@@ -243,23 +252,31 @@ __global__ void fused_kernel(
   if (slot_idx >= 0) {
     const int64_t blk_idx = slot_idx / block_size;
     const int64_t blk_off = slot_idx % block_size;
-    // NHD layout: [num_blocks, block_size, num_kv_heads, head_dim]
     const int64_t cache_elem_size = IS_FP8 ? 1 : sizeof(scalar_t);
-    const int64_t page_stride =
+    const int64_t k_page_stride =
         (int64_t)num_heads_kv * head_dim * cache_elem_size;
-    const int64_t blk_stride = (int64_t)block_size * page_stride;
-    const int64_t base_offset = blk_idx * blk_stride + blk_off * page_stride;
+    const int64_t v_page_stride =
+        (int64_t)num_heads_kv * head_dim_v * cache_elem_size;
+    const int64_t k_blk_stride = (int64_t)block_size * k_page_stride;
+    const int64_t v_blk_stride = (int64_t)block_size * v_page_stride;
+    const int64_t k_base_offset =
+        blk_idx * k_blk_stride + blk_off * k_page_stride;
+    const int64_t v_base_offset =
+        blk_idx * v_blk_stride + blk_off * v_page_stride;
 
-    char* k_base = reinterpret_cast<char*>(k_cache) + base_offset;
-    char* v_base = reinterpret_cast<char*>(v_cache) + base_offset;
+    char* k_base = reinterpret_cast<char*>(k_cache) + k_base_offset;
+    char* v_base = reinterpret_cast<char*>(v_cache) + v_base_offset;
 
     for (int h = 0; h < num_heads_kv; ++h) {
-      const int64_t head_cache_off = (int64_t)h * head_dim * cache_elem_size;
+      const int64_t k_head_cache_off =
+          (int64_t)h * head_dim * cache_elem_size;
+      const int64_t v_head_cache_off =
+          (int64_t)h * head_dim_v * cache_elem_size;
 
       // ── (a) V store: load → convert → fire-and-forget store ──
-      const scalar_t* v_src = v_in + h * head_dim;
-      void* v_dst = v_base + head_cache_off;
-      for (int i = tid; i < head_dim; i += blockDim.x) {
+      const scalar_t* v_src = v_in + h * head_dim_v;
+      void* v_dst = v_base + v_head_cache_off;
+      for (int i = tid; i < head_dim_v; i += blockDim.x) {
         float val = static_cast<float>(v_src[i]);
         write_cache_elem<scalar_t, IS_FP8>(v_dst, i, val, v_scale);
       }
@@ -269,20 +286,20 @@ __global__ void fused_kernel(
       // While the memory subsystem drains V stores in the background,
       // threads load K into shared memory and start the RMSNorm reduction.
       do_rmsnorm(k_in + h * head_dim, k_weight);
-      do_rope_write_cache(k_base + head_cache_off, k_scale);
+      do_rope_write_model_and_cache(
+          k_in + h * head_dim, k_base + k_head_cache_off, k_scale);
     }
   }
 
   // =================================================================
-  //  Phase 2:  Q heads – RMSNorm + RoPE → q_out (model dtype)
+  //  Phase 2:  Q heads – RMSNorm + RoPE → query (model dtype)
   //
   //  By the time we reach here, all KV cache stores are complete or
-  //  nearly so.  Q output goes to a separate buffer (not paged cache).
+  //  nearly so.  Query output is written back in place.
   // =================================================================
-  scalar_t* q_dst = q_out + (int64_t)token_idx * q_size;
   for (int h = 0; h < num_heads_q; ++h) {
     do_rmsnorm(q_in + h * head_dim, q_weight);
-    do_rope_write_model(q_dst + h * head_dim);
+    do_rope_write_model(q_in + h * head_dim);
   }
 }
 
@@ -290,11 +307,12 @@ __global__ void fused_kernel(
 
 // ── Torch wrapper ────────────────────────────────────────────────────
 
-void fused_qk_norm_rope_cache_quant_v2(
-    torch::Tensor q_out,           // [T, num_heads_q * head_dim]  – output
-    torch::Tensor k_cache,         // [num_blocks, block_size, nkv, hd]
-    torch::Tensor v_cache,         // same shape
-    torch::Tensor qkv,            // [T, (nq + 2*nkv) * hd]
+torch::Tensor fused_qk_norm_rope_cache_quant_v2(
+    torch::Tensor query,          // [T, num_heads_q, head_dim]  – mutated
+    torch::Tensor key,            // [T, num_heads_kv, head_dim] – mutated
+    torch::Tensor value,          // [T, num_heads_kv, head_dim_v]
+    torch::Tensor k_cache,        // [num_blocks, block_size, nkv, hd]
+    torch::Tensor v_cache,        // [num_blocks, block_size, nkv, hd_v]
     torch::Tensor q_weight,       // [head_dim]
     torch::Tensor k_weight,       // [head_dim]
     torch::Tensor cos_sin_cache,  // [max_pos, rot_dim]
@@ -311,76 +329,58 @@ void fused_qk_norm_rope_cache_quant_v2(
     bool is_fp8) {
 
   const int num_tokens = positions.numel();
-  if (num_tokens == 0) return;
+  if (num_tokens == 0) return torch::empty(0, query.options());
 
-  const int threads = std::min<int>(head_dim, 256);
+  const int head_dim_v = value.size(2);
+  const int work_dim = std::max<int>(head_dim, head_dim_v);
+  const int threads = ((std::max<int>(work_dim, 256) + 31) / 32) * 32;
   const int smem_bytes = (head_dim + 8) * sizeof(float);
-  const at::cuda::OptionalCUDAGuard guard(qkv.device());
+  const at::cuda::OptionalCUDAGuard guard(query.device());
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   // Macro for dispatching across (dtype × neox × fp8) combinations.
 #define LAUNCH(scalar_t, NEOX, FP8)                                           \
   fused_qknrc_v2::fused_kernel<scalar_t, NEOX, FP8><<<num_tokens, threads,      \
                                                      smem_bytes, stream>>>(   \
-      q_out.data_ptr<scalar_t>(),                                             \
+      query.data_ptr<scalar_t>(),                                             \
+      key.data_ptr<scalar_t>(),                                               \
       FP8 ? reinterpret_cast<void*>(k_cache.data_ptr<uint8_t>())             \
           : reinterpret_cast<void*>(k_cache.data_ptr<scalar_t>()),            \
       FP8 ? reinterpret_cast<void*>(v_cache.data_ptr<uint8_t>())             \
           : reinterpret_cast<void*>(v_cache.data_ptr<scalar_t>()),            \
-      qkv.data_ptr<scalar_t>(), q_weight.data_ptr<scalar_t>(),               \
+      value.data_ptr<scalar_t>(), q_weight.data_ptr<scalar_t>(),             \
       k_weight.data_ptr<scalar_t>(), cos_sin_cache.data_ptr<scalar_t>(),     \
       positions.data_ptr<int64_t>(), slot_mapping.data_ptr<int64_t>(),        \
       static_cast<float>(k_scale), static_cast<float>(v_scale),              \
       static_cast<float>(epsilon), static_cast<int>(num_heads_q),            \
       static_cast<int>(num_heads_kv), static_cast<int>(head_dim),            \
-      static_cast<int>(block_size))
+      static_cast<int>(head_dim_v), static_cast<int>(block_size))
 
-  AT_DISPATCH_SWITCH(
-      qkv.scalar_type(), "fused_qk_norm_rope_cache_quant",
-      AT_DISPATCH_CASE(at::ScalarType::BFloat16, [&] {
+  VLLM_DISPATCH_HALF_TYPES(
+      query.scalar_type(), "fused_qk_norm_rope_cache_quant_v2", [&] {
         if (is_neox) {
-          if (is_fp8) { LAUNCH(scalar_t, true, true); }
-          else        { LAUNCH(scalar_t, true, false); }
+          if (is_fp8) {
+            LAUNCH(scalar_t, true, true);
+          } else {
+            LAUNCH(scalar_t, true, false);
+          }
         } else {
-          if (is_fp8) { LAUNCH(scalar_t, false, true); }
-          else        { LAUNCH(scalar_t, false, false); }
+          if (is_fp8) {
+            LAUNCH(scalar_t, false, true);
+          } else {
+            LAUNCH(scalar_t, false, false);
+          }
         }
-      })
-      AT_DISPATCH_CASE(at::ScalarType::Half, [&] {
-        if (is_neox) {
-          if (is_fp8) { LAUNCH(scalar_t, true, true); }
-          else        { LAUNCH(scalar_t, true, false); }
-        } else {
-          if (is_fp8) { LAUNCH(scalar_t, false, true); }
-          else        { LAUNCH(scalar_t, false, false); }
-        }
-      }));
+      });
 
 #undef LAUNCH
+  return torch::empty(0, query.options());
 }
 
-// ── PyBind ──
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("fused_qk_norm_rope_cache_quant",
-        &fused_qk_norm_rope_cache_quant,
-        "Fused QK RMSNorm + RoPE + KV cache write + FP8 quant (CUDA)",
-        py::arg("q_out"),
-        py::arg("k_cache"),
-        py::arg("v_cache"),
-        py::arg("qkv"),
-        py::arg("q_weight"),
-        py::arg("k_weight"),
-        py::arg("cos_sin_cache"),
-        py::arg("positions"),
-        py::arg("slot_mapping"),
-        py::arg("k_scale"),
-        py::arg("v_scale"),
-        py::arg("epsilon"),
-        py::arg("num_heads_q"),
-        py::arg("num_heads_kv"),
-        py::arg("head_dim"),
-        py::arg("block_size"),
-        py::arg("is_neox"),
-        py::arg("is_fp8"));
-}
+// PyBind registration is in torch_bindings.cpp (CMake build).
+// For standalone JIT testing, uncomment the PYBIND11_MODULE block below.
+//
+// PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+//   m.def("fused_qk_norm_rope_cache_quant",
+//         &fused_qk_norm_rope_cache_quant, ...);
+// }

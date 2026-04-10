@@ -179,8 +179,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Fused QK RMSNorm + RoPE + KV cache write + FP8 quant
   ops.def(
-      "fused_qk_norm_rope_cache_quant(Tensor! qkv, Tensor! k_cache,"
-      " Tensor! v_cache, Tensor q_weight, Tensor k_weight,"
+      "fused_qk_norm_rope_cache_quant(Tensor! query, Tensor! key,"
+      " Tensor value, Tensor! k_cache, Tensor! v_cache,"
+      " Tensor q_weight, Tensor k_weight,"
       " Tensor cos_sin_cache, Tensor positions, Tensor slot_mapping,"
       " float k_scale, float v_scale, float epsilon,"
       " int num_heads_q, int num_heads_kv, int head_dim,"
@@ -190,12 +191,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Fused QK RMSNorm + RoPE + KV cache write + FP8 quant (v2: naive fusion baseline)
   ops.def(
-      "fused_qk_norm_rope_cache_quant_v2(Tensor! q_out, Tensor! k_cache,"
-      " Tensor! v_cache, Tensor qkv, Tensor q_weight, Tensor k_weight,"
-      " Tensor cos_sin_cache, Tensor positions, Tensor slot_mapping,"
+      "fused_qk_norm_rope_cache_quant_v2(Tensor! query, Tensor! key,"
+      " Tensor value, Tensor! k_cache, Tensor! v_cache, Tensor q_weight,"
+      " Tensor k_weight, Tensor cos_sin_cache, Tensor positions, Tensor slot_mapping,"
       " float k_scale, float v_scale, float epsilon,"
       " int num_heads_q, int num_heads_kv, int head_dim,"
-      " int block_size, bool is_neox, bool is_fp8) -> ()");
+      " int block_size, bool is_neox, bool is_fp8) -> Tensor");
   ops.impl("fused_qk_norm_rope_cache_quant_v2", torch::kCUDA,
            &fused_qk_norm_rope_cache_quant_v2);
 

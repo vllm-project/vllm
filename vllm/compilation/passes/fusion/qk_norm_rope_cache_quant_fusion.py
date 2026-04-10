@@ -9,21 +9,12 @@ Architecture
 Pattern:      QK RMSNorm → RoPE → unified_kv_cache_update
 Replacement:  fused_qk_norm_rope_cache_quant  (single op call)
 
-Stub implementation
--------------------
-The registered custom op currently falls back to calling the individual
-kernels sequentially so that correctness can be validated before a fused
-CUDA kernel is written.
-
-TODO(cuda-fusion): Replace the sequential body of
-    _fused_qk_norm_rope_cache_quant_impl
-with a single fused CUDA/Triton kernel that avoids intermediate HBM
-round-trips.  Performance reference: the AITER (AMD) kernel
-    aiter/ops/fused_qk_norm_rope_cache_quant_shuffle.py
-achieves meaningful gains for small-batch decode where these ops are
-memory-bandwidth bound.  See the vLLM fusion tracker
-    vllm-project/vllm#36066  (row: QK Norm + RoPE + Cache + Quant)
-for status across hardware platforms.
+Runtime context bridge
+----------------------
+The fused CUDA kernel still needs runtime-only cache state such as
+`kv_cache`, `slot_mapping`, and KV scales.  This module therefore registers a
+small custom op wrapper that resolves the attention context from `layer_name`
+and forwards the tensors into the native CUDA op.
 
 Relationship to existing passes
 --------------------------------
@@ -42,18 +33,20 @@ from torch._higher_order_ops import auto_functionalized
 from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
     Attention,
     get_attention_context,
 )
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherRMSNorm, MatcherRotaryEmbedding
-from .rms_quant_fusion import empty_bf16, empty_i64
+from .matcher_utils import MatcherRotaryEmbedding
+from .rms_quant_fusion import empty_bf16, empty_fp32, empty_i64
 
 logger = init_logger(__name__)
 
@@ -74,77 +67,37 @@ def _fused_qk_norm_rope_cache_quant_impl(
     is_neox: bool,
     layer_name: str = "",
 ) -> torch.Tensor:
-    """
-    Fused QK RMSNorm + RoPE + KV cache write.
+    """Resolve runtime cache context, then dispatch the fused CUDA kernel."""
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
 
-    Tensor shapes
-    -------------
-    query   : [T, num_heads,    head_dim]  – mutated in-place
-    key     : [T, num_kv_heads, head_dim]  – mutated in-place
-    value   : [T, num_kv_heads, head_dim]  – read-only
-    q_weight: [1, head_dim] or [head_dim]
-    k_weight: [1, head_dim] or [head_dim]
-    positions: [T]
-    cos_sin_cache: [max_seq_len, head_dim]
+    if layer_slot_mapping is None:
+        return torch.empty(0, device=query.device, dtype=query.dtype)
 
-    Returns a zero-size dummy tensor so that torch.compile sees the
-    side-effect dependency on the KV cache, mirroring
-    unified_kv_cache_update.
+    key_cache, value_cache = kv_cache.unbind(0)
 
-    TODO(cuda-fusion): replace sequential calls with a single fused kernel.
-    """
-    T = query.shape[0]
-    num_heads = query.shape[1]
-    num_kv_heads = key.shape[1]
     head_dim = query.shape[2]
 
-    # ---- Step 1: Q RMSNorm (normalise each head independently) ----
-    q_norm = torch.empty_like(query)
-    torch.ops._C.rms_norm(
-        result=q_norm,
-        input=query,
-        weight=q_weight.view(head_dim),
-        epsilon=eps,
+    torch.ops._C.fused_qk_norm_rope_cache_quant(
+        query,
+        key,
+        value,
+        key_cache,
+        value_cache,
+        q_weight.view(head_dim),
+        k_weight.view(head_dim),
+        cos_sin_cache,
+        positions,
+        layer_slot_mapping,
+        float(attn_layer._k_scale_float),
+        float(attn_layer._v_scale_float),
+        eps,
+        query.shape[1],
+        key.shape[1],
+        head_dim,
+        key_cache.shape[1],
+        is_neox,
+        attn_layer.kv_cache_dtype.startswith("fp8"),
     )
-    query.copy_(q_norm)
-
-    # ---- Step 2: K RMSNorm ----
-    k_norm = torch.empty_like(key)
-    torch.ops._C.rms_norm(
-        result=k_norm,
-        input=key,
-        weight=k_weight.view(head_dim),
-        epsilon=eps,
-    )
-    key.copy_(k_norm)
-
-    # ---- Step 3: RoPE (in-place, expects 2-D flat tensors) ----
-    q_flat = query.reshape(T, num_heads * head_dim)
-    k_flat = key.reshape(T, num_kv_heads * head_dim)
-    torch.ops._C.rotary_embedding(
-        positions, q_flat, k_flat, head_dim, cos_sin_cache, is_neox
-    )
-    # query / key are views of q_flat / k_flat, so they see the updated data.
-
-    # ---- Step 4: KV cache write (handles FP8 quant internally) ----
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
-    if layer_slot_mapping is not None:
-        # Import here to avoid a circular import at module load time.
-        from vllm.v1.attention.backends.fa_utils import (
-            reshape_and_cache_flash,
-        )
-
-        key_cache, value_cache = kv_cache.unbind(0)
-        reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            layer_slot_mapping,
-            attn_layer.impl.kv_cache_dtype,
-            attn_layer._k_scale,
-            attn_layer._v_scale,
-        )
 
     return torch.empty(0, device=query.device, dtype=query.dtype)
 
@@ -227,6 +180,7 @@ class QkNormRopeCacheQuantPattern:
         layer: Attention,
         eps: float,
         is_neox: bool,
+        rope_flashinfer: bool = False,
     ) -> None:
         self.layer_name = layer.layer_name
         self.num_heads = layer.num_heads
@@ -235,17 +189,18 @@ class QkNormRopeCacheQuantPattern:
         self.head_size_v = layer.head_size_v
         self.eps = eps
         self.is_neox = is_neox
+        self.rope_flashinfer = rope_flashinfer
 
         self.q_size = self.num_heads * self.head_size
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
-        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
+            use_flashinfer=self.rope_flashinfer,
         )
 
     def get_inputs(self) -> list[torch.Tensor]:
@@ -256,7 +211,10 @@ class QkNormRopeCacheQuantPattern:
         # Weights: [1, head_dim] – same convention as QkNormRopePattern
         q_weight = empty_bf16(1, self.head_size)
         k_weight = empty_bf16(1, self.head_size)
-        cos_sin_cache = empty_bf16(L, self.head_size)
+        if self.rope_flashinfer:
+            cos_sin_cache = empty_fp32(L, self.head_size)
+        else:
+            cos_sin_cache = empty_bf16(L, self.head_size)
         return [qkv, positions, q_weight, k_weight, cos_sin_cache]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -272,10 +230,21 @@ class QkNormRopeCacheQuantPattern:
         is_neox = self.is_neox
         layer_name = self.layer_name
 
-        rmsnorm_matcher = self.rmsnorm_matcher
         rope_matcher = self.rope_matcher
 
-        def pattern(
+        def apply_neox_rope_3d(
+            x: torch.Tensor,
+            cos: torch.Tensor,
+            sin: torch.Tensor,
+        ) -> torch.Tensor:
+            x1, x2 = x.chunk(2, dim=-1)
+            cos_expanded = cos.unsqueeze(-2)
+            sin_expanded = sin.unsqueeze(-2)
+            o1 = x1 * cos_expanded - x2 * sin_expanded
+            o2 = x2 * cos_expanded + x1 * sin_expanded
+            return torch.cat((o1, o2), dim=-1)
+
+        def pattern_flattened_rope(
             qkv: torch.Tensor,
             positions: torch.Tensor,
             q_weight: torch.Tensor,
@@ -284,27 +253,51 @@ class QkNormRopeCacheQuantPattern:
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             q, k, v = qkv.split([q_size, k_size, v_size], dim=-1)
 
-            # Q RMSNorm: per-head normalisation
-            q_by_head = q.reshape(-1, num_heads, head_size)
-            q_normed = rmsnorm_matcher(q_by_head, q_weight)
-            q_flat = q_normed.reshape(-1, q_size)
+            # Keep this path structurally aligned with QKNormRoPEFusionPass.
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_size, head_size)
+            q_normed_by_head = vllm.ir.ops.rms_norm(q_by_head, q_weight, eps)
+            q_flat = q_normed_by_head.view(q.shape)
 
-            # K RMSNorm: per-head normalisation
-            k_by_head = k.reshape(-1, num_kv_heads, head_size)
-            k_normed = rmsnorm_matcher(k_by_head, k_weight)
-            k_flat = k_normed.reshape(-1, k_size)
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_size, head_size)
+            k_normed_by_head = vllm.ir.ops.rms_norm(k_by_head, k_weight, eps)
+            k_flat = k_normed_by_head.view(k.shape)
 
-            # RoPE
-            q_rope, k_rope = rope_matcher(
-                positions, q_flat, k_flat, cos_sin_cache
-            )
+            # Flattened RoPE, then reshape to the same 3D layout as RopeKVCacheFusionPass.
+            q_rope, k_rope = rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
 
-            # Reshape for attention / cache
-            q_out = q_rope.reshape(-1, num_heads, head_size)
-            k_out = k_rope.reshape(-1, num_kv_heads, head_size)
-            v_out = v.reshape(-1, num_kv_heads, head_size_v)
+            q_out = q_rope.view(-1, num_heads, head_size)
+            k_out = k_rope.view(-1, num_kv_heads, head_size)
+            v_out = v.view(-1, num_kv_heads, head_size_v)
 
             # KV cache write (includes FP8 quant when kv_cache_dtype=fp8)
+            dummy = torch.ops.vllm.unified_kv_cache_update(
+                k_out, v_out, layer_name
+            )
+            return dummy, q_out, k_out, v_out
+
+        def pattern_expanded_3d_rope(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            q_weight: torch.Tensor,
+            k_weight: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([q_size, k_size, v_size], dim=-1)
+
+            # Q path: view -> RMS
+            q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_size, head_size)
+            q_normed_by_head = vllm.ir.ops.rms_norm(q_by_head, q_weight, eps)
+
+            # K path: view -> RMS
+            k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_size, head_size)
+            k_normed_by_head = vllm.ir.ops.rms_norm(k_by_head, k_weight, eps)
+
+            cos_sin = cos_sin_cache[positions]
+            cos, sin = cos_sin.chunk(2, dim=-1)
+            q_out = apply_neox_rope_3d(q_normed_by_head, cos, sin)
+            k_out = apply_neox_rope_3d(k_normed_by_head, cos, sin)
+            v_out = v.reshape(-1, num_kv_heads, head_size_v)
+
             dummy = torch.ops.vllm.unified_kv_cache_update(
                 k_out, v_out, layer_name
             )
@@ -344,13 +337,21 @@ class QkNormRopeCacheQuantPattern:
             view_to_reshape(gm)
             return gm
 
-        pm.register_replacement(
-            pattern,
-            replacement,
-            self.get_inputs(),
-            fwd_and_view_to_reshape,
-            pm_pass,
-        )
+        patterns = [pattern_flattened_rope]
+        # The manual 3D expansion below matches the Neox-style branch
+        # (`chunk -> mul/add -> cat`). Register it only for that branch to
+        # avoid generating duplicate pattern graphs for GPT-J style.
+        if is_neox:
+            patterns.append(pattern_expanded_3d_rope)
+
+        for pattern in patterns:
+            pm.register_replacement(
+                pattern,
+                replacement,
+                self.get_inputs(),
+                fwd_and_view_to_reshape,
+                pm_pass,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -397,11 +398,20 @@ class QKNormRopeCacheQuantFusionPass(VllmPatternMatcherPass):
         for _, layer in attn_layers.items():
             for eps in [1e-5, 1e-6]:
                 for is_neox in [True, False]:
-                    QkNormRopeCacheQuantPattern(
-                        layer=layer,
-                        eps=eps,
-                        is_neox=is_neox,
-                    ).register(self.patterns)
+                    if RotaryEmbedding.enabled():
+                        for rope_flashinfer in [False, True]:
+                            QkNormRopeCacheQuantPattern(
+                                layer=layer,
+                                eps=eps,
+                                is_neox=is_neox,
+                                rope_flashinfer=rope_flashinfer,
+                            ).register(self.patterns)
+                    else:
+                        QkNormRopeCacheQuantPattern(
+                            layer=layer,
+                            eps=eps,
+                            is_neox=is_neox,
+                        ).register(self.patterns)
 
             # Each (eps, is_neox) combo shares the seen-pattern cache, so
             # clear it between layers to avoid cross-layer collisions.
@@ -409,8 +419,59 @@ class QKNormRopeCacheQuantFusionPass(VllmPatternMatcherPass):
 
         self.dump_patterns(config, self.patterns)
 
+    @staticmethod
+    def _normalize_reshape_neg1(graph: fx.Graph) -> int:
+        """Replace literal ``-1`` first-dim in ``aten.reshape.default`` with
+        the symbolic batch-size placeholder already present in the graph.
+
+        ``torch.compile`` sometimes preserves the literal ``-1`` from
+        ``v.reshape(-1, …)`` while resolving the equivalent expression in
+        ``q.view(*q.shape[:-1], …)`` to a symbolic placeholder (e.g.
+        ``arg1_1``).  The pattern-matcher's ``check_fn`` re-traces with
+        symbolic shapes and maps every batch-dim to the *same* KeywordArg;
+        if the real graph mixes symbolic and literal ``-1`` the consistency
+        check (``repeated pattern differs``) fails.
+
+        This pre-pass makes all first-dims of ``reshape.default`` use the
+        same symbolic node, which is semantically equivalent because every
+        tensor in the compiled graph shares the same dynamic batch axis.
+        """
+        sym_batch: fx.Node | None = None
+        for node in graph.nodes:
+            if (node.op == "call_function"
+                    and node.target is torch.ops.aten.reshape.default):
+                shape = node.args[1]
+                if isinstance(shape, (list, tuple)) and len(shape) > 0:
+                    first = shape[0]
+                    if isinstance(first, fx.Node):
+                        sym_batch = first
+                        break
+
+        if sym_batch is None:
+            return 0
+
+        count = 0
+        for node in graph.nodes:
+            if (node.op == "call_function"
+                    and node.target is torch.ops.aten.reshape.default):
+                shape = node.args[1]
+                if (isinstance(shape, (list, tuple))
+                        and len(shape) > 0
+                        and shape[0] == -1):
+                    new_shape = [sym_batch] + list(shape[1:])
+                    node.args = (node.args[0], new_shape)
+                    count += 1
+        return count
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        norm_count = self._normalize_reshape_neg1(graph)
+        if norm_count:
+            logger.debug(
+                "QKNormRopeCacheQuantFusionPass: normalized %d reshape(-1,…) "
+                "nodes to use symbolic batch dim",
+                norm_count,
+            )
         self.matched_count = self.patterns.apply(graph)
         logger.debug(
             "QKNormRopeCacheQuantFusionPass: replaced %s pattern(s)",

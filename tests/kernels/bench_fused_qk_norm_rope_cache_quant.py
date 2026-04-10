@@ -152,17 +152,17 @@ def bench_one(
     )
     v_buf = torch.empty_like(k_buf)
 
-    # Pre-allocate q_out for v2 (naive fusion needs separate output)
-    q_out_v2 = torch.empty(
-        num_tokens, q_size, dtype=dtype, device=device
-    )
-
     # ==================================================================
-    #  v3 (warp-per-head): Q in-place in qkv
+    #  v3 (warp-per-head): separate Q/K/V in-place
     # ==================================================================
     def run_v3_only():
+        qkv_copy = qkv_static.clone()
+        q_v3, k_v3, v_v3 = qkv_copy.split([q_size, kv_size, kv_size], dim=-1)
+        q_v3 = q_v3.view(num_tokens, num_heads_q, head_dim)
+        k_v3 = k_v3.view(num_tokens, num_heads_kv, head_dim)
+        v_v3 = v_v3.view(num_tokens, num_heads_kv, head_dim)
         torch.ops._C.fused_qk_norm_rope_cache_quant(
-            qkv_static, k_cache, v_cache,
+            q_v3, k_v3, v_v3, k_cache, v_cache,
             q_weight, k_weight, cos_sin_cache,
             positions, slot_mapping,
             k_scale, v_scale, epsilon,
@@ -174,9 +174,14 @@ def bench_one(
     #  v2 (naive fusion): block-per-token, smem reduce
     # ==================================================================
     def run_v2_only():
+        qkv_copy = qkv_static.clone()
+        q_v2, k_v2, v_v2 = qkv_copy.split([q_size, kv_size, kv_size], dim=-1)
+        q_v2 = q_v2.view(num_tokens, num_heads_q, head_dim)
+        k_v2 = k_v2.view(num_tokens, num_heads_kv, head_dim)
+        v_v2 = v_v2.view(num_tokens, num_heads_kv, head_dim)
         torch.ops._C.fused_qk_norm_rope_cache_quant_v2(
-            q_out_v2, k_cache, v_cache,
-            qkv_static, q_weight, k_weight, cos_sin_cache,
+            q_v2, k_v2, v_v2, k_cache, v_cache,
+            q_weight, k_weight, cos_sin_cache,
             positions, slot_mapping,
             k_scale, v_scale, epsilon,
             num_heads_q, num_heads_kv, head_dim, block_size,
