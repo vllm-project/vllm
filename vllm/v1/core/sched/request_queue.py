@@ -136,23 +136,41 @@ class PriorityRequestQueue(RequestQueue):
     requests with a smaller value of `priority` are processed first.
     If multiple requests have the same priority, the one with the earlier
     `arrival_time` is processed first.
+
+    Removals use lazy deletion: requests are marked as removed in O(1) and
+    physically purged from the heap on the next pop/peek. This avoids the
+    O(n) heap.remove() + heapify() that the naive approach requires.
     """
 
     def __init__(self) -> None:
         self._heap: list[Request] = []
+        # Requests marked for removal but not yet purged from the heap.
+        self._removed: set[Request] = set()
+        # Active (non-removed) requests for O(1) len/bool/membership checks.
+        self._active: set[Request] = set()
+
+    def _purge_removed(self) -> None:
+        """Discard lazily-deleted entries from the top of the heap."""
+        while self._heap and self._heap[0] in self._removed:
+            self._removed.discard(heapq.heappop(self._heap))
 
     def add_request(self, request: Request) -> None:
         """Add a request to the queue according to priority policy."""
         heapq.heappush(self._heap, request)
+        self._active.add(request)
 
     def pop_request(self) -> Request:
         """Pop a request from the queue according to priority policy."""
+        self._purge_removed()
         if not self._heap:
             raise IndexError("pop from empty heap")
-        return heapq.heappop(self._heap)
+        request = heapq.heappop(self._heap)
+        self._active.discard(request)
+        return request
 
     def peek_request(self) -> Request:
         """Peek at the next request in the queue without removing it."""
+        self._purge_removed()
         if not self._heap:
             raise IndexError("peek from empty heap")
         return self._heap[0]
@@ -173,27 +191,32 @@ class PriorityRequestQueue(RequestQueue):
             self.add_request(request)
 
     def remove_request(self, request: Request) -> None:
-        """Remove a specific request from the queue."""
-        self._heap.remove(request)
-        heapq.heapify(self._heap)
+        """Mark a request for removal in O(1).
+
+        The entry remains in the heap until the next pop/peek, at which point
+        it is discarded without disturbing heap order.
+        """
+        if request in self._active:
+            self._removed.add(request)
+            self._active.discard(request)
 
     def remove_requests(self, requests: Iterable[Request]) -> None:
-        """Remove multiple specific requests from the queue."""
-        requests_to_remove = requests if isinstance(requests, set) else set(requests)
-        self._heap = [r for r in self._heap if r not in requests_to_remove]
-        heapq.heapify(self._heap)
+        """Mark multiple requests for removal in O(k), k = len(requests)."""
+        for r in requests:
+            self.remove_request(r)
 
     def __bool__(self) -> bool:
         """Check if queue has any requests."""
-        return bool(self._heap)
+        return bool(self._active)
 
     def __len__(self) -> int:
         """Get number of requests in queue."""
-        return len(self._heap)
+        return len(self._active)
 
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
-        heap_copy = self._heap[:]
+        heap_copy = [r for r in self._heap if r not in self._removed]
+        heapq.heapify(heap_copy)
         while heap_copy:
             yield heapq.heappop(heap_copy)
 
