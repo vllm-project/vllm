@@ -14,6 +14,7 @@ import pytest
 import torch
 import torch.multiprocessing as torch_mp
 
+from vllm.platforms import current_platform
 from vllm.v1.engine.tensor_ipc import (
     TensorIpcData,
     TensorIpcReceiver,
@@ -21,6 +22,7 @@ from vllm.v1.engine.tensor_ipc import (
 )
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
+DEVICE_TYPE = current_platform.device_type
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_multiprocessing():
@@ -52,8 +54,8 @@ def encoder_process(
         sender = TensorIpcSender(tensor_queue)
         encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
-        if torch.cuda.is_available():
-            device = "cuda:0"
+        if torch.accelerator.is_available():
+            device = f"{DEVICE_TYPE}:0"
             tensor = torch.randn(
                 *tensor_data["shape"], dtype=tensor_data["dtype"], device=device
             )
@@ -125,7 +127,7 @@ def decoder_process(
         retrieval_done.set()
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
 def test_cuda_tensor_queue_basic():
     """Test CUDA tensor IPC through the msgpack encoder/decoder path."""
     tensor_queue = torch_mp.Queue()
@@ -179,7 +181,7 @@ def test_cuda_tensor_queue_basic():
         f"{decoder_result.get('traceback', '')}"
     )
     assert decoder_result["matches_expected"], "Tensor shape mismatch"
-    assert "cuda" in decoder_result["device"], "Tensor not on CUDA device"
+    assert DEVICE_TYPE in decoder_result["device"], "Tensor not on GPU device"
     assert decoder_result["label"] == "cuda-msgpack"
 
 
@@ -384,7 +386,7 @@ def mixed_tensor_encoder_process(
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
         # But actually, let's just send CUDA tensor directly
-        cuda_tensor = torch.randn(4, 5, device="cuda:0")
+        cuda_tensor = torch.randn(4, 5, device=f"{DEVICE_TYPE}:0")
 
         # Manually send via IPC to test the mechanism
         cuda_tensor_shared = cuda_tensor.share_memory_()
@@ -430,7 +432,7 @@ def mixed_tensor_decoder_process(
         result_queue.put(
             {
                 "success": True,
-                "is_cuda": ipc_data.tensor.is_cuda,
+                "is_cuda": ipc_data.tensor.device.type != "cpu",
                 "shape": tuple(ipc_data.tensor.shape),
             }
         )
@@ -446,7 +448,7 @@ def mixed_tensor_decoder_process(
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
 def test_mixed_cpu_cuda_tensors():
     """Test encoding with mixed CPU and CUDA tensors using multiprocessing."""
     tensor_queue = torch_mp.Queue()
@@ -650,8 +652,8 @@ def test_ipc_disabled_mode():
     assert tensor_queues[0].empty(), "Tensor queue should be empty when IPC is disabled"
 
     # If CUDA is available, test with CUDA tensor too
-    if torch.cuda.is_available():
-        cuda_tensor = torch.randn(4, 5, device="cuda:0")
+    if torch.accelerator.is_available():
+        cuda_tensor = torch.randn(4, 5, device=f"{DEVICE_TYPE}:0")
         encoded_cuda = encoder.encode({"cuda_tensor": cuda_tensor})
         assert len(encoded_cuda) > 0
         assert tensor_queues[0].empty(), (
@@ -880,8 +882,8 @@ def test_concurrent_senders_interleaved_buffer():
 
 def test_mixed_cpu_cuda_with_ipc_enabled():
     """Test that encoder is configured correctly for IPC with all tensor types."""
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA not available")
+    if not torch.accelerator.is_available():
+        pytest.skip("GPU not available")
 
     tensor_queue = torch_mp.Queue()
 

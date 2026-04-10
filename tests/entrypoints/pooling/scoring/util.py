@@ -18,6 +18,9 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
+from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
 
 
 class ColBERTScoringHfRunner(torch.nn.Module):
@@ -26,7 +29,7 @@ class ColBERTScoringHfRunner(torch.nn.Module):
 
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(DEVICE_TYPE)
 
         extra = {}
         if self.device.type == "cpu":
