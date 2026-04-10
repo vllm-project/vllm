@@ -19,8 +19,8 @@ use serde_json::json;
 use serial_test::serial;
 use tower::{Service as _, ServiceExt as _};
 use vllm_chat::{
-    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatTextBackend,
-    SamplingParams,
+    ChatBackend, ChatEvent, ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole,
+    ChatTextBackend, DynChatRenderer, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
@@ -441,7 +441,13 @@ impl TextBackend for FakeChatBackend {
 }
 
 impl ChatBackend for FakeChatBackend {
-    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(self.clone())
+    }
+}
+
+impl ChatRenderer for FakeChatBackend {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
         let mut prompt = String::new();
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
@@ -489,8 +495,14 @@ impl TextBackend for FailingDecodeChatBackend {
 }
 
 impl ChatBackend for FailingDecodeChatBackend {
-    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
-        FakeChatBackend::new().apply_chat_template(request)
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(self.clone())
+    }
+}
+
+impl ChatRenderer for FailingDecodeChatBackend {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+        FakeChatBackend::new().render(request)
     }
 }
 

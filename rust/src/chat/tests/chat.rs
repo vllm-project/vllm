@@ -7,8 +7,8 @@ use futures::StreamExt as _;
 use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
-    ChatLlm, ChatMessage, ChatRequest, ChatRole, ChatTextBackend, ChatTool, ChatToolChoice,
-    FinishReason, SamplingParams,
+    ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
+    ChatToolChoice, DynChatRenderer, FinishReason, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
@@ -226,7 +226,13 @@ impl TextBackend for FakeChatBackend {
 }
 
 impl ChatBackend for FakeChatBackend {
-    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(self.clone())
+    }
+}
+
+impl ChatRenderer for FakeChatBackend {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
         if !self.has_template {
             return Err(vllm_chat::Error::MissingChatTemplate);
         }
@@ -246,7 +252,7 @@ impl ChatBackend for FakeChatBackend {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct FailingDecodeBackend {
     inner: FakeChatBackend,
 }
@@ -278,8 +284,14 @@ impl TextBackend for FailingDecodeBackend {
 }
 
 impl ChatBackend for FailingDecodeBackend {
-    fn apply_chat_template(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
-        self.inner.apply_chat_template(request)
+    fn chat_renderer(&self) -> DynChatRenderer {
+        Arc::new(self.clone())
+    }
+}
+
+impl ChatRenderer for FailingDecodeBackend {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+        self.inner.render(request)
     }
 }
 
@@ -656,7 +668,7 @@ fn chat_request_rejects_conflicting_generation_modes() {
 fn backend_requires_a_template() {
     let request = sample_request("chat-3");
     let backend = FakeChatBackend::without_template();
-    let error = backend.apply_chat_template(&request).unwrap_err();
+    let error = backend.chat_renderer().render(&request).unwrap_err();
     assert!(matches!(error, vllm_chat::Error::MissingChatTemplate));
 }
 

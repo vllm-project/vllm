@@ -12,12 +12,12 @@ use vllm_text::backends::hf::{
 use crate::backend::{ChatBackend, DynChatBackend};
 use crate::backends::LoadedModelBackends;
 use crate::error::{Error, Result};
-use crate::request::ChatRequest;
-use crate::template::ChatTemplate;
+use crate::renderers::DynChatRenderer;
+use crate::renderers::hf::HfChatRenderer;
 
 /// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
-    chat_template: ChatTemplate,
+    chat_renderer: DynChatRenderer,
 }
 
 impl HfChatBackend {
@@ -57,19 +57,20 @@ impl HfChatBackend {
                 );
             }
         }
-        let chat_template = ChatTemplate::new(template, special_tokens)?;
+        let chat_renderer: DynChatRenderer =
+            Arc::new(HfChatRenderer::new(template, special_tokens)?);
 
         info!(
             model_id,
             "loaded chat backend with Hugging Face model files"
         );
-        Ok(Self { chat_template })
+        Ok(Self { chat_renderer })
     }
 }
 
 impl ChatBackend for HfChatBackend {
-    fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
-        self.chat_template.apply_chat_template(request)
+    fn chat_renderer(&self) -> DynChatRenderer {
+        self.chat_renderer.clone()
     }
 }
 

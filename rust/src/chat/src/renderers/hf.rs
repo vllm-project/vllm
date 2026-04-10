@@ -5,20 +5,19 @@ use smg_tokenizer::{ChatTemplateState, SpecialTokens};
 use thiserror_ext::AsReport as _;
 use tracing::trace;
 
+use super::ChatRenderer;
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
 use crate::{AssistantMessageExt, Error};
 
-/// Chat template handling for Hugging Face models.
-///
-/// Currently it's a simple wrapper around smg's [`ChatTemplateState`].
-pub struct ChatTemplate {
+/// Hugging Face chat-template renderer backed by smg's [`ChatTemplateState`].
+pub struct HfChatRenderer {
     inner: ChatTemplateState,
     special_tokens: Option<SpecialTokens>,
 }
 
-impl ChatTemplate {
-    /// Create a chat template from the given template string.
+impl HfChatRenderer {
+    /// Create a renderer from the given template string.
     pub fn new(template: Option<String>, special_tokens: Option<SpecialTokens>) -> Result<Self> {
         Ok(Self {
             inner: ChatTemplateState::new(template)
@@ -27,15 +26,15 @@ impl ChatTemplate {
         })
     }
 
-    /// Apply the chat template to one chat request, rendering the prompt string to be tokenized and
-    /// submitted to the model.
+    /// Apply the chat template to one chat request, rendering the prompt string to be tokenized
+    /// and submitted to the model.
     ///
     /// If the request carries a per-request `chat_template` override, a temporary template is
     /// compiled from that string and used instead of the model's default.
-    pub fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
+    fn apply_chat_template(&self, request: &ChatRequest) -> Result<String> {
         if let Some(override_template) = &request.chat_options.chat_template {
             let overridden =
-                ChatTemplate::new(Some(override_template.clone()), self.special_tokens.clone())?;
+                Self::new(Some(override_template.clone()), self.special_tokens.clone())?;
             return overridden.apply_chat_template_inner(request);
         }
         self.apply_chat_template_inner(request)
@@ -90,6 +89,12 @@ impl ChatTemplate {
         );
 
         Ok(prompt)
+    }
+}
+
+impl ChatRenderer for HfChatRenderer {
+    fn render(&self, request: &ChatRequest) -> Result<String> {
+        self.apply_chat_template(request)
     }
 }
 
@@ -223,13 +228,13 @@ mod tests {
     use expect_test::expect;
     use smg_tokenizer::SpecialTokens;
 
-    use super::ChatTemplate;
+    use super::HfChatRenderer;
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
     };
-    use crate::{AssistantContentBlock, Error, Result};
+    use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
-    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../tests/templates/qwen3.jinja");
+    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../tests/templates/qwen3.jinja");
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
@@ -240,7 +245,7 @@ mod tests {
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
-        ChatTemplate::new(template.map(str::to_owned), None)?.apply_chat_template(request)
+        HfChatRenderer::new(template.map(str::to_owned), None)?.render(request)
     }
 
     #[test]
@@ -362,7 +367,7 @@ mod tests {
             ..Default::default()
         };
 
-        let rendered = ChatTemplate::new(
+        let rendered = HfChatRenderer::new(
             Some("{{ bos_token }}|{{ bos_token is defined }}".to_string()),
             Some(special_tokens),
         )

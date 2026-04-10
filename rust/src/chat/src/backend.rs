@@ -3,13 +3,12 @@ use std::sync::Arc;
 pub use vllm_text::SamplingHints;
 use vllm_text::TextBackend;
 
-use crate::error::Result;
-use crate::request::ChatRequest;
+use crate::renderers::DynChatRenderer;
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.
 pub trait ChatBackend: Send + Sync {
-    /// Apply the chat template and return the rendered text prompt.
-    fn apply_chat_template(&self, request: &ChatRequest) -> Result<String>;
+    /// Return the renderer used for chat-prompt construction.
+    fn chat_renderer(&self) -> DynChatRenderer;
 }
 
 /// Shared trait-object form of [`ChatBackend`].

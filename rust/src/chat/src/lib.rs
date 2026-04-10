@@ -19,6 +19,7 @@ pub use event::{
     AssistantToolCall, ChatEvent,
 };
 use futures::{StreamExt, TryStreamExt as _};
+pub use renderers::{ChatRenderer, DynChatRenderer};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, SamplingParams,
@@ -31,9 +32,9 @@ pub mod backends;
 mod error;
 mod event;
 mod output;
+mod renderers;
 mod request;
 mod stream;
-mod template;
 
 use reasoning_parser::ParserFactory as ReasoningParserFactory;
 use tool_parser::ParserFactory as ToolParserFactory;
@@ -149,7 +150,7 @@ impl ChatLlm {
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
 
-        let prompt = self.backend.apply_chat_template(&request)?;
+        let prompt = self.backend.chat_renderer().render(&request)?;
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
             prompt: Prompt::Text(prompt),
