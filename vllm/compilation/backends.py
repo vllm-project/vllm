@@ -421,6 +421,7 @@ class CompilerManager:
             set_functorch_config()
 
             cache_key = None
+            handle = None
 
             has_standalone_key_api = is_torch_equal_or_newer("2.12.0.dev")
             use_standalone_key = (
@@ -443,18 +444,19 @@ class CompilerManager:
                         compile_range,
                     )
                     if cache_key in self.loaded_artifacts:
-                        return self.loaded_artifacts[cache_key]
+                        compiled_graph = self.loaded_artifacts[cache_key]
 
-                with torch._functorch.config.patch(
-                    autograd_cache_normalize_inputs=True,
-                ):
-                    compiled_graph, handle = self.compiler.compile(
-                        graph,
-                        example_inputs,
-                        additional_inductor_config,
-                        compile_range,
-                        maybe_key,
-                    )
+                if compiled_graph is None:
+                    with torch._functorch.config.patch(
+                        autograd_cache_normalize_inputs=True,
+                    ):
+                        compiled_graph, handle = self.compiler.compile(
+                            graph,
+                            example_inputs,
+                            additional_inductor_config,
+                            compile_range,
+                            maybe_key,
+                        )
             else:
                 # torch < 2.12 or debug mode: capture key via
                 # monkey-patching during compilation.
