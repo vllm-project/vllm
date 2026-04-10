@@ -92,7 +92,7 @@ def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
     # GGML quant type names never contain hyphens, so a hyphen indicates
     # a vendor prefix.
     if "-" in gguf_quant_type:
-        prefix, remainder = gguf_quant_type.split("-", 1)
+        prefix, remainder = gguf_quant_type.rsplit("-", 1)
         if prefix and remainder:
             return _is_base_gguf_quant_type(remainder)
 
