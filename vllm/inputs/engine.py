@@ -128,6 +128,13 @@ class MultiModalInput(_InputOptions):
     `prompt_token_ids`.
     """
 
+    externally_processed: NotRequired[bool]
+    """
+    If ``True``, ``mm_kwargs`` have already been through the HF processor
+    and should be injected into the local processor cache so that MM cache
+    hit rate metrics are reported accurately.
+    """
+
 
 def mm_input(
     prompt_token_ids: list[int],

@@ -172,6 +172,49 @@ class InputProcessor:
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
 
+    def _inject_into_mm_cache(
+        self,
+        mm_hashes: dict[str, list[str]],
+        mm_kwargs: dict[str, list],
+    ) -> None:
+        """Inject pre-processed mm_kwargs into the processor cache.
+
+        When ``externally_processed`` is set, mm_kwargs have already been
+        through the HF processor. This method injects them into the
+        processor cache so that MM cache hit rate metrics are reported
+        accurately.
+
+        Uses ``get_and_update_item()`` with an empty prompt_updates list,
+        since token expansion has already been handled externally.
+        """
+        cache = getattr(self.renderer, "mm_processor_cache", None)
+        if cache is None:
+            # Fall back to recording stats directly if no cache available
+            mm_cache_stats = getattr(self.renderer, "_mm_cache_stats", None)
+            if mm_cache_stats is not None:
+                total = sum(len(h) for h in mm_hashes.values())
+                mm_cache_stats.record(total, total)
+            return
+        try:
+            for modality, hashes in mm_hashes.items():
+                items = mm_kwargs.get(modality, [])
+                for i, mm_hash in enumerate(hashes):
+                    if i < len(items) and items[i] is not None:
+                        # Insert into cache via get_and_update_item.
+                        # If already cached, this is a no-op that returns
+                        # the existing item. If not cached, it inserts.
+                        cache.get_and_update_item(
+                            (items[i], []),  # (kwargs_item, empty prompt_updates)
+                            mm_hash,
+                        )
+            # Update cache stats to reflect the externally processed items
+            self.renderer.update_mm_cache_stats()
+        except Exception:
+            logger.debug(
+                "Failed to inject mm_kwargs into processor cache",
+                exc_info=True,
+            )
+
     @staticmethod
     def assign_request_id(request: EngineCoreRequest):
         """Replace the externally supplied request ID with an internal request ID
@@ -295,6 +338,14 @@ class InputProcessor:
                     f"mm_hashes must contain only strings, got: {decoder_mm_hashes}. "
                     "This is likely due to an incorrect custom implementation of "
                     "MultiModalProcessor.apply method."
+                )
+
+            # If mm_kwargs were pre-processed externally, inject into
+            # the processor cache so that MM cache hit rate metrics are
+            # reported accurately.
+            if decoder_inputs.get("externally_processed"):
+                self._inject_into_mm_cache(
+                    decoder_mm_hashes, decoder_mm_inputs
                 )
 
             # Merge and flatten multimodal placeholders, hashes and inputs
