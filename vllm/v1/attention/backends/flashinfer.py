@@ -612,13 +612,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.cache_dtype
             )
         else:
-            # Only set to "auto" if cache_config and kv_cache_spec disagree,
-            # indicating kv_cache_dtype_skip_layers is used.
-            self.cache_dtype = (
-                "auto"
-                if is_quantized_kv_cache(self.cache_config.cache_dtype)
-                else self.cache_config.cache_dtype
-            )
+            self.cache_dtype = "auto"
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
