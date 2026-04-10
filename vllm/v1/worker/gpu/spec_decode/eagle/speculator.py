@@ -108,16 +108,20 @@ class EagleSpeculator:
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         cudagraph_mode = self.vllm_config.compilation_config.cudagraph_mode
+        # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = EagleCudaGraphManager(
             self.vllm_config,
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,
         )
+        # Initialize cudagraph manager for draft generation (draft positions > 0).
         self.decode_cudagraph_manager = EagleCudaGraphManager(
             self.vllm_config,
             self.device,
-            cudagraph_mode,
+            # Only use FULL graph mode, if available, because draft decodes
+            # only consist of a single token.
+            cudagraph_mode.decode_mode(),
             decode_query_len=1,
         )
         # Share a single pool between prefill and decode since they never
@@ -341,6 +345,11 @@ class EagleSpeculator:
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
 
+        # Capture the prefill routine (model forward + compute_logits +
+        # gumbel_sample).
+        # For FULL graphs, the entire routine is recorded as one graph.
+        # For PIECEWISE, only the model's compiled regions are captured
+        # and the rest (compute_logits, gumbel_sample) runs eagerly.
         assert self.prefill_cudagraph_manager is not None
         self.prefill_cudagraph_manager.capture(
             self.prefill,
@@ -354,6 +363,14 @@ class EagleSpeculator:
 
         if self.num_speculative_steps == 1:
             return
+
+        # Capture the decode draft generation loop (model forward +
+        # compute_logits + gumbel_sample + update_eagle_inputs, for
+        # each step).
+        # For FULL graphs, the entire multi-step loop is recorded as
+        # one graph. For PIECEWISE, only the model's compiled regions
+        # are captured, and the rest (compute_logits, gumbel_sample,
+        # update_eagle_inputs) runs eagerly.
         assert self.decode_cudagraph_manager is not None
         self.decode_cudagraph_manager.capture(
             self.generate_draft,
@@ -435,25 +452,29 @@ class EagleSpeculator:
         )
 
         # When all requests are decoding (no true prefills), each has
-        # num_speculative_steps + 1 tokens, enabling FULL cudagraph.
+        # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         # Mixed or prefill-only batches fall back to PIECEWISE.
-        prefill_batch_desc, num_tokens_across_dp = self._dispatch_and_sync_dp(
+        prefill_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.prefill_cudagraph_manager,
             num_reqs,
             num_tokens,
             get_uniform_token_count(num_reqs, num_tokens, max_query_len),
+            dp_size=self.dp_size,
+            dp_rank=self.dp_rank,
+            need_eager=is_profile,
         )
 
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # It is necessary to rebuild the attention metadata when
-            # replaying the FULL cudagraph so that any attention
-            # metadata builder state is updated.
+            # replaying the FULL graph so that any attention metadata
+            # builder state is updated.
             self._build_draft_attn_metadata(
                 num_reqs=num_reqs,
                 num_reqs_padded=prefill_batch_desc.num_reqs or num_reqs,
                 num_tokens_padded=prefill_batch_desc.num_tokens,
                 max_query_len=self.num_speculative_steps + 1,
             )
+            # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
             self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
         else:
@@ -484,8 +505,8 @@ class EagleSpeculator:
             self.max_num_reqs,
         )
 
-        # Each request produces exactly 1 token per draft decode step,
-        # enabling FULL cudagraph.
+        # Each request produces exactly 1 token per draft generation step,
+        # enabling FULL graph replay.
         decode_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
             self.decode_cudagraph_manager,
             num_reqs,
@@ -501,8 +522,8 @@ class EagleSpeculator:
         if not (dummy_run and skip_attn_for_dummy_run):
             # Build attention metadata and slot mappings for the draft
             # decode steps. It is necessary to rebuild the attention
-            # metadata even when replaying the FULL cudagraph so that
-            # any attention metadata builder state is updated.
+            # metadata even when replaying the FULL graph so that any
+            # attention metadata builder state is updated.
             slot_mappings = self.block_tables.compute_slot_mappings(
                 self.idx_mapping[:num_reqs],
                 self.input_buffers.query_start_loc[: num_reqs + 1],
@@ -520,6 +541,7 @@ class EagleSpeculator:
             )
 
         if decode_batch_desc.cg_mode == CUDAGraphMode.FULL:
+            # Replay the full graph for draft generation.
             assert self.decode_cudagraph_manager is not None
             self.decode_cudagraph_manager.run_fullgraph(decode_batch_desc)
         else:
