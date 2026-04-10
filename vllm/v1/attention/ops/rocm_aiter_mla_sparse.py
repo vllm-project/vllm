@@ -339,12 +339,9 @@ def rocm_fp8_paged_mqa_logits(
         (out_qk,) = current_workspace_manager().get_simultaneous(
             ((heads, actual_batch, max_model_len), torch.float32),
         )
-<<<<<<< HEAD
         # TODO: 1. Replace _stage1 and out_qk.sum with another fused variant;
         #       2. Remove ChunkQ when AITER PR #2891 merged
-=======
         out_qk.fill_(float("-inf"))
->>>>>>> 8fa7992f8 ([ROCm][perf] Use workspace manager for sparse indexer allocations)
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,

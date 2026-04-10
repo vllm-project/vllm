@@ -266,6 +266,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         next_n = self.num_speculative_tokens + 1
+        if self.num_speculative_tokens > 2 and current_platform.is_rocm():
+            logger.warning_once(
+                "num_speculative_tokens > 2 (=%d) with ROCm AITER "
+                "sparse indexer kernel may crash or produce incorrect results. "
+                "num_speculative_tokens <= 2 is recommended.",
+                self.num_speculative_tokens,
+            )
         self.reorder_batch_threshold += self.num_speculative_tokens
         # NOTE(zyongye) fp4 indexer cache only natively supports next_n in
         # natively_supported_next_n_fp4; for other next_n values we fall back
