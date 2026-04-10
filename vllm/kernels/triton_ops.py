@@ -141,8 +141,13 @@ _triton_group_quant_args = (
         fp8_dtype != torch.float8_e4m3fnuz  # constexpr min/max are fixed at load time
         and x.stride(-1) == 1  # last dimension must be contiguous
         and x.shape[-1] % group_shape[-1] == 0
+        and (
+            column_major or scale_alignment == 1
+        )  # row-major only supports alignment=1
     )
 )
+"""triton dynamic_group_quant_fp8 requires contiguous input, hidden dim divisible by
+group size, non-fnuz fp8 dtype, and scale_alignment=1 when row-major."""
 
 
 @ir.ops.dynamic_group_quant_fp8.register_impl(
