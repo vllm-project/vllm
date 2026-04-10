@@ -30,7 +30,9 @@ class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return False, "requires ROCm or CUDA."
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(
+        cls, config: Int8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
         return True, None
 
     def apply_weights(

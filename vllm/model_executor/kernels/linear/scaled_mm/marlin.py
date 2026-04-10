@@ -55,7 +55,9 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(
+        cls, config: FP8ScaledMMLinearLayerConfig
+    ) -> tuple[bool, str | None]:
         return True, None
 
     def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
