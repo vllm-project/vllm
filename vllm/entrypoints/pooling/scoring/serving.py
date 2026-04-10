@@ -4,7 +4,6 @@
 from fastapi.responses import JSONResponse, Response
 
 from vllm import PoolingParams
-from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
@@ -42,25 +41,23 @@ class ServingScores(PoolingServing):
         enable_flash_late_interaction: bool = True,
         **kwargs,
     ):
-        self.score_type = engine_client.model_config.score_type
+        self.io_processor_name: str = engine_client.model_config.score_type
         self.enable_flash_late_interaction = (
-            self.score_type == "late-interaction" and enable_flash_late_interaction
+            self.io_processor_name == "late-interaction"
+            and enable_flash_late_interaction
         )
+
+        if self.enable_flash_late_interaction:
+            self.io_processor_name = "flash-late-interaction"
+
+        if engine_client.model_config.architecture == "JinaForRanking":
+            self.io_processor_name = "jina-reranking-scoring"
+            self.enable_flash_late_interaction = False
 
         super().__init__(engine_client, *args, **kwargs)
 
-    def init_io_processor(
-        self, vllm_config: VllmConfig, *args, **kwargs
-    ) -> PoolingIOProcessor:
-        model_config = vllm_config.model_config
-
-        score_type: str = model_config.score_type
-        if self.enable_flash_late_interaction:
-            score_type = "flash-late-interaction"
-
-        assert score_type in ScoringIOProcessors
-        processor_cls = ScoringIOProcessors[score_type]
-        return processor_cls(vllm_config, *args, **kwargs)
+    def init_io_processor(self, *args, **kwargs) -> PoolingIOProcessor:
+        return ScoringIOProcessors[self.io_processor_name](*args, **kwargs)
 
     async def __call__(self, *args, **kwargs) -> Response:
         if not self.enable_flash_late_interaction:

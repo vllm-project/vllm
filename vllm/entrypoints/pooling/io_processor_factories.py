@@ -59,6 +59,13 @@ def init_pooling_io_processors(
         if score_type is not None and score_type in ScoringIOProcessors:
             processors[score_type] = ScoringIOProcessors[score_type]
 
+    if model_config.architecture == "JinaForRanking":
+        from .embed.io_processor import JinaRankingTokenEmbedIOProcessor
+        from .scoring.io_processor import ScoringIOProcessors
+
+        processors["token_embed"] = JinaRankingTokenEmbedIOProcessor
+        processors["late-interaction"] = ScoringIOProcessors["jina-reranking-scoring"]
+
     return {
         task: processor_cls(
             vllm_config=vllm_config,

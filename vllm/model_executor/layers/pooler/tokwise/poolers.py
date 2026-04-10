@@ -58,7 +58,7 @@ class TokenPooler(Pooler):
     def __init__(
         self,
         pooling: TokenPoolingMethod | TokenPoolingFn,
-        head: TokenPoolerHead | TokenPoolingHeadFn,
+        head: TokenPoolerHead | TokenPoolingHeadFn | None = None,
     ) -> None:
         super().__init__()
 
@@ -89,7 +89,8 @@ class TokenPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> TokenPoolerOutput:
         pooled_data = self.pooling(hidden_states, pooling_metadata)
-        pooled_data = self.head(pooled_data, pooling_metadata)
+        if self.head is not None:
+            pooled_data = self.head(pooled_data, pooling_metadata)
         return pooled_data
 
 
