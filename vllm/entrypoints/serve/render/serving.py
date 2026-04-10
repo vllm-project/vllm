@@ -65,7 +65,6 @@ class OpenAIServingRender:
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
-        io_processor: Any,
         model_registry: OpenAIModelRegistry,
         *,
         request_logger: RequestLogger | None,
@@ -81,7 +80,6 @@ class OpenAIServingRender:
     ) -> None:
         self.model_config = model_config
         self.renderer = renderer
-        self.io_processor = io_processor
         self.model_registry = model_registry
         self.request_logger = request_logger
         self.chat_template = chat_template
