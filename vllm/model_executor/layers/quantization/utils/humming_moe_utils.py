@@ -14,7 +14,7 @@ def humming_moe_align(
     expert_map: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert len(configs) > 0 and len(configs) % 3 == 0
-    # NOTE: we choose moe_block_size based on 
+    # NOTE: we choose moe_block_size based on
     #       num_tokens * top_k (= topk_ids.nelement())
     shape_m = topk_ids.nelement()
 

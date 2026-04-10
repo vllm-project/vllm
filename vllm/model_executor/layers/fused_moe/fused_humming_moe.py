@@ -56,7 +56,6 @@ def get_humming_moe_gemm_type():
 
 
 class HummingExpertsBase(mk.FusedMoEExpertsModular):
-
     def __init__(
         self,
         layer: torch.nn.Module,
@@ -69,6 +68,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.init_humming_moe()
 
         if prepare_finalize is not None:
+            assert quant_method.moe_quant_config is not None
             super().__init__(
                 moe_config=quant_method.moe,
                 quant_config=quant_method.moe_quant_config,
@@ -197,6 +197,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if self.is_batched:
             max_num_tokens = self.max_num_tokens
             num_dispatchers = self.num_dispatchers
+            assert max_num_tokens is not None and num_dispatchers is not None
             real_shape_m = num_experts * max_num_tokens * num_dispatchers
             output_shape = (num_experts, max_num_tokens * num_dispatchers, K)
         else:
@@ -294,7 +295,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        return self._workspace_shape(M, topk, activation)
+        return self._workspace_shapes(M, topk, activation)
 
     def make_workspaces(self, M: int, topk: int, activation: MoEActivation):
         shapes = self._workspace_shapes(M, topk, activation)
@@ -376,7 +377,7 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
         topk_ids: torch.Tensor,
         expert_map: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
         valid_shape_m = math.ceil(valid_shape_m)
 
@@ -388,6 +389,8 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
             raise ValueError(f"cannot found moe_block_size for shape {valid_shape_m}")
 
         if self.is_batched:
+            assert self.max_num_tokens is not None
+            assert expert_tokens_meta is not None
             sorted_ids, expert_ids, num_tokens_padded = batched_moe_align_block_size(
                 max_tokens_per_batch=self.max_num_tokens,
                 block_size=moe_block_size,

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 import triton
 import triton.language as tl
@@ -60,10 +62,6 @@ def moe_fused_mul_sum_kernel(
         acc.to(outputs_ptr.dtype.element_ty),
         mask=mask,
     )
-
-
-def _get_sm_version() -> int:
-    return torch.cuda.get_device_capability()[0]
 
 
 def _heuristic_config(
@@ -158,13 +156,11 @@ def moe_fused_mul_sum(
     assert topk_weights.shape == (num_tokens, top_k)
 
     if not isinstance(inputs, FakeTensor):
-        sm_major = _get_sm_version()
         BLOCK_M, BLOCK_K, num_warps, num_stages = _heuristic_config(
             num_tokens,
             top_k,
             size,
             inputs.element_size(),
-            sm_major,
         )
         grid = (triton.cdiv(size, BLOCK_K), triton.cdiv(num_tokens, BLOCK_M))
         moe_fused_mul_sum_kernel[grid](

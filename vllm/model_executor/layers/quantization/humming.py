@@ -837,10 +837,12 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 already_padded=True,
             )
 
+        experts: HummingIndexedExperts | HummingGroupedExperts
         if get_humming_moe_gemm_type() == "indexed":
-            self.experts = HummingIndexedExperts(layer, self)
+            experts = HummingIndexedExperts(layer, self)
         else:
-            self.experts = HummingGroupedExperts(layer, self)
+            experts = HummingGroupedExperts(layer, self)
+        self.experts = experts
 
     def select_gemm_impl(
         self,
@@ -848,6 +850,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
     ):
         from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+
         activation_format = prepare_finalize.activation_format
         if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
             if get_humming_moe_gemm_type() == "indexed":
