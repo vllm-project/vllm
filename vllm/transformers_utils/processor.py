@@ -535,10 +535,40 @@ def call_hf_processor_mm_only(
     audio: AudioInput | None = None,
     **kwargs,
 ) -> BatchFeature:
-    output_kwargs = processor._merge_kwargs(
-        get_processor_kwargs_type(processor),
-        **kwargs,
-    )
+    if not hasattr(processor, "image_processor") and not hasattr(processor, "video_processor") and not hasattr(processor, "feature_extractor"):
+        logger.info(f"{processor.__class__.__name__} Identified as a monolithic mixed processor, merge parameters for direct invocation.")
+        dummy_text = ""
+        if images is not None:
+            num_imgs = len(images) if isinstance(images, (list, tuple)) else 1
+            dummy_text += "<image>" * num_imgs
+        if videos is not None:
+            num_vids = len(videos) if isinstance(videos, (list, tuple)) else 1
+            dummy_text += "<video>" * num_vids
+        if audio is not None:
+            num_aud = len(audio) if isinstance(audio, (list, tuple)) else 1
+            audio_ctx = getattr(processor, "AUDIO_CONTEXT", "<so_embedding>")
+            dummy_text += audio_ctx * num_aud
+        return processor(
+            text=dummy_text if dummy_text else None,
+            images=images,
+            videos=videos,
+            audios=audio,  
+            **kwargs,
+        )
+
+    try:
+        output_kwargs = processor._merge_kwargs(
+            get_processor_kwargs_type(processor),
+            **kwargs,
+        )
+    except (AttributeError, TypeError, NotImplementedError) as e:
+        logger.warning(f"Failed to use _merge_kwargs. The fallback tiling strategy was triggered. Error message: {e}")
+        output_kwargs = {
+            "text_kwargs": kwargs.copy(),
+            "images_kwargs": kwargs.copy(),
+            "videos_kwargs": kwargs.copy(),
+            "audio_kwargs": kwargs.copy(),
+        }
 
     if audio is not None and (
         feature_extractor := getattr(processor, "feature_extractor", None)
