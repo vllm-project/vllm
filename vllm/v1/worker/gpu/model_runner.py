@@ -155,6 +155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_config
         )
         self.encoder_cache = None
+        self._deferred_encoder_free_hashes: list[str] = []
         if self.supports_mm_inputs and self.is_first_pp_rank:
             self.encoder_cache = EncoderCache()
 
@@ -621,9 +622,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
+        # Defer freeing encoder cache entries until after speculative
+        # draft proposal. The speculator reads the encoder cache, so
+        # evicting here would cause a cache miss.
+        # https://github.com/vllm-project/vllm/issues/38551
         if self.encoder_cache is not None:
-            for mm_hash in scheduler_output.free_encoder_mm_hashes:
-                self.encoder_cache.free_encoder_cache(mm_hash)
+            self._deferred_encoder_free_hashes = list(
+                scheduler_output.free_encoder_mm_hashes)
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -1233,6 +1238,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
+
+        # Free encoder cache entries deferred from free_states, now
+        # that both target forward and speculator reads are complete.
+        if self.encoder_cache is not None:
+            for mm_hash in self._deferred_encoder_free_hashes:
+                self.encoder_cache.free_encoder_cache(mm_hash)
+            self._deferred_encoder_free_hashes = []
 
         if self.use_async_scheduling:
             return async_output

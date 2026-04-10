@@ -501,6 +501,8 @@ class GPUModelRunner(
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        # Encoder cache entries to free after MTP draft proposal.
+        self._deferred_encoder_free_hashes: list[str] = []
         self.late_interaction_runner = LateInteractionRunner()
 
         # Encoder CUDA graph manager (initialized after model load if enabled)
@@ -1084,9 +1086,12 @@ class GPUModelRunner(
         if scheduler_output.new_block_ids_to_zero:
             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
-        # Free the cached encoder outputs.
-        for mm_hash in scheduler_output.free_encoder_mm_hashes:
-            self.encoder_cache.pop(mm_hash, None)
+        # Defer freeing encoder cache entries until after MTP draft
+        # proposal. _gather_mm_embeddings reads the encoder cache during
+        # MTP, so popping here would cause a cache miss.
+        # https://github.com/vllm-project/vllm/issues/38551
+        self._deferred_encoder_free_hashes = list(
+            scheduler_output.free_encoder_mm_hashes)
 
         # Remove the unscheduled requests from the persistent batch.
         # NOTE(woosuk): The unscheduled requests are either preempted requests
@@ -4301,6 +4306,12 @@ class GPUModelRunner(
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
+
+        # Free encoder cache entries deferred from _update_states, now
+        # that both target forward and MTP draft reads are complete.
+        for mm_hash in self._deferred_encoder_free_hashes:
+            self.encoder_cache.pop(mm_hash, None)
+        self._deferred_encoder_free_hashes = []
 
         # Finalize KV connector (wait_for_save + clear metadata) after
         # draft model runs. Deferred from target model forward to allow
