@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/jinaai/jina-reranker-v3/blob/main/modeling.py
+from collections.abc import Iterable
 
 import torch
 from torch import nn
@@ -18,7 +19,7 @@ from ..layers.pooler.tokwise import (
 )
 from .interfaces import SupportsLateInteraction
 from .qwen3 import Qwen3Model
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):
@@ -66,6 +67,10 @@ class JinaForRanking(nn.Module, SupportsLateInteraction):
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
         return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=(["lm_head."]))
+        return loader.load_weights(weights)
 
 
 class JinaForRankingPool(StepPool):
