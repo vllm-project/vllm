@@ -86,7 +86,6 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
     serving_render = OpenAIServingRender(
         model_config=engine.model_config,
         renderer=engine.renderer,
-        io_processor=engine.io_processor,
         model_registry=models.registry,
         request_logger=None,
         chat_template=None,
@@ -148,7 +147,6 @@ def _mock_engine() -> MagicMock:
     engine.errored = False
     engine.model_config = MockModelConfig()
     engine.input_processor = MagicMock()
-    engine.io_processor = MagicMock()
     engine.renderer = _build_renderer(engine.model_config)
     return engine
 

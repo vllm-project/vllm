@@ -18,7 +18,7 @@ pull_request_rules:
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:
-    - status-failure=pre-commit
+    - check-failure=pre-commit
     - -closed
     - -draft
   actions:
@@ -51,7 +51,7 @@ pull_request_rules:
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails
   conditions:
-    - status-failure=dco
+    - check-failure=dco
     - -closed
     - -draft
   actions:
@@ -378,17 +378,18 @@ pull_request_rules:
       add:
         - tool-calling
 
-- name: auto-rebase if approved, ready, and 40 commits behind main
+- name: auto-rebase to keep merge candidate within 1 day behind main
   conditions:
     - base = main
     - label=ready
     - "#approved-reviews-by >= 1"
-    - "#commits-behind >= 40"
+    - "#commits-behind >= 50"
+    - "#check-failure = 0"
     - -closed
     - -draft
     - -conflict
   actions:
-    rebase: {}
+    update: {}
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
