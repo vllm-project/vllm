@@ -468,6 +468,11 @@ class GPUModelRunner(
         self.plugin_manager = load_observation_plugins(
             self.vllm_config.observation_plugins, self.vllm_config
         )
+        if self.plugin_manager and self.plugin_manager.observe_decode:
+            logger.warning(
+                "observe_decode=True requested but decode observation is not yet "
+                "implemented. Only prefill phases will be observed."
+            )
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -1171,6 +1176,8 @@ class GPUModelRunner(
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
+            if self.plugin_manager:
+                self.plugin_manager.on_request_complete(req_id)
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
@@ -1229,6 +1236,8 @@ class GPUModelRunner(
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
+            if self.plugin_manager:
+                self.plugin_manager.on_request_start(req_id, prompt=None)
             if req_id in self.requests:
                 # For streaming case only.
                 req_state = self._update_streaming_request(req_id, new_req_data)
@@ -4388,8 +4397,20 @@ class GPUModelRunner(
 
             if is_prefill_batch and self.observation_hook:
                 request_contexts = []
+                current_offset = 0
                 for req_id in self.input_batch.req_ids:
-                    request_contexts.append(RequestContext(request_id=req_id))
+                    num_tokens = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                    req_state = self.requests[req_id]
+                    is_prefill = req_state.num_computed_tokens < req_state.num_prompt_tokens
+                    
+                    request_contexts.append(RequestContext(
+                        request_id=req_id,
+                        is_prefill=is_prefill,
+                        batch_offset=current_offset,
+                        num_tokens=num_tokens,
+                        num_cached_tokens=req_state.num_computed_tokens,
+                    ))
+                    current_offset += num_tokens
 
                 observation_results = self.observation_hook.process_step(
                     request_contexts
