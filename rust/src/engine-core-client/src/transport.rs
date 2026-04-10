@@ -59,6 +59,12 @@ impl EngineId {
         }
         Some(u16::from_le_bytes([self[0], self[1]]) as u32)
     }
+
+    /// Construct an engine id from the Python-compatible engine index encoding (two-byte
+    /// little-endian).
+    pub fn from_engine_index(value: u32) -> Self {
+        Self(Bytes::copy_from_slice(&(value as u16).to_le_bytes()))
+    }
 }
 
 impl Deref for EngineId {
@@ -78,14 +84,6 @@ impl From<Vec<u8>> for EngineId {
 impl<const N: usize> From<&[u8; N]> for EngineId {
     fn from(value: &[u8; N]) -> Self {
         Self(Bytes::copy_from_slice(value))
-    }
-}
-
-impl From<usize> for EngineId {
-    /// Create an engine id from an index, using the same two-byte little-endian
-    /// encoding that Python vllm `EngineCoreProc` uses for ZMQ identities.
-    fn from(value: usize) -> Self {
-        Self(Bytes::copy_from_slice(&(value as u16).to_le_bytes()))
     }
 }
 

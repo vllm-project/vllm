@@ -2536,7 +2536,7 @@ async fn bootstrapped_external_coordinator_running_state_suppresses_wakeup() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bootstrapped_external_coordinator_keeps_local_inflight_routing() {
+async fn bootstrapped_external_coordinator_routes_using_main_output_scheduler_stats() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let input_address = ipc.input_endpoint();
@@ -2580,21 +2580,49 @@ async fn bootstrapped_external_coordinator_keeps_local_inflight_routing() {
     send_external_coordinator_publish(&mut stats_socket, &(Value::Nil, 0_u32, true)).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
-    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
-
-    let add_1 = recv_engine_message(&mut dealer0).await;
-    let req_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
-    assert_eq!(req_1.request_id, "req-1");
-
-    let add_2 = recv_engine_message(&mut dealer1).await;
-    let req_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
-    assert_eq!(req_2.request_id, "req-2");
-
     send_outputs(
         &mut push0,
         EngineCoreOutputs {
             engine_index: 0,
+            scheduler_stats: Some(Box::new(SchedulerStats {
+                num_waiting_reqs: 1,
+                num_running_reqs: 0,
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await;
+    send_outputs(
+        &mut push1,
+        EngineCoreOutputs {
+            engine_index: 1,
+            scheduler_stats: Some(Box::new(SchedulerStats {
+                num_waiting_reqs: 0,
+                num_running_reqs: 0,
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let mut stream_1 = client.call(sample_request_with_id("req-1")).await.unwrap();
+    let mut stream_2 = client.call(sample_request_with_id("req-2")).await.unwrap();
+
+    let add_1 = recv_engine_message(&mut dealer1).await;
+    let req_1: EngineCoreRequest = rmp_serde::from_slice(&add_1[1]).unwrap();
+    assert_eq!(req_1.request_id, "req-1");
+
+    let add_2 = recv_engine_message(&mut dealer0).await;
+    let req_2: EngineCoreRequest = rmp_serde::from_slice(&add_2[1]).unwrap();
+    assert_eq!(req_2.request_id, "req-2");
+
+    send_outputs(
+        &mut push1,
+        EngineCoreOutputs {
+            engine_index: 1,
             outputs: vec![request_output(
                 "req-1",
                 vec![],
@@ -2606,9 +2634,9 @@ async fn bootstrapped_external_coordinator_keeps_local_inflight_routing() {
     )
     .await;
     send_outputs(
-        &mut push1,
+        &mut push0,
         EngineCoreOutputs {
-            engine_index: 1,
+            engine_index: 0,
             outputs: vec![request_output(
                 "req-2",
                 vec![],

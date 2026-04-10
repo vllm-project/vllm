@@ -15,6 +15,7 @@ use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::record_scheduler_stats;
+use crate::protocol::stats::SchedulerStats;
 use crate::protocol::{
     ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
     UtilityOutput, encode_msgpack,
@@ -110,6 +111,14 @@ impl ClientInner {
         request_ids: impl IntoIterator<Item = &'a String>,
     ) -> Vec<mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>> {
         self.request_reg.lock().finish_many(request_ids)
+    }
+
+    /// Apply one scheduler stats update for the given engine to the local routing state.
+    /// Returns `false` if the engine is unknown to the client.
+    pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
+        self.request_reg
+            .lock()
+            .apply_scheduler_stats(engine_index, stats)
     }
 
     /// Close all active request streams and utility calls with the first persistent health error.
@@ -300,6 +309,12 @@ pub(crate) async fn run_output_dispatcher_loop(
                     }
 
                     if let Some(scheduler_stats) = batch.scheduler_stats.as_ref() {
+                        if !inner.apply_scheduler_stats(batch.engine_index, scheduler_stats) {
+                            debug!(
+                                engine_index = batch.engine_index,
+                                "dropping scheduler stats for unknown engine"
+                            );
+                        }
                         record_scheduler_stats(
                             &METRICS.scheduler,
                             inner.model_name(),

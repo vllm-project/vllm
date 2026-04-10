@@ -2,10 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use tokio::sync::{mpsc, oneshot};
+use tracing::trace;
 
 use crate::EngineId;
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
+use crate::protocol::stats::SchedulerStats;
 use crate::protocol::{EngineCoreOutput, UtilityOutput};
 use crate::transport::ConnectedEngine;
 
@@ -20,6 +22,65 @@ struct TrackedRequest {
     engine_id: EngineId,
 }
 
+/// The latest real scheduler-side load snapshot observed from one engine.
+///
+/// These counters come from `scheduler_stats` on the normal engine output path and are the
+/// preferred routing signal once available.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EngineLoadSnapshot {
+    /// Requests still counted on the scheduler's waiting side.
+    waiting: usize,
+    /// Requests currently counted on the scheduler's running side.
+    running: usize,
+}
+
+/// Frontend-local routing state for one connected engine.
+///
+/// The frontend prefers the latest real scheduler stats when present, but keeps a local
+/// in-flight count as the bootstrap fallback before any stats have arrived. An optimistic
+/// waiting overlay is applied on request admission so back-to-back requests do not pile onto
+/// the same engine while the next stats refresh is still in flight.
+#[derive(Debug, Default)]
+struct EngineRoutingState {
+    /// Requests admitted by this frontend that have not finished yet.
+    ///
+    /// This is only used as the fallback "waiting" count before real scheduler stats exist.
+    inflight: usize,
+    /// The latest real scheduler snapshot received from this engine, if any.
+    last_scheduler_stats: Option<EngineLoadSnapshot>,
+    /// Local waiting bump applied at admission time until the next real stats update lands.
+    optimistic_waiting_overlay: usize,
+}
+
+impl EngineRoutingState {
+    /// Compute the routing score used to pick the least-loaded engine.
+    ///
+    /// If real scheduler stats exist, use `waiting * 4 + running`, plus any local optimistic
+    /// waiting overlay. Otherwise, fall back to treating the frontend's in-flight count as the
+    /// waiting count and `0` as running, without re-applying the optimistic overlay on top.
+    fn routing_score(&self) -> usize {
+        let (waiting, running, overlay) = match self.last_scheduler_stats {
+            Some(stats) => (
+                stats.waiting,
+                stats.running,
+                self.optimistic_waiting_overlay,
+            ),
+            None => (self.inflight, 0, 0),
+        };
+
+        (waiting + overlay) * 4 + running
+    }
+
+    /// Replace the local routing view with a fresh real scheduler snapshot.
+    ///
+    /// Any optimistic waiting overlay is cleared because the scheduler's own counts are now the
+    /// source of truth again.
+    fn apply_scheduler_counts(&mut self, next: EngineLoadSnapshot) {
+        self.last_scheduler_stats = Some(next);
+        self.optimistic_waiting_overlay = 0;
+    }
+}
+
 /// Internal registry for tracking active requests and their output stream senders.
 ///
 /// This is used to route incoming outputs to the correct request stream, and to ensure proper
@@ -28,7 +89,7 @@ struct TrackedRequest {
 pub struct RequestRegistry {
     closed: bool,
     requests: BTreeMap<String, TrackedRequest>,
-    in_flight_per_engine: BTreeMap<EngineId, usize>,
+    routing_per_engine: BTreeMap<EngineId, EngineRoutingState>,
 }
 
 impl RequestRegistry {
@@ -36,9 +97,9 @@ impl RequestRegistry {
         Self {
             closed: false,
             requests: BTreeMap::default(),
-            in_flight_per_engine: engines
+            routing_per_engine: engines
                 .iter()
-                .map(|engine| (engine.engine_id.clone(), 0))
+                .map(|engine| (engine.engine_id.clone(), EngineRoutingState::default()))
                 .collect(),
         }
     }
@@ -67,10 +128,13 @@ impl RequestRegistry {
                 engine_id: engine_id.clone(),
             },
         );
-        *self
-            .in_flight_per_engine
+
+        let state = self
+            .routing_per_engine
             .get_mut(&engine_id)
-            .expect("request registry must track all known engines") += 1;
+            .expect("request registry must track all known engines");
+        state.inflight += 1;
+        state.optimistic_waiting_overlay += 1;
 
         Ok((engine_id, rx))
     }
@@ -78,22 +142,21 @@ impl RequestRegistry {
     fn choose_engine_for_request(&mut self, data_parallel_rank: Option<u32>) -> Result<EngineId> {
         if let Some(rank) = data_parallel_rank {
             // Route to the engine at the specified rank index.
-            let engine_id = EngineId::from(rank as usize);
+            let engine_id = EngineId::from_engine_index(rank);
             return self
-                .in_flight_per_engine
+                .routing_per_engine
                 .contains_key(&engine_id)
                 .then_some(engine_id)
                 .ok_or_else(|| Error::InvalidDataParallelRank {
                     rank,
-                    num_engines: self.in_flight_per_engine.len() as u32,
+                    num_engines: self.routing_per_engine.len() as u32,
                 });
         }
 
-        // Simple routing strategy: assign to the engine with the least in-flight requests.
         Ok(self
-            .in_flight_per_engine
+            .routing_per_engine
             .iter()
-            .min_by_key(|(_, in_flight)| *in_flight)
+            .min_by_key(|(_, state)| state.routing_score())
             .map(|(engine_id, _)| engine_id.clone())
             .expect("request registry must contain at least one engine"))
     }
@@ -138,6 +201,18 @@ impl RequestRegistry {
             .collect()
     }
 
+    /// Apply one scheduler stats update for the given engine to the local routing state.
+    /// Returns `false` if the engine is unknown to the client.
+    pub fn apply_scheduler_stats(&mut self, engine_index: u32, stats: &SchedulerStats) -> bool {
+        self.apply_scheduler_counts(
+            engine_index,
+            EngineLoadSnapshot {
+                waiting: stats.num_waiting_reqs as usize,
+                running: stats.num_running_reqs as usize,
+            },
+        )
+    }
+
     /// Mark the registry as closed, detach and return all tracked senders.
     pub fn close(&mut self) -> Vec<OutputSender> {
         if self.closed {
@@ -155,11 +230,34 @@ impl RequestRegistry {
     #[must_use]
     pub fn remove(&mut self, request_id: &str) -> Option<(OutputSender, EngineId)> {
         let tracked = self.requests.remove(request_id)?;
-        *self
-            .in_flight_per_engine
+        self.routing_per_engine
             .get_mut(&tracked.engine_id)
-            .expect("request registry must track all known engines") -= 1;
+            .expect("request registry must track all known engines")
+            .inflight -= 1;
         Some((tracked.sender, tracked.engine_id))
+    }
+
+    fn apply_scheduler_counts(&mut self, engine_index: u32, next: EngineLoadSnapshot) -> bool {
+        let engine_id = EngineId::from_engine_index(engine_index);
+        let Some(state) = self.routing_per_engine.get_mut(&engine_id) else {
+            return false;
+        };
+
+        let previous = state.last_scheduler_stats;
+        if previous != Some(next) {
+            trace!(
+                ?engine_id,
+                previous_waiting = previous.map(|stats| stats.waiting),
+                previous_running = previous.map(|stats| stats.running),
+                previous_optimistic_waiting_overlay = state.optimistic_waiting_overlay,
+                waiting = next.waiting,
+                running = next.running,
+                "updated scheduler routing counts",
+            );
+        }
+
+        state.apply_scheduler_counts(next);
+        true
     }
 
     #[cfg(test)]
@@ -228,8 +326,9 @@ impl UtilityRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{RequestRegistry, UtilityRegistry};
+    use super::{EngineRoutingState, RequestRegistry, UtilityRegistry};
     use crate::EngineId;
+    use crate::client::state::EngineLoadSnapshot;
     use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput, UtilityOutput};
     use crate::transport::ConnectedEngine;
 
@@ -282,8 +381,8 @@ mod tests {
 
     #[test]
     fn registry_tracks_engine_id_per_request() {
-        let engine_0 = EngineId::from(b"engine-0");
-        let engine_1 = EngineId::from(b"engine-1");
+        let engine_0 = EngineId::from_engine_index(0);
+        let engine_1 = EngineId::from_engine_index(1);
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
                 engine_id: engine_0.clone(),
@@ -315,10 +414,79 @@ mod tests {
     }
 
     #[test]
+    fn registry_uses_inflight_as_waiting_fallback_before_stats_arrive() {
+        let engine_0 = EngineId::from_engine_index(0);
+        let engine_1 = EngineId::from_engine_index(1);
+        let mut registry = RequestRegistry::new(&[
+            ConnectedEngine {
+                engine_id: engine_0.clone(),
+                ready_response: None,
+            },
+            ConnectedEngine {
+                engine_id: engine_1.clone(),
+                ready_response: None,
+            },
+        ]);
+
+        let (chosen_0, _) = registry.register("req-1".to_string(), None).unwrap();
+        let (chosen_1, _) = registry.register("req-2".to_string(), None).unwrap();
+        let (chosen_0_again, _) = registry.register("req-3".to_string(), None).unwrap();
+
+        assert_eq!(chosen_0, engine_0);
+        assert_eq!(chosen_1, engine_1);
+        assert_eq!(chosen_0_again, engine_0);
+    }
+
+    #[test]
+    fn routing_score_does_not_double_count_overlay_before_stats_arrive() {
+        let state = EngineRoutingState {
+            inflight: 3,
+            last_scheduler_stats: None,
+            optimistic_waiting_overlay: 2,
+        };
+
+        assert_eq!(state.routing_score(), 12);
+    }
+
+    #[test]
+    fn registry_prefers_real_scheduler_stats_over_inflight() {
+        let engine_0 = EngineId::from_engine_index(0);
+        let engine_1 = EngineId::from_engine_index(1);
+        let mut registry = RequestRegistry::new(&[
+            ConnectedEngine {
+                engine_id: engine_0.clone(),
+                ready_response: None,
+            },
+            ConnectedEngine {
+                engine_id: engine_1.clone(),
+                ready_response: None,
+            },
+        ]);
+
+        assert!(registry.apply_scheduler_counts(
+            0,
+            EngineLoadSnapshot {
+                waiting: 3,
+                running: 2
+            }
+        ));
+        assert!(registry.apply_scheduler_counts(
+            1,
+            EngineLoadSnapshot {
+                waiting: 0,
+                running: 1
+            }
+        ));
+
+        let (chosen, _) = registry.register("req-stats".to_string(), None).unwrap();
+        assert_eq!(chosen, engine_1);
+    }
+
+    #[test]
     fn register_with_data_parallel_rank_routes_to_specified_engine() {
-        let engine_0 = EngineId::from(0usize);
-        let engine_1 = EngineId::from(1usize);
-        let engine_2 = EngineId::from(2usize);
+        let engine_0 = EngineId::from_engine_index(0);
+        let engine_1 = EngineId::from_engine_index(1);
+        let engine_2 = EngineId::from_engine_index(2);
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
                 engine_id: engine_0.clone(),
@@ -349,8 +517,8 @@ mod tests {
 
     #[test]
     fn register_with_data_parallel_rank_bypasses_load_balancing() {
-        let engine_0 = EngineId::from(0usize);
-        let engine_1 = EngineId::from(1usize);
+        let engine_0 = EngineId::from_engine_index(0);
+        let engine_1 = EngineId::from_engine_index(1);
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
                 engine_id: engine_0.clone(),
@@ -375,11 +543,11 @@ mod tests {
     fn register_with_out_of_range_rank_returns_error() {
         let mut registry = RequestRegistry::new(&[
             ConnectedEngine {
-                engine_id: EngineId::from(0usize),
+                engine_id: EngineId::from_engine_index(0),
                 ready_response: None,
             },
             ConnectedEngine {
-                engine_id: EngineId::from(1usize),
+                engine_id: EngineId::from_engine_index(1),
                 ready_response: None,
             },
         ]);
@@ -396,7 +564,7 @@ mod tests {
 
     #[test]
     fn register_with_rank_on_single_engine_only_accepts_zero() {
-        let engine_0 = EngineId::from(0usize);
+        let engine_0 = EngineId::from_engine_index(0);
         let mut registry = RequestRegistry::new(&[ConnectedEngine {
             engine_id: engine_0.clone(),
             ready_response: None,
