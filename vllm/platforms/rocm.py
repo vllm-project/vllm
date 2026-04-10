@@ -409,6 +409,7 @@ class RocmPlatform(Platform):
         "mxfp4",
         "torchao",
         "bitsandbytes",
+        "modelopt_fp4",
     ]
 
     @classmethod
@@ -603,6 +604,10 @@ class RocmPlatform(Platform):
         Set the device for the current platform.
         """
         torch.cuda.set_device(device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
 
     @classmethod
     @lru_cache(maxsize=8)

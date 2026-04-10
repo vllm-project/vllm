@@ -46,8 +46,11 @@ def make_group_quant_scales(
         return torch.empty(shape, device=x.device, dtype=torch.float32)
 
 
-rms_no_var_size = lambda x, weight, epsilon, variance_size=None: variance_size is None
-"""vLLM kernel does not support variance_size parameter."""
+rms_no_var_size = (
+    lambda x, weight, epsilon, variance_size=None: variance_size is None
+    and (weight is None or weight.dtype == x.dtype)
+)
+"""vLLM kernel requires no variance_size override and matching input/weight dtype."""
 
 
 @ir.ops.rms_norm.register_impl(
@@ -147,6 +150,7 @@ _vllm_c_group_quant_args = (
         x.is_contiguous() and x.shape[-1] % group_shape[-1] == 0
     )
 )
+"""vllm_c dynamic_group_quant_fp8 requires a contiguous input tensor with hidden dim divisible by group size."""
 
 
 @ir.ops.dynamic_group_quant_fp8.register_impl(
