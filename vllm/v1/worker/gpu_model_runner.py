@@ -1446,11 +1446,11 @@ class GPUModelRunner(
             .argmax(-1)
         )
 
+        accepted_np = self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+        for i in range(num_reqs):
+            self.input_batch.num_accepted_tokens_cpu[i] = int(accepted_np[i])
+
         if self.cache_config.mamba_cache_mode == "align":
-            for i, num_tokens in enumerate(
-                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
-            ):
-                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
             mamba_utils.postprocess_mamba(
                 scheduler_output,
                 self.kv_cache_config,
@@ -1462,9 +1462,23 @@ class GPUModelRunner(
                 self._get_mamba_copy_bufs(),
             )
         else:
-            self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
-                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
-            )
+            if any(accepted_np > 1):
+                for req_id in self.input_batch.req_ids[:num_reqs]:
+                    self.mamba_state_idx.setdefault(req_id, 0)
+                mamba_utils.postprocess_mamba(
+                    scheduler_output,
+                    self.kv_cache_config,
+                    self.input_batch,
+                    self.requests,
+                    self.mamba_state_idx,
+                    self.compilation_config.static_forward_context,
+                    self.model.get_mamba_state_copy_func(),
+                    self._get_mamba_copy_bufs(),
+                )
+            else:
+                self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
+                    self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
+                )
             assert self.num_accepted_tokens_event is not None
             self.num_accepted_tokens_event.record()
 
