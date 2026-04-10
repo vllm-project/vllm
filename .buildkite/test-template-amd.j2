@@ -48,7 +48,6 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {%- for dep in step.source_file_dependencies %}
 {%- if dep[:6] == 'tests/' %}
 {%- set dep_rel = dep[6:] %}
-{# Handle deps that already end with '/' (e.g., tests/benchmarks/) #}
 {%- if dep_rel[-1:] == '/' %}
 {%- set dep_dir_prefix = dep_rel %}
 {%- set dep_file_name = dep_rel[:-1] ~ '.py' %}
@@ -57,7 +56,6 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {%- set dep_file_name = dep_rel ~ '.py' %}
 {%- endif %}
 {%- for t in changed_tests %}
-{# Check if t starts with dep_dir_prefix (for directories) or equals dep_file_name (for files) #}
 {%- set prefix_len = dep_dir_prefix | length %}
 {%- set t_prefix = t[:prefix_len] %}
 {%- set cond1 = (t | length >= prefix_len and t_prefix == dep_dir_prefix) %}
@@ -71,11 +69,9 @@ COVERAGE_FILE={{ coverage_file }} {{ cmd | replace("pytest ", "pytest --cov=vllm
 {%- endif %}
 {%- set matched_targets = match_ns.targets %}
 
-{# If we have matched targets, run only those specific tests #}
 {% if matched_targets | length > 0 %}
 pytest -v -s {{ matched_targets | join(' ') }}
 {% else %}
-{# Default behavior: preserve original commands with optional coverage injection #}
 {% if cov_enabled %}
 {% set ns = namespace(has_pytest=false) %}
 {% if step.command %}
@@ -92,290 +88,75 @@ pytest -v -s {{ matched_targets | join(' ') }}
 {% endif %}
 {% endmacro %}
 
-{% macro render_cuda_config(step, image, default_working_dir, hf_home_fsx, hf_home, branch) %}
-agents:
-  {% if step.label == "Documentation Build" %}
-  queue: small_cpu_queue_premerge
-  {% elif step.no_gpu %}
-  queue: cpu_queue_premerge_us_east_1
-  {% elif step.gpu == "a100" %}
-  queue: a100_queue
-  {% elif step.gpu == "h100" %}
-  queue: mithril-h100-pool
-  {% elif step.gpu == "h200" %}
-  queue: skylab-h200
-  {% elif step.gpu == "b200" %}
-  queue: B200
-  {% elif step.num_gpus == 2 or step.num_gpus == 4 %}
-  queue: gpu_4_queue
-  {% else %}
-  queue: gpu_1_queue
-  {% endif %}
+ - group: "AMD Tests"
+   depends_on: ~
+   steps:
+   - label: "AMD: :docker: build image"
+     depends_on: ~
+     soft_fail: false
+     commands:
+     - >
+       docker build
+       --build-arg max_jobs=16
+       --build-arg REMOTE_VLLM=1
+       --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
+       --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
+       --tag {{ docker_image_amd }}
+       -f docker/Dockerfile.rocm
+       --target test
+       --no-cache
+       --progress plain .
+     - "docker push {{ docker_image_amd }}"
+     key: "amd-build"
+     env:
+       DOCKER_BUILDKIT: "1"
+     retry:
+       automatic:
+       - exit_status: -1
+         limit: 2
+       - exit_status: -10
+         limit: 2
+       - exit_status: 128
+         limit: 2
+       - exit_status: 1
+         limit: 1
+     agents:
+       queue: amd-cpu
 
-{% if step.num_nodes >= 2 %}
-commands:
-  - ./.buildkite/scripts/run-multi-node-test.sh {{ (step.working_dir or default_working_dir) | safe }} {{ step.num_nodes }} {{ step.num_gpus }} {{ image }} {% for command in step.commands %}"{{ (command | join(' && ')) | safe }}" {% endfor %}
-{% endif %}
+   {% for step in steps %}
+   {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
 
-{% if step.parallelism %}
-parallelism: {{ step.parallelism }}
-{% endif %}
-
-retry:
-  automatic:
-    - exit_status: -1
-      limit: 1
-    - exit_status: -10
-      limit: 1
-
-{% if step.num_nodes < 2 %}
-plugins:
-  {% if step.gpu != "a100" and step.gpu != "h100" and step.gpu != "h200" and step.gpu != "b200" %}
-  - docker#v5.2.0:
-      image: {{ image }}
-      always-pull: true
-      propagate-environment: true
-      {% if not step.no_gpu %}
-      gpus: all
-      {% endif %}
-      {% if step.label == "Benchmarks" or step.mount_buildkite_agent or cov_enabled %}
-      mount-buildkite-agent: true
-      {% endif %}
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
-      environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME={{ hf_home_fsx }}
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        {% if fail_fast == "true" %}
-        - PYTEST_ADDOPTS=-x
-        {% endif %}
-        {% if branch == "main" %}
-        - BUILDKITE_ANALYTICS_TOKEN
-        {% endif %}
-        {% if step.label == "Speculative decoding tests" %}
-        - VLLM_ATTENTION_BACKEND=XFORMERS
-        {% endif %}
-      volumes:
-        - /dev/shm:/dev/shm
-        - {{ hf_home_fsx }}:{{ hf_home_fsx }}
-  {% elif step.gpu == "h200" %}
-   - docker#v5.2.0:
-      image: {{ image }}
-      always-pull: true
-      propagate-environment: true
-      gpus: all
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
-      environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/benchmark-hf-cache
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        {% if fail_fast == "true" %}
-        - PYTEST_ADDOPTS=-x
-        {% endif %}
-        {% if branch == "main" %}
-        - BUILDKITE_ANALYTICS_TOKEN
-        {% endif %}
-      volumes:
-        - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache
-        - /data/benchmark-vllm-cache:/root/.cache/vllm
-  {% elif step.gpu == "b200" %}
-   - docker#v5.2.0:
-      image: {{ image }}
-      always-pull: true
-      propagate-environment: true
-      # gpus will be configured by BUILDKITE_PLUGIN_DOCKER_GPUS in per host environment variable.
-      # gpus: all
-      command: ["bash", "{% if fail_fast == "true" %}-xce{% else %}-xc{% endif %}", "(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ add_docker_pytest_coverage(step, cov_enabled) }}"]
-      environment:
-        - VLLM_USAGE_SOURCE=ci-test
-        - NCCL_CUMEM_HOST_ENABLE=0
-        - HF_HOME=/benchmark-hf-cache
-        - HF_TOKEN
-        - CODECOV_TOKEN
-        {% if fail_fast == "true" %}
-        - PYTEST_ADDOPTS=-x
-        {% endif %}
-        {% if branch == "main" %}
-        - BUILDKITE_ANALYTICS_TOKEN
-        {% endif %}
-      volumes:
-        - /dev/shm:/dev/shm
-        - /data/benchmark-hf-cache:/benchmark-hf-cache
-        - /data/benchmark-vllm-cache:/root/.cache/vllm
-  {% elif step.gpu == "h100" %}
-  - kubernetes:
-      podSpec:
-        containers:
-          - image: {{ image }}
-            command:
-              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
-            resources:
-              limits:
-                nvidia.com/gpu: {{ step.num_gpus or 1 }}
-            volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: {{ hf_home }}
-            env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: "0"
-              - name: HF_HOME
-                value: {{ hf_home }}
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
-        volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
-          - name: hf-cache
-            hostPath:
-              path: /mnt/hf-cache
-              type: Directory
-  {% else %}
-  - kubernetes:
-      podSpec:
-        priorityClassName: ci
-        containers:
-          - image: {{ image }}
-            command:
-              - bash -c "{{ '(command nvidia-smi || true) && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd ' ~ ((step.working_dir or default_working_dir) | safe) ~ ' && ' ~ (step.command or (step.commands | join(" && ")) | safe) }}"
-            resources:
-              limits:
-                nvidia.com/gpu: {{ step.num_gpus or 1 }}
-            volumeMounts:
-              - name: devshm
-                mountPath: /dev/shm
-              - name: hf-cache
-                mountPath: {{ hf_home }}
-            env:
-              - name: VLLM_USAGE_SOURCE
-                value: ci-test
-              - name: NCCL_CUMEM_HOST_ENABLE
-                value: "0"
-              - name: HF_HOME
-                value: {{ hf_home }}
-              - name: HF_TOKEN
-                valueFrom:
-                  secretKeyRef:
-                    name: hf-token-secret
-                    key: token
-        nodeSelector:
-          nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-        volumes:
-          - name: devshm
-            emptyDir:
-              medium: Memory
-          - name: hf-cache
-            hostPath:
-              path: {{ hf_home }}
-              type: Directory
-  {% endif %}
-{% endif %}
-{% endmacro %}
-
-  - group: "AMD Tests"
-    depends_on: ~
-    steps:
-      - label: "AMD: :docker: build image"
-        depends_on: ~
-        soft_fail: false
-        commands:
-          # Handle the introduction of test target in Dockerfile.rocm
-          - >
-            docker build
-            --build-arg max_jobs=16
-            --build-arg REMOTE_VLLM=1
-            --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
-            --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-            --tag {{ docker_image_amd }}
-            -f docker/Dockerfile.rocm
-            --target test
-            --no-cache
-            --progress plain .
-          - "docker push {{ docker_image_amd }}"
-        key: "amd-build"
-        env:
-          DOCKER_BUILDKIT: "1"
-        retry:
-          automatic:
-            - exit_status: -1  # Agent was lost
-              limit: 2
-            - exit_status: -10  # Agent was lost
-              limit: 2
-            - exit_status: 128  # Git connectivity issues
-              limit: 2
-            - exit_status: 1  # Machine occasionally fail
-              limit: 1
-        agents:
-          queue: amd-cpu
-
-    {% for step in steps %}
-    {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
-    
-    {% set ns = namespace(blocked=1) %}
-
-    {% if run_all == "1" or nightly == "1" %}
-    {% set ns.blocked = 0 %}
-    {% endif %}
-
-      {% if step.source_file_dependencies %}
-        {% for source_file in step.source_file_dependencies %}
-          {% for file in list_file_diff %}
-            {% if source_file in file %}
-              {% set ns.blocked = 0 %}
-            {% endif %}
-          {% endfor %}
-        {% endfor %}
-      {% else %}
-        {% set ns.blocked = 0 %}
-      {% endif %}
-
-      {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-      - block: "Run {{ step.agent_pool }}: {{ step.label }}"
-        depends_on: amd-build
-        key: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-      {% endif %}
-
-      - label: "{{ step.agent_pool }}: {{ step.label }}"
-        {% if (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
-        depends_on: block-{{ step.agent_pool }}-{{ step.label | replace(" ", "-") | lower | replace("(", "") | replace(")", "") | replace("%", "") | replace(",", "-") | replace("+", "-") }}
-        {% else %}
-        depends_on: amd-build
-        {% endif %}
-        agents:
-          {% if step.agent_pool %}
-          queue: {{ step.agent_pool }}
-          {% else %}
-          queue: mi250_1xGPU
-          {% endif %}
-        command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
-        env:
-          DOCKER_BUILDKIT: "1"
-          VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
-        priority: 100
-        {% if step.grade and step.grade == "Blocking" %}
-        soft_fail: false
-        {% else %}
-        soft_fail: true
-        {% endif %}
-        {% if step.parallelism %}
-        parallelism: {{ step.parallelism }}
-        {% endif %}
-        retry:
-          automatic:
-            - exit_status: -1  # Agent was lost
-              limit: 2
-            - exit_status: -10  # Agent was lost
-              limit: 2
-            - exit_status: 128  # Git connectivity issues
-              limit: 2
-    {% endif %}
-    {% endfor %}
+   - label: "{{ step.agent_pool }}: {{ step.label }}"
+     depends_on: amd-build
+     agents:
+     {% if step.agent_pool %}
+       queue: {{ step.agent_pool }}
+     {% else %}
+       queue: mi250_1xGPU
+     {% endif %}
+     {% if step.resource_class %}
+       resource_class: {{ step.resource_class }}
+     {% endif %}
+     command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
+     env:
+       DOCKER_BUILDKIT: "1"
+       VLLM_TEST_COMMANDS: "(command rocm-smi || true) && export VLLM_TEST_GROUP_NAME={{ step.agent_pool }}-{{ step.label | replace(' ', '-') | lower | replace('(', '') | replace(')', '') | replace('%', '') | replace(',', '-') | replace('+', '-') }} && export VLLM_ALLOW_DEPRECATED_BEAM_SEARCH=1 && cd {{ (step.working_dir or default_working_dir) | safe }} && {{ (step.command or (step.commands | join(' && '))) | replace('\"', '\\\"') | safe }}"
+     priority: 100
+     {% if step.grade and step.grade == "Blocking" %}
+     soft_fail: false
+     {% else %}
+     soft_fail: true
+     {% endif %}
+     {% if step.parallelism %}
+     parallelism: {{ step.parallelism }}
+     {% endif %}
+     retry:
+       automatic:
+       - exit_status: -1
+         limit: 2
+       - exit_status: -10
+         limit: 2
+       - exit_status: 128
+         limit: 2
+   {% endif %}
+   {% endfor %}
