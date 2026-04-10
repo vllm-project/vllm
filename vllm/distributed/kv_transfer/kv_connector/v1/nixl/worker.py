@@ -62,6 +62,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path
+from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     MambaSpec,
@@ -2356,7 +2357,3 @@ class NixlConnectorWorker:
         for desc in self._registered_descs:
             self.nixl_wrapper.deregister_memory(desc)
         self._registered_descs.clear()
-
-
-# Import get_kv_cache_layout at module level for use by __init__
-from vllm.v1.attention.backends.utils import get_kv_cache_layout  # noqa: E402
