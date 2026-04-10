@@ -450,8 +450,15 @@ async fn send_init_message(
 
 /// Receive the input registration message from each engine and validate its identity.
 ///
-/// Each registration contains 2 frames: `[identity, ready-payload]` where the payload
-/// is a msgpack-encoded [`EngineCoreReadyResponse`].
+/// Each registration contains 2 frames: `[identity, ready-payload]`.
+///
+/// Since vLLM commit `c8d98f81f676552c263f35bbde55e6edbe81b4e8` ("[Core] Simplify API server
+/// handshake"), the payload is a msgpack-encoded [`EngineCoreReadyResponse`] carrying
+/// post-initialization values such as `max_model_len`.
+///
+/// Older engines sent an empty second frame here just to establish the ROUTER/DEALER backchannel,
+/// with no structured payload on the input socket. We continue to tolerate that legacy shape so
+/// the frontend can still connect to slightly older local engine checkouts.
 async fn wait_for_input_registrations(
     input_socket: &mut RouterSocket,
     engines: &mut [ConnectedEngine],
@@ -484,17 +491,25 @@ async fn wait_for_input_registrations(
             );
         }
 
-        let ready_response: EngineCoreReadyResponse = decode_msgpack(&frames[1])?;
-
-        debug!(
-            ?actual_id,
-            ?ready_response,
-            "received input registration from engine"
-        );
+        let ready_response = if frames[1].is_empty() {
+            debug!(
+                ?actual_id,
+                "received legacy empty input registration from engine"
+            );
+            None
+        } else {
+            let ready_response: EngineCoreReadyResponse = decode_msgpack(&frames[1])?;
+            debug!(
+                ?actual_id,
+                ?ready_response,
+                "received input registration from engine"
+            );
+            Some(ready_response)
+        };
 
         // Store the ready response in the corresponding engine entry.
         if let Some(engine) = engines.iter_mut().find(|e| e.engine_id == actual_id) {
-            engine.ready_response = Some(ready_response);
+            engine.ready_response = ready_response;
         }
     }
 
