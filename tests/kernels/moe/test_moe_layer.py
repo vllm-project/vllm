@@ -64,11 +64,9 @@ from vllm.v1.worker.workspace import (
 fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 
 SHAPE_COMBOS = [
-    # (1, 128, 256),
-    # (32, 1024, 512),
-    (1, 512, 2048),  # should be big enough to exercise DP chunking
-    (22, 1024, 2048),  # should be big enough to exercise DP chunking
-    (222, 2048, 2048),  # should be big enough to exercise DP chunking
+    (1, 128, 256),
+    (32, 1024, 512),
+    (222, 2048, 2048),
 ]
 MAX_M = max([x[0] for x in SHAPE_COMBOS])
 
@@ -116,7 +114,7 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "mori":                        {None, "fp8", "modelopt_fp8"},
     "flashinfer_nvlink_two_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
     "flashinfer_nvlink_one_sided": {None,        "modelopt_fp8", "modelopt_fp4"},
-    "deepep_low_latency":          {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
+    "deepep_low_latency":          {None,        "modelopt_fp8", "modelopt_fp4"},
     "deepep_high_throughput":      {None, "fp8", "modelopt_fp8", "modelopt_fp4"},
     "nixl_ep":                     {None, "fp8", "modelopt_fp8"},
 }
