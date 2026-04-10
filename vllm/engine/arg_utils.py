@@ -1591,7 +1591,7 @@ class EngineArgs:
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context, model_config
         )
-
+        self._set_default_reasoning_config_args()
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -2232,6 +2232,13 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
+
+    def _set_default_reasoning_config_args(self):
+        if not self.reasoning_parser:
+            return
+        if self.reasoning_config is None:
+            self.reasoning_config = ReasoningConfig()
+        self.reasoning_config.reasoning_parser = self.reasoning_parser
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
