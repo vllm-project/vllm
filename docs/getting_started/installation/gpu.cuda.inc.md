@@ -31,7 +31,7 @@ uv pip install vllm --torch-backend=auto
     pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
     ```
 
-We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu128`), set `--torch-backend=cu128` (or `UV_TORCH_BACKEND=cu128`). If this doesn't work, try running `uv self update` to update `uv` first.
+We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu130`), set `--torch-backend=cu130` (or `UV_TORCH_BACKEND=cu130`). If this doesn't work, try running `uv self update` to update `uv` first.
 
 !!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
@@ -93,7 +93,7 @@ If you only need to change Python code, you can build and install vLLM without c
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-VLLM_USE_PRECOMPILED=1 uv pip install --editable .
+VLLM_USE_PRECOMPILED=1 uv pip install --editable . --torch-backend=auto
 ```
 
 This command will do the following:
@@ -134,7 +134,7 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-uv pip install -e .
+uv pip install -e . --torch-backend=auto
 ```
 
 !!! tip
@@ -185,7 +185,7 @@ To achieve this, you can set the environment variable VLLM_CUTLASS_SRC_DIR to po
 ```bash
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-VLLM_CUTLASS_SRC_DIR=/path/to/cutlass uv pip install -e .
+VLLM_CUTLASS_SRC_DIR=/path/to/cutlass uv pip install -e . --torch-backend=auto
 ```
 
 ##### Troubleshooting
