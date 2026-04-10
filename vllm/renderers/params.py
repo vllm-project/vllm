@@ -329,18 +329,15 @@ class TokenizeParams:
 
     def _token_len_check(self, tokenizer: TokenizerLike | None, tokens: _S) -> _S:
         """Apply length checks to prompt tokens if necessary."""
-        max_input_tokens = self.max_input_tokens
-        if max_input_tokens is None:
+        if self.max_total_tokens is None:
             return tokens
 
-        if len(tokens) > max_input_tokens:
+        if len(tokens) > self.max_total_tokens:
             raise VLLMValidationError(
                 f"You passed {len(tokens)} input tokens "
                 f"and requested {self.max_output_tokens} output tokens. "
                 f"However, the model's context length is only "
-                f"{self.max_total_tokens} tokens, resulting in a maximum "
-                f"input length of {max_input_tokens} tokens. "
-                f"Please reduce the length of the input prompt.",
+                f"{self.max_total_tokens} tokens",
                 parameter="input_tokens",
                 value=len(tokens),
             )
