@@ -620,6 +620,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
             self.packed_modules_mapping = {k: list(v) for k, v in base.items()}
             self.packed_modules_mapping.pop("in_proj_qkvz", None)
             self.packed_modules_mapping["in_proj_qkv"] = ["in_proj_qkv"]
+            self.packed_modules_mapping["in_proj_z"] = ["in_proj_z"]
 
     def embed_input_ids(
         self,
