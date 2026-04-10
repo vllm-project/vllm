@@ -215,10 +215,7 @@ class PriorityRequestQueue(RequestQueue):
 
     def __iter__(self) -> Iterator[Request]:
         """Iterate over the queue according to priority policy."""
-        heap_copy = [r for r in self._heap if r not in self._removed]
-        heapq.heapify(heap_copy)
-        while heap_copy:
-            yield heapq.heappop(heap_copy)
+        yield from sorted(self._active)
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:
