@@ -469,4 +469,8 @@ async def test_pooling_not_supported(
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    else:
+        err_msg = f"Unsupported task: {task!r}"
+    assert response.json()["error"]["message"].startswith(err_msg)

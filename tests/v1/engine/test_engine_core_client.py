@@ -114,7 +114,7 @@ def test_mp_client_uses_env_timeout(monkeypatch: pytest.MonkeyPatch):
             return 1
 
         def recv_multipart(self):
-            return (b"\x00\x00", b"ready")
+            return (b"\x00\x00", b"")
 
     class DummySocket:
         def send_multipart(self, _msg, *, copy: bool = False, track: bool = False):

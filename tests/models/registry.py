@@ -648,7 +648,6 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
-        revision="4a0a9f3ac7a7992fec410bfa8e3d080ac9a5bcee",
     ),
     "ColPaliForRetrieval": _HfExamplesInfo("vidore/colpali-v1.3-hf"),
     "ColQwen3": _HfExamplesInfo(
@@ -813,6 +812,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
         revision="refs/pr/17",
+    ),
+    "Exaone4_5_ForConditionalGeneration": _HfExamplesInfo(
+        "LGAI-EXAONE/EXAONE-4.5-33B",
+        min_transformers_version="5.6.0",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
@@ -1306,6 +1309,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         speculative_model="LGAI-EXAONE/K-EXAONE-236B-A23B",
         min_transformers_version="5.1.0",
         enable_prefix_caching=False,
+    ),
+    "Exaone4_5_MTP": _HfExamplesInfo(
+        "LGAI-EXAONE/EXAONE-4.5-33B",
+        speculative_model="LGAI-EXAONE/EXAONE-4.5-33B",
+        min_transformers_version="5.6.0",
     ),
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
