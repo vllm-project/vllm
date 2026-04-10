@@ -178,3 +178,7 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
+
+    def shutdown(self) -> None:
+        """Shutdown the manager and release any resources."""
+        return

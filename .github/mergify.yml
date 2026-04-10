@@ -83,8 +83,8 @@ pull_request_rules:
     - or:
       - files~=^examples/.*deepseek.*\.py
       - files~=^tests/.*deepseek.*\.py
-      - files~=^vllm/entrypoints/openai/tool_parsers/.*deepseek.*\.py
       - files~=^vllm/model_executor/models/.*deepseek.*\.py
+      - files~=^vllm/tool_parsers/.*deepseek.*\.py
       - files~=^vllm/reasoning/.*deepseek.*\.py
       - files~=^vllm/transformers_utils/.*deepseek.*\.py
       - title~=(?i)DeepSeek
@@ -110,9 +110,10 @@ pull_request_rules:
     - or:
       - files~=^examples/.*llama.*\.py
       - files~=^tests/.*llama.*\.py
-      - files~=^vllm/entrypoints/openai/tool_parsers/llama.*\.py
       - files~=^vllm/model_executor/models/.*llama.*\.py
-      - files~=^vllm/transformers_utils/configs/.*llama.*\.py
+      - files~=^vllm/reasoning/.*llama.*\.py
+      - files~=^vllm/tool_parsers/.*llama.*\.py
+      - files~=^vllm/transformers_utils/.*llama.*\.py
       - title~=(?i)llama
   actions:
     label:
@@ -132,6 +133,23 @@ pull_request_rules:
     label:
       add:
         - multi-modality
+
+- name: label-mistral
+  description: Automatically apply mistral label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^examples/.*mistral.*\.py
+      - files~=^tests/.*mistral.*\.py
+      - files~=^vllm/model_executor/models/.*mistral.*\.py
+      - files~=^vllm/reasoning/.*mistral.*\.py
+      - files~=^vllm/tool_parsers/.*mistral.*\.py
+      - files~=^vllm/transformers_utils/.*mistral.*\.py
+      - title~=(?i)Mistral
+  actions:
+    label:
+      add:
+        - mistral
 
 - name: label-new-model
   description: Automatically apply new-model label
@@ -167,7 +185,9 @@ pull_request_rules:
       - files~=^examples/.*qwen.*\.py
       - files~=^tests/.*qwen.*\.py
       - files~=^vllm/model_executor/models/.*qwen.*\.py
+      - files~=^vllm/tool_parsers/.*qwen.*\.py
       - files~=^vllm/reasoning/.*qwen.*\.py
+      - files~=^vllm/transformers_utils/.*qwen.*\.py
       - title~=(?i)Qwen
   actions:
     label:
