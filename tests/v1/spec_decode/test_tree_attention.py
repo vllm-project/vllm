@@ -14,6 +14,7 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import ParallelConfig, SpeculativeConfig
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -323,8 +324,7 @@ def forward_attention(
 def test_tree_attn_correctness(
     reference_backend: AttentionBackendEnum,
 ) -> None:
-    torch.manual_seed(42)
-    torch.cuda.manual_seed_all(42)
+    set_random_seed(42)
 
     device = "cuda"
     tree_attn_masks = {
