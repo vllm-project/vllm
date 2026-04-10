@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    EagleMode,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
 )
@@ -357,7 +358,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
+            eagle_mode=EagleMode.PRIMARY if self.use_eagle else EagleMode.NONE,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
@@ -486,14 +487,15 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 
         # Simple hybrid (1 full attn + 1 other): one iteration suffices.
         # Full attn is always first if it exists. This avoids EAGLE drops
-        # being applied multiple times to non-full-attn groups.
-        # FIXME (yifan): However, for complex hybrid models with multiple attn
-        # groups, we still have the EAGLE spiral block dropping problem. See
-        # discussion in issue https://github.com/vllm-project/vllm/issues/32802.
+        # being applied multiple times to non-full-attn groups. For later
+        # fixed-point retries, managers switch to `SECONDARY`, which treats the
+        # candidate hit length as already EAGLE-adjusted and validates it with
+        # one-block slack to avoid spiraling the result down to zero.
         is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
             self.attention_groups[0][0], FullAttentionSpec
         )
 
+        is_first_iteration = True
         while True:
             curr_hit_length = hit_length
 
@@ -517,7 +519,13 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         kv_cache_group_ids=group_ids,
                         block_pool=self.block_pool,
                         kv_cache_spec=spec,
-                        use_eagle=self.use_eagle,
+                        eagle_mode=(
+                            EagleMode.PRIMARY
+                            if self.use_eagle and is_first_iteration
+                            else EagleMode.SECONDARY
+                            if self.use_eagle
+                            else EagleMode.NONE
+                        ),
                         alignment_tokens=self.lcm_block_size,
                     )
                     curr_hit_length = len(hit_blocks[0]) * spec.block_size
@@ -527,6 +535,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
+            is_first_iteration = False
             # Simple hybrid: exit after one iteration
             if is_simple_hybrid:
                 break

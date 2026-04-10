@@ -14,6 +14,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    EagleMode,
     SlidingWindowManager,
 )
 from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
@@ -81,7 +82,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=chunked_local_attention_spec,
-            use_eagle=False,
+            eagle_mode=EagleMode.NONE,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
@@ -152,7 +153,7 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=sliding_window_spec,
-            use_eagle=False,
+            eagle_mode=EagleMode.NONE,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
