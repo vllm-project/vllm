@@ -16,14 +16,14 @@ from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8StaticTensorSym,
-)
+from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
+from .matcher_utils import MatcherFusedAddRMSNorm
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 logger = init_logger(__name__)
 
@@ -226,7 +226,6 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         device: str | None,
     ) -> None:
         super().__init__(epsilon, dtype, device)
-        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
         # input, weight, scale
@@ -240,7 +239,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = self._all_reduce(input)
             rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
-            quant, _ = self.quant_matcher(rms, scale)
+            quant = vllm.ir.ops.static_quant_fp8(rms, scale, FP8_DTYPE)
             return quant, all_reduce
 
         def replacement(
@@ -250,7 +249,7 @@ class FirstAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             reduce_scatter = self._reduce_scatter(input)
             rms = vllm.ir.ops.rms_norm(reduce_scatter, weight, self.epsilon)
-            quant, _ = self.quant_matcher(rms, scale)
+            quant = vllm.ir.ops.static_quant_fp8(rms, scale, FP8_DTYPE)
             all_gather = self._all_gather(quant)
 
             return all_gather, reduce_scatter
@@ -264,7 +263,6 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
     def __init__(self, epsilon: float, dtype: torch.dtype, device: str | None) -> None:
         super().__init__(epsilon, dtype, device)
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
-        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
         mm_1 = torch.empty([4, 4], device=self.device, dtype=self.dtype)
@@ -285,7 +283,7 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             rms, residual_out = self.rmsnorm_matcher(
                 all_reduce, rms_norm_weights, residual
             )
-            quant, _ = self.quant_matcher(rms, scale)
+            quant = vllm.ir.ops.static_quant_fp8(rms, scale, FP8_DTYPE)
             return quant, residual_out
 
         def replacement(
@@ -303,7 +301,7 @@ class MiddleAllReduceRMSNormStaticFP8Pattern(_SequenceParallelPatternHelper):
             rms, residual_out = self.rmsnorm_matcher(
                 reduce_scatter, rms_norm_weights, residual
             )
-            quant, _ = self.quant_matcher(rms, scale)
+            quant = vllm.ir.ops.static_quant_fp8(rms, scale, FP8_DTYPE)
             all_gather = self._all_gather(quant)
             # shape of residual changes but that's fine,
             # next node is already slicing it, now becomes a noop

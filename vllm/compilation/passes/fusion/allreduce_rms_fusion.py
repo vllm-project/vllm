@@ -20,9 +20,6 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    kFp8StaticTensorSym,
-)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
@@ -30,9 +27,7 @@ from vllm.utils.torch_utils import (
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8
-
-FP8_DTYPE = current_platform.fp8_dtype()
+from .matcher_utils import MatcherFusedAddRMSNorm
 
 logger = init_logger(__name__)
 
@@ -412,13 +407,14 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         self.epsilon = epsilon
         self.allreduce_params = allreduce_params
         self.quant_dtype = torch.float8_e4m3fn
-        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
-        _, scale = self.quant_matcher.inputs()
-
-        # input, weight
-        return [self.empty(5, 16), self.empty(16), scale]
+        # input, weight, scale
+        return [
+            self.empty(5, 16),
+            self.empty(16),
+            torch.empty(1, 1, dtype=torch.float32, device=self.device),
+        ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
         def pattern(
@@ -428,7 +424,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             all_reduce = tensor_model_parallel_all_reduce(input)
             rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
-            quant, _ = self.quant_matcher(rms, scale)
+            quant = vllm.ir.ops.static_quant_fp8(rms, scale, self.quant_dtype)
             return quant, all_reduce
 
         def replacement(
@@ -484,11 +480,10 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         self.quant_dtype = torch.float8_e4m3fn
 
         self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
-        self.quant_matcher = MatcherQuantFP8(kFp8StaticTensorSym)
 
     def get_inputs(self) -> list[torch.Tensor]:
         input, residual, weight = self.rmsnorm_matcher.inputs()
-        _, scale = self.quant_matcher.inputs()
+        scale = torch.empty(1, 1, dtype=torch.float32, device=self.device)
 
         # input goes through allreduce first, always 16-bit
         return [residual, input.to(self.dtype), weight, scale]
@@ -502,7 +497,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
             rms, res = self.rmsnorm_matcher(allreduce_output, weight, residual)
-            quant, _ = self.quant_matcher(rms, scale)
+            quant = vllm.ir.ops.static_quant_fp8(rms, scale, self.quant_dtype)
 
             return quant, res
 
