@@ -14,7 +14,6 @@ from vllm.distributed.weight_transfer.base import (
 from vllm.inputs import EngineInput, PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
@@ -44,7 +43,6 @@ class EngineClient(ABC):
     vllm_config: VllmConfig
     model_config: ModelConfig
     renderer: BaseRenderer
-    io_processor: IOProcessor | None
     input_processor: InputProcessor
 
     @property
