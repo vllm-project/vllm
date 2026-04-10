@@ -22,12 +22,12 @@ def test_tree_decoding():
         enable_tree_search=True,
         entropy_threshold=1.0,
         branching_factor=3,
-        max_tree_depth=2
+        max_tree_depth=3
     )
     
     sampling_params = SamplingParams(
         temperature=0.8,
-        max_tokens=50,
+        max_tokens=256,
         tree_search_params=tree_config
     )
     
