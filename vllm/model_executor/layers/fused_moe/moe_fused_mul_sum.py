@@ -3,6 +3,8 @@ import triton
 import triton.language as tl
 from torch._subclasses.fake_tensor import FakeTensor
 
+from vllm.platforms import current_platform
+
 
 @triton.jit
 def moe_fused_mul_sum_kernel(
@@ -69,12 +71,12 @@ def _heuristic_config(
     top_k: int,
     size: int,
     element_size: int,
-    sm_major: int,
 ):
     is_fp32 = element_size > 2
-    is_sm90_plus = sm_major >= 9
+    is_sm90_plus = current_platform.has_device_capability(90)
+    is_sm80_before = not current_platform.has_device_capability(80)
 
-    if is_sm90_plus:
+    if current_platform.has_device_capability(90):
         # SM90/SM100+: prefer small tiles + many CTAs.
         if is_fp32:
             BLOCK_M = 1 if num_tokens <= 4 else 2
@@ -108,9 +110,7 @@ def _heuristic_config(
 
     if is_fp32:
         max_block_k = 256
-    elif sm_major <= 7:
-        max_block_k = 512
-    elif is_sm90_plus:
+    elif is_sm80_before or is_sm90_plus:
         max_block_k = 512
     else:
         max_block_k = 1024
@@ -123,7 +123,7 @@ def _heuristic_config(
     else:
         num_warps = max(4, min(16, total // 256))
 
-    if sm_major <= 7:
+    if is_sm80_before:
         num_warps = min(num_warps, 8)
         num_stages = 2
     elif is_sm90_plus:
