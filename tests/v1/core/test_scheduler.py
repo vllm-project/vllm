@@ -1493,6 +1493,53 @@ def test_kv_connector_unable_to_allocate(use_ec_connector, ec_role):
     assert len(scheduler.waiting) == 0
 
 
+def test_prefix_cache_stats_not_double_counted_on_alloc_fail():
+    block_size = 16
+    num_tokens = block_size * 6 + 1
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        num_blocks=8,
+        block_size=block_size,
+        max_num_seqs=2,
+        max_num_batched_tokens=4096,
+        skip_tokenizer_init=True,
+    )
+
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=num_tokens,
+        max_tokens=2,
+        block_size=block_size,
+        same_prompt=True,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {requests[0].request_id: num_tokens}
+    stats = scheduler.update_from_output(output, make_output(scheduler))[0]
+    assert stats.scheduler_stats is not None
+    local_stats = stats.scheduler_stats.prefix_cache_stats
+    assert local_stats.queries == num_tokens
+    assert local_stats.hits == 0
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {requests[0].request_id: 1}
+    stats = scheduler.update_from_output(output, make_output(scheduler))[0]
+    assert stats.scheduler_stats is not None
+    local_stats = stats.scheduler_stats.prefix_cache_stats
+    assert local_stats.queries == 0
+    assert local_stats.hits == 0
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {requests[1].request_id: 1}
+    stats = scheduler.update_from_output(output, make_output(scheduler))[0]
+    assert stats.scheduler_stats is not None
+    local_stats = stats.scheduler_stats.prefix_cache_stats
+    assert local_stats.queries == num_tokens
+    assert local_stats.hits == block_size * 6
+
+
 @pytest.mark.parametrize("is_async", [False, True])
 @pytest.mark.parametrize(
     "use_ec_connector, ec_role", [(False, None), (True, "ec_consumer")]

@@ -205,14 +205,6 @@ class KVCacheManager:
             )
         )
 
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.record(
-                num_tokens=request.num_tokens,
-                num_hits=num_new_computed_tokens,
-                preempted=request.num_preemptions > 0,
-            )
-
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
     def can_fit_full_sequence(

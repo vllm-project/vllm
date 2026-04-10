@@ -763,6 +763,14 @@ class Scheduler(SchedulerInterface):
                         self.encoder_cache_manager.free(request)
                     break
 
+                if self.kv_cache_manager.log_stats:
+                    assert self.kv_cache_manager.prefix_cache_stats is not None
+                    self.kv_cache_manager.prefix_cache_stats.record(
+                        num_tokens=request.num_tokens,
+                        num_hits=num_new_local_computed_tokens,
+                        preempted=request.num_preemptions > 0,
+                    )
+
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
                 # This information is used to determine if a load is
