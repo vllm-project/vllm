@@ -4,6 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import msgspec
@@ -63,17 +64,16 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
-class EngineCoreReadyResponse(
-    msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
-    omit_defaults=True,  # type: ignore[call-arg]
-):
-    """Sent from EngineCore to the frontend during the ready handshake.
+@dataclass
+class EngineCoreReadyResponse:
+    """Sent from EngineCore to each frontend at the end of engine startup.
 
     Contains post-initialization config that may differ from the original
     values (e.g. max_model_len after KV cache auto-fitting).
     """
 
+    num_gpu_blocks: int
+    dp_stats_address: str | None
     max_model_len: int | None = None
 
 

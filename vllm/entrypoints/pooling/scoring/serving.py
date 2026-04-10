@@ -4,15 +4,13 @@
 from fastapi.responses import JSONResponse, Response
 
 from vllm import PoolingParams
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
 from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
-from vllm.renderers import BaseRenderer
 from vllm.v1.pool.late_interaction import (
     build_late_interaction_doc_params,
     build_late_interaction_query_params,
@@ -52,22 +50,17 @@ class ServingScores(PoolingServing):
         super().__init__(engine_client, *args, **kwargs)
 
     def init_io_processor(
-        self,
-        model_config: ModelConfig,
-        renderer: BaseRenderer,
-        chat_template_config: ChatTemplateConfig,
+        self, vllm_config: VllmConfig, *args, **kwargs
     ) -> PoolingIOProcessor:
+        model_config = vllm_config.model_config
+
         score_type: str = model_config.score_type
         if self.enable_flash_late_interaction:
             score_type = "flash-late-interaction"
 
         assert score_type in ScoringIOProcessors
         processor_cls = ScoringIOProcessors[score_type]
-        return processor_cls(
-            model_config=model_config,
-            renderer=renderer,
-            chat_template_config=chat_template_config,
-        )
+        return processor_cls(vllm_config, *args, **kwargs)
 
     async def __call__(self, *args, **kwargs) -> Response:
         if not self.enable_flash_late_interaction:
