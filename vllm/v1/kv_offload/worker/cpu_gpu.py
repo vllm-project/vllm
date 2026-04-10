@@ -274,6 +274,14 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             if event is not None:
                 event.synchronize()
 
+    def shutdown(self) -> None:
+        while self._transfers:
+            transfer = self._transfers.popleft()
+            transfer.end_event.synchronize()
+        self._transfer_events.clear()
+        self._stream_pool.clear()
+        self._event_pool.clear()
+
 
 class CpuGpuOffloadingHandlers:
     def __init__(
