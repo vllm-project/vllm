@@ -1475,6 +1475,7 @@ class OpenAIServingResponses(OpenAIServing):
                 previous_token_ids = current_token_ids
                 if not delta_message:
                     continue
+                tool_call_item_started = False
                 if not first_delta_sent:
                     current_item_id = random_uuid()
                     if delta_message.tool_calls:
@@ -1506,6 +1507,7 @@ class OpenAIServingResponses(OpenAIServing):
                                 ),
                             )
                         )
+                        tool_call_item_started = True
                     elif delta_message.reasoning:
                         yield _increment_sequence_number_and_return(
                             ResponseOutputItemAddedEvent(
@@ -1666,8 +1668,6 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     )
                     previous_delta_messages = []
-
-                tool_call_item_started = False
 
                 if (
                     previous_delta_messages

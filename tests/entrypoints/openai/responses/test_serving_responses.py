@@ -1070,6 +1070,102 @@ class TestForcedToolStreaming:
 class TestAutoToolStreaming:
     @pytest.mark.skip_global_cleanup
     @pytest.mark.asyncio
+    async def test_auto_tool_choice_first_delta_tool_call_does_not_duplicate_item(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+
+        delta_sequence = [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_test",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments="",
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(
+                            arguments='{"location":"Berlin"}',
+                        ),
+                    )
+                ]
+            ),
+        ]
+        _mock_parser_with_deltas(serving, delta_sequence)
+
+        contexts = [
+            _make_simple_context_with_output("chunk1", [10]),
+            _make_simple_context_with_output("chunk2", [20]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice="auto",
+            stream=True,
+        )
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore[attr-defined]
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 1
+        assert function_items[0].item.name == "get_weather"
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert "".join(argument_deltas) == '{"location":"Berlin"}'
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
     async def test_auto_tool_choice_does_not_add_duplicate_function_call_item(
         self, monkeypatch
     ):
