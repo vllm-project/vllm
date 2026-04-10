@@ -255,7 +255,7 @@ class CompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.logprobs
 
-        echo_without_generation = self.echo and self.max_tokens == 0
+        echo_without_generation = self.echo and max_tokens == 0
 
         response_format = self.response_format
         if response_format is not None:

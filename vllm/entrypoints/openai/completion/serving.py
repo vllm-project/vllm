@@ -144,6 +144,7 @@ class OpenAIServingCompletion(OpenAIServing):
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
+        max_tokens_per_prompt: list[int] = []
         for i, engine_input in enumerate(engine_inputs):
             max_tokens = get_max_tokens(
                 max_model_len,
@@ -152,6 +153,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 self.default_sampling_params,
                 self.override_max_tokens,
             )
+            max_tokens_per_prompt.append(max_tokens)
 
             sampling_params: SamplingParams | BeamSearchParams
             if request.use_beam_search:
@@ -217,6 +219,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 created_time,
                 model_name,
                 num_prompts=num_prompts,
+                max_tokens_per_prompt=max_tokens_per_prompt,
                 tokenizer=tokenizer,
                 request_metadata=request_metadata,
             )
@@ -244,6 +247,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 request_id,
                 created_time,
                 model_name,
+                max_tokens_per_prompt,
                 tokenizer,
                 request_metadata,
             )
@@ -272,9 +276,11 @@ class OpenAIServingCompletion(OpenAIServing):
         created_time: int,
         model_name: str,
         num_prompts: int,
+        max_tokens_per_prompt: list[int],
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> AsyncGenerator[str, None]:
+        assert len(max_tokens_per_prompt) == num_prompts
         num_choices = 1 if request.n is None else request.n
         previous_text_lens = [0] * num_choices * num_prompts
         previous_num_tokens = [0] * num_choices * num_prompts
@@ -311,40 +317,65 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
+                    prompt_max_tokens = max_tokens_per_prompt[prompt_idx]
+                    echo_without_generation = request.echo and prompt_max_tokens == 0
+                    visible_token_ids = as_list(output.token_ids)
+                    num_visible_tokens = len(visible_token_ids)
+                    visible_text_len = len(output.text)
 
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
                     # with the echo implementation.
                     prompt_token_ids_to_return: list[int] | None = None
 
-                    assert request.max_tokens is not None
-                    if request.echo and not has_echoed[i]:
+                    if echo_without_generation:
                         assert prompt_token_ids is not None
                         if request.return_token_ids:
                             prompt_text = ""
                         assert prompt_text is not None
-                        if request.max_tokens == 0:
+                        if not has_echoed[i]:
                             # only return the prompt
                             delta_text = prompt_text
                             delta_token_ids = prompt_token_ids
                             out_logprobs = prompt_logprobs
                         else:
-                            # echo the prompt and first token
-                            delta_text = prompt_text + output.text
-                            delta_token_ids = [
-                                *prompt_token_ids,
-                                *output.token_ids,
-                            ]
-                            out_logprobs = [
-                                *(prompt_logprobs or []),
-                                *(output.logprobs or []),
-                            ]
-                        prompt_token_ids_to_return = prompt_token_ids
+                            # The engine may emit a helper token internally,
+                            # but it must not become visible to clients.
+                            delta_text = ""
+                            delta_token_ids = []
+                            out_logprobs = [] if request.logprobs is not None else None
+                        visible_token_ids = []
+                        num_visible_tokens = 0
+                        visible_text_len = 0
+                        prompt_token_ids_to_return = (
+                            prompt_token_ids
+                            if request.return_token_ids and not has_echoed[i]
+                            else None
+                        )
+                        has_echoed[i] = True
+                    elif request.echo and not has_echoed[i]:
+                        assert prompt_token_ids is not None
+                        if request.return_token_ids:
+                            prompt_text = ""
+                        assert prompt_text is not None
+                        # echo the prompt and first token
+                        delta_text = prompt_text + output.text
+                        delta_token_ids = [
+                            *prompt_token_ids,
+                            *visible_token_ids,
+                        ]
+                        out_logprobs = [
+                            *(prompt_logprobs or []),
+                            *(output.logprobs or []),
+                        ]
+                        prompt_token_ids_to_return = (
+                            prompt_token_ids if request.return_token_ids else None
+                        )
                         has_echoed[i] = True
                     else:
                         # return just the delta
                         delta_text = output.text
-                        delta_token_ids = output.token_ids
+                        delta_token_ids = visible_token_ids
                         out_logprobs = output.logprobs
 
                         # has_echoed[i] is reused here to indicate whether
@@ -353,15 +384,21 @@ class OpenAIServingCompletion(OpenAIServing):
                             prompt_token_ids_to_return = prompt_token_ids
                             has_echoed[i] = True
 
-                        if (
-                            not delta_text
-                            and not delta_token_ids
-                            and not previous_num_tokens[i]
-                        ):
-                            # Chunked prefill case, don't return empty chunks
-                            continue
+                    finish_reason = output.finish_reason
+                    stop_reason = output.stop_reason
 
-                    if request.logprobs is not None:
+                    if (
+                        not delta_text
+                        and not delta_token_ids
+                        and prompt_token_ids_to_return is None
+                        and finish_reason is None
+                        and stop_reason is None
+                    ):
+                        # Chunked prefill / suppressed helper-token case,
+                        # don't return empty intermediate chunks.
+                        continue
+
+                    if request.logprobs is not None and len(delta_token_ids) > 0:
                         assert out_logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_completion_logprobs(
                             token_ids=delta_token_ids,
@@ -372,12 +409,12 @@ class OpenAIServingCompletion(OpenAIServing):
                             return_as_token_id=request.return_tokens_as_token_ids,
                         )
                     else:
+                        # Prompt-token-id-only chunks do not have completion
+                        # token logprobs to surface.
                         logprobs = None
 
-                    previous_text_lens[i] += len(output.text)
-                    previous_num_tokens[i] += len(output.token_ids)
-                    finish_reason = output.finish_reason
-                    stop_reason = output.stop_reason
+                    previous_text_lens[i] += visible_text_len
+                    previous_num_tokens[i] += num_visible_tokens
 
                     self._raise_if_error(finish_reason, request_id)
 
@@ -394,7 +431,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 stop_reason=stop_reason,
                                 prompt_token_ids=prompt_token_ids_to_return,
                                 token_ids=(
-                                    as_list(output.token_ids)
+                                    visible_token_ids
                                     if request.return_token_ids
                                     else None
                                 ),
@@ -457,15 +494,17 @@ class OpenAIServingCompletion(OpenAIServing):
         request_id: str,
         created_time: int,
         model_name: str,
+        max_tokens_per_prompt: list[int],
         tokenizer: TokenizerLike | None,
         request_metadata: RequestResponseMetadata,
     ) -> CompletionResponse:
+        assert len(max_tokens_per_prompt) == len(final_res_batch)
         choices: list[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
         kv_transfer_params = None
         last_final_res = None
-        for final_res in final_res_batch:
+        for prompt_idx, final_res in enumerate(final_res_batch):
             last_final_res = final_res
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -477,21 +516,27 @@ class OpenAIServingCompletion(OpenAIServing):
 
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
+                visible_token_ids = as_list(output.token_ids)
+                num_visible_tokens = len(visible_token_ids)
 
-                assert request.max_tokens is not None
                 if request.echo:
                     if request.return_token_ids:
                         prompt_text = ""
                     assert prompt_text is not None
-                    if request.max_tokens == 0:
+                    if max_tokens_per_prompt[prompt_idx] == 0:
                         token_ids = prompt_token_ids
                         out_logprobs = prompt_logprobs
                         output_text = prompt_text
+                        visible_token_ids = []
+                        num_visible_tokens = 0
                     else:
-                        token_ids = [*prompt_token_ids, *output.token_ids]
+                        token_ids = [*prompt_token_ids, *visible_token_ids]
 
                         if request.logprobs is None:
                             out_logprobs = None
+                        elif num_visible_tokens == 0:
+                            assert prompt_logprobs is not None
+                            out_logprobs = prompt_logprobs
                         else:
                             assert prompt_logprobs is not None
                             assert output.logprobs is not None
@@ -502,11 +547,11 @@ class OpenAIServingCompletion(OpenAIServing):
 
                         output_text = prompt_text + output.text
                 else:
-                    token_ids = output.token_ids
+                    token_ids = visible_token_ids
                     out_logprobs = output.logprobs
                     output_text = output.text
 
-                if request.logprobs is not None:
+                if request.logprobs is not None and len(token_ids) > 0:
                     assert out_logprobs is not None, "Did not output logprobs"
                     logprobs = self._create_completion_logprobs(
                         token_ids=token_ids,
@@ -516,6 +561,8 @@ class OpenAIServingCompletion(OpenAIServing):
                         return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
+                    # Empty visible completions do not have completion token
+                    # logprobs to surface.
                     logprobs = None
 
                 choice_data = CompletionResponseChoice(
@@ -528,13 +575,11 @@ class OpenAIServingCompletion(OpenAIServing):
                     prompt_token_ids=(
                         prompt_token_ids if request.return_token_ids else None
                     ),
-                    token_ids=(
-                        as_list(output.token_ids) if request.return_token_ids else None
-                    ),
+                    token_ids=(visible_token_ids if request.return_token_ids else None),
                 )
                 choices.append(choice_data)
 
-                num_generated_tokens += len(output.token_ids)
+                num_generated_tokens += num_visible_tokens
 
             num_prompt_tokens += len(prompt_token_ids)
 
