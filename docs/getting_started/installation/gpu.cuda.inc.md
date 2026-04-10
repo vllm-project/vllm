@@ -162,7 +162,7 @@ To build vLLM using an existing PyTorch installation:
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 python use_existing_torch.py
-uv pip install -r requirements/build.txt
+uv pip install -r requirements/build/cuda.txt
 uv pip install --no-build-isolation -e .
 ```
 
