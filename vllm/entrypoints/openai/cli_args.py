@@ -136,6 +136,11 @@ class BaseFrontendArgs:
     """If set to True, enable prompt_tokens_details in usage."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
+    max_unfinished_requests: int | None = None
+    """Maximum number of unfinished requests allowed across all API servers.
+    When the total unfinished requests exceeds this value, new requests
+    are rejected with a 503 error. Uses shared memory when multiple
+    API servers are running."""
     enable_force_include_usage: bool = False
     """If set to True, including usage on every request."""
     enable_tokenizer_info_endpoint: bool = False
@@ -374,6 +379,10 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    # max_unfinished_requests must be positive if set
+    if args.max_unfinished_requests is not None and args.max_unfinished_requests <= 0:
+        raise ValueError("Error: --max-unfinished-requests must be > 0")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

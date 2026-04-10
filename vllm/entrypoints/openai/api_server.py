@@ -499,6 +499,10 @@ async def init_render_app_state(
     state.args = args
     state.enable_server_load_tracking = False
     state.server_load_metrics = 0
+    # max_unfinished_requests not applicable for render server
+    state.max_unfinished_requests = None
+    state.shared_unfinished_requests = None
+    state.server_index = 0
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
@@ -588,6 +592,7 @@ async def build_and_serve(
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
+    client_config: dict | None = None,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
@@ -605,6 +610,19 @@ async def build_and_serve(
 
     logger.info("Supported tasks: %s", supported_tasks)
     app = build_app(args, supported_tasks, model_config)
+
+    # Set server tracking fields from client_config
+    if client_config is not None:
+        app.state.server_index = client_config.get("client_index", 0)
+        unfinished_arr = client_config.get("shared_unfinished_requests")
+        app.state.shared_unfinished_requests = unfinished_arr
+    else:
+        app.state.server_index = 0
+        app.state.shared_unfinished_requests = None
+
+    # max_unfinished_requests is always from args
+    app.state.max_unfinished_requests = args.max_unfinished_requests
+
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)
@@ -702,7 +720,12 @@ async def run_server_worker(
         client_config=client_config,
     ) as engine_client:
         shutdown_task = await build_and_serve(
-            engine_client, listen_address, sock, args, **uvicorn_kwargs
+            engine_client,
+            listen_address,
+            sock,
+            args,
+            client_config=client_config,
+            **uvicorn_kwargs,
         )
     # NB: Await server shutdown only after the backend context is exited
     try:
