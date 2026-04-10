@@ -290,7 +290,7 @@ def test_flashinfer_trtllm_mxint4_moe_wrapper(m, n, k, e, topk):
         flashinfer_trtllm_mxint4_moe,
     )
 
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
     dtype = torch.bfloat16
 
     a = torch.randn((m, k), device="cuda", dtype=dtype) * 0.5
