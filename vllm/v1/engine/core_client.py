@@ -671,11 +671,9 @@ class MPClient(EngineCoreClient):
             return
         vllm_config = self.vllm_config
         response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
-        if response.max_model_len is not None:
-            vllm_config.model_config.max_model_len = min(
-                vllm_config.model_config.max_model_len,
-                response.max_model_len,
-            )
+        vllm_config.model_config.max_model_len = min(
+            vllm_config.model_config.max_model_len, response.max_model_len
+        )
 
         # Setup KV cache config with initialization state from
         # engine core process. Sum values from all engines in DP case.
