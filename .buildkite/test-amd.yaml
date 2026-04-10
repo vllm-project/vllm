@@ -3966,24 +3966,6 @@ steps:
   - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
 
 
-- label: Batch Invariance (H100-MI325) # 5.2m
-  timeout_in_minutes: 12
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_8
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/attention
-  - vllm/model_executor/layers
-  - tests/v1/determinism/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pip install pytest-timeout pytest-forked
-  - pytest -v -s v1/determinism/test_batch_invariance.py
-  - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
-
-
 - label: Benchmarks # 8.2m
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -4024,7 +4006,7 @@ steps:
   - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
 
 
-- label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI325) # TBD
+- label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -4271,7 +4253,7 @@ steps:
     - python3 offline_inference/spec_decode.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
 
 
-- label: Fusion E2E Config Sweep (H100-MI325) # TBD
+- label: Fusion E2E Config Sweep (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -4292,7 +4274,7 @@ steps:
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 
-- label: Fusion E2E Quick (H100-MI325) # TBD
+- label: Fusion E2E Quick (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -4312,31 +4294,6 @@ steps:
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
   # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and +rms_norm and +quant_fp8 and qwen3'"
-
-
-- label: Kernels (B200-MI355) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_8
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
-  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
-  - vllm/v1/attention/backends/triton_attn.py
-  - vllm/v1/attention/backends/rocm_attn.py
-  - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
-  - vllm/v1/attention/backends/mla/aiter_triton_mla.py
-  - vllm/v1/attention/backends/mla/rocm_aiter_mla.py
-  - vllm/v1/attention/selector.py
-  - vllm/platforms/rocm.py
-  - vllm/_aiter_ops.py
-  commands:
-  - rocm-smi
-  - python3 examples/basic/offline_inference/chat.py
-  - pytest -v -s tests/kernels/attention/test_attention_selector.py
 
 
 - label: Kernels Attention Test %N # 17.7m
@@ -4459,7 +4416,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 
-- label: LM Eval Small Models (MI325) # TBD
+- label: LM Eval Small Models (MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -4944,7 +4901,7 @@ steps:
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
 
-- label: Quantized MoE Test (B200-MI325) # TBD
+- label: Quantized MoE Test (B200-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -5223,7 +5180,7 @@ steps:
   - pytest -v -s -m 'slow_test' v1/spec_decode/test_tree_attention.py
 
 
-- label: V1 attention (B200-MI355) # TBD
+- label: V1 attention (H100-MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -5238,52 +5195,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/attention
-
-
-- label: V1 attention (H100-MI250) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_8
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/config/attention.py
-  - vllm/model_executor/layers/attention
-  - vllm/v1/attention
-  - tests/v1/attention
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s v1/attention
-
-
-- label: V1 attention (H100-MI325) # 14.5m
-  timeout_in_minutes: 40
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_8
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/config/attention.py
-  - vllm/model_executor/layers/attention
-  - vllm/v1/attention
-  - tests/v1/attention
-  - vllm/_aiter_ops.py
-  - vllm/envs.py
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s v1/attention
-
-
-- label: V1 e2e (2 GPUs) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_8
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  - tests/v1/e2e
-  commands:
-    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
 
 
 - label: V1 others (CPU) # 10.4m
