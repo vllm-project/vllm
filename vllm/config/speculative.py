@@ -199,7 +199,8 @@ class SpeculativeConfig:
     """Module path to a custom proposer function (e.g., 'my_module.my_draft_func').
     If provided, this custom function will be used to generate draft tokens instead
     of built-in proposers. The function must have the signature:
-        def generate_drafts(batch_input_ids: List[List[int]], draft_len: int, **kwargs) -> torch.Tensor
+        def generate_drafts(batch_input_ids: List[List[int]], 
+                            draft_len: int, **kwargs) -> torch.Tensor
     and return a tensor of shape [batch_size, draft_len]."""
 
     def compute_hash(self) -> str:
@@ -462,8 +463,9 @@ class SpeculativeConfig:
             self.draft_model_config = self.target_model_config
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "extract_hidden_states":
-            from vllm.transformers_utils.configs.extract_hidden_states import \
-                ExtractHiddenStatesConfig
+            from vllm.transformers_utils.configs.extract_hidden_states import (
+                ExtractHiddenStatesConfig,
+            )
 
             # ExtractHiddenStatesModel is instantiated manually in load_model()
             # We just need to store the target model config for KV cache shape info
@@ -560,10 +562,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
-                    from vllm.transformers_utils.configs.eagle import \
-                        EAGLEConfig
-                    from vllm.transformers_utils.configs.speculators import \
-                        SpeculatorsConfig
+                    from vllm.transformers_utils.configs.eagle import EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import (
+                        SpeculatorsConfig,
+                    )
 
                     if isinstance(
                         self.draft_model_config.hf_config,

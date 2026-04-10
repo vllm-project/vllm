@@ -11,8 +11,18 @@ from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
-from typing import (TYPE_CHECKING, Annotated, Any, Literal, TypeAlias, TypeVar,
-                    Union, cast, get_args, get_origin)
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    cast,
+    get_args,
+    get_origin,
+)
 
 import huggingface_hub
 import regex as re
@@ -22,28 +32,63 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import (AttentionConfig, CacheConfig, CompilationConfig,
-                         ConfigType, DeviceConfig, ECTransferConfig,
-                         EPLBConfig, KernelConfig, KVEventsConfig,
-                         KVTransferConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         MultiModalConfig, ObservabilityConfig, OffloadConfig,
-                         ParallelConfig, PoolerConfig, PrefetchOffloadConfig,
-                         ProfilerConfig, ReasoningConfig, SchedulerConfig,
-                         SpeculativeConfig, StructuredOutputsConfig,
-                         UVAOffloadConfig, VllmConfig, WeightTransferConfig,
-                         get_attr_docs)
-from vllm.config.cache import (CacheDType, KVOffloadingBackend, MambaCacheMode,
-                               MambaDType, PrefixCachingHashAlgo)
+from vllm.config import (
+    AttentionConfig,
+    CacheConfig,
+    CompilationConfig,
+    ConfigType,
+    DeviceConfig,
+    ECTransferConfig,
+    EPLBConfig,
+    KernelConfig,
+    KVEventsConfig,
+    KVTransferConfig,
+    LoadConfig,
+    LoRAConfig,
+    ModelConfig,
+    MultiModalConfig,
+    ObservabilityConfig,
+    OffloadConfig,
+    ParallelConfig,
+    PoolerConfig,
+    PrefetchOffloadConfig,
+    ProfilerConfig,
+    ReasoningConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+    StructuredOutputsConfig,
+    UVAOffloadConfig,
+    VllmConfig,
+    WeightTransferConfig,
+    get_attr_docs,
+)
+from vllm.config.cache import (
+    CacheDType,
+    KVOffloadingBackend,
+    MambaCacheMode,
+    MambaDType,
+    PrefixCachingHashAlgo,
+)
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.model import (ConvertOption, HfOverrides, LogprobsMode,
-                               ModelDType, RunnerOption, TokenizerMode)
+from vllm.config.model import (
+    ConvertOption,
+    HfOverrides,
+    LogprobsMode,
+    ModelDType,
+    RunnerOption,
+    TokenizerMode,
+)
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
 from vllm.config.observability import DetailedTraceModules
-from vllm.config.parallel import (All2AllBackend, DataParallelBackend,
-                                  DCPCommBackend, DistributedExecutorBackend,
-                                  ExpertPlacementStrategy)
+from vllm.config.parallel import (
+    All2AllBackend,
+    DataParallelBackend,
+    DCPCommBackend,
+    DistributedExecutorBackend,
+    ExpertPlacementStrategy,
+)
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
@@ -51,8 +96,10 @@ from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import (is_interleaved,
-                                            maybe_override_with_speculators)
+from vllm.transformers_utils.config import (
+    is_interleaved,
+    maybe_override_with_speculators,
+)
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
@@ -1443,8 +1490,7 @@ class EngineArgs:
         )
 
     def validate_tensorizer_args(self):
-        from vllm.model_executor.model_loader.tensorizer import \
-            TensorizerConfig
+        from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
         for key in self.model_loader_extra_config:
             if key in TensorizerConfig._fields:
