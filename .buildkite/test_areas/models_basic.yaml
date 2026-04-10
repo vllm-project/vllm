@@ -71,7 +71,7 @@ steps:
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
-- label: Transformers Backward Compatibility Models
+- label: Transformers Backward Compatibility Models Test
   working_dir: "/vllm-workspace/"
   optional: true
   soft_fail: true
