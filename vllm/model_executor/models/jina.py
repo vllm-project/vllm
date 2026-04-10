@@ -22,6 +22,8 @@ from .utils import maybe_prefix
 
 
 class JinaForRanking(nn.Module, SupportsLateInteraction):
+    is_pooling_model = True
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
