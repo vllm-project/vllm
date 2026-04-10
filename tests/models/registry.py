@@ -1268,6 +1268,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "architectures": ["Tarsier2ForConditionalGeneration"],
             "model_type": "tarsier2",
         },
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "Qwen2VLConfig was split into Qwen2VLConfig + "
+                "Qwen2VLTextConfig in transformers v5, breaking "
+                "attribute access (num_attention_heads, hidden_size, etc.)"
+            )
+        },
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
