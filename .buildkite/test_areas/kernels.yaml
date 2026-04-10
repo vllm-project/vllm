@@ -18,10 +18,9 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
-  - tests/kernels/test_top_k_per_row.py
   - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_top_k_per_row.py kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core kernels/test_concat_mla_q.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
@@ -107,6 +106,7 @@ steps:
   - vllm/v1/attention/backends/mla/flashinfer_mla.py
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
+  - tests/kernels/test_top_k_per_row.py
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
@@ -117,6 +117,7 @@ steps:
     - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
     - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
     - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
+    - pytest -v -s tests/kernels/test_top_k_per_row.py
     # Quantization
     - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
     - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py

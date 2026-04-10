@@ -205,6 +205,12 @@ direct_register_custom_op(
 )
 
 
+def xpu_mxfp8_quantize(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.ops.vllm.xpu_mxfp8_quantize(x, dtype)
+
+
 class Mxfp8LinearOp:
     def __init__(self):
         self.backend = select_mxfp8_linear_backend()
