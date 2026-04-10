@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
-    from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+    from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
@@ -1096,6 +1096,12 @@ class SupportsTranscription(Protocol):
     :meth:`get_language_detection_prompt` and
     :meth:`parse_language_detection_output` and
     :meth:`get_language_token_ids`.
+    """
+
+    no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
+    """
+    Languages that don't need a space between words.
+    For example, Japanese (ja) and Chinese (zh) don't need a space between words.
     """
 
     def __init_subclass__(cls, **kwargs):
