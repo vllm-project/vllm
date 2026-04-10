@@ -72,9 +72,9 @@ class EngineCoreReadyResponse:
     values (e.g. max_model_len after KV cache auto-fitting).
     """
 
+    max_model_len: int
     num_gpu_blocks: int
     dp_stats_address: str | None
-    max_model_len: int | None = None
 
 
 class EngineCoreRequest(
