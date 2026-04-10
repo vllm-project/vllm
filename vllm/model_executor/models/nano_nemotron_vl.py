@@ -288,6 +288,35 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
             max_num_tiles=max_num_tiles,
         )
 
+    def get_dummy_image_size_and_max_tokens(
+        self, mm_counts: Mapping[str, int]
+    ) -> tuple[tuple[int, int], int]:
+        processor = self.get_hf_processor()
+        num_images = mm_counts.get("image", 0)
+
+        if tiler := processor.dynamic_tiler:
+            budget = tiler.max_num_tokens_available(text_prompt_length=num_images)
+            target_width, target_height = (
+                tiler.width_and_height_for_max_num_tokens_available(budget)
+            )
+            return (
+                (target_width, target_height),
+                tiler._get_num_embeddings(target_width, target_height),
+            )
+
+        max_num_tiles = processor.max_num_tiles
+        target_width, target_height = self.get_image_size_with_most_features(
+            max_num_tiles
+        )
+        return (
+            (target_width, target_height),
+            processor.get_num_image_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                max_num_tiles=max_num_tiles,
+            ),
+        )
+
     def get_num_frames_with_most_features(
         self,
         seq_len: int,
@@ -305,6 +334,26 @@ class NanoNemotronVLProcessingInfo(BaseProcessingInfo):
         max_tubelets_per_video = max_total_tubelets // max(max_videos, 1)
         max_frames_per_video = max_tubelets_per_video * T
         return max(max_frames_per_video, 1)
+
+    def get_mm_max_tokens_per_item(
+        self, seq_len: int, mm_counts: Mapping[str, int]
+    ) -> Mapping[str, int]:
+        mm_max_tokens: dict[str, int] = {}
+
+        if mm_counts.get("image", 0) > 0:
+            _, mm_max_tokens["image"] = self.get_dummy_image_size_and_max_tokens(
+                mm_counts
+            )
+
+        if mm_counts.get("video", 0) > 0:
+            assert self.supports_video
+            mm_max_tokens["video"] = seq_len
+
+        if mm_counts.get("audio", 0) > 0:
+            assert self.supports_audio
+            mm_max_tokens["audio"] = seq_len
+
+        return mm_max_tokens
 
 
 class NanoNemotronVLMultiModalProcessor(
@@ -548,19 +597,26 @@ class NanoNemotronVLMultiModalProcessor(
     def _extract_audio_from_videos(
         self,
         mm_items: MultiModalDataItems,
-    ) -> tuple[MultiModalDataItems, list[AudioItem]]:
+    ) -> tuple[MultiModalDataItems, list[AudioItem], list[bool]]:
         """Extract audio tracks from video bytes in *mm_items*.
 
+        Videos whose bytes are missing or that contain no audio stream are
+        silently skipped.  The returned *has_audio* mask is aligned with
+        the video list so callers know which ``<video>`` tokens need an
+        accompanying audio context.
+
         Returns:
-            The augmented *mm_items* (with audio added) and the list of
-            extracted audio items.
+            A 3-tuple of (augmented mm_items, extracted audio items,
+            per-video boolean mask indicating which videos have audio).
         """
         videos = mm_items.get_items("video", VideoProcessorItems)
         assert isinstance(videos.metadata, list)
+
         metadata_list = videos.metadata
 
         audio_items: list[AudioItem] = []
-        for metadata in metadata_list:
+        has_audio: list[bool] = []
+        for idx, metadata in enumerate(metadata_list):
             video_bytes = metadata.get("original_video_bytes")
             if video_bytes is None or len(video_bytes) == 0:
                 raise ValueError(
@@ -569,7 +625,16 @@ class NanoNemotronVLMultiModalProcessor(
                     "video must be loaded with keep_video_bytes=True (e.g. via "
                     "the chat API with a model that sets use_audio_in_video)."
                 )
-            audio_items.append(load_audio_pyav(BytesIO(video_bytes)))
+            try:
+                audio_items.append(load_audio_pyav(BytesIO(video_bytes)))
+                has_audio.append(True)
+            except Exception:
+                logger.debug(
+                    "Video %d: no audio stream found, skipping audio extraction.",
+                    idx,
+                    exc_info=True,
+                )
+                has_audio.append(False)
 
         # Create a new VideoProcessorItems with metadata that does not contain
         # the large video bytes, to avoid modifying the input `mm_items`.
@@ -579,45 +644,83 @@ class NanoNemotronVLMultiModalProcessor(
         ]
         new_videos = VideoProcessorItems(data=videos.data, metadata=new_metadata_list)
 
-        audio_parsed = self.data_parser.parse_mm_data({"audio": audio_items})
+        audio_parsed = {}
+        if audio_items:
+            audio_parsed = self.data_parser.parse_mm_data({"audio": audio_items})
 
         # Create a new MultiModalDataItems with the new video and audio items.
         new_mm_items_dict = {**mm_items, **audio_parsed, "video": new_videos}
         mm_items = MultiModalDataItems(new_mm_items_dict)
 
-        return mm_items, audio_items
+        return mm_items, audio_items, has_audio
 
     def apply(
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
     ) -> MultiModalInput:
-        use_audio_in_video = bool(
-            inputs.hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        mm_config = self.info.ctx.model_config.get_multimodal_config()
+        merged_kwargs = mm_config.merge_mm_processor_kwargs(
+            inputs.hf_processor_mm_kwargs
         )
+        use_audio_in_video = bool(merged_kwargs.get("use_audio_in_video", False))
+
         inputs.hf_processor_mm_kwargs = {
             k: v
             for k, v in inputs.hf_processor_mm_kwargs.items()
             if k != "use_audio_in_video"
         }
 
-        if not (
-            use_audio_in_video
-            and "video" in inputs.mm_data_items
-            and "audio" not in inputs.mm_data_items
-        ):
+        if not (use_audio_in_video and "video" in inputs.mm_data_items):
             return super().apply(inputs, timing_ctx)
 
-        mm_items, audio_items = self._extract_audio_from_videos(inputs.mm_data_items)
-        inputs.mm_data_items = mm_items
+        mm_items = inputs.mm_data_items
+        if "audio" in mm_items:
+            # Audio was pre-populated by upstream (e.g., OpenAI chat endpoint).
+            # Reuse existing audio items; validate 1:1 correspondence.
+            videos = mm_items.get_items("video", VideoProcessorItems)
+            audios = mm_items.get_items("audio", AudioProcessorItems)
+            if len(audios) != len(videos):
+                raise ValueError(
+                    "use_audio_in_video requires equal number of audio and "
+                    f"video items, got num_audios={len(audios)}, "
+                    f"num_videos={len(videos)}"
+                )
+            audio_items = audios.get_all()
+            has_audio = [True] * len(videos)
+            logger.info(
+                "Using %d pre-populated audio item(s) from upstream.",
+                len(audio_items),
+            )
+        else:
+            # Extract audio from video bytes (library usage path).
+            mm_items, audio_items, has_audio = self._extract_audio_from_videos(mm_items)
+            inputs.mm_data_items = mm_items
+            logger.info(
+                "Extracted audio from video bytes: %d audio(s), has_audio=%s.",
+                len(audio_items),
+                has_audio,
+            )
+
+        if not audio_items:
+            return super().apply(inputs, timing_ctx)
 
         prompt = inputs.prompt
         tokenizer = self.info.get_tokenizer()
         if not isinstance(prompt, str):
             prompt = tokenizer.decode(prompt, skip_special_tokens=False)
 
-        for _ in audio_items:
-            prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
+        # Inject AUDIO_CONTEXT only after <video> tokens whose video
+        # actually contained an audio stream (preserving video-audio pairing).
+        tag = "<video>"
+        head, *rest = prompt.split(tag)
+        rebuilt = [head]
+        for append_audio, part in zip(has_audio, rest, strict=True):
+            rebuilt.append(tag)
+            if append_audio:
+                rebuilt.append(AUDIO_CONTEXT)
+            rebuilt.append(part)
+        prompt = "".join(rebuilt)
 
         inputs.prompt = tokenizer.encode(prompt, add_special_tokens=False)
 
@@ -708,17 +811,10 @@ class NanoNemotronVLDummyInputsBuilder(
         mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
+        (target_width, target_height), _ = (
+            self.info.get_dummy_image_size_and_max_tokens(mm_counts)
+        )
         processor = self.info.get_hf_processor()
-        if tiler := processor.dynamic_tiler:
-            budget = tiler.max_num_tokens_available(text_prompt_length=num_images)
-            target_width, target_height = (
-                tiler.width_and_height_for_max_num_tokens_available(budget)
-            )
-        else:
-            max_num_tiles = 12
-            target_width, target_height = self.info.get_image_size_with_most_features(
-                max_num_tiles
-            )
 
         image_overrides = mm_options.get("image")
 

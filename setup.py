@@ -379,6 +379,20 @@ class cmake_build_ext(build_ext):
                 dirs_exist_ok=True,
             )
 
+        if _is_cuda():
+            # copy vendored deep_gemm package from build_lib to source tree
+            # for editable installs
+            deep_gemm_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "deep_gemm"
+            )
+            if os.path.exists(deep_gemm_build):
+                print(f"Copying {deep_gemm_build} to vllm/third_party/deep_gemm")
+                shutil.copytree(
+                    deep_gemm_build,
+                    "vllm/third_party/deep_gemm",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -685,6 +699,8 @@ class precompiled_wheel_utils:
                 flashmla_regex = re.compile(
                     r"vllm/third_party/flashmla/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
+                deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 file_members = list(
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
@@ -698,6 +714,9 @@ class precompiled_wheel_utils:
                 )
                 file_members += list(
                     filter(lambda x: flashmla_regex.match(x.filename), wheel.filelist)
+                )
+                file_members += list(
+                    filter(lambda x: deep_gemm_regex.match(x.filename), wheel.filelist)
                 )
 
                 for file in file_members:
@@ -987,6 +1006,12 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+    ):
+        # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
+        # Optional since it won't build on unsupported architectures
+        ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
 
 if _is_cpu():
     import platform
@@ -1013,6 +1038,11 @@ package_data = {
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
+        "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        # DeepGEMM JIT include headers (vendored via cmake)
+        "third_party/deep_gemm/include/**/*.cuh",
+        "third_party/deep_gemm/include/**/*.h",
+        "third_party/deep_gemm/include/**/*.hpp",
     ]
 }
 

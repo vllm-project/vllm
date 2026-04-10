@@ -370,7 +370,6 @@ async def init_app_state(
     state.openai_serving_render = OpenAIServingRender(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        io_processor=engine_client.io_processor,
         model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -379,6 +378,7 @@ async def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
@@ -440,13 +440,12 @@ async def init_render_app_state(
 
     Unlike :func:`init_app_state` this function does not require an
     :class:`~vllm.engine.protocol.EngineClient`; it bootstraps the
-    preprocessing pipeline (renderer, io_processor, input_processor)
+    preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.config.VllmConfig`.
     """
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-    from vllm.plugins.io_processors import get_io_processor
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]
@@ -464,15 +463,11 @@ async def init_render_app_state(
         request_logger = None
 
     renderer = renderer_from_config(vllm_config)
-    io_processor = get_io_processor(
-        vllm_config, renderer, vllm_config.model_config.io_processor_plugin
-    )
     resolved_chat_template = load_chat_template(args.chat_template)
 
     state.openai_serving_render = OpenAIServingRender(
         model_config=vllm_config.model_config,
         renderer=renderer,
-        io_processor=io_processor,
         model_registry=model_registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -481,6 +476,7 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
