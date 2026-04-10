@@ -218,7 +218,6 @@ class TestInitializeToolSessions:
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
-        engine_client.io_processor = MagicMock()
         engine_client.renderer = MagicMock()
 
         models = MagicMock()
@@ -307,7 +306,6 @@ class TestValidateGeneratorInput:
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
-        engine_client.io_processor = MagicMock()
         engine_client.renderer = MagicMock()
 
         models = MagicMock()
@@ -369,7 +367,6 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     model_config.get_diff_sampling_param.return_value = {}
     engine_client.model_config = model_config
     engine_client.input_processor = MagicMock()
-    engine_client.io_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
     tokenizer = FakeTokenizer()
@@ -672,7 +669,6 @@ def _make_serving_instance_with_reasoning():
     model_config.get_diff_sampling_param.return_value = {}
     engine_client.model_config = model_config
     engine_client.input_processor = MagicMock()
-    engine_client.io_processor = MagicMock()
     engine_client.renderer = MagicMock()
 
     models = MagicMock()
