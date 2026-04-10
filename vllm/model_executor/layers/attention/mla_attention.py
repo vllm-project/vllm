@@ -1397,10 +1397,10 @@ def mla_attention_prefill_with_output(
                 )
             )
         else:
-            context_output, context_lse = attn_layer._compute_prefill_context(
+            context_output, context_lse = attn_layer.impl._compute_prefill_context(
                 q, kv_cache, attn_metadata, attn_layer._k_scale
             )
-        if attn_layer._pad_v:
+        if attn_layer.impl._pad_v:
             context_output = context_output[..., : v.shape[-1]]
             suffix_output = suffix_output[..., : v.shape[-1]]
         result = q.new_empty(num_prefill, attn_layer.num_heads, attn_layer.v_head_dim)
