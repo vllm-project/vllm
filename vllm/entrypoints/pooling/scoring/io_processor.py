@@ -416,7 +416,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-class JinaRankingMixin:
+class JinaRankingIOProcessorMixin:
     @staticmethod
     def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
         for token in special_tokens.values():
@@ -440,12 +440,15 @@ class JinaRankingMixin:
         if special_tokens is None:
             special_tokens = default_special_tokens
 
-        query = JinaRankingMixin.sanitize_input(query, special_tokens)
-        docs = [JinaRankingMixin.sanitize_input(doc, special_tokens) for doc in docs]
+        query = JinaRankingIOProcessorMixin.sanitize_input(query, special_tokens)
+        docs = [
+            JinaRankingIOProcessorMixin.sanitize_input(doc, special_tokens)
+            for doc in docs
+        ]
 
         prefix = (
             "<|im_start|>system\n"
-            "You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. "
+            "You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. "  # noqa: E501
             "If the query is a question, how relevant a passage is depends on how well it answers the question. "
             "If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. "
             "If an instruction is provided, you should follow the instruction when determining the ranking."
@@ -487,15 +490,9 @@ class JinaRankingMixin:
         return text
 
 
-class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingMixin):
+class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorMixin):
     name = "jina-reranking-scoring"
     pooling_task: PoolingTask = "token_embed"
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    #######################################
-    # helpers
 
     def _pre_process(
         self,

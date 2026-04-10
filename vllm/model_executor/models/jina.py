@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from https://huggingface.co/jinaai/jina-reranker-v3/blob/main/modeling.py
-# ruff: noqa: E501
-
 
 import torch
 from torch import nn
