@@ -56,6 +56,7 @@ Sorted alphabetically by GitHub handle:
 - [@zhuohan123](https://github.com/zhuohan123): Project lead, RL integration, numerics
 - [@zou3519](https://github.com/zou3519): Compilation
 - [@BoyuanFeng](https://github.com/BoyuanFeng): Compilation, CUDAGraph
+- [@xuechendi](https://github.com/xuechendi): Intel CPU/XPU integration, KV connector
 
 ### Emeritus Committers
 
@@ -175,7 +176,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - Plugin Interface: @youkaichao, @Yikun
 - NVIDIA GPU: @pavanimajety
 - AMD GPU: @gshtras, @tjtanaa
-- Intel CPU/GPU: @jikunshang, @bigPYJ1151
+- Intel CPU/GPU: @jikunshang, @bigPYJ1151, @xuechendi
 - Google TPU: @yaochengji
 
 ### Ecosystem Projects
