@@ -36,7 +36,7 @@ def init_pooling_io_processors(
         processors["embed"] = EmbedIOProcessor
 
     if "token_embed" in supported_tasks:
-        from vllm.entrypoints.pooling.embed.io_processor import TokenEmbedIOProcessor
+        from .embed.io_processor import TokenEmbedIOProcessor
 
         processors["token_embed"] = TokenEmbedIOProcessor
 
