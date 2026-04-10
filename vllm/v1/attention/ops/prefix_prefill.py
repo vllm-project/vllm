@@ -187,7 +187,8 @@ def _fwd_kernel(
                 bn[:, None] * stride_v_cache_bs
                 + cur_kv_head * stride_v_cache_h
                 + (internal_offsets[:, None] // INTERLEAVED_V_KX)
-                * BLOCK_DMODEL * INTERLEAVED_V_KX
+                * BLOCK_DMODEL
+                * INTERLEAVED_V_KX
                 + offs_d[None, :] * INTERLEAVED_V_KX
                 + (internal_offsets[:, None] % INTERLEAVED_V_KX)
             )
@@ -483,8 +484,7 @@ def _fwd_kernel_alibi(
             off_v = (
                 bn[:, None] * stride_v_cache_bs
                 + cur_kv_head * stride_v_cache_h
-                + (v_internal // INTERLEAVED_V_KX)
-                * BLOCK_DMODEL * INTERLEAVED_V_KX
+                + (v_internal // INTERLEAVED_V_KX) * BLOCK_DMODEL * INTERLEAVED_V_KX
                 + offs_d[None, :] * INTERLEAVED_V_KX
                 + (v_internal % INTERLEAVED_V_KX)
             )

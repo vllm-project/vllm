@@ -569,8 +569,8 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
   constexpr int KX_V = 16 / sizeof(cache_t);
 
   if constexpr (USE_INTERLEAVED_V_CACHE) {
-    // Interleaved V-cache layout: [num_blocks, num_heads, block_size/x, head_dim, x]
-    // Address for v[block][head][token t][dim d]:
+    // Interleaved V-cache layout: [num_blocks, num_heads, block_size/x,
+    // head_dim, x] Address for v[block][head][token t][dim d]:
     //   chunk = t / x,  sub = t % x
     //   addr = base + chunk * head_dim * x + d * x + sub
     const cache_t* v_ptr_head = v_cache + wg_start_kv_head_idx * kv_head_stride;
@@ -585,10 +585,10 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
         for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
           const int bo = ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE) +
                          vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-          const int bo_chunk = bo / KX_V;       // which chunk of x tokens
+          const int bo_chunk = bo / KX_V;  // which chunk of x tokens
           const cache_t* v_fetch_ptr =
-              v_block_ptr +
-              (bo_chunk * HEAD_SIZE + vhead_elem) * KX_V + (bo % KX_V);
+              v_block_ptr + (bo_chunk * HEAD_SIZE + vhead_elem) * KX_V +
+              (bo % KX_V);
           Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
               *reinterpret_cast<const _B16x8*>(v_fetch_ptr);
         }
@@ -1151,21 +1151,22 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
         for (int h = 0; h < VHELOOP; h++) {
           const int head_size_elem = h * WARP_SIZE + laneid;
           if constexpr (USE_INTERLEAVED_V_CACHE) {
-            // Interleaved layout: [num_blocks, num_heads, block_size/x, head_dim, x]
-            // Iterate over chunks of x tokens; within each chunk, x values
-            // for the same head_size_elem are contiguous (16-byte aligned).
+            // Interleaved layout: [num_blocks, num_heads, block_size/x,
+            // head_dim, x] Iterate over chunks of x tokens; within each chunk,
+            // x values for the same head_size_elem are contiguous (16-byte
+            // aligned).
             for (int bo_chunk = 0; bo_chunk < BLOCK_SIZE / KX_V; bo_chunk++) {
               const _B16x8* v_chunk =
-                  v_ptrh8b +
-                  (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
+                  v_ptrh8b + (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
               for (int xd = 0; xd < KX_V / 8; xd++) {
                 Vlocal[h][b * BLOCK_SIZE / 8 + bo_chunk * (KX_V / 8) + xd] =
                     v_chunk[xd];
               }
             }
           } else {
-            // Standard PagedAttention layout: [num_blocks, num_heads, head_dim, block_size]
-            // All block_size tokens for one head_size_elem are contiguous.
+            // Standard PagedAttention layout: [num_blocks, num_heads, head_dim,
+            // block_size] All block_size tokens for one head_size_elem are
+            // contiguous.
             const _B16x8* v_ptrh8be =
                 v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
             for (int d = 0; d < BLOCK_SIZE / 8; d++) {
@@ -1190,16 +1191,14 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
             // elements (KX_V=16, using _B8x8 loads instead of _B16x8).
             for (int bo_chunk = 0; bo_chunk < BLOCK_SIZE / KX_V; bo_chunk++) {
               const _B8x8* v_chunk =
-                  v_ptrh8b +
-                  (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
+                  v_ptrh8b + (bo_chunk * HEAD_SIZE + head_size_elem) * KX_V / 8;
               for (int xd = 0; xd < KX_V / 8; xd++) {
                 Vlocalb8[h][b * BLOCK_SIZE / 8 + bo_chunk * (KX_V / 8) + xd] =
                     v_chunk[xd];
               }
             }
           } else {
-            const _B8x8* v_ptrh8be =
-                v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
+            const _B8x8* v_ptrh8be = v_ptrh8b + head_size_elem * BLOCK_SIZE / 8;
             for (int d = 0; d < BLOCK_SIZE / 8; d++) {
               Vlocalb8[h][b * BLOCK_SIZE / 8 + d] = v_ptrh8be[d];
             }
@@ -2219,8 +2218,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO,
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
           bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
@@ -2954,8 +2952,7 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
 template <typename scalar_t, typename cache_t,
           vllm::Fp8KVCacheDataType KV_DTYPE, typename OUTT, int BLOCK_SIZE,
-          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED,
-          int GQA_RATIO,
+          int HEAD_SIZE, int NUM_THREADS, bool ALIBI_ENABLED, int GQA_RATIO,
           bool USE_INTERLEAVED_V_CACHE = false>
 __global__
 __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
@@ -3258,10 +3255,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 #endif
 
 #define LAUNCH_CUSTOM_ATTENTION_MFMA16(GQA_RATIO)                              \
-  paged_attention_ll4mi_QKV_mfma16_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,  \
-                                          HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
-                                          GQA_RATIO, MFMA_TYPE,                \
-                                          USE_INTERLEAVED_V_CACHE>             \
+  paged_attention_ll4mi_QKV_mfma16_kernel<                                     \
+      T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE, HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
+      GQA_RATIO, MFMA_TYPE, USE_INTERLEAVED_V_CACHE>                           \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
@@ -3272,8 +3268,7 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
   paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
                                          HEAD_SIZE, NTHR, ALIBI_ENABLED,       \
-                                         GQA_RATIO,                            \
-                                         USE_INTERLEAVED_V_CACHE>              \
+                                         GQA_RATIO, USE_INTERLEAVED_V_CACHE>   \
       <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
@@ -3627,33 +3622,33 @@ void paged_attention_custom_launcher_navi(
 // compatibility; a TORCH_CHECK prevents dispatch to NAVI with interleaved V.
 // TODO: implement interleaved V-cache support in the NAVI (GFX11/GFX12)
 // kernels if shuffle KV cache layout is needed on RDNA GPUs.
-#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,      \
-                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)                  \
-  if (use_interleaved_v_cache) {                                               \
-    TORCH_CHECK(!is_navi,                                                      \
-        "Reading interleaved V-cache layout from paged decode "                \
-        "attention not supported on NAVI GPUs");                               \
-    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,     \
-                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,     \
-                                    true>(                                     \
-        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,     \
-        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,          \
-        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);           \
-  } else {                                                                     \
-    if (!is_navi) {                                                            \
-      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,   \
-                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>(  \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
-          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);         \
-    } else {                                                                   \
-      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,         \
-                                           HEAD_SIZE, OUTT, PSIZE,             \
-                                           ALIBI_ENABLED, MFMA_TYPE>(          \
-          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,   \
-          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,        \
-          max_seq_len, alibi_slopes, k_scale, v_scale);                        \
-    }                                                                          \
+#define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,     \
+                             PSIZE, ALIBI_ENABLED, MFMA_TYPE)                 \
+  if (use_interleaved_v_cache) {                                              \
+    TORCH_CHECK(!is_navi,                                                     \
+                "Reading interleaved V-cache layout from paged decode "       \
+                "attention not supported on NAVI GPUs");                      \
+    paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \
+                                    OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE,    \
+                                    true>(                                    \
+        out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,    \
+        num_kv_heads, scale, block_tables, seq_lens, query_start_loc,         \
+        max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);          \
+  } else {                                                                    \
+    if (!is_navi) {                                                           \
+      paged_attention_custom_launcher<T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,  \
+                                      OUTT, PSIZE, ALIBI_ENABLED, MFMA_TYPE>( \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+          max_seq_len, alibi_slopes, k_scale, v_scale, fp8_out_scale);        \
+    } else {                                                                  \
+      paged_attention_custom_launcher_navi<T, KVT, KV_DTYPE, BLK_SIZE,        \
+                                           HEAD_SIZE, OUTT, PSIZE,            \
+                                           ALIBI_ENABLED, MFMA_TYPE>(         \
+          out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,  \
+          num_kv_heads, scale, block_tables, seq_lens, query_start_loc,       \
+          max_seq_len, alibi_slopes, k_scale, v_scale);                       \
+    }                                                                         \
   }
 
 #define CALL_CUSTOM_LAUNCHER_ALIBI(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE,    \

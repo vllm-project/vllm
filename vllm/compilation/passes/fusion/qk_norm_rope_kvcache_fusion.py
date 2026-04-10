@@ -68,8 +68,9 @@ def unify_reshape_batch_dim(graph: fx.Graph) -> None:
         new_shape = list(shape_arg)
         changed = False
         for i, s in enumerate(new_shape):
-            if s == -1 or (isinstance(s, torch.SymInt)
-                           and not isinstance(s, torch.fx.Node)):
+            if s == -1 or (
+                isinstance(s, torch.SymInt) and not isinstance(s, torch.fx.Node)
+            ):
                 new_shape[i] = batch_node
                 changed = True
         if changed:
@@ -79,6 +80,7 @@ def unify_reshape_batch_dim(graph: fx.Graph) -> None:
 # ---------------------------------------------------------------------------
 # Custom op: fused QK-norm + RoPE + KV cache update
 # ---------------------------------------------------------------------------
+
 
 def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     q_out: torch.Tensor,
@@ -92,8 +94,7 @@ def fused_qk_norm_rope_and_unified_kv_cache_update_impl(
     is_neox: bool,
     layer_name: str = "",
 ) -> torch.Tensor:
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
-        layer_name)
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         attn_layer.impl.do_qk_norm_rope_kvcache_update(
             attn_layer,
@@ -140,6 +141,7 @@ direct_register_custom_op(
 # Pattern: QK-norm + RoPE + unified_kv_cache_update
 # ---------------------------------------------------------------------------
 
+
 class QkNormRopeKvCachePattern:
     """
     Match the unfused sequence:
@@ -161,9 +163,7 @@ class QkNormRopeKvCachePattern:
       v = split(qkv, ...)[2].view(num_kv_heads, head_dim)
     """
 
-    FUSED_OP = (
-        torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default
-    )
+    FUSED_OP = torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default
 
     def __init__(
         self,
@@ -245,16 +245,12 @@ class QkNormRopeKvCachePattern:
             k_normed = rmsnorm_matcher(k_by_head, k_weight)
             k_flat = k_normed.view(T, k_size)
 
-            q_rope, k_rope = rope_matcher(
-                positions, q_flat, k_flat, cos_sin_cache
-            )
+            q_rope, k_rope = rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
 
             q_rope = q_rope.view(T, num_heads, head_dim)
             k_rope = k_rope.view(T, num_kv_heads, head_dim)
             v = v.view(T, num_kv_heads, head_dim_v)
-            dummy = torch.ops.vllm.unified_kv_cache_update(
-                k_rope, v, layer_name
-            )
+            dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, layer_name)
             return dummy, q_rope, k_rope, v
 
         def replacement(
@@ -265,12 +261,18 @@ class QkNormRopeKvCachePattern:
             cos_sin_cache: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
             q_out = torch.empty(
-                qkv.shape[0], num_heads, head_dim,
-                device=qkv.device, dtype=qkv.dtype,
+                qkv.shape[0],
+                num_heads,
+                head_dim,
+                device=qkv.device,
+                dtype=qkv.dtype,
             )
             k_out = torch.empty(
-                qkv.shape[0], num_kv_heads, head_dim,
-                device=qkv.device, dtype=qkv.dtype,
+                qkv.shape[0],
+                num_kv_heads,
+                head_dim,
+                device=qkv.device,
+                dtype=qkv.dtype,
             )
             _, _, v = qkv.split([q_size, k_size, v_size], dim=-1)
             v = v.view(qkv.shape[0], num_kv_heads, head_dim_v)
@@ -310,6 +312,7 @@ class QkNormRopeKvCachePattern:
 # Pass class
 # ---------------------------------------------------------------------------
 
+
 class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
     """
     Fuse QK-norm + RoPE + KV cache update into a single AITER HIP kernel.
@@ -333,8 +336,7 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         dtype = config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
             logger.warning_once(
-                "QK Norm+RoPE+KVCache fusion not enabled: "
-                "unsupported dtype %s", dtype
+                "QK Norm+RoPE+KVCache fusion not enabled: unsupported dtype %s", dtype
             )
             return
 
@@ -346,7 +348,8 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             "QkNormRopeKvCacheFusionPass init: "
             "RotaryEmbedding.enabled()=%s, rope_custom_enabled=%s, "
             "RMSNorm custom_op_enabled=%s",
-            RotaryEmbedding.enabled(), rope_custom_enabled,
+            RotaryEmbedding.enabled(),
+            rope_custom_enabled,
             rms_custom_enabled,
         )
 
@@ -383,8 +386,11 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                                 "Skipping duplicate pattern: "
                                                 "aiter_rms=%s aiter_rope=%s "
                                                 "eps=%s neox=%s fi=%s",
-                                                aiter_rms, aiter_rope,
-                                                epsilon, neox, rope_flashinfer,
+                                                aiter_rms,
+                                                aiter_rope,
+                                                epsilon,
+                                                neox,
+                                                rope_flashinfer,
                                             )
                                         else:
                                             raise
@@ -403,8 +409,10 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
                                             "Skipping duplicate pattern: "
                                             "aiter_rms=%s aiter_rope=%s "
                                             "eps=%s neox=%s fi=N/A",
-                                            aiter_rms, aiter_rope,
-                                            epsilon, neox,
+                                            aiter_rms,
+                                            aiter_rope,
+                                            epsilon,
+                                            neox,
                                         )
                                     else:
                                         raise
@@ -417,18 +425,21 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         # ranges so both write and read paths agree on the layout.
         max_batched = config.scheduler_config.max_num_batched_tokens
         needs_full_coverage = any(
-            getattr(layer.impl, '_use_interleaved_v_cache', False)
+            getattr(layer.impl, "_use_interleaved_v_cache", False)
             for _, layer in attn_layers.items()
             if layer.impl.fused_qk_norm_rope_kvcache_supported()
         )
-        if (needs_full_coverage
-                and max_batched is not None
-                and self.max_token_num < max_batched):
+        if (
+            needs_full_coverage
+            and max_batched is not None
+            and self.max_token_num < max_batched
+        ):
             logger.info(
                 "Raising rope_kvcache_fusion_max_token_num from %d to %d "
                 "to maintain consistent interleaved V-cache layout across "
                 "all compile ranges (required by attention backend).",
-                self.max_token_num, max_batched,
+                self.max_token_num,
+                max_batched,
             )
             self.max_token_num = max_batched
 
@@ -439,10 +450,11 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         unify_reshape_batch_dim(graph)
 
         import torch._inductor.pattern_matcher as _pm_mod
+
         _orig_fx_to_pat = _pm_mod.fx_to_pattern
 
         def _relaxed_fx_to_pattern(*a, **kw):
-            kw['ignore_types'] = (int, torch.SymInt)
+            kw["ignore_types"] = (int, torch.SymInt)
             return _orig_fx_to_pat(*a, **kw)
 
         _pm_mod.fx_to_pattern = _relaxed_fx_to_pattern
@@ -461,6 +473,4 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
         return compile_range.end <= self.max_token_num
 
     def uuid(self) -> str:
-        return VllmInductorPass.hash_source(
-            self, QkNormRopeKvCachePattern
-        )
+        return VllmInductorPass.hash_source(self, QkNormRopeKvCachePattern)

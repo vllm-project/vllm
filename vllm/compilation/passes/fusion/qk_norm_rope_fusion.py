@@ -66,9 +66,7 @@ class QkNormRopePattern:
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.eps = eps
-        self.rmsnorm_matcher = MatcherRMSNorm(
-            eps, match_rocm_aiter=match_rocm_aiter
-        )
+        self.rmsnorm_matcher = MatcherRMSNorm(eps, match_rocm_aiter=match_rocm_aiter)
         self.is_neox = is_neox
         self.rope_flashinfer = rope_flashinfer
         self.rope_matcher = MatcherRotaryEmbedding(

@@ -403,7 +403,9 @@ class RocmAttentionImpl(AttentionImpl):
             )
 
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size,
+            kv_cache,
+            self.num_kv_heads,
+            self.head_size,
         )
 
         if self.kv_cache_dtype.startswith("fp8"):
@@ -496,7 +498,8 @@ class RocmAttentionImpl(AttentionImpl):
     def set_fused_kv_cache_layout(self):
         self._use_interleaved_v_cache = True
 
-    def do_qk_norm_rope_kvcache_update(self,
+    def do_qk_norm_rope_kvcache_update(
+        self,
         layer: AttentionLayer,
         qkv: torch.Tensor,
         q_out: torch.Tensor,
@@ -517,12 +520,14 @@ class RocmAttentionImpl(AttentionImpl):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
 
-        num_heads_q = layer.num_heads
-        num_heads_k = layer.num_kv_heads
-        num_heads_v = layer.num_kv_heads
-        head_dim = layer.head_size
-        use_shuffle_layout = (self._use_interleaved_v_cache
-                              or rocm_aiter_ops.is_shuffle_kv_cache_enabled())
+        num_heads_q = self.num_heads
+        num_heads_k = self.num_kv_heads
+        num_heads_v = self.num_kv_heads
+        head_dim = self.head_size
+        use_shuffle_layout = (
+            self._use_interleaved_v_cache
+            or rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+        )
         block_size = key_cache.shape[1]
         x = 16 // key_cache.element_size()
 
@@ -532,19 +537,15 @@ class RocmAttentionImpl(AttentionImpl):
         v_scale_val = layer._v_scale_float
         if self._cached_k_scale_val is None or (
             self._cached_k_scale_val != k_scale_val
-            and not (math.isnan(self._cached_k_scale_val)
-                     and math.isnan(k_scale_val))
+            and not (math.isnan(self._cached_k_scale_val) and math.isnan(k_scale_val))
         ):
-            self._cached_k_scale_cpu = torch.tensor(k_scale_val,
-                                                    dtype=torch.float32)
+            self._cached_k_scale_cpu = torch.tensor(k_scale_val, dtype=torch.float32)
             self._cached_k_scale_val = k_scale_val
         if self._cached_v_scale_val is None or (
             self._cached_v_scale_val != v_scale_val
-            and not (math.isnan(self._cached_v_scale_val)
-                     and math.isnan(v_scale_val))
+            and not (math.isnan(self._cached_v_scale_val) and math.isnan(v_scale_val))
         ):
-            self._cached_v_scale_cpu = torch.tensor(v_scale_val,
-                                                    dtype=torch.float32)
+            self._cached_v_scale_cpu = torch.tensor(v_scale_val, dtype=torch.float32)
             self._cached_v_scale_val = v_scale_val
 
         rocm_aiter_ops.hip_qk_norm_rope_and_cache(

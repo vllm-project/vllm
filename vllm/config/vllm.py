@@ -163,10 +163,12 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
 #   split(QKV) → view → RMSNorm(Q) → view → RMSNorm(K) → view → RoPE
 # Add model_type values here when new architectures hardcode QK-norm
 # with vllm's standard RMSNorm.
-_QK_NORM_MODEL_TYPES = frozenset({
-    "qwen3",
-    "qwen3_moe",
-})
+_QK_NORM_MODEL_TYPES = frozenset(
+    {
+        "qwen3",
+        "qwen3_moe",
+    }
+)
 
 
 def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:

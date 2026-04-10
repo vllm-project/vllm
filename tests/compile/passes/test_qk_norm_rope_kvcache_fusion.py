@@ -119,10 +119,8 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         )
 
         if self.kv_cache_dtype != self.dtype:
-            self.attn._k_scale = torch.tensor(1.0, dtype=torch.float32,
-                                              device=device)
-            self.attn._v_scale = torch.tensor(1.0, dtype=torch.float32,
-                                              device=device)
+            self.attn._k_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
+            self.attn._v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
             self.attn._k_scale_float = 1.0
             self.attn._v_scale_float = 1.0
         else:
@@ -142,16 +140,12 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         )
 
     def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
-        batch_spec = BatchSpec(
-            seq_lens=[1] * batch_size, query_lens=[1] * batch_size
-        )
+        batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
             batch_spec, self.block_size, self.device, arange_block_indices=True
         )
 
-        max_blocks = (
-            (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
-        )
+        max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
 
         attn_backend = self.attn.attn_backend
@@ -163,20 +157,13 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         except (AttributeError, NotImplementedError):
             kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
 
-        kv_cache_shape = tuple(
-            kv_cache_shape[i] for i in kv_cache_stride_order
-        )
+        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
         inv_order = [
-            kv_cache_stride_order.index(i)
-            for i in range(len(kv_cache_stride_order))
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]
 
         raw_tensor = torch.zeros(
-            2
-            * num_blocks
-            * self.block_size
-            * self.num_kv_heads
-            * self.head_size,
+            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
             dtype=self.kv_cache_dtype,
             device=self.device,
         )
@@ -195,9 +182,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         self, qkv: torch.Tensor, positions: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qkv = qkv.clone()
-        q, k, v = qkv.split(
-            [self.q_size, self.kv_size, self.kv_size], dim=-1
-        )
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # QK-norm: RMSNorm on per-head Q and K
         q = q.view(-1, self.num_heads, self.head_size)
@@ -234,9 +219,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         # RoPE op
         if self.enable_rope_custom_op:
             if rocm_aiter_ops.is_triton_rotary_embed_enabled():
-                ops.append(
-                    torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
-                )
+                ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
             else:
                 ops.append(ROTARY_OP)
         else:
@@ -245,9 +228,7 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return ops
 
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
-        return [
-            torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default
-        ]
+        return [torch.ops.vllm.fused_qk_norm_rope_and_unified_kv_cache_update.default]
 
 
 @pytest.mark.parametrize(
@@ -360,13 +341,9 @@ def test_qk_norm_rope_kvcache_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_unfused, k_unfused, v_unfused, dummy = model(
-                qkv_unfused, pos_unfused
-            )
+            q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_unfused = attn_layer.kv_cache[
-                forward_context.virtual_engine
-            ]
+            kv_cache_unfused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy
 
         # Run fused (compiled) forward
@@ -381,9 +358,7 @@ def test_qk_norm_rope_kvcache_fusion(
             }
             q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_fused = attn_layer.kv_cache[
-                forward_context.virtual_engine
-            ]
+            kv_cache_fused = attn_layer.kv_cache[forward_context.virtual_engine]
         del dummy
 
         assert fusion_pass.matched_count == 1
@@ -401,15 +376,11 @@ def test_qk_norm_rope_kvcache_fusion(
             # With FP8, the kernel writes quantized K directly to the cache
             # and may leave k_out uninitialised.  In production this is fine
             # because downstream attention reads K from the cache.
-            torch.testing.assert_close(
-                k_unfused, k_fused, atol=ATOL, rtol=RTOL
-            )
+            torch.testing.assert_close(k_unfused, k_fused, atol=ATOL, rtol=RTOL)
 
         torch.testing.assert_close(v_unfused, v_fused, atol=ATOL, rtol=RTOL)
 
-        uses_interleaved_v = getattr(
-            model.attn.impl, "_use_interleaved_v_cache", False
-        )
+        uses_interleaved_v = getattr(model.attn.impl, "_use_interleaved_v_cache", False)
         cache_atol = 5e-2 if is_fp8_cache else ATOL
         cache_rtol = 1.0 if is_fp8_cache else RTOL
 
@@ -443,9 +414,9 @@ def test_qk_norm_rope_kvcache_fusion(
                 n_blk, num_kv_heads, head_size, block_size
             )
             v_fused_std = (
-                v_fused_view
-                .reshape(n_blk, num_kv_heads, block_size // x_il,
-                         head_size, x_il)
+                v_fused_view.reshape(
+                    n_blk, num_kv_heads, block_size // x_il, head_size, x_il
+                )
                 .permute(0, 1, 3, 2, 4)
                 .contiguous()
                 .reshape(n_blk, num_kv_heads, head_size, block_size)

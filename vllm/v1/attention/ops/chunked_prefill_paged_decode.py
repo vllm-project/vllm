@@ -158,7 +158,8 @@ def kernel_paged_attention_2d(
                 p_block_idx[:, None] * stride_v_cache_0
                 + kv_head_idx * stride_v_cache_1
                 + (internal_offsets[:, None] // INTERLEAVED_V_KX)
-                * HEAD_SIZE * INTERLEAVED_V_KX
+                * HEAD_SIZE
+                * INTERLEAVED_V_KX
                 + offs_d[None, :] * INTERLEAVED_V_KX
                 + (internal_offsets[:, None] % INTERLEAVED_V_KX)
             )
@@ -287,7 +288,9 @@ def chunked_prefill_paged_decode(
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
 
-    interleaved_v_kx = (16 // value_cache.element_size()) if use_interleaved_v_cache else 0
+    interleaved_v_kx = (
+        (16 // value_cache.element_size()) if use_interleaved_v_cache else 0
+    )
 
     if max_query_len > 1:
         context_attention_fwd(

@@ -780,7 +780,8 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
-    def do_qk_norm_rope_kvcache_update(self,
+    def do_qk_norm_rope_kvcache_update(
+        self,
         layer: AttentionLayer,
         qkv: torch.Tensor,
         q_out: torch.Tensor,
