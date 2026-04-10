@@ -8,16 +8,18 @@
 //   Block: dynamic warp count = min(2 + gqa_ratio, 5) * 32
 //   Scheduling: V/K/Q ops distributed round-robin across warps
 //
-//   NeoX path (!interleave): interleaved thread mapping
-//     Lane j holds elements [j, j+32, j+64, j+96] for head_dim=128.
-//     RoPE pairs (j, j+HALF) in same thread → zero shuffle, zero syncwarp.
+//   NeoX path (!interleave): contiguous-within-half thread mapping
+//     Lane j holds elements [PPT*j .. PPT*j+PPT-1] in each half,
+//     e.g. for head_dim=128 (PPT=2): lo=[2j,2j+1], hi=[64+2j,64+2j+1].
+//     RoPE pairs (d, d+HALF) in same thread → zero shuffle, zero syncwarp.
+//     Vectorized loads: vec2 for hd=128, vec4 for hd=256.
 //
 //   GPT-J path (interleave): contiguous thread mapping
 //     Lane j holds elements [j*EPT .. j*EPT+EPT-1].
 //     RoPE pairs (2i, 2i+1) in same lane → zero shuffle.
 //
 //   Key optimizations over v3:
-//     1. Interleaved thread mapping for NeoX RoPE (zero cross-thread comm)
+//     1. Contiguous-within-half mapping for NeoX (vec2/vec4 loads, zero shuffle)
 //     2. Unified warp scheduling (V/K/Q round-robin, no phase split)
 //     3. 2D grid (token × kv_group parallelism)
 //     4. Dynamic warp count (5 warps optimal for GQA ratio=4)
@@ -114,18 +116,17 @@ struct fp8_store_type<8> {
   using type = uint2;
 };
 
-// ── NeoX RMSNorm + RoPE (warp-level, interleaved layout) ────────────
+// ── NeoX RMSNorm + RoPE (warp-level, contiguous-within-half layout) ──
 //
-// r_lo/r_hi hold PAIRS_PER_THREAD pairs in interleaved layout where
-// lane j owns elements [j+p*32] (lo) and [j+p*32+HALF] (hi).
+// r_lo/r_hi hold PPT elements each.  Lane j owns contiguous elements
+// [PPT*j .. PPT*j+PPT-1] in each half of the head.
 template <int head_dim>
 __device__ __forceinline__ void rmsnorm_rope_neox(
     float* r_lo, float* r_hi,
     float const* w_lo, float const* w_hi,
     float const* r_cos, float const* r_sin,
     int lane, int embed_dim, float epsilon) {
-  constexpr int HALF = head_dim / 2;
-  constexpr int PPT = HALF / 32;
+  constexpr int PPT = head_dim / 2 / 32;
 
   float var = 0.f;
 #pragma unroll
@@ -142,7 +143,7 @@ __device__ __forceinline__ void rmsnorm_rope_neox(
 
 #pragma unroll
   for (int p = 0; p < PPT; ++p) {
-    int const dim = lane + p * 32;
+    int const dim = PPT * lane + p;
     if (dim < embed_dim) {
       float const new_lo = r_lo[p] * r_cos[p] - r_hi[p] * r_sin[p];
       float const new_hi = r_hi[p] * r_cos[p] + r_lo[p] * r_sin[p];
@@ -188,19 +189,44 @@ __device__ __forceinline__ void rmsnorm_rope_gptj(
   }
 }
 
-// ── NeoX load/store helpers ──────────────────────────────────────────
+// ── NeoX load/store helpers (vectorized for PPT >= 2) ────────────────
 
 template <typename Converter, int head_dim>
 __device__ __forceinline__ void load_head_neox(
     typename Converter::hip_type const* src,
     float* lo, float* hi, int lane) {
+  using T_in = typename Converter::hip_type;
+  using T2_in = typename Converter::packed_hip_type;
   constexpr int HALF = head_dim / 2;
   constexpr int PPT = HALF / 32;
+
+  if constexpr (PPT == 1) {
+    lo[0] = Converter::convert(src[lane]);
+    hi[0] = Converter::convert(src[lane + HALF]);
+  } else {
+    constexpr int halfBytes = PPT * sizeof(T_in);
+    constexpr int vecSize = halfBytes / 4;
+    using vec_T = typename packed_as<uint, vecSize>::type;
+    constexpr int num_packed = halfBytes / sizeof(T2_in);
+    int const thr_off = PPT * lane;
+
+    vec_T v_lo = *reinterpret_cast<vec_T const*>(&src[thr_off]);
 #pragma unroll
-  for (int p = 0; p < PPT; ++p) {
-    int const lo_idx = lane + p * 32;
-    lo[p] = Converter::convert(src[lo_idx]);
-    hi[p] = Converter::convert(src[lo_idx + HALF]);
+    for (int i = 0; i < num_packed; i++) {
+      float2 vals = Converter::convert(
+          *(reinterpret_cast<T2_in const*>(&v_lo) + i));
+      lo[2 * i] = vals.x;
+      lo[2 * i + 1] = vals.y;
+    }
+
+    vec_T v_hi = *reinterpret_cast<vec_T const*>(&src[HALF + thr_off]);
+#pragma unroll
+    for (int i = 0; i < num_packed; i++) {
+      float2 vals = Converter::convert(
+          *(reinterpret_cast<T2_in const*>(&v_hi) + i));
+      hi[2 * i] = vals.x;
+      hi[2 * i + 1] = vals.y;
+    }
   }
 }
 
@@ -208,13 +234,38 @@ template <typename Converter, int head_dim>
 __device__ __forceinline__ void store_head_neox(
     typename Converter::hip_type* dst,
     float const* lo, float const* hi, int lane) {
+  using T_in = typename Converter::hip_type;
+  using T2_in = typename Converter::packed_hip_type;
   constexpr int HALF = head_dim / 2;
   constexpr int PPT = HALF / 32;
+
+  if constexpr (PPT == 1) {
+    dst[lane] = Converter::convert(lo[0]);
+    dst[lane + HALF] = Converter::convert(hi[0]);
+  } else {
+    constexpr int halfBytes = PPT * sizeof(T_in);
+    constexpr int vecSize = halfBytes / 4;
+    using vec_T = typename packed_as<uint, vecSize>::type;
+    constexpr int num_packed = halfBytes / sizeof(T2_in);
+    int const thr_off = PPT * lane;
+
+    vec_T vec_lo;
 #pragma unroll
-  for (int p = 0; p < PPT; ++p) {
-    int const lo_idx = lane + p * 32;
-    dst[lo_idx] = Converter::convert(lo[p]);
-    dst[lo_idx + HALF] = Converter::convert(hi[p]);
+    for (int i = 0; i < num_packed; i++) {
+      T2_in packed = Converter::convert(
+          make_float2(lo[2 * i], lo[2 * i + 1]));
+      *(reinterpret_cast<T2_in*>(&vec_lo) + i) = packed;
+    }
+    *reinterpret_cast<vec_T*>(&dst[thr_off]) = vec_lo;
+
+    vec_T vec_hi;
+#pragma unroll
+    for (int i = 0; i < num_packed; i++) {
+      T2_in packed = Converter::convert(
+          make_float2(hi[2 * i], hi[2 * i + 1]));
+      *(reinterpret_cast<T2_in*>(&vec_hi) + i) = packed;
+    }
+    *reinterpret_cast<vec_T*>(&dst[HALF + thr_off]) = vec_hi;
   }
 }
 
@@ -223,24 +274,62 @@ __device__ __forceinline__ void write_cache_neox(
     void* cache_void, int64_t offset,
     float const* lo, float const* hi,
     float scale, int lane) {
+  using T_in = typename Converter::hip_type;
+  using T2_in = typename Converter::packed_hip_type;
   constexpr int HALF = head_dim / 2;
   constexpr int PPT = HALF / 32;
+
   if constexpr (IS_FP8) {
     uint8_t* cache = reinterpret_cast<uint8_t*>(cache_void);
+    if constexpr (PPT == 1) {
+      cache[offset + lane] = float_to_fp8_e4m3(lo[0] / scale);
+      cache[offset + lane + HALF] = float_to_fp8_e4m3(hi[0] / scale);
+    } else {
+      int const thr_off = PPT * lane;
+      uint8_t fp8_lo[PPT];
 #pragma unroll
-    for (int p = 0; p < PPT; ++p) {
-      int const lo_idx = lane + p * 32;
-      cache[offset + lo_idx] = float_to_fp8_e4m3(lo[p] / scale);
-      cache[offset + lo_idx + HALF] = float_to_fp8_e4m3(hi[p] / scale);
+      for (int i = 0; i < PPT; i++)
+        fp8_lo[i] = float_to_fp8_e4m3(lo[i] / scale);
+      using fp8_vec_t = typename fp8_store_type<PPT>::type;
+      *reinterpret_cast<fp8_vec_t*>(&cache[offset + thr_off]) =
+          *reinterpret_cast<fp8_vec_t const*>(fp8_lo);
+
+      uint8_t fp8_hi[PPT];
+#pragma unroll
+      for (int i = 0; i < PPT; i++)
+        fp8_hi[i] = float_to_fp8_e4m3(hi[i] / scale);
+      *reinterpret_cast<fp8_vec_t*>(&cache[offset + HALF + thr_off]) =
+          *reinterpret_cast<fp8_vec_t const*>(fp8_hi);
     }
   } else {
-    using T_in = typename Converter::hip_type;
     T_in* cache = reinterpret_cast<T_in*>(cache_void);
+    if constexpr (PPT == 1) {
+      cache[offset + lane] = Converter::convert(lo[0]);
+      cache[offset + lane + HALF] = Converter::convert(hi[0]);
+    } else {
+      constexpr int halfBytes = PPT * sizeof(T_in);
+      constexpr int vecSize = halfBytes / 4;
+      using vec_T = typename packed_as<uint, vecSize>::type;
+      constexpr int num_packed = halfBytes / sizeof(T2_in);
+      int const thr_off = PPT * lane;
+
+      vec_T vec_lo;
 #pragma unroll
-    for (int p = 0; p < PPT; ++p) {
-      int const lo_idx = lane + p * 32;
-      cache[offset + lo_idx] = Converter::convert(lo[p]);
-      cache[offset + lo_idx + HALF] = Converter::convert(hi[p]);
+      for (int i = 0; i < num_packed; i++) {
+        T2_in packed = Converter::convert(
+            make_float2(lo[2 * i], lo[2 * i + 1]));
+        *(reinterpret_cast<T2_in*>(&vec_lo) + i) = packed;
+      }
+      *reinterpret_cast<vec_T*>(&cache[offset + thr_off]) = vec_lo;
+
+      vec_T vec_hi;
+#pragma unroll
+      for (int i = 0; i < num_packed; i++) {
+        T2_in packed = Converter::convert(
+            make_float2(hi[2 * i], hi[2 * i + 1]));
+        *(reinterpret_cast<T2_in*>(&vec_hi) + i) = packed;
+      }
+      *reinterpret_cast<vec_T*>(&cache[offset + HALF + thr_off]) = vec_hi;
     }
   }
 }
@@ -438,22 +527,23 @@ __global__ void fused_kernel(
 
     if constexpr (!interleave) {
       // ============================================================
-      //  NeoX PATH: Interleaved thread mapping
-      //  Lane j holds: r_lo[p] = elem[j + p*32]
-      //                r_hi[p] = elem[j + p*32 + HALF]
-      //  RoPE pair (r_lo[p], r_hi[p]) → same thread, zero shuffle
+      //  NeoX PATH: Contiguous-within-half thread mapping
+      //  Lane j holds: lo[p] = elem[PPT*j + p]
+      //                hi[p] = elem[PPT*j + p + HALF]
+      //  RoPE pair (lo[p], hi[p]) → same thread, zero shuffle
+      //  Vec load: PPT contiguous elements per half per thread
       // ============================================================
 
       static_assert(head_dim % 64 == 0,
-                    "head_dim must be divisible by 64 for interleaved mapping");
+                    "head_dim must be divisible by 64 for NeoX mapping");
       constexpr int HALF = head_dim / 2;
       constexpr int PAIRS_PER_THREAD = HALF / 32;
+      int const thr_off_neox = PAIRS_PER_THREAD * lane;
 
-      // Pre-load cos/sin into registers
       float r_cos[PAIRS_PER_THREAD], r_sin[PAIRS_PER_THREAD];
 #pragma unroll
       for (int p = 0; p < PAIRS_PER_THREAD; ++p) {
-        int const dim = lane + p * 32;
+        int const dim = thr_off_neox + p;
         if (dim < embed_dim) {
           r_cos[p] = CacheConverter::convert(VLLM_LDG(cos_ptr + dim));
           r_sin[p] = CacheConverter::convert(VLLM_LDG(sin_ptr + dim));
