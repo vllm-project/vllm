@@ -26,7 +26,33 @@ from vllm.model_executor.models.llama import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
-from .utils import AutoWeightsLoader
+from .utils import AutoWeightsLoader, WeightsMapper
+
+# Shared mapping for consolidated Mistral format (used by mistral_mapping and
+# hf_to_vllm_mapper). Defined at module level so Ruff resolves it in class body.
+_MISTRAL_MAPPING = {
+    "layers": "model.layers",
+    "attention": "self_attn",
+    "qscale_act": "input_scale",
+    "qscale_weight": "weight_scale",
+    "kv_fake_quantizer.qscale_act": "kv_scale",
+    "q_fake_quantizer.qscale_act": "attn.q_scale",
+    "k_fake_quantizer.qscale_act": "k_scale",
+    "v_fake_quantizer.qscale_act": "v_scale",
+    "wq": "q_proj",
+    "wk": "k_proj",
+    "wv": "v_proj",
+    "wo": "o_proj",
+    "attention_norm": "input_layernorm",
+    "feed_forward": "mlp",
+    "w1": "gate_proj",
+    "w2": "down_proj",
+    "w3": "up_proj",
+    "ffn_norm": "post_attention_layernorm",
+    "tok_embeddings": "model.embed_tokens",
+    "output": "lm_head",
+    "norm": "model.norm",
+}
 
 
 class MistralMLP(nn.Module):
@@ -233,29 +259,31 @@ class MistralForCausalLM(LlamaForCausalLM):
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
-    mistral_mapping = {
-        "layers": "model.layers",
-        "attention": "self_attn",
-        "qscale_act": "input_scale",
-        "qscale_weight": "weight_scale",
-        "kv_fake_quantizer.qscale_act": "kv_scale",
-        "q_fake_quantizer.qscale_act": "attn.q_scale",
-        "k_fake_quantizer.qscale_act": "k_scale",
-        "v_fake_quantizer.qscale_act": "v_scale",
-        "wq": "q_proj",
-        "wk": "k_proj",
-        "wv": "v_proj",
-        "wo": "o_proj",
-        "attention_norm": "input_layernorm",
-        "feed_forward": "mlp",
-        "w1": "gate_proj",
-        "w2": "down_proj",
-        "w3": "up_proj",
-        "ffn_norm": "post_attention_layernorm",
-        "tok_embeddings": "model.embed_tokens",
-        "output": "lm_head",
-        "norm": "model.norm",
-    }
+    mistral_mapping = _MISTRAL_MAPPING
+
+    # Maps Mistral-format LoRA weight keys to vLLM's internal naming (derived
+    # from _MISTRAL_MAPPING to avoid duplication).
+    _lora_substr_keys = (
+        "attention_norm",
+        "ffn_norm",
+        "attention",
+        "feed_forward",
+        "wq",
+        "wk",
+        "wv",
+        "wo",
+        "w1",
+        "w2",
+        "w3",
+    )
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "layers.": f"{_MISTRAL_MAPPING['layers']}.",
+        },
+        orig_to_new_substr={
+            f".{k}.": f".{_MISTRAL_MAPPING[k]}." for k in _lora_substr_keys
+        },
+    )
 
     def __init__(
         self,
