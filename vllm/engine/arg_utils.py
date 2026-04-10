@@ -11,18 +11,8 @@ from collections.abc import Callable
 from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
-from typing import (
-    TYPE_CHECKING,
-    Annotated,
-    Any,
-    Literal,
-    TypeAlias,
-    TypeVar,
-    Union,
-    cast,
-    get_args,
-    get_origin,
-)
+from typing import (TYPE_CHECKING, Annotated, Any, Literal, TypeAlias, TypeVar,
+                    Union, cast, get_args, get_origin)
 
 import huggingface_hub
 import regex as re
@@ -32,63 +22,28 @@ from pydantic.fields import FieldInfo
 from typing_extensions import TypeIs
 
 import vllm.envs as envs
-from vllm.config import (
-    AttentionConfig,
-    CacheConfig,
-    CompilationConfig,
-    ConfigType,
-    DeviceConfig,
-    ECTransferConfig,
-    EPLBConfig,
-    KernelConfig,
-    KVEventsConfig,
-    KVTransferConfig,
-    LoadConfig,
-    LoRAConfig,
-    ModelConfig,
-    MultiModalConfig,
-    ObservabilityConfig,
-    OffloadConfig,
-    ParallelConfig,
-    PoolerConfig,
-    PrefetchOffloadConfig,
-    ProfilerConfig,
-    ReasoningConfig,
-    SchedulerConfig,
-    SpeculativeConfig,
-    StructuredOutputsConfig,
-    UVAOffloadConfig,
-    VllmConfig,
-    WeightTransferConfig,
-    get_attr_docs,
-)
-from vllm.config.cache import (
-    CacheDType,
-    KVOffloadingBackend,
-    MambaCacheMode,
-    MambaDType,
-    PrefixCachingHashAlgo,
-)
+from vllm.config import (AttentionConfig, CacheConfig, CompilationConfig,
+                         ConfigType, DeviceConfig, ECTransferConfig,
+                         EPLBConfig, KernelConfig, KVEventsConfig,
+                         KVTransferConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         MultiModalConfig, ObservabilityConfig, OffloadConfig,
+                         ParallelConfig, PoolerConfig, PrefetchOffloadConfig,
+                         ProfilerConfig, ReasoningConfig, SchedulerConfig,
+                         SpeculativeConfig, StructuredOutputsConfig,
+                         UVAOffloadConfig, VllmConfig, WeightTransferConfig,
+                         get_attr_docs)
+from vllm.config.cache import (CacheDType, KVOffloadingBackend, MambaCacheMode,
+                               MambaDType, PrefixCachingHashAlgo)
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
-from vllm.config.model import (
-    ConvertOption,
-    HfOverrides,
-    LogprobsMode,
-    ModelDType,
-    RunnerOption,
-    TokenizerMode,
-)
+from vllm.config.model import (ConvertOption, HfOverrides, LogprobsMode,
+                               ModelDType, RunnerOption, TokenizerMode)
 from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MMTensorIPC
 from vllm.config.observability import DetailedTraceModules
-from vllm.config.parallel import (
-    All2AllBackend,
-    DataParallelBackend,
-    DCPCommBackend,
-    DistributedExecutorBackend,
-    ExpertPlacementStrategy,
-)
+from vllm.config.parallel import (All2AllBackend, DataParallelBackend,
+                                  DCPCommBackend, DistributedExecutorBackend,
+                                  ExpertPlacementStrategy)
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
@@ -96,10 +51,8 @@ from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
-from vllm.transformers_utils.config import (
-    is_interleaved,
-    maybe_override_with_speculators,
-)
+from vllm.transformers_utils.config import (is_interleaved,
+                                            maybe_override_with_speculators)
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
@@ -416,9 +369,6 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
-    numa_bind: bool = ParallelConfig.numa_bind
-    numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
-    numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -551,6 +501,8 @@ class EngineArgs:
     reasoning_parser_plugin: str | None = None
 
     speculative_config: dict[str, Any] | None = None
+
+    custom_proposer_backend: str | None = None
 
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
@@ -863,13 +815,6 @@ class EngineArgs:
         parallel_group.add_argument(
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
-        )
-        parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
-        parallel_group.add_argument(
-            "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
-        )
-        parallel_group.add_argument(
-            "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1338,6 +1283,16 @@ class EngineArgs:
             "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
+            "--custom-proposer-backend",
+            type=str,
+            default=None,
+            help="Module path to a custom proposer function for speculative "
+            "decoding (e.g., 'my_module.my_draft_func'). The function must "
+            "accept batch_input_ids (List[List[int]]) and draft_len (int) "
+            "and return a torch.Tensor of shape [batch_size, draft_len]. "
+            "This option takes highest priority over --speculative-config.",
+        )
+        vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
@@ -1488,7 +1443,8 @@ class EngineArgs:
         )
 
     def validate_tensorizer_args(self):
-        from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+        from vllm.model_executor.model_loader.tensorizer import \
+            TensorizerConfig
 
         for key in self.model_loader_extra_config:
             if key in TensorizerConfig._fields:
@@ -1535,7 +1491,16 @@ class EngineArgs:
         dictionary from the engine.
         """
         if self.speculative_config is None:
-            return None
+            if self.custom_proposer_backend is None:
+                return None
+            # Initialize speculative_config dict with the custom proposer backend
+            # so that SpeculativeConfig can be created with minimal config.
+            self.speculative_config = {}
+
+        if self.custom_proposer_backend is not None:
+            self.speculative_config["custom_proposer_backend"] = (
+                self.custom_proposer_backend
+            )
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine
@@ -1591,7 +1556,7 @@ class EngineArgs:
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context, model_config
         )
-        self._set_default_reasoning_config_args()
+
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1836,9 +1801,6 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
-            numa_bind=self.numa_bind,
-            numa_bind_nodes=self.numa_bind_nodes,
-            numa_bind_cpus=self.numa_bind_cpus,
         )
 
         speculative_config = self.create_speculative_config(
@@ -2232,13 +2194,6 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
-
-    def _set_default_reasoning_config_args(self):
-        if not self.reasoning_parser:
-            return
-        if self.reasoning_config is None:
-            self.reasoning_config = ReasoningConfig()
-        self.reasoning_config.reasoning_parser = self.reasoning_parser
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,

@@ -40,7 +40,6 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "nemotron_h_mtp",
     "exaone_moe_mtp",
-    "exaone4_5_mtp",
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
@@ -59,6 +58,7 @@ SpeculativeMethod = Literal[
     "mlp_speculator",
     "draft_model",
     "suffix",
+    "custom_callable",
     EagleModelTypes,
     NgramGPUTypes,
 ]
@@ -195,6 +195,13 @@ class SpeculativeConfig:
     positions equals this value. Only used when rejection_sample_method
     is 'synthetic'. Must be in [0, 1]."""
 
+    custom_proposer_backend: str | None = None
+    """Module path to a custom proposer function (e.g., 'my_module.my_draft_func').
+    If provided, this custom function will be used to generate draft tokens instead
+    of built-in proposers. The function must have the signature:
+        def generate_drafts(batch_input_ids: List[List[int]], draft_len: int, **kwargs) -> torch.Tensor
+    and return a tensor of shape [batch_size, draft_len]."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -328,13 +335,7 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
             )
-        if "exaone4_5" in hf_config.model_type:
-            hf_config.model_type = "exaone4_5_mtp"
-        if hf_config.model_type == "exaone4_5_mtp":
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            hf_config.update(
-                {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
-            )
+
         if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
             is_moe = hf_config.model_type == "qwen3_5_moe"
             hf_config.model_type = "qwen3_5_mtp"
@@ -372,7 +373,9 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        if self.method is None:
+        if self.custom_proposer_backend is not None:
+            self.method = "custom_callable"
+        elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
             else:
@@ -406,6 +409,8 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
+            elif self.method == "custom_callable":
+                self.model = "custom_callable"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -449,10 +454,16 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
+        elif self.method == "custom_callable":
+            # Custom callable proposer does not need a draft model.
+            # It will dynamically load the user-provided function at runtime.
+            self.prompt_lookup_max = 0
+            self.prompt_lookup_min = 0
+            self.draft_model_config = self.target_model_config
+            self.draft_parallel_config = self.target_parallel_config
         elif self.method == "extract_hidden_states":
-            from vllm.transformers_utils.configs.extract_hidden_states import (
-                ExtractHiddenStatesConfig,
-            )
+            from vllm.transformers_utils.configs.extract_hidden_states import \
+                ExtractHiddenStatesConfig
 
             # ExtractHiddenStatesModel is instantiated manually in load_model()
             # We just need to store the target model config for KV cache shape info
@@ -549,10 +560,10 @@ class SpeculativeConfig:
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
-                    from vllm.transformers_utils.configs.eagle import EAGLEConfig
-                    from vllm.transformers_utils.configs.speculators import (
-                        SpeculatorsConfig,
-                    )
+                    from vllm.transformers_utils.configs.eagle import \
+                        EAGLEConfig
+                    from vllm.transformers_utils.configs.speculators import \
+                        SpeculatorsConfig
 
                     if isinstance(
                         self.draft_model_config.hf_config,
@@ -893,7 +904,7 @@ class SpeculativeConfig:
         method = self.method
         model = (
             None
-            if method in ("ngram", "suffix", "extract_hidden_states")
+            if method in ("ngram", "suffix", "extract_hidden_states", "custom_callable")
             else self.draft_model_config.model
         )
         num_spec_tokens = self.num_speculative_tokens
