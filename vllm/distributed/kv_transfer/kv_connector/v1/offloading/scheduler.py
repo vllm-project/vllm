@@ -428,3 +428,6 @@ class OffloadingConnectorScheduler:
                     medium=event.medium,
                     lora_name=None,
                 )
+
+    def shutdown(self) -> None:
+        self.manager.shutdown()

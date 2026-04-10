@@ -24,6 +24,24 @@ def server():
         "--max-model-len",
         "2048",
         "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.4",
+        "--no-async-scheduling",
+    ]
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.fixture(scope="module")
+def server_with_auto_reasoning_config():
+    args = [
+        "--reasoning-parser",
+        "qwen3",
+        "--max-model-len",
+        "2048",
+        "--enforce-eager",
+        "--gpu-memory-utilization",
+        "0.4",
         "--no-async-scheduling",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -31,12 +49,18 @@ def server():
 
 
 @pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
+async def client(request, server, server_with_auto_reasoning_config):
+    server_map = {
+        "default": server,
+        "auto_config": server_with_auto_reasoning_config,
+    }
+    target_server = server_map[request.param]
+    async with target_server.get_async_client() as async_client:
         yield async_client
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
 async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
     """Test that mixed requests (some with thinking_token_budget, some without)
     complete successfully without errors."""
@@ -61,6 +85,7 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
 async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI):
     """Test that thinking_token_budget limits the number of reasoning tokens.
 
@@ -82,6 +107,6 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
             reasoning_token_count += 1
 
     assert reasoning_token_count == THINK_BUDGET, (
-        f"reasoning tokens ({reasoning_token_count}) != "
+        f"reasoning tokens ({reasoning_token_count}) exceeded "
         f"thinking_token_budget ({THINK_BUDGET})"
     )

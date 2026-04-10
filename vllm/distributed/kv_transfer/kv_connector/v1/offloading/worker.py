@@ -394,3 +394,13 @@ class OffloadingConnectorWorker:
         kv_connector_stats = self.kv_connector_stats
         self.kv_connector_stats = OffloadingConnectorStats()
         return kv_connector_stats
+
+    def shutdown(self) -> None:
+        # Drop deferred store jobs: there is no point in submitting
+        # them during shutdown.
+        self._unsubmitted_store_jobs.clear()
+        self._jobs.clear()
+        self._load_job.clear()
+        self._store_jobs.clear()
+        self._finished_reqs_waiting_for_store.clear()
+        self.worker.shutdown()
