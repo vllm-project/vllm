@@ -177,6 +177,7 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
+from vllm.v1.executor import pp_trace
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
@@ -3892,6 +3893,24 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
+            # Emit batch composition stats so we can correlate TPOT growth
+            # with KV-cache size and batch-size changes across decode steps.
+            _pp_step_id = getattr(self, "_pp_debug_step_id", None)
+            if num_reqs > 0:
+                _max_kv = int(
+                    self.input_batch.num_computed_tokens_cpu[:num_reqs].max()
+                )
+            else:
+                _max_kv = 0
+            pp_trace.instant(
+                "batch_stats",
+                pp_rank=get_pp_group().rank,
+                step=_pp_step_id,
+                num_reqs=num_reqs,
+                num_tokens=num_tokens_unpadded,
+                max_kv_len=_max_kv,
+            )
+
             # Deferred PP irecv completion: waiting here (rather than at the
             # top of execute_model_ray) lets Stage 0 overlap CPU preprocessing
             # — _update_states, buffer allocation — with Stages 1-N running the
@@ -3901,7 +3920,13 @@ class GPUModelRunner(
             if self._pending_pp_irecv is not None:
                 work, recv_buf, prev_req_id_to_index = self._pending_pp_irecv
                 self._pending_pp_irecv = None
-                work.wait()
+                with pp_trace.span(
+                    "pp_irecv_wait",
+                    pp_rank=get_pp_group().rank,
+                    step=_pp_step_id,
+                    num_reqs=num_reqs,
+                ):
+                    work.wait()
                 self.input_batch.prev_sampled_token_ids = recv_buf
                 self.input_batch.prev_req_id_to_index = prev_req_id_to_index
 
@@ -4428,6 +4453,7 @@ class GPUModelRunner(
         )
         # Post a non-blocking isend to each non-last PP rank.  Clone the tensor
         # so that the original can be freed while the NCCL transfer is in flight.
+        _isend_t0 = pp_trace._now_us() if pp_trace.is_enabled() else 0.0
         works = []
         for rank_in_group in range(pp.world_size - 1):
             dst_global_rank = pp.ranks[rank_in_group]
@@ -4439,6 +4465,12 @@ class GPUModelRunner(
                 group=sampled_token_group,
             )
             works.append(work)
+        pp_trace.record_complete(
+            "pp_isend_sampled_token",
+            _isend_t0,
+            pp_rank=pp.rank,
+            dst_ranks=str([pp.ranks[r] for r in range(pp.world_size - 1)]),
+        )
         # Store works so the cloned tensors are kept alive until NCCL is done.
         self._pp_send_works = works
 

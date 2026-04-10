@@ -167,6 +167,17 @@ try:
             # Capture overall start time for the total span (see finally block).
             _ray_t0 = time.monotonic() * 1_000_000.0
 
+            # Instant marker at the moment the Ray DAG delivers work to this
+            # actor.  Comparing timestamps across ranks reveals the inter-stage
+            # queuing delay that Ray's serialization and scheduling adds on top
+            # of the raw NCCL pipeline latency.
+            pp_trace.instant(
+                "dag_actor_start",
+                pp_rank=pp_rank,
+                step=step_id,
+                tokens=num_tokens,
+            )
+
             try:
                 start_ns = time.monotonic_ns()
                 # Hand the pending irecv to the model runner for deferred
@@ -192,12 +203,13 @@ try:
                 # Best-effort debug context for model-runner level PP logs.
                 # This helps correlate broadcast/receive logs with Ray DAG step ids.
                 setattr(self.worker.model_runner, "_pp_debug_step_id", step_id)
-                with pp_trace.span("execute_model_forward",
-                                   pp_rank=pp_rank, step=step_id,
-                                   tokens=num_tokens):
-                    output = self.worker.model_runner.execute_model(
-                        scheduler_output, intermediate_tensors
-                    )
+                with pp_trace.cuda_trace_step(step_id, pp_rank):
+                    with pp_trace.span("execute_model_forward",
+                                       pp_rank=pp_rank, step=step_id,
+                                       tokens=num_tokens):
+                        output = self.worker.model_runner.execute_model(
+                            scheduler_output, intermediate_tensors
+                        )
 
                 # Post the recv for the NEXT step's sampled tokens as early as
                 # possible so the transfer can overlap with Ray DAG scheduling.

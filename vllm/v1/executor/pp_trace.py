@@ -45,6 +45,58 @@ _ENABLED: bool = bool(_TRACE_DIR)
 # Flush trace every this many steps (for both driver and workers).
 _FLUSH_STEPS: int = int(os.environ.get("VLLM_PP_TRACE_FLUSH_STEPS", "100"))
 
+# CUDA / torch-profiler tracing window.
+#
+# Three supported values:
+#
+#   VLLM_PP_CUDA_TRACE_STEPS=all          capture every step; export at exit
+#   VLLM_PP_CUDA_TRACE_STEPS=10:20        capture steps 10-20 (closed interval)
+#   (unset / empty)                        GPU tracing disabled
+#
+# One persistent torch.profiler.profile is kept open per worker process for
+# the duration of the window.  A single Chrome Trace JSON file is exported at
+# the end of the window (or at process exit for "all") and merged into the PP
+# trace so CUDA kernels appear in the same Perfetto timeline as the CPU spans.
+_INF = 10 ** 9  # sentinel for "no upper bound"
+
+
+def _parse_cuda_trace_steps(env_val: str) -> tuple[int, int] | None:
+    """Return (first, last) step range, or None if disabled.
+
+    ``last == _INF`` means "run until process exit".
+    """
+    val = env_val.strip()
+    if not val:
+        return None
+    if val.lower() == "all":
+        return (0, _INF)
+    try:
+        parts = val.split(":")
+        if len(parts) != 2:
+            raise ValueError
+        first, last = int(parts[0]), int(parts[1])
+        if first > last:
+            raise ValueError
+        return (first, last)
+    except ValueError:
+        raise ValueError(
+            f"VLLM_PP_CUDA_TRACE_STEPS must be 'all' or 'first:last' "
+            f"(e.g. '10:20'), got: {env_val!r}"
+        )
+
+
+_CUDA_TRACE_STEPS: tuple[int, int] | None = _parse_cuda_trace_steps(
+    os.environ.get("VLLM_PP_CUDA_TRACE_STEPS", "")
+)
+
+# Per-process persistent CUDA profiler state.
+# Guarded by _cuda_prof_lock; each worker is a separate OS process so
+# there is no cross-rank sharing — this is truly per-rank state.
+_cuda_prof_lock = threading.Lock()
+_cuda_prof: Any = None          # torch.profiler.profile instance while active
+_cuda_prof_rank: int = -1       # pp_rank that started the profiler
+_cuda_prof_started: bool = False  # True after __enter__ has been called
+
 # ---------------------------------------------------------------------------
 # Module-level state (per process)
 # ---------------------------------------------------------------------------
@@ -407,3 +459,116 @@ def maybe_flush(step_count: int) -> None:
 
 # Keep the old name as an alias so existing call-sites still compile.
 maybe_flush_worker = maybe_flush
+
+
+# ---------------------------------------------------------------------------
+# CUDA / GPU kernel tracing via torch.profiler
+# ---------------------------------------------------------------------------
+
+def _cuda_export(pp_rank: int, step_id: int | None) -> None:
+    """Stop the active CUDA profiler and write its Chrome Trace JSON.
+
+    Must be called with ``_cuda_prof_lock`` already held, or from atexit
+    (single-threaded by that point).  Safe to call even if no profiler is
+    active (no-op in that case).
+    """
+    global _cuda_prof, _cuda_prof_started
+    if _cuda_prof is None or not _cuda_prof_started:
+        return
+    prof = _cuda_prof
+    _cuda_prof = None
+    _cuda_prof_started = False
+    try:
+        prof.__exit__(None, None, None)
+        os.makedirs(_TRACE_DIR, exist_ok=True)
+        step_tag = "final" if step_id is None else str(step_id)
+        cuda_trace_path = os.path.join(
+            _TRACE_DIR,
+            f"cuda_trace_rank{pp_rank}_step{step_tag}_{_pid}.json",
+        )
+        prof.export_chrome_trace(cuda_trace_path)
+        register_external_trace(cuda_trace_path)
+        flush(tag=f"after_cuda_step{step_tag}")
+    except Exception:
+        pass  # best-effort; never crash the serving process
+
+
+@contextmanager
+def cuda_trace_step(
+    step_id: int | None,
+    pp_rank: int,
+) -> Generator[None, None, None]:
+    """Wrap one DAG step inside a persistent torch.profiler session.
+
+    Lifecycle
+    ---------
+    * **First step in the window** — starts ``torch.profiler.profile`` once,
+      emits clock-sync markers so CPU and GPU clocks can be aligned.
+    * **Middle steps** — the profiler stays open; just ``yield`` through.
+    * **Last step in the window** — stops the profiler, exports a single
+      Chrome Trace JSON for the entire window, and registers it for merging.
+    * **"all" mode** (``VLLM_PP_CUDA_TRACE_STEPS=all``) — profiler stays open
+      until process exit; an ``atexit`` handler exports the final trace.
+
+    Zero overhead when ``VLLM_PP_CUDA_TRACE_STEPS`` is unset.
+    """
+    global _cuda_prof, _cuda_prof_rank, _cuda_prof_started
+
+    if (
+        not _ENABLED
+        or _CUDA_TRACE_STEPS is None
+        or step_id is None
+        or step_id < _CUDA_TRACE_STEPS[0]
+        or step_id > _CUDA_TRACE_STEPS[1]
+    ):
+        yield
+        return
+
+    try:
+        import torch
+    except ImportError:
+        yield
+        return
+
+    first_step, last_step = _CUDA_TRACE_STEPS
+    is_first = (step_id == first_step)
+    is_last = (last_step < _INF and step_id == last_step)
+
+    with _cuda_prof_lock:
+        if is_first and not _cuda_prof_started:
+            # Emit clock-sync BEFORE the profiler starts so the PP trace has a
+            # reference point on its own (monotonic) clock.
+            emit_profiler_clock_sync()
+
+            prof = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                record_shapes=False,
+                with_stack=False,
+                with_flops=False,
+            )
+            prof.__enter__()
+
+            # Second sync emitted INSIDE the profiler so the CUDA-aligned
+            # profiler clock gets the same reference marker.
+            emit_profiler_clock_sync()
+
+            _cuda_prof = prof
+            _cuda_prof_rank = pp_rank
+            _cuda_prof_started = True
+
+            # For "all" mode: register an atexit so the trace is exported even
+            # if we never see the last step (e.g. server is killed).
+            if last_step >= _INF:
+                atexit.register(
+                    lambda: _cuda_export(pp_rank, step_id=None)
+                )
+
+    try:
+        yield
+    finally:
+        if is_last:
+            with _cuda_prof_lock:
+                _cuda_export(pp_rank, step_id)
