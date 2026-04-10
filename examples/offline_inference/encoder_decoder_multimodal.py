@@ -55,7 +55,91 @@ def run_whisper():
     )
 
 
+def run_fireredasr2():
+    """
+    FireRedASR2 – Automatic Speech Recognition model.
+
+    This model uses a Conformer encoder + Qwen2 LLM decoder architecture
+    for speech-to-text transcription.  Audio is passed via the implicit
+    prompt format with the ``<|AUDIO|>`` placeholder token.
+    """
+    engine_args = EngineArgs(
+        model="allendou/FireRedASR2-LLM-vllm",
+        max_model_len=448,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"audio": 1},
+    )
+
+    prompt_str = (
+        "<|im_start|>user\n<|AUDIO|>请转写音频为文字<|im_end|>\n<|im_start|>assistant\n"
+    )
+
+    prompts = [
+        {  # Implicit prompt with audio
+            "prompt": prompt_str,
+            "multi_modal_data": {
+                "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+            },
+        },
+        {  # Another audio sample
+            "prompt": prompt_str,
+            "multi_modal_data": {
+                "audio": AudioAsset("winning_call").audio_and_sample_rate,
+            },
+        },
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
+def run_fireredlid():
+    """
+    FireRedLID – Language Identification model.
+
+    This encoder-decoder model identifies the spoken language of an audio
+    clip. It outputs at most 2 tokens representing the detected language
+    (e.g. "en", "zh mandarin").
+    """
+    engine_args = EngineArgs(
+        model="PatchyTisa/FireRedLID-vllm",
+        max_model_len=8,
+        max_num_seqs=16,
+        limit_mm_per_prompt={"audio": 1},
+    )
+
+    prompts = [
+        {  # Test explicit encoder/decoder prompt
+            "encoder_prompt": {
+                "prompt": "",
+                "multi_modal_data": {
+                    "audio": AudioAsset("mary_had_lamb").audio_and_sample_rate,
+                },
+            },
+            "decoder_prompt": "<sos>",
+        },
+        {  # Another audio sample
+            "encoder_prompt": {
+                "prompt": "",
+                "multi_modal_data": {
+                    "audio": AudioAsset("winning_call").audio_and_sample_rate,
+                },
+            },
+            "decoder_prompt": "<sos>",
+        },
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 model_example_map = {
+    "fireredasr2": run_fireredasr2,
+    "fireredlid": run_fireredlid,
     "whisper": run_whisper,
 }
 
