@@ -8,6 +8,7 @@ import pytest
 from vllm.transformers_utils.gguf_utils import (
     is_gguf,
     is_remote_gguf,
+    is_valid_gguf_quant_type,
     split_remote_gguf,
 )
 from vllm.transformers_utils.utils import (
@@ -119,6 +120,16 @@ class TestIsRemoteGGUF:
         assert not is_remote_gguf("s3://repo/model:Q4_K")
         assert not is_remote_gguf("gs://repo/model:Q8_0")
 
+    def test_vendor_prefixed_remote_gguf(self):
+        """Remote GGUF with vendor-prefixed quant types should be detected."""
+        assert is_remote_gguf("unsloth/Qwen3.5-35B-A3B-GGUF:UD-Q4_K_XL")
+        assert is_remote_gguf("repo/model:UD-Q4_K_M")
+        assert is_remote_gguf("repo/model:UD-Q3_K_S")
+        assert is_remote_gguf("repo/model:UD-F16")
+
+        # Invalid vendor-prefixed should still fail
+        assert not is_remote_gguf("repo/model:UD-INVALID")
+
 
 class TestSplitRemoteGGUF:
     """Test split_remote_gguf utility function."""
@@ -166,6 +177,14 @@ class TestSplitRemoteGGUF:
         # Cloud storage - is_remote_gguf returns False
         with pytest.raises(ValueError, match="Wrong GGUF model"):
             split_remote_gguf("s3://bucket/repo/model:Q2_K")
+
+    def test_split_vendor_prefixed_remote_gguf(self):
+        """split_remote_gguf should preserve full quant string including prefix."""
+        repo_id, quant_type = split_remote_gguf(
+            "unsloth/Qwen3.5-35B-A3B-GGUF:UD-Q4_K_XL"
+        )
+        assert repo_id == "unsloth/Qwen3.5-35B-A3B-GGUF"
+        assert quant_type == "UD-Q4_K_XL"
 
 
 class TestIsGGUF:
@@ -218,3 +237,41 @@ class TestIsGGUF:
         # Cloud storage
         assert not is_gguf("s3://bucket/repo/model:IQ1_S")
         assert not is_gguf("gs://bucket/repo/model:Q2_K")
+
+    def test_vendor_prefixed_is_gguf(self):
+        """is_gguf should recognize vendor-prefixed remote GGUF."""
+        assert is_gguf("unsloth/Qwen3.5-35B-A3B-GGUF:UD-Q4_K_XL")
+        assert is_gguf("repo/model:UD-Q4_K_M")
+        assert not is_gguf("repo/model:UD-INVALID")
+
+
+class TestIsValidGGUFQuantType:
+    """Test is_valid_gguf_quant_type utility function."""
+
+    def test_vendor_prefixed_quant_types(self):
+        """Vendor-prefixed quant types like UD-Q4_K_XL should be valid."""
+        # Unsloth Dynamic (UD-) prefix with size suffix
+        assert is_valid_gguf_quant_type("UD-Q4_K_XL")
+        assert is_valid_gguf_quant_type("UD-Q4_K_M")
+        assert is_valid_gguf_quant_type("UD-Q3_K_S")
+        assert is_valid_gguf_quant_type("UD-Q5_K_L")
+        assert is_valid_gguf_quant_type("UD-Q6_K_XXS")
+
+        # UD- prefix with exact GGML types (no size suffix)
+        assert is_valid_gguf_quant_type("UD-Q4_K")
+        assert is_valid_gguf_quant_type("UD-Q4_0")
+        assert is_valid_gguf_quant_type("UD-F16")
+        assert is_valid_gguf_quant_type("UD-BF16")
+        assert is_valid_gguf_quant_type("UD-IQ1_S")
+
+        # Other hypothetical vendor prefixes should also work
+        assert is_valid_gguf_quant_type("XX-Q4_K_M")
+
+        # Invalid base type after valid prefix should fail
+        assert not is_valid_gguf_quant_type("UD-INVALID")
+        assert not is_valid_gguf_quant_type("UD-Q9_K_M")
+        assert not is_valid_gguf_quant_type("UD-")
+
+        # Empty prefix should fail (e.g., "-Q4_K" is not a valid quant type)
+        assert not is_valid_gguf_quant_type("-Q4_K")
+        assert not is_valid_gguf_quant_type("-")

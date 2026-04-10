@@ -54,22 +54,47 @@ def is_remote_gguf(model: str | Path) -> bool:
 _GGUF_QUANT_SUFFIXES = ("_M", "_S", "_L", "_XL", "_XS", "_XXS")
 
 
+def _is_base_gguf_quant_type(quant_type: str) -> bool:
+    """Check if quant_type matches a GGMLQuantizationType, with optional
+    size suffix.
+
+    Checks for exact enum match first, then tries stripping known suffixes
+    (e.g., Q4_K_M -> Q4_K).
+    """
+    if getattr(GGMLQuantizationType, quant_type, None) is not None:
+        return True
+
+    for suffix in _GGUF_QUANT_SUFFIXES:
+        if quant_type.endswith(suffix):
+            base_type = quant_type[: -len(suffix)]
+            if getattr(GGMLQuantizationType, base_type, None) is not None:
+                return True
+
+    return False
+
+
 def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
     """Check if the quant type is a valid GGUF quant type.
 
-    Supports both exact GGML quant types (e.g., Q4_K, IQ1_S) and
-    extended naming conventions (e.g., Q4_K_M, Q3_K_S, Q5_K_L).
+    Supports exact GGML quant types (e.g., Q4_K, IQ1_S), extended naming
+    conventions with size suffixes (e.g., Q4_K_M, Q3_K_S, Q5_K_L), and
+    vendor-prefixed quant types (e.g., UD-Q4_K_XL) where the prefix is
+    separated by a hyphen.
+
+    Vendor prefixes are stripped because GGML quant type names never
+    contain hyphens — any hyphen indicates a vendor prefix (e.g., "UD-"
+    for Unsloth Dynamic quantization).
     """
-    # Check for exact match first
-    if getattr(GGMLQuantizationType, gguf_quant_type, None) is not None:
+    if _is_base_gguf_quant_type(gguf_quant_type):
         return True
 
-    # Check for extended naming conventions (e.g., Q4_K_M -> Q4_K)
-    for suffix in _GGUF_QUANT_SUFFIXES:
-        if gguf_quant_type.endswith(suffix):
-            base_type = gguf_quant_type[: -len(suffix)]
-            if getattr(GGMLQuantizationType, base_type, None) is not None:
-                return True
+    # Try stripping vendor prefix (e.g., "UD-Q4_K_XL" -> "Q4_K_XL").
+    # GGML quant type names never contain hyphens, so a hyphen indicates
+    # a vendor prefix.
+    if "-" in gguf_quant_type:
+        prefix, remainder = gguf_quant_type.split("-", 1)
+        if prefix and remainder:
+            return _is_base_gguf_quant_type(remainder)
 
     return False
 
@@ -84,7 +109,8 @@ def split_remote_gguf(model: str | Path) -> tuple[str, str]:
         f"Wrong GGUF model or invalid GGUF quant type: {model}.\n"
         "- It should be in repo_id:quant_type format.\n"
         f"- Valid base quant types: {GGMLQuantizationType._member_names_}\n"
-        f"- Extended suffixes also supported: {_GGUF_QUANT_SUFFIXES}",
+        f"- Extended suffixes also supported: {_GGUF_QUANT_SUFFIXES}\n"
+        "- Vendor-prefixed types also supported (e.g., UD-Q4_K_XL)",
     )
 
 
