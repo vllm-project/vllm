@@ -125,8 +125,12 @@ class FP8ScaledMMLinearKernel(
 class Int8ScaledMMLinearKernel(
     MMLinearKernel[Int8ScaledMMLinearLayerConfig, Int8Params], ABC
 ):
+    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> Int8Params:
+        return Int8Params.from_layer(layer)
+
     def process_weights_after_loading(self, layer):
-        # These processors are common between, cutlass, triton, aiter.
+        # The cpu kernels override this method entirely
+        # on cuda_like these processors are common between, cutlass, triton, aiter.
         params = self._get_layer_params(layer)
         config = self.config
         # WEIGHT
@@ -210,6 +214,3 @@ class Int8ScaledMMLinearKernel(
         cls, config: Int8ScaledMMLinearLayerConfig
     ) -> tuple[bool, str | None]:
         return True, None
-
-    def _get_layer_params(self, layer: torch.nn.Module, **kwargs) -> Int8Params:
-        return Int8Params.from_layer(layer)
