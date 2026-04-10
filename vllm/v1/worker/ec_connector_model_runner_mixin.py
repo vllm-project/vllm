@@ -35,14 +35,6 @@ class ECConnectorModelRunnerMixin:
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
 
     @staticmethod
-    def get_finished_ec_transfers(
-        scheduler_output: "SchedulerOutput",
-    ) -> tuple[set[str] | None, set[str] | None]:
-        if has_ec_transfer():
-            return get_ec_transfer().get_finished(scheduler_output.finished_req_ids)
-        return None, None
-
-    @staticmethod
     def maybe_get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],

@@ -20,6 +20,7 @@ import torch
 import torch.fx as fx
 from torch._dynamo.utils import dynamo_timed
 from torch._logging._internal import trace_structured
+from torch.fx._lazy_graph_module import _use_lazy_graph_module
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, CUDAGraphMode, VllmConfig
@@ -30,6 +31,7 @@ from vllm.logging_utils import lazy
 from vllm.platforms import current_platform
 from vllm.tracing import instrument, instrument_manual
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from .compiler_interface import (
     CompilerInterface,
@@ -573,9 +575,16 @@ def split_graph(
     # otherwise pytorch might reorder the nodes and
     # the semantics of the graph will change when we
     # have mutations in the graph
-    split_gm = torch.fx.passes.split_module.split_module(
-        graph, None, lambda node: node_to_subgraph_id[node], keep_original_order=True
-    )
+    with _use_lazy_graph_module(True):
+        has_tuple_return = is_torch_equal_or_newer("2.12.0.dev")
+        tuple_return_kwarg = {"tuple_return": True} if has_tuple_return else {}
+        split_gm = torch.fx.passes.split_module.split_module(
+            graph,
+            None,
+            lambda node: node_to_subgraph_id[node],
+            keep_original_order=True,
+            **tuple_return_kwarg,
+        )
 
     outputs = []
 
@@ -993,11 +1002,11 @@ class VllmBackend:
         )
         hash_content = []
         for filepath in forward_code_files:
-            hash_content.append(filepath)
             if filepath == "<string>":
                 # This means the function was dynamically generated, with
                 # e.g. exec(). We can't actually check these.
                 continue
+            hash_content.append(filepath)
             try:
                 with open(filepath) as f:
                     hash_content.append(f.read())

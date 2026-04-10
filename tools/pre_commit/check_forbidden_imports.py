@@ -31,6 +31,7 @@ CHECK_IMPORTS = {
             "vllm/transformers_utils/config.py",
             "vllm/model_executor/models/registry.py",
             "vllm/compilation/caching.py",
+            "vllm/env_override.py",
             "vllm/compilation/piecewise_backend.py",
             "vllm/distributed/utils.py",
             "vllm/distributed/parallel_state.py",

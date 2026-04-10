@@ -42,6 +42,7 @@ docker run \
     python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4  --block-size 64 --enforce-eager --max-model-len 8192
     python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b  --block-size 64 --enforce-eager -tp 2
     python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b  --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel
+    python3 examples/basic/offline_inference/generate.py --model OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc --block-size 64 --enforce-eager --max-model-len 8192
     cd tests
     pytest -v -s v1/core --ignore=v1/core/test_reset_prefix_cache_e2e.py --ignore=v1/core/test_scheduler_e2e.py
     pytest -v -s v1/engine
@@ -49,6 +50,6 @@ docker run \
     pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py --ignore=v1/worker/test_worker_memory_snapshot.py
     pytest -v -s v1/structured_output
     pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_tree_attention.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py
-    pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_multi_connector.py --ignore=v1/kv_connector/unit/test_nixl_connector.py --ignore=v1/kv_connector/unit/test_example_connector.py --ignore=v1/kv_connector/unit/test_lmcache_integration.py -k "not (test_register_kv_caches and FLASH_ATTN and True)"
+    pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_multi_connector.py --ignore=v1/kv_connector/unit/test_example_connector.py --ignore=v1/kv_connector/unit/test_lmcache_integration.py --ignore=v1/kv_connector/unit/test_hf3fs_client.py --ignore=v1/kv_connector/unit/test_hf3fs_connector.py --ignore=v1/kv_connector/unit/test_hf3fs_metadata_server.py
     pytest -v -s v1/test_serial_utils.py
 '
