@@ -244,4 +244,4 @@ for backend in "${BACKEND_LIST[@]}"; do
 done
 
 # ── Compare all available results ───────────────────────────────
-python "${SCRIPT_DIR}/compare_results.py" "$RESULT_DIR"
+python3 "${SCRIPT_DIR}/compare_results.py" "$RESULT_DIR"

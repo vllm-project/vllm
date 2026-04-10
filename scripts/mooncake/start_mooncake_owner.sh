@@ -2,9 +2,12 @@
 # Start a node-local Mooncake owner (real client) for vLLM requester ranks.
 #
 # Usage:
+#   MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 #   bash start_mooncake_owner.sh --cpu-mem-size 80
-#   bash start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400
+#
+#   MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 #   bash start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400 --bg
+#
 #   bash start_mooncake_owner.sh --stop
 #
 # Flags:
@@ -16,24 +19,23 @@
 #   --rpc-port <p>        Owner RPC port (default: 50052)
 #   --master <addr>       Mooncake master address (default: MOONCAKE_MASTER or 127.0.0.1:50051)
 #   --metadata-server <u> Metadata server URL (default: MOONCAKE_TE_META_DATA_SERVER or http://127.0.0.1:8080/metadata)
-#   --protocol <name>     Transport protocol (default: MOONCAKE_PROTOCOL or tcp)
-#   --device <names>      RDMA device name(s) (default: MOONCAKE_DEVICE or empty)
+#   --protocol <name>     Transport protocol (default: MOONCAKE_PROTOCOL or rdma)
+#   --device <names>      RDMA device name(s) (default: MC_OWNER_DEVICE)
 #   --threads <n>         Owner RPC worker threads (default: 1)
 #   --bg                  Run in background
 #   --stop                Stop the backgrounded owner launched by this script
 #
-# Disk-offload environment variables:
-#   MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR   default: bucket_storage_backend
-#   MOONCAKE_BUCKET_EVICTION_POLICY               default: lru
-#   MOONCAKE_USE_URING                            default: true
-#   MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES      default: 1073741824
-#   MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS   default: 3
-#
+# The owner does not auto-select RNICs. For multi-RNIC hosts, use:
+#   bash scripts/mooncake/recommend_mooncake_rnic_config.sh
+
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PID_FILE="$SCRIPT_DIR/mooncake_owner.pid"
-LOG_FILE="$SCRIPT_DIR/mooncake_owner.log"
+source "${SCRIPT_DIR}/rdma_config_utils.sh"
+
+HOST_TAG="$(hostname -s 2>/dev/null || echo local)"
+PID_FILE="${SCRIPT_DIR}/mooncake_owner.${HOST_TAG}.pid"
+LOG_FILE="${SCRIPT_DIR}/mooncake_owner.${HOST_TAG}.log"
 
 OPT_BG=false
 OPT_STOP=false
@@ -46,7 +48,7 @@ RPC_PORT="${MC_OWNER_RPC_PORT:-50052}"
 MASTER_SERVER="${MOONCAKE_MASTER:-127.0.0.1:50051}"
 METADATA_SERVER="${MOONCAKE_TE_META_DATA_SERVER:-http://127.0.0.1:8080/metadata}"
 PROTOCOL="${MOONCAKE_PROTOCOL:-rdma}"
-DEVICE_NAME="${MOONCAKE_DEVICE:-}"
+DEVICE_NAME="${MC_OWNER_DEVICE:-}"
 THREADS="${MC_OWNER_THREADS:-1}"
 
 while [[ $# -gt 0 ]]; do
@@ -92,6 +94,37 @@ is_our_owner() {
     [[ "$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')" == "$(id -u)" ]]
 }
 
+is_port_listening() {
+    local port=$1
+    ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[:.])${port}$"
+}
+
+print_rnic_hint() {
+    echo "Hint: use scripts/mooncake/recommend_mooncake_rnic_config.sh to generate MC_OWNER_DEVICE." >&2
+}
+
+print_owner_failure_hint() {
+    [[ -f "$LOG_FILE" ]] || return 0
+    if grep -q "Duplicate rpc_meta key not allowed" "$LOG_FILE"; then
+        echo "Hint: the owner rpc_meta key is already registered. Stop the old owner or clean the stale Mooncake metadata before retrying." >&2
+    fi
+}
+
+wait_for_owner_ready() {
+    local pid=$1
+    local timeout_s=${2:-30}
+    for _ in $(seq "$timeout_s"); do
+        if ! is_our_owner "$pid"; then
+            return 1
+        fi
+        if is_port_listening "$RPC_PORT"; then
+            return 0
+        fi
+        sleep 1
+    done
+    return 1
+}
+
 stop_owner() {
     [[ -f "$PID_FILE" ]] || return 0
     local pid
@@ -121,8 +154,7 @@ if $OPT_STOP; then
 fi
 
 if [[ -z "$CPU_MEM_GB" ]]; then
-    echo "Error: --cpu-mem-size is required unless --stop is used" >&2
-    echo "Usage: $0 [--bg] [--stop] --cpu-mem-size <GB> [--disk-size <GB>]" >&2
+    echo "Error: --cpu-mem-size is required unless --stop is used." >&2
     exit 1
 fi
 
@@ -131,14 +163,37 @@ if [[ -z "$OWNER_HOST" ]]; then
 fi
 
 if [[ -z "$OWNER_HOST" ]]; then
-    echo "Error: failed to determine owner host automatically; pass --host <ip-or-host>" >&2
+    echo "Error: failed to determine owner host automatically; pass --host <ip-or-host>." >&2
     exit 1
 fi
 
-stop_owner 2>/dev/null || true
+if [[ -f "$PID_FILE" ]]; then
+    pid="$(<"$PID_FILE")"
+    if is_our_owner "$pid"; then
+        echo "Error: mooncake_client owner is already running with PID $pid. Use '$0 --stop' first." >&2
+        exit 1
+    fi
+    rm -f "$PID_FILE"
+fi
+
+if is_port_listening "$RPC_PORT"; then
+    echo "Error: owner RPC port ${RPC_PORT} is already in use." >&2
+    exit 1
+fi
+
+if [[ "$PROTOCOL" == "rdma" || "$PROTOCOL" == "efa" ]]; then
+    if [[ -z "${DEVICE_NAME//[[:space:]]/}" ]]; then
+        echo "Error: MC_OWNER_DEVICE or --device is required for ${PROTOCOL} owner launches." >&2
+        print_rnic_hint
+        exit 1
+    fi
+    if ! validate_rdma_device_list "$DEVICE_NAME"; then
+        print_rnic_hint
+        exit 1
+    fi
+fi
 
 if [[ -n "$DISK_GB" ]]; then
-    DISK_PATH="${DISK_PATH:-/mnt/data/mooncake_offload}"
     DISK_BYTES=$(( DISK_GB * 1073741824 ))
     HEADROOM_BYTES=$(( 40 * 1073741824 ))
 
@@ -146,9 +201,9 @@ if [[ -n "$DISK_GB" ]]; then
     export MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR="${MOONCAKE_OFFLOAD_STORAGE_BACKEND_DESCRIPTOR:-bucket_storage_backend}"
     export MOONCAKE_BUCKET_EVICTION_POLICY="${MOONCAKE_BUCKET_EVICTION_POLICY:-lru}"
     export MOONCAKE_USE_URING="${MOONCAKE_USE_URING:-true}"
-    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES="${MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES:-1073741824}"
+    export MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES="${MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES:-$((32*1024*1024*1024))}"
     export MOONCAKE_OFFLOAD_TOTAL_SIZE_LIMIT_BYTES="$DISK_BYTES"
-    export MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS="${MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS:-3}"
+    export MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS="${MOONCAKE_OFFLOAD_HEARTBEAT_INTERVAL_SECONDS:-1}"
     if (( DISK_BYTES > HEADROOM_BYTES )); then
         export MOONCAKE_BUCKET_MAX_TOTAL_SIZE=$(( DISK_BYTES - HEADROOM_BYTES ))
     else
@@ -192,16 +247,16 @@ if $OPT_BG; then
     : > "$LOG_FILE"
     nohup "${CMD[@]}" > "$LOG_FILE" 2>&1 < /dev/null &
     echo $! > "$PID_FILE"
-    sleep 1
-    if ! is_our_owner "$(cat "$PID_FILE")"; then
-        echo "  ERROR: mooncake_client failed to stay running" >&2
+    if ! wait_for_owner_ready "$(cat "$PID_FILE")" 30; then
+        echo "  ERROR: mooncake_client failed to become ready" >&2
         tail -n 50 "$LOG_FILE" >&2 || true
+        print_owner_failure_hint
         rm -f "$PID_FILE"
         exit 1
     fi
     echo "  PID:           $(<"$PID_FILE") (written to $PID_FILE)"
     echo "  Log:           $LOG_FILE"
-    echo ""
+    echo
     echo "Stop with:       bash $0 --stop"
 else
     echo "  (foreground — Ctrl-C to stop)"

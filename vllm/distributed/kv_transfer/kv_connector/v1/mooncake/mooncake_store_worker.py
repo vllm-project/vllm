@@ -6,19 +6,14 @@ Includes the store worker, transfer threads, lookup server,
 and MooncakeDistributedStore integration.
 """
 
-import ipaddress
 import json
 import os
 import queue
-import socket
 import threading
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
-from urllib.request import urlopen
 
 import regex as re
 import torch
@@ -51,13 +46,10 @@ from vllm.v1.serial_utils import MsgpackDecoder
 
 logger = init_logger(__name__)
 
-DEFAULT_REQUESTER_LOCAL_BUFFER_SIZE = 128 * 1024 * 1024  # 128 MiB
+DEFAULT_REQUESTER_LOCAL_BUFFER_SIZE = 1024 * 1024 * 1024  # 1 GiB
 MOONCAKE_NO_AVAILABLE_HANDLE = -200
 DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE = 1280 * 1024 * 1024
 DISK_OFFLOAD_USABLE_BUDGET_RATIO = 0.9
-DEFAULT_MOONCAKE_MASTER_ADMIN_PORT = 9003
-PREFERRED_SEGMENT_DISCOVERY_TIMEOUT_SECS = 1.0
-GET_ALL_SEGMENTS_PATH = "/get_all_segments"
 _DIRECT_IO_ALIGNMENT = 4096
 _DIRECT_IO_PADDING_BYTES = 2 * _DIRECT_IO_ALIGNMENT
 
@@ -125,15 +117,6 @@ def _get_kv_connector_extra_config(vllm_config: VllmConfig) -> Mapping[str, Any]
     return kv_transfer_config.kv_connector_extra_config
 
 
-def _get_kv_connector_extra_config_value(
-    vllm_config: VllmConfig, key: str, default: Any = None
-) -> Any:
-    kv_transfer_config = vllm_config.kv_transfer_config
-    if kv_transfer_config is None:
-        return default
-    return kv_transfer_config.get_from_extra_config(key, default)
-
-
 def _get_disk_offload_buffer_budget_bytes() -> int:
     value = os.getenv("MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES")
     if value is None:
@@ -148,45 +131,61 @@ def _normalize_string_override(value: Any) -> str | None:
     return normalized or None
 
 
-def _get_host_from_address(address: str | None) -> str | None:
-    if address is None:
+def _normalize_single_device_name(value: str | None) -> str | None:
+    normalized = _normalize_string_override(value)
+    if normalized is None or "," in normalized:
         return None
-    normalized = address.strip()
-    if not normalized:
-        return None
-    parsed = urlsplit(normalized if "://" in normalized else f"//{normalized}")
-    return parsed.hostname
+    return normalized
 
 
-def _format_http_host(host: str) -> str:
-    return f"[{host}]" if ":" in host and not host.startswith("[") else host
-
-
-def _is_ip_address(host: str) -> bool:
-    try:
-        ipaddress.ip_address(host)
-    except ValueError:
-        return False
-    return True
-
-
-def _derive_master_admin_endpoint(master_server_address: str | None) -> str | None:
-    host = _get_host_from_address(master_server_address)
-    if host is None:
-        return None
+def _is_full_pci_bus_id(value: str) -> bool:
     return (
-        f"http://{_format_http_host(host)}:{DEFAULT_MOONCAKE_MASTER_ADMIN_PORT}"
-        f"{GET_ALL_SEGMENTS_PATH}"
+        re.fullmatch(
+            r"[0-9a-fA-F]{8}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]",
+            value.strip(),
+        )
+        is not None
     )
 
 
-def _get_master_admin_endpoint(
-    extra_config: Mapping[str, Any], master_server_address: str | None
-) -> str | None:
-    override = _normalize_string_override(extra_config.get("master_admin_endpoint"))
-    if override is not None:
-        return override
-    return _derive_master_admin_endpoint(master_server_address)
+def _normalize_pci_bus_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    match = re.fullmatch(
+        r"(?:(?P<domain>[0-9a-fA-F]{4,8}):)?"
+        r"(?P<bus>[0-9a-fA-F]{2}):"
+        r"(?P<device>[0-9a-fA-F]{2})\.(?P<function>[0-7])",
+        normalized,
+    )
+    if match is None:
+        return None
+    domain = int(match.group("domain") or "0", 16)
+    bus = int(match.group("bus"), 16)
+    device = int(match.group("device"), 16)
+    function = int(match.group("function"), 16)
+    return f"{domain:08x}:{bus:02x}:{device:02x}.{function:x}"
+
+
+def _get_current_cuda_pci_bus_id() -> str | None:
+    try:
+        from vllm.platforms import current_platform
+        from vllm.utils.import_utils import import_pynvml
+    except ImportError:
+        return None
+
+    device_index = torch.accelerator.current_device_index()
+    physical_device_id = current_platform.device_id_to_physical_device_id(device_index)
+    pynvml = import_pynvml()
+    pynvml.nvmlInit()
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+        pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+        return _normalize_pci_bus_id(getattr(pci_info, "busId", None))
+    except Exception:
+        return None
+    finally:
+        pynvml.nvmlShutdown()
 
 
 def _get_requester_local_hostname(local_ip: str) -> str:
@@ -196,129 +195,79 @@ def _get_requester_local_hostname(local_ip: str) -> str:
     return local_ip
 
 
-def _get_local_hostname_candidates() -> set[str]:
-    hostnames: set[str] = set()
-    for candidate in (
-        os.getenv("MOONCAKE_LOCAL_HOSTNAME"),
-        socket.gethostname(),
-        socket.getfqdn(),
-    ):
-        host = _get_host_from_address(candidate)
-        if host is not None and not _is_ip_address(host):
-            hostnames.add(host)
-    return hostnames
-
-
-def _parse_segment_lines(payload: str) -> list[str] | None:
-    segments = [line.strip() for line in payload.splitlines() if line.strip()]
-    if any(_get_host_from_address(segment) is None for segment in segments):
-        return None
-    return segments
-
-
-def _match_local_segment(
-    segments: list[str], local_ip: str, local_hostnames: set[str]
-) -> tuple[str | None, str | None]:
-    exact_ip_matches = [
-        segment for segment in segments if _get_host_from_address(segment) == local_ip
-    ]
-    if len(exact_ip_matches) == 1:
-        return exact_ip_matches[0], None
-    if len(exact_ip_matches) > 1:
-        return (
-            None,
-            "Mooncake preferred-segment discovery found multiple exact IP "
-            f"matches for {local_ip}",
-        )
-
-    hostname_matches = [
-        segment
-        for segment in segments
-        if _get_host_from_address(segment) in local_hostnames
-    ]
-    if len(hostname_matches) == 1:
-        return hostname_matches[0], None
-    if len(hostname_matches) > 1:
-        return (
-            None,
-            "Mooncake preferred-segment discovery found multiple hostname "
-            f"matches for {sorted(local_hostnames)}",
-        )
-    return (
-        None,
-        "Mooncake preferred-segment discovery found no unique local match "
-        f"for {local_ip}",
-    )
-
-
-def _discover_preferred_segment(
-    admin_endpoint: str,
-    local_ip: str,
-    local_hostnames: set[str],
-    *,
-    urlopen_impl: Any = urlopen,
-) -> tuple[str | None, str | None]:
-    try:
-        with urlopen_impl(  # noqa: S310
-            admin_endpoint,
-            timeout=PREFERRED_SEGMENT_DISCOVERY_TIMEOUT_SECS,
-        ) as response:
-            payload = response.read().decode("utf-8")
-    except (HTTPError, URLError, OSError, TimeoutError, UnicodeDecodeError) as exc:
-        return (
-            None,
-            "Mooncake preferred-segment discovery failed to fetch "
-            f"{admin_endpoint}: {exc}",
-        )
-
-    segments = _parse_segment_lines(payload)
-    if segments is None:
-        return (
-            None,
-            "Mooncake preferred-segment discovery received malformed segment "
-            f"data from {admin_endpoint}",
-        )
-    if not segments:
-        return (
-            None,
-            "Mooncake preferred-segment discovery received no segments from "
-            f"{admin_endpoint}",
-        )
-    return _match_local_segment(segments, local_ip, local_hostnames)
-
-
-def _resolve_preferred_segment(
+def _get_configured_preferred_segment(
     extra_config: Mapping[str, Any],
-    master_server_address: str | None,
-    local_ip: str,
-    local_hostnames: set[str],
-    *,
-    urlopen_impl: Any = urlopen,
-) -> tuple[str | None, str | None]:
+) -> str | None:
     preferred_segment = _normalize_string_override(
         extra_config.get("preferred_segment")
     )
     if preferred_segment is not None:
-        return preferred_segment, None
+        return preferred_segment
     if extra_config.get("preferred_segment") is not None:
-        return (
-            None,
-            "Mooncake preferred_segment override must be a non-empty string",
+        raise ValueError(
+            "Mooncake preferred_segment override must be a non-empty string"
+        )
+    return None
+
+
+def _get_configured_rnic(
+    store_config: "MooncakeStoreConfig", extra_config: Mapping[str, Any]
+) -> str:
+    configured_device = _normalize_string_override(store_config.device_name)
+    if configured_device is not None:
+        if "," in configured_device:
+            raise ValueError(
+                "Mooncake worker device_name must be a single RDMA device name"
+            )
+        return configured_device
+
+    if store_config.protocol not in {"rdma", "efa"}:
+        return ""
+
+    local_gpu_bdf = _get_current_cuda_pci_bus_id()
+    if local_gpu_bdf is None:
+        raise RuntimeError(
+            "Mooncake RDMA requester could not determine the local GPU PCI BDF"
         )
 
-    admin_endpoint = _get_master_admin_endpoint(extra_config, master_server_address)
-    if admin_endpoint is None:
-        return (
-            None,
-            "Mooncake preferred-segment discovery has no admin endpoint; "
-            "continuing without locality hint",
+    raw_map = extra_config.get("gpu_bdf_rnic_map")
+    if not isinstance(raw_map, Mapping) or not raw_map:
+        raise ValueError(
+            "Mooncake RDMA requester requires "
+            "kv_connector_extra_config.gpu_bdf_rnic_map. "
+            "Use scripts/mooncake/recommend_mooncake_rnic_config.sh to "
+            "generate a ready-to-paste mapping."
         )
-    return _discover_preferred_segment(
-        admin_endpoint,
-        local_ip,
-        local_hostnames,
-        urlopen_impl=urlopen_impl,
-    )
+
+    normalized_map: dict[str, str] = {}
+    for raw_key, raw_value in raw_map.items():
+        if not isinstance(raw_key, str) or not _is_full_pci_bus_id(raw_key):
+            raise ValueError(
+                "Mooncake gpu_bdf_rnic_map keys must use full GPU PCI BDFs "
+                "like 00000000:89:00.0"
+            )
+        device_name = _normalize_single_device_name(
+            raw_value if isinstance(raw_value, str) else None
+        )
+        if device_name is None:
+            raise ValueError(
+                "Mooncake gpu_bdf_rnic_map values must be single RDMA device "
+                "names like rocep139s0"
+            )
+        normalized_key = _normalize_pci_bus_id(raw_key)
+        if normalized_key is None:
+            raise ValueError(
+                f"Mooncake gpu_bdf_rnic_map key is not a valid PCI BDF: {raw_key!r}"
+            )
+        normalized_map[normalized_key] = device_name
+
+    device_name = normalized_map.get(local_gpu_bdf)
+    if device_name is None:
+        raise ValueError(
+            "Mooncake gpu_bdf_rnic_map does not contain the local GPU PCI BDF "
+            f"{local_gpu_bdf}"
+        )
+    return device_name
 
 
 def _parse_size(value: Any) -> int:
@@ -913,6 +862,8 @@ class MooncakeStoreWorker:
 
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_env()
+        extra_config = _get_kv_connector_extra_config(vllm_config)
+        store_config.device_name = _get_configured_rnic(store_config, extra_config)
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
         local_hostname = _get_requester_local_hostname(local_ip)
@@ -930,15 +881,7 @@ class MooncakeStoreWorker:
             logger.error(msg)
             raise RuntimeError(msg)
 
-        self._preferred_segment_fallback_logged = False
-        preferred_segment, warning = _resolve_preferred_segment(
-            _get_kv_connector_extra_config(vllm_config),
-            store_config.master_server_address,
-            local_ip,
-            _get_local_hostname_candidates(),
-        )
-        if warning is not None:
-            self._log_preferred_segment_fallback(warning)
+        preferred_segment = _get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
         self.store_replicate_config = None
         if preferred_segment is not None:
@@ -955,12 +898,6 @@ class MooncakeStoreWorker:
         self.kv_send_thread: KVCacheStoreSendingThread | None = None
         self.kv_recv_thread: KVCacheStoreRecvingThread | None = None
         self.finished_store_req: set[str] = set()
-
-    def _log_preferred_segment_fallback(self, message: str) -> None:
-        if self._preferred_segment_fallback_logged:
-            return
-        logger.warning("%s", message)
-        self._preferred_segment_fallback_logged = True
 
     def register_cross_layers_kv_caches(self, kv_cache: torch.Tensor) -> None:
         """Register a cross-layers KV cache tensor.

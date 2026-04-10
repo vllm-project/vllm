@@ -1,0 +1,136 @@
+# Kimi-K2.5-NVFP4 Multi-Node DP with MooncakeStore — 2 nodes × 4 GPUs each
+#
+# This config bootstraps the Mooncake master in pre_serve, then lets
+# run_vllm_with_mooncake_owner.sh auto-detect the local RNIC layout and inject
+# the final Mooncake --kv-transfer-config for each worker node.
+
+model: nvidia/Kimi-K2.5-NVFP4
+mode: remote
+precheck: true
+collect_env: true
+router_port: 30000
+
+pre_serve:
+  - cmd: >-
+      bash scripts/mooncake/start_mooncake_master.sh
+      --bg
+      --env-file {log_dir}/mooncake_master.env
+    repo_path: /home/${USER}/code/vllm-mooncake
+
+serving:
+  roles:
+    - role: worker
+      count: 2
+      nodes_per_instance: 1
+      gpus_per_node: 4
+      base_port: 8000
+      vllm_engine:
+        repo_path: /home/${USER}/code/vllm-mooncake
+        cmd: >-
+          bash /home/${USER}/code/vllm-mooncake/scripts/mooncake/run_vllm_with_mooncake_owner.sh
+          vllm serve {model}
+          --port {port}
+          --trust-remote-code
+          --language-model-only
+          --load-format dummy
+          --enforce-eager
+          -tp 4
+          -O3
+          --gpu-memory-utilization 0.9
+          --max-model-len 131072
+          --max-num-seqs 32
+          --max-num-batched-tokens 8192
+          --enable-sleep-mode
+          --enable-prefix-caching
+          --enable-chunked-prefill
+          --kv-cache-dtype fp8
+          --attention_config.disable_flashinfer_prefill false
+          --disable-uvicorn-access-log
+          --disable-hybrid-kv-cache-manager
+        env:
+          MC_OWNER_CPU_MEM_GIB: "700"
+          # MC_OWNER_DISK_GIB: "1000"
+          # MC_OWNER_DISK_PATH: "/mnt/data/${USER}/mooncake_offload"
+          MC_OWNER_READY_TIMEOUT_S: "120"
+          MC_OWNER_LOG_DIR: "{log_dir}"
+          VLLM_USE_SIMPLE_KV_OFFLOAD: "1"
+          VLLM_USE_FLASHINFER_MOE_FP4: "1"
+          VLLM_FLASHINFER_MOE_BACKEND: latency
+          VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: "81920"
+          VLLM_ENABLE_MOE_DP_CHUNK: "0"
+          VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: "8192"
+          VLLM_RANDOMIZE_DP_DUMMY_INPUTS: "1"
+          # Timeouts
+          VLLM_ENGINE_READY_TIMEOUT_S: "3600"
+          VLLM_RPC_TIMEOUT: "600000"
+          VLLM_LOG_STATS_INTERVAL: "1"
+          # UCX config for MNNVL
+          UCX_MEMTYPE_CACHE: "n"
+          UCX_MEMTYPE_REG_WHOLE: "n"
+          UCX_TLS: "cuda_copy,cuda_ipc,tcp"
+          UCX_CUDA_IPC_ENABLE_MNNVL: "y"
+          UCX_RC_TIMEOUT: "5s"
+          UCX_RC_RETRY_COUNT: "14"
+          UCX_RC_RNR_TIMEOUT: "10ms"
+          UCX_RC_RNR_RETRY_COUNT: "14"
+          # Model cache (shared filesystem)
+          HF_HOME: /mnt/lustre/hf-models
+          # NCCL for GB200 NVL72
+          NCCL_P2P_DISABLE: "0"
+          NCCL_P2P_LEVEL: NVL
+          NCCL_SOCKET_IFNAME: enp192s2
+          NCCL_IB_HCA: "mlx5_1,mlx5_2,mlx5_3,mlx5_4"
+          NCCL_NET_GDR_LEVEL: "5"
+          NCCL_SHM_DISABLE: "1"
+          NCCL_DEBUG: WARN
+          NCCL_TIMEOUT: "1800"
+          TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "1800"
+          GLOO_SOCKET_IFNAME: enp192s2
+        health_check:
+          url: "http://localhost:{port}/health"
+          timeout_s: 3600
+          poll_interval_s: 10
+
+  # ---- Router (round-robin, no PD disaggregation) ----
+  router:
+    cmd: >-
+      vllm-router
+      --policy round_robin
+      --host 0.0.0.0
+      --port {router_port}
+      {worker_flags}
+    health_check:
+      url: http://localhost:{router_port}/health
+      timeout_s: 300
+      poll_interval_s: 5
+
+  remote:
+    launcher: slurm
+    slurm:
+      partition: normal
+      time_limit: "12:00:00"
+      grace_period_s: 120
+
+post_serve:
+  - vmon: start
+  - cmd: >-
+      vllm-bench
+      --backend openai-chat
+      --base-url http://localhost:{router_port}
+      --model {model}
+      --dataset-name random
+      --random-input-len 70000
+      --random-output-len 300
+      --num-prompts 100
+      --multi-turn
+      --multi-turn-num-turns 3
+      --multi-turn-concurrency 32
+      --multi-turn-delay-ms 500
+      --multi-turn-prefix-global-ratio 0.1
+      --multi-turn-prefix-conversation-ratio 0.8
+      --percentile-metrics "ttft,tpot,itl,e2el"
+      --result-dir {log_dir}
+      --save-result
+  - vmon: stop
+  - cmd: bash scripts/mooncake/start_mooncake_master.sh --stop
+    repo_path: /home/${USER}/code/vllm-mooncake

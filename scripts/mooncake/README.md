@@ -34,6 +34,8 @@ Start the Mooncake master server:
 
 ```bash
 bash scripts/mooncake/start_mooncake_master.sh
+# Or write a shared env file for managed launches:
+bash scripts/mooncake/start_mooncake_master.sh --bg --env-file /tmp/mooncake_master.env
 ```
 
 In a separate terminal, run the example script to confirm everything works:
@@ -60,6 +62,8 @@ bash scripts/mooncake/start_mooncake_master.sh
 bash scripts/mooncake/start_mooncake_master.sh --enable-offload
 # Start master and run it in background
 bash scripts/mooncake/start_mooncake_master.sh --bg
+# Start master in background and write connection env for workers/wrappers
+bash scripts/mooncake/start_mooncake_master.sh --bg --env-file /shared/logs/mooncake_master.env
 # With disk offloading support and running in background:
 bash scripts/mooncake/start_mooncake_master.sh --enable-offload --bg
 ```
@@ -72,7 +76,7 @@ Default ports:
 - HTTP metadata: 8080
 - Prometheus metrics: 9003
 
-See the script header for environment variables (`MC_RPC_PORT`, `MC_HTTP_PORT`, etc.) to customize ports and eviction settings. Mooncake master is launched cluster-wise, so we may get port conflict if someone else has already launched it. Typically we don't need to change this, and multiple users should be able to share the same master. One can freely change ports here, but also remember to update the `mooncake_config.json` for the client (vLLM) below.
+See the script header for environment variables (`MC_RPC_PORT`, `MC_HTTP_PORT`, `MC_MASTER_HOST`, etc.) to customize ports and the advertised host/IP. The `--env-file` output is the simplest way to feed `MOONCAKE_MASTER` and `MOONCAKE_TE_META_DATA_SERVER` into managed worker launches.
 
 ### 2. Configure Mooncake
 
@@ -95,6 +99,22 @@ Edit `scripts/mooncake/mooncake_config.json`:
 - The requester still uses `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` as a batching hint.
 - Start one owner per node before launching vLLM requester ranks.
 - If you want disk offload, the owner process must be launched with disk support separately.
+- On multi-RNIC hosts, keep this file generic. The managed owner wrapper can auto-detect the local RNIC layout and inject `gpu_bdf_rnic_map` at launch time.
+
+Generate the node-local RNIC recommendations with:
+
+```bash
+bash scripts/mooncake/recommend_mooncake_rnic_config.sh
+```
+
+This prints:
+
+- a ready-to-paste `gpu_bdf_rnic_map` JSON object for `kv_connector_extra_config`
+- a ready-to-paste `MC_OWNER_DEVICE=...` line for the owner
+
+For managed launches, `run_vllm_with_mooncake_owner.sh` calls this helper automatically. The human-readable output is still useful to inspect the detected topology or debug ambiguous hosts.
+
+The helper exits non-zero when the topology is ambiguous, but still prints the best-effort recommendation for review.
 
 Owner launch contract:
 
@@ -108,12 +128,15 @@ Owner helper:
 
 ```bash
 # Memory only
+MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80
 
 # Memory + disk offload
+MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400
 
 # Background mode
+MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400 --bg
 ```
 
@@ -122,6 +145,7 @@ This helper:
 - launches `mooncake_client` with the stable owner contract `--host=<node-ip>:50053 --port=50052`
 - sets owner-side disk offload env vars when `--disk-size` is given
 - keeps requester setup separate from owner setup
+- validates the explicit owner RNIC list instead of auto-selecting one
 
 ### 3. Environment Setup (setup_vllm_env.sh)
 
@@ -167,7 +191,7 @@ Mooncake benchmark expectations:
 - source `setup_vllm_env.sh` only for requester-side environment setup
 - use `kv_connector_extra_config` for connector-specific overrides
 - set `preferred_segment` explicitly in `kv_connector_extra_config` when you want to pin locality
-- if you omit `preferred_segment`, requester startup uses best-effort admin discovery through `/get_all_segments`
+- on multi-RNIC hosts, also set `gpu_bdf_rnic_map` explicitly in `kv_connector_extra_config`
 
 Environment variables:
 
