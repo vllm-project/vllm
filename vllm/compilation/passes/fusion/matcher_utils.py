@@ -27,7 +27,7 @@ RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 ROTARY_OP = torch.ops._C.rotary_embedding.default
 FLASHINFER_ROTARY_OP = torch.ops.vllm.flashinfer_rotary_embedding.default
 
-QUANT_OPS: dict[QuantKey, object] = {
+QUANT_OPS: dict[QuantKey, torch._ops.OpOverloadPacket | torch._ops.OpOverload] = {
     kFp8StaticTensorSym: torch.ops.vllm_ir.static_quant_fp8,
     kFp8DynamicTokenSym: torch.ops.vllm_ir.dynamic_quant_fp8,
     kFp8Dynamic128Sym: torch.ops.vllm_ir.dynamic_group_quant_fp8,
