@@ -96,7 +96,7 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
         # (8192, 8192, 8192),
         #  RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 (using asyncTP with 4 ranks)
         (8192, 8192, 2560),
-        #(8192, 2560, 14336)
+        (8192, 8192, 14336)
     ]
     #shapes_to_tune[(num_tokens, hidden_size, N)]
     rank = int(os.environ["RANK"])

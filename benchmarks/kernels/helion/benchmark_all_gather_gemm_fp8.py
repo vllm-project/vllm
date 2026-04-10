@@ -435,7 +435,7 @@ if __name__ == "__main__":
         #(4096, 5120, 5120),
         #(8192, 8192, 8192)
         (8192, 8192, 2560),
-        #(8192, 2560, 14336)
+        #(8192, 8192, 14336)
     ]
     import time 
     rank, local_rank, world_size, device, dist_group, world_group = setup_distributed()

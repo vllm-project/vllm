@@ -258,10 +258,6 @@ def _helion_all_gather_fp8_gemm_runtime(
     """
     Performs an all-gather on a_shared and matrix multiplication using the Helion library.
     """
-    configs = {
-        "SPLITS_PER_RANK":SPLITS_PER_RANK,
-    }
-
 
     symm_mem_group = group_name
     symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared, group=group_name)
@@ -284,20 +280,17 @@ def _helion_all_gather_fp8_gemm_runtime(
 
     a_shape = list(a_shared_symm.shape)
     a_shape[0] *= symm_mem_hdl.world_size
-    configs["RANK"] = symm_mem_hdl.rank
-    configs["WORLD_SIZE"] = symm_mem_hdl.world_size
-
     if a_out is None:
         a_out = torch.empty(a_shape, dtype=a_shared.dtype, device=a_shared.device)
     
     progress = torch.zeros(
-        symm_mem_hdl.world_size * configs["SPLITS_PER_RANK"],
+        symm_mem_hdl.world_size * SPLITS_PER_RANK,
         dtype=torch.uint32,
         device=a_shared_symm.device,
     )
 
     backend_stream = copy_engine_all_gather_w_progress(
-        a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
+        a_out, a_shared_symm, progress, group_name, SPLITS_PER_RANK
     )
     
     c = helion_matmul_w_progress_fp8(
@@ -307,8 +300,8 @@ def _helion_all_gather_fp8_gemm_runtime(
         b,
         scale_b,
         progress,
-        SPLITS_PER_RANK=configs["SPLITS_PER_RANK"],
-        RANK=configs["RANK"],
+        SPLITS_PER_RANK=SPLITS_PER_RANK,
+        RANK=symm_mem_hdl.rank,
     )
     assert type(c) is torch.Tensor
     torch.cuda.current_stream().wait_stream(backend_stream)
