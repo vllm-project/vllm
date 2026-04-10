@@ -1394,6 +1394,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 
         return loaded_params
 
+
 class Gemma4ForCausalLM(
     nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
 ):
