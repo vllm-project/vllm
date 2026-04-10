@@ -286,9 +286,7 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
         scope="local",
     )
 
-    padded_w13 = w13.new_zeros(
-        (num_experts, gate_up_dim, padded_hidden_size // 2)
-    )
+    padded_w13 = w13.new_zeros((num_experts, gate_up_dim, padded_hidden_size // 2))
     padded_w13[:, :, :packed_hidden_size] = w13
 
     padded_w13_scale = w13_scale.new_zeros(

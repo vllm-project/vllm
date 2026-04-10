@@ -32,13 +32,11 @@ def test_align_trtllm_fp4_moe_hidden_dim_pads_to_256_multiple():
     w13 = torch.arange(2 * 12 * (hidden_dim // 2), dtype=torch.uint8).reshape(
         2, 12, hidden_dim // 2
     )
-    w13_scale = torch.arange(
-        2 * 12 * (hidden_dim // 16), dtype=torch.uint8
-    ).reshape(2, 12, hidden_dim // 16)
-
-    w2 = torch.arange(2 * hidden_dim * 6, dtype=torch.uint8).reshape(
-        2, hidden_dim, 6
+    w13_scale = torch.arange(2 * 12 * (hidden_dim // 16), dtype=torch.uint8).reshape(
+        2, 12, hidden_dim // 16
     )
+
+    w2 = torch.arange(2 * hidden_dim * 6, dtype=torch.uint8).reshape(2, hidden_dim, 6)
     w2_scale = torch.arange(2 * hidden_dim * 2, dtype=torch.uint8).reshape(
         2, hidden_dim, 2
     )
@@ -54,9 +52,7 @@ def test_align_trtllm_fp4_moe_hidden_dim_pads_to_256_multiple():
     assert out_w2_scale.shape == (2, padded_hidden_dim, 2)
 
     torch.testing.assert_close(out_w13[:, :, : hidden_dim // 2], w13)
-    torch.testing.assert_close(
-        out_w13_scale[:, :, : hidden_dim // 16], w13_scale
-    )
+    torch.testing.assert_close(out_w13_scale[:, :, : hidden_dim // 16], w13_scale)
     torch.testing.assert_close(out_w2[:, :hidden_dim, :], w2)
     torch.testing.assert_close(out_w2_scale[:, :hidden_dim, :], w2_scale)
 
