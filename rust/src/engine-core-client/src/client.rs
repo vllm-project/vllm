@@ -289,6 +289,13 @@ impl EngineCoreClient {
         let abort_task =
             AbortOnDropHandle::new(tokio::spawn(run_abort_loop(inner.clone(), abort_rx)));
 
+        // If any engine reported a dp_stats_address in its ready response, use it
+        // as the external coordinator address.
+        let dp_stats_address: Option<String> = engines
+            .iter()
+            .filter_map(|e| e.ready_response.as_ref())
+            .find_map(|r| r.dp_stats_address.clone());
+
         let (coordinator, coordinator_output_task, coordinator_task) =
             if let Some(coordinator_transport) = connected.coordinator {
                 let (handle, runner) =
@@ -307,12 +314,15 @@ impl EngineCoreClient {
                     Some(coordinator_output_task),
                     Some(coordinator_task),
                 )
-            } else if let Some(CoordinatorMode::External {
-                address: coordinator_address,
-            }) = config.coordinator_mode.as_ref()
+            } else if let Some(address) =
+                dp_stats_address
+                    .as_deref()
+                    .or(match config.coordinator_mode.as_ref() {
+                        Some(CoordinatorMode::External { address }) => Some(address.as_str()),
+                        _ => None,
+                    })
             {
-                let (handle, service) =
-                    CoordinatorHandle::connect_external(coordinator_address).await?;
+                let (handle, service) = CoordinatorHandle::connect_external(address).await?;
                 let coordinator_task =
                     AbortOnDropHandle::new(tokio::spawn(service.run(inner.clone())));
                 (Some(handle), None, Some(coordinator_task))
