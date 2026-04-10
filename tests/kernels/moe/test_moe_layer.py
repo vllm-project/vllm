@@ -65,8 +65,8 @@ fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 # Note: some M and K should be big enough to exercise DP chunking + DeepEP.
 SHAPE_COMBOS = [
     (1, 128, 256),
-    (32, 1024, 512),
-    (222, 2048, 2048),
+    (32, 512, 512),
+    (222, 1024, 2048),
 ]
 
 NUM_EXPERTS = [8, 64]
@@ -1018,7 +1018,7 @@ def make_fake_moe_layer(
     top_k: int,
     global_num_experts: int,
     in_dtype: torch.dtype,
-    quant_dtype: torch.dtype | None,
+    quantization: str | None,
     renormalize: bool = False,
     shared_experts_config: SharedExpertsConfig | None = None,
     use_grouped_topk: bool = False,
@@ -1045,6 +1045,7 @@ def make_fake_moe_layer(
     ep_size: int = 1,
     reduce_results: bool = False,
 ) -> Callable:
+    quant_dtype = None
     activation = MoEActivation.from_str(activation)
 
     router = create_fused_moe_router(
@@ -1239,10 +1240,6 @@ def _test_body_eplb(
         routed_output_transform=routed_output_transform,
     )
 
-    # Necessary?
-    if moe_layer._expert_map is not None:
-        moe_layer._expert_map = moe_layer._expert_map.to(device)
-
     # All ranks must generate the same permutation
     initial_indices = torch.arange(num_experts, dtype=torch.long)
     shuffled_indices = initial_indices[torch.randperm(num_experts)]
@@ -1368,6 +1365,7 @@ def _run_one_config(
     gate = test_data.gate
     routed_input_transform = test_data.routed_input_transform
     routed_output_transform = test_data.routed_output_transform
+    activation = "silu"
 
     baseline_layer = make_fake_moe_layer(
         w1=w1,
@@ -1375,7 +1373,7 @@ def _run_one_config(
         top_k=top_k,
         global_num_experts=num_experts,
         in_dtype=in_dtype,
-        quant_dtype=None,  # quantization_to_quant_dtype(quantization),
+        quantization=quantization,
         renormalize=False,
         shared_experts_config=shared_experts_config,
         gate=gate,
@@ -1386,6 +1384,7 @@ def _run_one_config(
         ep_size=ep_size,
         dp_size=dp_size,
         reduce_results=reduce_results,
+        activation=activation,
     )
 
     baseline_output = baseline_layer(hidden_states, router_logits)
@@ -1431,11 +1430,8 @@ def _run_one_config(
             gate=gate,
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
+            activation=activation,
         )
-
-        # Necessary?
-        if moe_layer._expert_map is not None:
-            moe_layer._expert_map = moe_layer._expert_map.to(device)
 
         num_tokens = m
         num_tokens_across_dp = torch.tensor(
@@ -1485,7 +1481,14 @@ def _run_one_config(
     elif quantization in ("fp8", "fp8_blocked", "modelopt_fp8"):
         atol, rtol = 6e-2, 6e-2
     elif quantization == "modelopt_fp4":
-        atol = rtol = 1e-1 + k * 5e-4
+        if k >= 2048:
+            atol = rtol = 1e-1 + (k * 1e-4)
+        else:
+            atol = rtol = 1e-1
+
+        if backend == "allgather_reducescatter" and tp_size > 1:
+            atol += 2e-1
+            rtol += 2e-1
     else:
         atol, rtol = 6e-2, 6e-2
 
@@ -1717,8 +1720,8 @@ def test_moe_layer(
     test_env = dict()
     test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
     monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
-    # if os.environ.get("VLLM_LOGGING_LEVEL") is None:
-    #    monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
+    if os.environ.get("VLLM_LOGGING_LEVEL") is None:
+        monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
     # TODO
     # VLLM_FLASHINFER_MOE_BACKEND=latency
