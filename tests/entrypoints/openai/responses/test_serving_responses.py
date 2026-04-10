@@ -51,6 +51,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser import DelegatingParser
 from vllm.sampling_params import SamplingParams
 
 
@@ -716,6 +717,11 @@ def _mock_parser_with_deltas(serving, delta_sequence: list[DeltaMessage]):
     serving.parser = MagicMock(return_value=mock_parser_instance)
 
 
+class _TestForcedToolStreamingParser(DelegatingParser):
+    reasoning_parser_cls = None
+    tool_parser_cls = None
+
+
 class TestStreamingReasoningToContentTransition:
     """Tests for _process_simple_streaming_events reasoning-to-content
     transition, specifically the fix for mixed deltas that carry both
@@ -931,7 +937,7 @@ class TestForcedToolStreaming:
     @staticmethod
     async def _collect_events_for_request(request: ResponsesRequest):
         serving = _make_serving_instance_with_reasoning()
-        serving.parser = None
+        serving.parser = _TestForcedToolStreamingParser
 
         sampling_params = SamplingParams(max_tokens=64)
         metadata = RequestResponseMetadata(request_id="req")

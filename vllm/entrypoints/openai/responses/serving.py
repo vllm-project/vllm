@@ -30,7 +30,6 @@ from openai.types.responses import (
     ResponseStatus,
     ResponseTextDeltaEvent,
     ResponseTextDoneEvent,
-    ToolChoiceFunction,
     response_text_delta_event,
 )
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
@@ -51,9 +50,6 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionNamedToolChoiceParam,
-)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
@@ -110,10 +106,6 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_input_messages,
     construct_tool_dicts,
     extract_tool_types,
-)
-from vllm.entrypoints.openai.tool_call_streaming import (
-    extract_named_tool_call_streaming,
-    extract_required_tool_call_streaming,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.utils import get_max_tokens
@@ -1352,115 +1344,22 @@ class OpenAIServingResponses(OpenAIServing):
         current_tool_call_id = ""
         current_tool_call_name = ""
         parser = self.parser(tokenizer, request.tools) if self.parser else None
-        reasoning_parser = None
-        if self.parser and self.parser.reasoning_parser_cls:
-            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
-        reasoning_ended = False
-        previous_text = ""
-        previous_token_ids: list[int] = []
-        prompt_is_reasoning_end = None
+        if parser is not None:
+            parser.tool_call_id_type = self.tool_call_id_type
         first_delta_sent = False
         previous_delta_messages: list[DeltaMessage] = []
-        function_name_returned = False
-        history_tool_call_cnt = 0
-
-        if isinstance(request.tool_choice, ToolChoiceFunction):
-            tool_choice_function_name = request.tool_choice.name
-        elif isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
-            tool_choice_function_name = request.tool_choice.function.name
-        else:
-            tool_choice_function_name = None
 
         async for ctx in result_generator:
             assert isinstance(ctx, SimpleContext)
             if ctx.last_output is None:
                 continue
-            if reasoning_parser and prompt_is_reasoning_end is None:
-                prompt_is_reasoning_end = reasoning_parser.is_reasoning_end(
-                    ctx.last_output.prompt_token_ids
-                )
             if ctx.last_output.outputs:
                 output = ctx.last_output.outputs[0]
                 # finish_reason='error' indicates a retryable error
                 self._raise_if_error(output.finish_reason, request.request_id)
                 delta_text = output.text
                 delta_token_ids = as_list(output.token_ids)
-                current_text = previous_text + delta_text
-                current_token_ids = previous_token_ids + delta_token_ids
-
-                if tool_choice_function_name:
-                    if prompt_is_reasoning_end:
-                        reasoning_ended = True
-                    if reasoning_parser and not reasoning_ended:
-                        delta_message = reasoning_parser.extract_reasoning_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            delta_token_ids=delta_token_ids,
-                        )
-                        if reasoning_parser.is_reasoning_end(delta_token_ids):
-                            reasoning_ended = True
-                            if delta_message and delta_message.content:
-                                current_text = delta_message.content
-                                delta_message.content = None
-                            else:
-                                current_text = ""
-                    else:
-                        if reasoning_parser:
-                            delta_text = previous_text + delta_text
-                            current_text = ""
-                        (
-                            delta_message,
-                            function_name_returned,
-                            created_new_tool_call,
-                        ) = extract_named_tool_call_streaming(
-                            delta_text=delta_text,
-                            function_name=tool_choice_function_name,
-                            function_name_returned=function_name_returned,
-                            tool_call_idx=history_tool_call_cnt,
-                            tool_call_id_type=self.tool_call_id_type,
-                            tokenizer=tokenizer,
-                            tool_call_array_index=0,
-                        )
-                        if created_new_tool_call:
-                            history_tool_call_cnt += 1
-                elif request.tool_choice == "required":
-                    if prompt_is_reasoning_end:
-                        reasoning_ended = True
-                    if reasoning_parser and not reasoning_ended:
-                        delta_message = reasoning_parser.extract_reasoning_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            delta_token_ids=delta_token_ids,
-                        )
-                        if reasoning_parser.is_reasoning_end(delta_token_ids):
-                            reasoning_ended = True
-                            if delta_message and delta_message.content:
-                                current_text = delta_message.content
-                                delta_message.content = None
-                            else:
-                                current_text = ""
-                    else:
-                        (
-                            delta_message,
-                            function_name_returned,
-                            created_new_tool_call,
-                        ) = extract_required_tool_call_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
-                            delta_text=delta_text,
-                            function_name_returned=function_name_returned,
-                            tool_call_idx=history_tool_call_cnt,
-                            tool_call_id_type=self.tool_call_id_type,
-                        )
-                        if created_new_tool_call:
-                            history_tool_call_cnt += 1
-                elif parser:
+                if parser:
                     delta_message = parser.parse_delta(
                         delta_text=delta_text,
                         delta_token_ids=delta_token_ids,
@@ -1471,8 +1370,6 @@ class OpenAIServingResponses(OpenAIServing):
                     delta_message = DeltaMessage(
                         content=output.text,
                     )
-                previous_text = current_text
-                previous_token_ids = current_token_ids
                 if not delta_message:
                     continue
                 tool_call_item_started = False
