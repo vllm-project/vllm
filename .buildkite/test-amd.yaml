@@ -3818,10 +3818,6 @@ steps:
 #                                                                                                                                   #
 #                                              gfx942 — mi300_8 (single-GPU shadow)                                                 #
 #                                                                                                                                   #
-#  Auto-generated catalog of every *_1 (single-GPU) test from the MI250, gfx942 (mi325) and gfx950 (mi355) sections, deduplicated   #
-#  by label and routed to the mi300_8 agent_pool. Despite the `_8` suffix, mi300_8 is a single-GPU queue. All entries are kept      #
-#  non-optional and tagged for gfx942 / amdmi300.                                                                                   #
-#                                                                                                                                   #
 #####################################################################################################################################
 
 
