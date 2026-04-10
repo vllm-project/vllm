@@ -873,12 +873,20 @@ class EngineCoreProc(EngineCore):
                 )
             self._init_data_parallel(vllm_config)
 
+            import time as _time
+            _dp_rank = getattr(self, 'dp_rank', -1)
+            logger.info("[DIAG-ENGINE] Starting EngineCore.__init__ dp_rank=%d", _dp_rank)
+            _engine_t0 = _time.time()
             super().__init__(
                 vllm_config,
                 executor_class,
                 log_stats,
                 executor_fail_callback,
                 internal_dp_balancing,
+            )
+            logger.info(
+                "[DIAG-ENGINE] EngineCore.__init__ completed in %.1fs dp_rank=%d",
+                _time.time() - _engine_t0, _dp_rank,
             )
 
             # Background Threads and Queues for IO. These enable us to
@@ -1009,6 +1017,11 @@ class EngineCoreProc(EngineCore):
             yield addresses
 
             # Send ready message.
+            logger.info(
+                "[DIAG-HANDSHAKE] Sending READY to main process "
+                "(local=%s, headless=%s)",
+                local_client, headless,
+            )
             ready_msg = {
                 "status": "READY",
                 "local": local_client,
@@ -1217,7 +1230,7 @@ class EngineCoreProc(EngineCore):
         # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
         # background threads (like NIXL handshake) to make progress.
         # Without this, the tight polling loop can starve background threads.
-        if not model_executed and self.scheduler.has_unfinished_requests():
+        if not model_executed and self.scheduler.has_requests():
             time.sleep(0.001)
 
         return model_executed
@@ -1406,7 +1419,13 @@ class EngineCoreProc(EngineCore):
                     )
                 )
                 # Send subscription message to coordinator.
+                logger.info(
+                    "[DIAG-INPUT] Sending subscription to coordinator at %s "
+                    "(identity=%s)",
+                    coord_input_address, identity,
+                )
                 coord_socket.send(b"\x01")
+                logger.info("[DIAG-INPUT] Subscription sent")
 
             # Register sockets with poller.
             poller = zmq.Poller()
@@ -1425,9 +1444,13 @@ class EngineCoreProc(EngineCore):
 
             if coord_socket is not None:
                 # Wait for ready message from coordinator.
-                assert coord_socket.recv() == b"READY"
+                logger.info("[DIAG-INPUT] Waiting for READY from coordinator...")
+                msg = coord_socket.recv()
+                logger.info("[DIAG-INPUT] Received from coordinator: %r", msg)
+                assert msg == b"READY"
                 poller.register(coord_socket, zmq.POLLIN)
 
+            logger.info("[DIAG-INPUT] ready_event.set() — input thread ready")
             ready_event.set()
             del ready_event
             while True:
@@ -1654,6 +1677,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
         # Configure GPUs and stateless process group for data parallel.
+        import time as _time
         parallel_config = vllm_config.parallel_config
         dp_rank = parallel_config.data_parallel_rank
         dp_size = parallel_config.data_parallel_size
@@ -1664,7 +1688,20 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
+        logger.info(
+            "[DIAG-DP-INIT] Starting stateless_init_dp_group "
+            "dp_rank=%d dp_size=%d master_ip=%s master_port=%s",
+            dp_rank, dp_size,
+            parallel_config.data_parallel_master_ip,
+            parallel_config.data_parallel_master_port,
+        )
+        _t0 = _time.time()
         dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        logger.info(
+            "[DIAG-DP-INIT] stateless_init_dp_group completed in %.1fs "
+            "dp_rank=%d",
+            _time.time() - _t0, dp_rank,
+        )
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):

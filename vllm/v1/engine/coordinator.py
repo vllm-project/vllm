@@ -242,13 +242,27 @@ class DPCoordinatorProc:
                 finally:
                     zmq_addr_pipe.close()
             # Wait until all engines subscribe.
-            for _ in self.engines:
-                if publish_back.recv() != b"\x01":
+            total_engines = len(self.engines)
+            for i in range(total_engines):
+                logger.info(
+                    "[DIAG-COORD] Waiting for subscription %d/%d...",
+                    i + 1, total_engines,
+                )
+                msg = publish_back.recv()
+                logger.info(
+                    "[DIAG-COORD] Received subscription %d/%d: %r",
+                    i + 1, total_engines, msg,
+                )
+                if msg != b"\x01":
                     logger.error(
                         "DP Coordinator received unexpected message while "
                         "waiting for engines to subscribe"
                     )
                     return
+            logger.info(
+                "[DIAG-COORD] All %d subscriptions received, sending READY",
+                total_engines,
+            )
             # Send ready message to engines.
             publish_back.send(b"READY")
 

@@ -211,13 +211,28 @@ class NixlConnectorScheduler:
         with zmq_ctx(zmq.ROUTER, path) as sock:
             sock.setsockopt(zmq.RCVTIMEO, 1000)
             ready_event.set()
+            logger.info(
+                "NIXL handshake listener started on %s (port %d)",
+                path, port,
+            )
             while True:
                 try:
-                    identity, _, msg = sock.recv_multipart()
+                    frames = sock.recv_multipart()
                 except zmq.Again:
                     if stop_event.is_set():
                         break
                     continue
+                if len(frames) != 3:
+                    logger.warning(
+                        "Handshake listener: got %d frames (expected 3). "
+                        "Frame sizes: %s. Possible stray connection "
+                        "or non-REQ socket on port %d.",
+                        len(frames),
+                        [len(f) for f in frames],
+                        port,
+                    )
+                    continue
+                identity, _, msg = frames
                 # Decode the message which contains (GET_META_MSG, rank)
                 msg, target_tp_rank = msgspec.msgpack.decode(msg)
                 logger.debug(
@@ -477,11 +492,12 @@ class NixlConnectorScheduler:
 
         if delay_free_blocks:
             # Prefill request on remote. It will be read from D upon completion
-            logger.debug(
-                "NIXLConnector request_finished(%s) waiting for %d seconds "
-                "for remote decode to fetch blocks",
+            logger.info(
+                "[KV] request_finished(P): req=%s, blocks=%d, "
+                "pending_send=%d",
                 request.request_id,
-                envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT,
+                len(block_ids),
+                len(self._reqs_need_send) + 1,
             )
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
@@ -501,4 +517,7 @@ class NixlConnectorScheduler:
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=getattr(
+                self.vllm_config.parallel_config, "pipeline_parallel_size", 1
+            ) or 1,
         )
