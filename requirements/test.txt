@@ -552,7 +552,6 @@ numba==0.61.2
     # via
     #   -r requirements/test.in
     #   librosa
-    #   resampy
 numpy==2.2.6
     # via
     #   -r requirements/test.in
@@ -593,7 +592,6 @@ numpy==2.2.6
     #   pyogrio
     #   pywavelets
     #   rasterio
-    #   resampy
     #   rioxarray
     #   rouge-score
     #   runai-model-streamer
@@ -1014,8 +1012,6 @@ requests==2.32.3
     #   tiktoken
     #   transformers
     #   wandb
-resampy==0.4.3
-    # via -r requirements/test.in
 responses==0.25.3
     # via genai-perf
 rfc3339-validator==0.1.4

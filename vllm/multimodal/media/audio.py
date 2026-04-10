@@ -9,6 +9,7 @@ import numpy.typing as npt
 import pybase64
 import torch
 
+from vllm.multimodal.audio import resample_audio_pyav
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 
@@ -23,12 +24,6 @@ try:
     import soundfile
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
-
-
-try:
-    import resampy
-except ImportError:
-    resampy = PlaceholderModule("resampy")  # type: ignore[assignment]
 
 
 # Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
@@ -126,7 +121,7 @@ def load_audio_soundfile(
         y = np.mean(y, axis=tuple(range(y.ndim - 1)))
 
     if sr is not None and sr != native_sr:
-        y = resampy.resample(y, sr_orig=native_sr, sr_new=sr)
+        y = resample_audio_pyav(y, orig_sr=native_sr, target_sr=sr)
         return y, int(sr)
     return y, native_sr
 
