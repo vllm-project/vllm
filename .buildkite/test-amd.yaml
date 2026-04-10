@@ -44,6 +44,7 @@ steps:
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   soft_fail: true
   source_file_dependencies:
@@ -55,6 +56,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -98,6 +100,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
@@ -109,6 +112,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   fast_check: true
   torch_nightly: true
@@ -126,6 +130,7 @@ steps:
 - label: Entrypoints Unit Tests # 5min
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
@@ -142,6 +147,7 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -161,6 +167,7 @@ steps:
   timeout_in_minutes: 130
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -179,6 +186,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -195,6 +203,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -214,6 +223,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  resource_class: 4gpu
   source_file_dependencies:
   - vllm/distributed/
   - tests/distributed/test_utils
@@ -270,6 +280,7 @@ steps:
   # grade: Blocking
   gpu: h100
   num_gpus: 8
+  resource_class: 8gpu
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - examples/offline_inference/torchrun_dp_example.py
@@ -288,6 +299,7 @@ steps:
 - label: EPLB Algorithm Test # 5min
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
@@ -304,6 +316,7 @@ steps:
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  resource_class: 4gpu
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_execute.py
@@ -317,6 +330,7 @@ steps:
   agent_pool: mi250_internal
   # grade: Blocking
   num_gpus: 2
+  resource_class: 2gpu
   source_file_dependencies:
   - vllm/
   - tests/v1/tracing
@@ -336,6 +350,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -350,6 +365,7 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   #grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -365,6 +381,7 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
     - vllm/
@@ -380,6 +397,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
     - vllm/
@@ -392,6 +410,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
     - vllm/
@@ -418,6 +437,7 @@ steps:
 - label: V1 Test attention # 5 mins
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   timeout_in_minutes: 30
   gpu: h100
@@ -432,6 +452,7 @@ steps:
 - label: Batch Invariance Tests (H100) # 10min
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   timeout_in_minutes: 25
   gpu: h100
   source_file_dependencies:
@@ -476,6 +497,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
@@ -511,6 +533,7 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -522,6 +545,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -535,6 +559,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/lora
@@ -556,6 +581,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -573,6 +599,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -589,6 +616,7 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -606,6 +634,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   source_file_dependencies:
   - tests/v1/cudagraph
   - vllm/v1/cudagraph_dispatcher.py
@@ -619,6 +648,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/
@@ -631,6 +661,7 @@ steps:
   timeout_in_minutes: 35
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/attention/
@@ -646,6 +677,7 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/
@@ -659,6 +691,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
@@ -676,6 +709,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/mamba/
@@ -689,6 +723,7 @@ steps:
   timeout_in_minutes: 45
   gpu: h100
   num_gpus: 1
+  resource_class: 1gpu
   source_file_dependencies:
   - tools/install_deepgemm.sh
   - vllm/utils/deep_gemm.py
@@ -708,6 +743,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   source_file_dependencies:
   - vllm/utils/import_utils.py
   - tests/kernels/helion/
@@ -720,6 +756,7 @@ steps:
   torch_nightly: true
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/engine/arg_utils.py
@@ -737,6 +774,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
@@ -748,6 +786,7 @@ steps:
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
   num_gpus: 8
+  resource_class: 8gpu
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
     # GPU diagnostics
@@ -765,6 +804,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -776,6 +816,7 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/
@@ -797,6 +838,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/
@@ -809,6 +851,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/
@@ -823,6 +866,7 @@ steps:
   timeout_in_minutes: 35
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   fast_check: false
   source_file_dependencies:
@@ -849,6 +893,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -862,6 +907,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -882,6 +928,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -909,6 +956,7 @@ steps:
   timeout_in_minutes: 25
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -923,6 +971,7 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -944,6 +993,7 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -965,6 +1015,7 @@ steps:
   timeout_in_minutes: 110
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   source_file_dependencies:
@@ -981,6 +1032,7 @@ steps:
   timeout_in_minutes: 110
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   source_file_dependencies:
@@ -993,6 +1045,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   source_file_dependencies:
@@ -1005,6 +1058,7 @@ steps:
   timeout_in_minutes: 110
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   source_file_dependencies:
@@ -1017,6 +1071,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -1029,6 +1084,7 @@ steps:
   timeout_in_minutes: 100
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
@@ -1046,6 +1102,7 @@ steps:
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   timeout_in_minutes: 70
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -1061,6 +1118,7 @@ steps:
   timeout_in_minutes: 120
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   source_file_dependencies:
@@ -1076,6 +1134,7 @@ steps:
   timeout_in_minutes: 120
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   source_file_dependencies:
@@ -1091,6 +1150,7 @@ steps:
   timeout_in_minutes: 150
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   source_file_dependencies:
@@ -1106,6 +1166,7 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
@@ -1117,6 +1178,7 @@ steps:
 - label: Custom Models Test
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
 
   commands:
@@ -1128,6 +1190,7 @@ steps:
 - label: Transformers Nightly Models Test
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   working_dir: "/vllm-workspace/"
 
   commands:
@@ -1145,7 +1208,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   gpu: b200
-  # optional: true
+  
   source_file_dependencies:
   - csrc/quantization/fp4/
   - csrc/attention/mla/
@@ -1269,6 +1332,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  resource_class: 2gpu
   source_file_dependencies:
   - vllm/distributed
   - tests/distributed
@@ -1285,6 +1349,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  resource_class: 2gpu
   num_nodes: 2
   source_file_dependencies:
   - vllm/distributed/
@@ -1312,6 +1377,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  resource_class: 2gpu
   source_file_dependencies:
   - vllm/compilation/
   - vllm/distributed/
@@ -1352,6 +1418,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  resource_class: 2gpu
   source_file_dependencies:
   - vllm/model_executor/model_loader/sharded_state_loader.py
   - vllm/model_executor/models/
@@ -1374,6 +1441,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  resource_class: 2gpu
   source_file_dependencies:
   - vllm/plugins/
   - tests/plugins/
@@ -1408,6 +1476,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  resource_class: 4gpu
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
@@ -1424,6 +1493,7 @@ steps:
   agent_pool: mi250_internal
   # grade: Blocking
   num_gpus: 4
+  resource_class: 4gpu
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -1450,6 +1520,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  resource_class: 2gpu
 
   source_file_dependencies:
   - vllm/
@@ -1463,6 +1534,7 @@ steps:
   # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
+  resource_class: 2gpu
 
   source_file_dependencies:
   - vllm/
@@ -1476,6 +1548,7 @@ steps:
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  resource_class: 4gpu
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
@@ -1490,6 +1563,7 @@ steps:
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
+  resource_class: 4gpu
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
     - tests/v1/kv_connector/nixl_integration/
@@ -1507,6 +1581,7 @@ steps:
   gpu: a100
 
   num_gpus: 4
+  resource_class: 4gpu
   source_file_dependencies:
   - vllm/
   commands:
@@ -1528,6 +1603,7 @@ steps:
   agent_pool: mi250_internal
   # grade: Blocking
   num_gpus: 4
+  resource_class: 4gpu
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -1544,6 +1620,7 @@ steps:
   agent_pool: mi250_internal
   # grade: Blocking
   num_gpus: 4
+  resource_class: 4gpu
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -1562,6 +1639,7 @@ steps:
 
   working_dir: "/vllm-workspace/"
   num_gpus: 2
+  resource_class: 2gpu
   commands:
     - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/distributed/test_async_tp.py
     - pytest -v -s tests/compile/distributed/test_sequence_parallelism.py
@@ -1582,6 +1660,7 @@ steps:
 
   working_dir: "/vllm-workspace/"
   num_gpus: 2
+  resource_class: 2gpu
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
@@ -1592,6 +1671,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
+  resource_class: 1gpu
   # grade: Blocking
   source_file_dependencies:
   - csrc/
@@ -1606,6 +1686,7 @@ steps:
   gpu: a100
 
   num_gpus: 4
+  resource_class: 4gpu
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -1618,6 +1699,7 @@ steps:
   mirror_hardwares: [amdproduction]
   agent_pool: mi250_internal
   num_gpus: 8
+  resource_class: 8gpu
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -1627,6 +1709,7 @@ steps:
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/"
   agent_pool: mi250_internal
+  resource_class: 1gpu
   mirror_hardwares: [amdproduction]
 
   source_file_dependencies:
@@ -1646,6 +1729,7 @@ steps:
   timeout_in_minutes: 30
 
   num_gpus: 2
+  resource_class: 2gpu
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/
@@ -1662,6 +1746,7 @@ steps:
   gpu: h100
 
   num_gpus: 4
+  resource_class: 4gpu
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
@@ -1674,6 +1759,7 @@ steps:
   gpu: h100
 
   num_gpus: 4
+  resource_class: 4gpu
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
@@ -1683,6 +1769,7 @@ steps:
   gpu: b200
 
   num_gpus: 2
+  resource_class: 2gpu
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
@@ -1695,6 +1782,7 @@ steps:
   # grade: Blocking
 
   num_gpus: 4
+  resource_class: 4gpu
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
