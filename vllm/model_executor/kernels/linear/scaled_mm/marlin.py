@@ -73,7 +73,8 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             replace_parameter(layer, "weight", weight.data)
             replace_parameter(layer, "weight_scale_inv", weight_scale_inv.data)
         else:
-            w_q, *_ = self._get_layer_params(layer)
+            params = self._get_layer_params(layer)
+            w_q = params.weight
             # Compressed tensors transposes the weight to (K, N)
             # for channel and tensor quant strategies.
             # So we can skip the transpose if the layout is
@@ -88,7 +89,7 @@ class MarlinFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
                 # transpose the weights to (K,N)
                 replace_parameter(
                     layer,
-                    "weight",
+                    params.WEIGHT,
                     w_q.t(),
                 )
 
