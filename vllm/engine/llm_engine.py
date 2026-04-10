@@ -1460,31 +1460,67 @@ class LLMEngine:
     def _should_enable_tree_decoding(self, seq_group_metadata_list):
         """检查是否有序列组启用了tree decoding"""
         for group in seq_group_metadata_list:
-            if group.sampling_params.tree_search_params is not None:
-                return True
+            request_id = group.request_id
+            if request_id in self.seq_id_to_seq_group:
+                parent = self.seq_id_to_seq_group[request_id]
+                tsp = parent.assembled_seq_group.sampling_params.tree_search_params
+                if tsp is not None and tsp.enable_tree_search:
+                    return True
+            else:
+                tsp = group.sampling_params.tree_search_params
+                if tsp is not None and tsp.enable_tree_search:
+                    return True
         return False
     
     def _process_tree_decoding(self, outputs, seq_group_metadata_list):
         """处理tree decoding逻辑"""
         if len(self.seq_id_to_seq_group) == 0:
             return
-        assert hasattr(outputs[0], 'logprobs')
         logprobs = outputs[0].logprobs
+        if logprobs is None:
+            return
+
+        # Build mapping: metadata index -> logprobs row index.
+        # Only sequences with do_sample=True contribute rows to logprobs
+        # (when prompt_logprobs is None, which is the default for tree search).
+        logprob_row = {}
+        row_idx = 0
+        for i, meta in enumerate(seq_group_metadata_list):
+            if meta.do_sample:
+                logprob_row[i] = row_idx
+                row_idx += 1
 
         for i, seq_group_metadata in enumerate(seq_group_metadata_list):
+            # Skip prefill sequences — tree search only applies during decode
+            if seq_group_metadata.is_prompt:
+                continue
+            if i not in logprob_row:
+                continue
             request_id = seq_group_metadata.request_id
             if request_id not in self.seq_id_to_seq_group:
                 continue
-            sampling_params = seq_group_metadata.sampling_params
-            if sampling_params.tree_search_params is None:
-                continue
-            num_branches = sampling_params.tree_search_params.branching_factor
             current_group = self.seq_id_to_seq_group[request_id]
+            # Use the *original* sampling params from the parent group,
+            # because the sub-request's cloned params have enable_tree_search=False
+            # (to avoid infinite recursion in _add_processed_request).
+            sampling_params = current_group.assembled_seq_group.sampling_params
+            tsp = sampling_params.tree_search_params
+            if tsp is None or not tsp.enable_tree_search:
+                continue
+            lp_idx = logprob_row[i]
+            if lp_idx >= logprobs.shape[0]:
+                break
+            # Skip if already finished (e.g. hit EOS/max_len during _process_model_outputs)
+            if request_id not in current_group.to_be_finished:
+                continue
             seq_index = current_group.seq_id_to_index[request_id]
             seq = current_group.assembled_seq_group.seqs[seq_index]
+            if seq.is_finished():
+                continue
+            num_branches = sampling_params.tree_search_params.branching_factor
             if self._should_create_branches(
-                seq, logprobs[i], sampling_params):
-                probs = torch.exp(logprobs[i])
+                seq, logprobs[lp_idx], sampling_params):
+                probs = torch.exp(logprobs[lp_idx])
                 _, new_token_ids = torch.topk(probs, num_branches, dim=-1)
                 new_token_ids = new_token_ids.tolist()
                 current_group.add_tree_branches(request_id, new_token_ids, self)
@@ -1493,7 +1529,6 @@ class LLMEngine:
         if seq.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
             return False
         entropy = self._calculate_entropy(logprobs)
-        print("entropy:", entropy)
         return entropy > sampling_params.tree_search_params.entropy_threshold
     
     def _calculate_entropy(self, logprobs):
