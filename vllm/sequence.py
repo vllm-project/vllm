@@ -1520,6 +1520,10 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             group.seq_id_to_index[request_id_i] = i
             params = original_params.clone()
             params.n = 1
+            # Disable tree search on the cloned sub-request params so that
+            # the recursive _add_processed_request call takes the normal
+            # (non-ParallelSample) path.  Tree decoding is still driven by
+            # the *original* params stored on the parent group.
             if params.tree_search_params is not None:
                 params.tree_search_params.enable_tree_search = False
             if params.seed is not None:
@@ -1575,6 +1579,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             params = self.assembled_seq_group.sampling_params.clone()
             params.n = 1
             params.tree_search_params.enable_tree_search = False
+            params.max_tokens = parent_seq_group.sampling_params.max_tokens - parent_seq.get_output_len()
             seq_group = engine._add_processed_request(
                 request_id_i,
                 processed_inputs=processed_inputs,
