@@ -35,20 +35,6 @@ from .utils import (
 ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
 
-def _params_to_single(
-    params: PoolingParams | Sequence[PoolingParams] | None,
-) -> PoolingParams | None:
-    """Convert pooling_params to a single PoolingParams instance.
-
-    Compatible with the upcoming _params_to_seq from #39153.
-    """
-    if params is None:
-        return None
-    if isinstance(params, Sequence):
-        return params[0] if params else None
-    return params
-
-
 class ScoringIOProcessor(PoolingIOProcessor):
     name: str
     pooling_task: PoolingTask
@@ -76,15 +62,18 @@ class ScoringIOProcessor(PoolingIOProcessor):
     def _get_token_limits(
         self,
         request: ScoringRequest | None = None,
-        pooling_params: PoolingParams | Sequence[PoolingParams] | None = None,
+        pooling_params: PoolingParams | None = None,
     ) -> tuple[int, int]:
         """Extract and validate token limits from request or pooling_params."""
         if request is not None:
             max_tokens_per_query = getattr(request, "max_tokens_per_query", 0)
             max_tokens_per_doc = getattr(request, "max_tokens_per_doc", 0)
         else:
-            params = _params_to_single(pooling_params)
-            extra = (params.extra_kwargs or {}) if params is not None else {}
+            extra = (
+                (pooling_params.extra_kwargs or {})
+                if pooling_params is not None
+                else {}
+            )
             max_tokens_per_query = extra.get("max_tokens_per_query", 0)
             max_tokens_per_doc = extra.get("max_tokens_per_doc", 0)
 
@@ -192,6 +181,8 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         assert isinstance(ctx.prompts, ScoringData)
+        assert not isinstance(ctx.pooling_params, Sequence)
+
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
