@@ -449,9 +449,9 @@ class JinaRankingIOProcessorMixin:
         prefix = (
             "<|im_start|>system\n"
             "You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. "  # noqa: E501
-            "If the query is a question, how relevant a passage is depends on how well it answers the question. "
-            "If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. "
-            "If an instruction is provided, you should follow the instruction when determining the ranking."
+            "If the query is a question, how relevant a passage is depends on how well it answers the question. "  # noqa: E501
+            "If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. "  # noqa: E501
+            "If an instruction is provided, you should follow the instruction when determining the ranking."  # noqa: E501
             "<|im_end|>\n<|im_start|>user\n"
         )
         suffix = "<|im_end|>\n<|im_start|>assistant\n"
@@ -462,7 +462,7 @@ class JinaRankingIOProcessorMixin:
         query_emb_token = special_tokens["query_embed_token"]
 
         prompt = (
-            f"I will provide you with {len(docs)} passages, each indicated by a numerical identifier. "
+            f"I will provide you with {len(docs)} passages, each indicated by a numerical identifier. "  # noqa: E501
             f"Rank the passages based on their relevance to query: {query}\n"
         )
 
