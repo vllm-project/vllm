@@ -577,7 +577,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             vt = processor.video_token
             parts = prompt.split(vt, len(video_replacements))
             
-            # NOTE: len(parts) <= len(video_replacements)
+            # NOTE: len(parts) <= len(video_replacements) + 1
             parts_with_repl: list[str] = []
             for part, repl in zip(parts, video_replacements):
                 parts_with_repl.extend([part, repl])
