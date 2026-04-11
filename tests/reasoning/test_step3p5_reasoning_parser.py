@@ -2,16 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
+from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 
 parser_name = "step3p5"
 start_token = "<think>"
 end_token = "</think>"
 
 REASONING_MODEL_NAME = "stepfun-ai/Step-3.5-Flash"
+
+# Register vLLM's Step3p5Config so that AutoTokenizer.from_pretrained loads
+# the config as Step3p5Config (which defines max_position_embeddings) instead
+# of a generic PretrainedConfig, avoiding an AttributeError with
+# transformers >= 5.
+AutoConfig.register("step3p5", Step3p5Config, exist_ok=True)
 
 
 @pytest.fixture(scope="module")
