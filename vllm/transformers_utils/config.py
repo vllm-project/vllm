@@ -222,8 +222,7 @@ class HFConfigParser(ConfigParserBase):
             )
         else:
             try:
-                kwargs = _maybe_update_auto_config_kwargs(
-                    kwargs, model_type=model_type)
+                kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
                     model,
                     trust_remote_code=trust_remote_code,
