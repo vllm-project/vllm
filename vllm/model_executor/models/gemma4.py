@@ -69,6 +69,7 @@ from .interfaces import (
 )
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
     is_pp_missing_parameter,
     make_layers,
@@ -1411,6 +1412,23 @@ class Gemma4ForCausalLM(
             "up_proj",
         ],
     }
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # Gemma4ForConditionalGeneration loads the text stack from
+            # ``model.language_model.*``.  We reuse that same checkpoint
+            # and adapter naming for the text-only Gemma4ForCausalLM path,
+            # so LoRA keys from the conditional wrapper map onto ``model.*``.
+            "model.language_model.": "model.",
+        },
+        orig_to_new_substr={
+            # Gemma4ForConditionalGeneration names MoE adapter targets
+            # under ``...moe.experts.*``, while the text-only model
+            # exposes them under ``...moe.*``.
+            ".moe.experts.gate_up_proj": ".moe.gate_up_proj",
+            ".moe.experts.down_proj": ".moe.down_proj",
+        },
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = _get_text_config(vllm_config.model_config.hf_config)

@@ -67,6 +67,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -854,6 +855,7 @@ class Gemma4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsEagle3,
 ):
     packed_modules_mapping = {
