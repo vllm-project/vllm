@@ -5,21 +5,21 @@
    (or equivalent) in vllm-project/ci-infra.
 
    The agent-stack-k8s controller is deployed with a single queue
-   (amd_mi300_8) and resource-classes (1gpu, 2gpu, 4gpu, 8gpu) defined
+   (mi300_8) and resource-classes (1gpu, 2gpu, 4gpu, 8gpu) defined
    in the Helm values. Each pipeline step selects its GPU tier via the
    resource_class agent tag; no per-job podSpecPatch is needed.
 
    Variables expected from the step definition (test-amd.yaml):
-     - step.agent_pool : str  (e.g. "amd_mi300_8")
+     - step.agent_pool : str  (e.g. "mi300_8")
      - step.num_gpus   : int  (default 1)
      - step.no_gpu     : bool (default false)
 
    For mirror_hardwares steps (test-pipeline.yaml):
-     - mirror target "amdexperimental" maps to queue amd_mi300_8
+     - mirror target "amdexperimental" maps to queue mi300_8
    ============================================================================ #}
 
 {% set amd_pool_queue_map = {
-    "amd_mi300_8": "amd_mi300_8",
+    "mi300_8": "mi300_8",
 } %}
 
 {% set num_gpus = step.num_gpus | default(1) %}
@@ -40,6 +40,6 @@
 {# For mirrored steps from test-pipeline.yaml #}
 {% if "amdexperimental" in step.mirror_hardwares | default([]) %}
     agents:
-      queue: "amd_mi300_8"
+      queue: "mi300_8"
       resource_class: "{{ gpu_resource_class }}"
 {% endif %}
