@@ -268,6 +268,20 @@ steps:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs)
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+
 - label: NixlConnector PD + Spec Decode acceptance (2 GPUs)
   timeout_in_minutes: 30
   device: a100
@@ -280,6 +294,20 @@ steps:
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - bash v1/kv_connector/nixl_integration/spec_decode_acceptance_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs)
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
 
 - label: Pipeline + Context Parallelism (4 GPUs)
   timeout_in_minutes: 60

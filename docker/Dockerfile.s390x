@@ -262,7 +262,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         $OPENCV_WHL_FILE \
         $OUTLINES_CORE_WHL_FILE \
         --index-strategy unsafe-best-match \
-        -r requirements/cpu-build.txt \
+        -r requirements/build/cpu.txt \
         -r requirements/cpu.txt
 
 
