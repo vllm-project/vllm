@@ -154,7 +154,11 @@ async def serve_grpc(args: argparse.Namespace):
         logger.info("Shutting down vLLM gRPC server...")
         if stats_task is not None:
             stats_task.cancel()
-        health_servicer.set_not_serving()
+        try:
+            health_servicer.set_not_serving()
+        except Exception:
+            logger.warning("Failed to set health status to NOT_SERVING",
+                           exc_info=True)
         await server.stop(grace=5.0)
         logger.info("gRPC server stopped")
         async_llm.shutdown()
