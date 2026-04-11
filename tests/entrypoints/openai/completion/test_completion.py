@@ -607,6 +607,86 @@ async def test_echo_logprob_completion(
     "model_name",
     [MODEL_NAME],
 )
+async def test_completion_without_max_tokens_uses_normalized_budget(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    completion = await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        temperature=0.0,
+        echo=True,
+        extra_body={"return_token_ids": True},
+    )
+
+    choice = completion.choices[0]
+
+    assert choice.prompt_token_ids is not None
+    assert choice.token_ids is not None
+    assert completion.usage.prompt_tokens == len(choice.prompt_token_ids)
+    assert completion.usage.completion_tokens == len(choice.token_ids)
+    assert completion.usage.total_tokens == (
+        completion.usage.prompt_tokens + completion.usage.completion_tokens
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_completion_stream_without_max_tokens_uses_normalized_budget(
+    client: openai.AsyncOpenAI, model_name: str
+):
+    stream = await client.completions.create(
+        model=model_name,
+        prompt="Hello, my name is",
+        temperature=0.0,
+        echo=True,
+        stream=True,
+        stream_options={
+            "include_usage": True,
+            "continuous_usage_stats": True,
+        },
+        extra_body={"return_token_ids": True},
+    )
+
+    choice_chunks = []
+    final_usage_chunk = None
+
+    async for chunk in stream:
+        assert chunk.usage is not None
+        assert chunk.usage.total_tokens == (
+            chunk.usage.prompt_tokens + chunk.usage.completion_tokens
+        )
+
+        if chunk.choices:
+            choice_chunks.append(chunk)
+        else:
+            final_usage_chunk = chunk
+
+    assert choice_chunks
+    assert final_usage_chunk is not None
+    assert final_usage_chunk.choices == []
+    assert final_usage_chunk.usage is not None
+    assert final_usage_chunk.usage.total_tokens == (
+        final_usage_chunk.usage.prompt_tokens
+        + final_usage_chunk.usage.completion_tokens
+    )
+
+    first_choice = choice_chunks[0].choices[0]
+    assert first_choice.prompt_token_ids is not None
+    assert first_choice.token_ids is not None
+
+    for chunk in choice_chunks[1:]:
+        choice = chunk.choices[0]
+        assert choice.prompt_token_ids is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_zero_budget_echo_completion_hides_helper_token(
     client: openai.AsyncOpenAI, model_name: str
 ):
