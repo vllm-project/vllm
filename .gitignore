@@ -12,6 +12,9 @@ vllm/third_party/triton_kernels/*
 # FlashMLA interface copied from source
 vllm/third_party/flashmla/flash_mla_interface.py
 
+# DeepGEMM vendored package built from source
+vllm/third_party/deep_gemm/
+
 # triton jit
 .triton
 
@@ -26,6 +29,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!requirements/build/
 cmake-build-*/
 CMakeUserPresets.json
 develop-eggs/

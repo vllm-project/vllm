@@ -57,6 +57,7 @@ from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -357,7 +358,13 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         conv_out_dim = config.downsample_hidden_size * (
             (((config.num_mel_bins + 1) // 2 + 1) // 2 + 1) // 2
         )
-        self.conv_out = nn.Linear(conv_out_dim, config.d_model, bias=False)
+        self.conv_out = ReplicatedLinear(
+            conv_out_dim,
+            config.d_model,
+            bias=False,
+            return_bias=False,
+            prefix=f"{prefix}.conv_out",
+        )
 
         # Transformer encoder layers
         self.layers = nn.ModuleList(
@@ -372,9 +379,21 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
 
         # Output layers
         self.ln_post = nn.LayerNorm(config.d_model)
-        self.proj1 = nn.Linear(config.d_model, config.d_model)
+        self.proj1 = ReplicatedLinear(
+            config.d_model,
+            config.d_model,
+            bias=True,
+            return_bias=False,
+            prefix=f"{prefix}.proj1",
+        )
         self.act = _ACTIVATION_REGISTRY[config.activation_function]
-        self.proj2 = nn.Linear(config.d_model, config.output_dim)
+        self.proj2 = ReplicatedLinear(
+            config.d_model,
+            config.output_dim,
+            bias=True,
+            return_bias=False,
+            prefix=f"{prefix}.proj2",
+        )
 
         # Get attention backend
         self.attn_backend = get_vit_attn_backend(
@@ -1869,8 +1888,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # both the deepstack path and the final embedding merge.
         video_token_id = self.config.video_token_id
         audio_token_id = self.config.audio_token_id
-        is_video = is_multimodal & (input_ids == video_token_id)
-        is_audio = is_multimodal & (input_ids == audio_token_id)
+        input_ids_cpu = input_ids.cpu()
+        is_video = is_multimodal & (input_ids_cpu == video_token_id)
+        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 
