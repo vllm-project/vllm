@@ -1,8 +1,8 @@
 # Kimi-K2.5-NVFP4 Multi-Node DP with MooncakeStore — 2 nodes × 4 GPUs each
 #
 # This config bootstraps the Mooncake master in pre_serve, then lets
-# run_vllm_with_mooncake_owner.sh auto-detect the local RNIC layout and inject
-# the final Mooncake --kv-transfer-config for each worker node.
+# run_vllm_with_mooncake_owner.sh default the GID/fabric choice and inject the
+# final Mooncake --kv-transfer-config for each worker node.
 
 model: nvidia/Kimi-K2.5-NVFP4
 mode: remote
@@ -48,11 +48,10 @@ serving:
           --disable-uvicorn-access-log
           --disable-hybrid-kv-cache-manager
         env:
+          MC_MASTER_ENV_FILE: "{log_dir}/mooncake_master.env"
           MC_OWNER_CPU_MEM_GIB: "700"
           # MC_OWNER_DISK_GIB: "1000"
           # MC_OWNER_DISK_PATH: "/mnt/data/${USER}/mooncake_offload"
-          MC_OWNER_READY_TIMEOUT_S: "120"
-          MC_OWNER_LOG_DIR: "{log_dir}"
           VLLM_USE_SIMPLE_KV_OFFLOAD: "1"
           VLLM_USE_FLASHINFER_MOE_FP4: "1"
           VLLM_FLASHINFER_MOE_BACKEND: latency

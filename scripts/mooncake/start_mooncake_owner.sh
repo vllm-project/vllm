@@ -25,12 +25,14 @@
 #   --bg                  Run in background
 #   --stop                Stop the backgrounded owner launched by this script
 #
-# The owner does not auto-select RNICs. For multi-RNIC hosts, use:
+# The owner auto-selects active RDMA devices when MC_OWNER_DEVICE/--device is
+# unset. For diagnostics, use:
 #   bash scripts/mooncake/recommend_mooncake_rnic_config.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/network_utils.sh"
 source "${SCRIPT_DIR}/rdma_config_utils.sh"
 
 HOST_TAG="$(hostname -s 2>/dev/null || echo local)"
@@ -94,35 +96,51 @@ is_our_owner() {
     [[ "$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')" == "$(id -u)" ]]
 }
 
-is_port_listening() {
-    local port=$1
-    ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[:.])${port}$"
-}
-
 print_rnic_hint() {
-    echo "Hint: use scripts/mooncake/recommend_mooncake_rnic_config.sh to generate MC_OWNER_DEVICE." >&2
+    echo "Hint: use scripts/mooncake/recommend_mooncake_rnic_config.sh to inspect local Mooncake RDMA detection." >&2
 }
 
-print_owner_failure_hint() {
-    [[ -f "$LOG_FILE" ]] || return 0
-    if grep -q "Duplicate rpc_meta key not allowed" "$LOG_FILE"; then
-        echo "Hint: the owner rpc_meta key is already registered. Stop the old owner or clean the stale Mooncake metadata before retrying." >&2
+detect_owner_devices() {
+    local detected_gid_index=""
+    local rdma_entries=()
+    local rdma_entry=""
+    local device_name=""
+    local devices=()
+
+    [[ "$PROTOCOL" == "rdma" || "$PROTOCOL" == "efa" ]] || return 0
+    [[ -z "${DEVICE_NAME//[[:space:]]/}" ]] || return 0
+
+    if [[ -z "${MC_GID_INDEX:-}" ]]; then
+        detected_gid_index="$(detect_preferred_gid_index)" || {
+            echo "Error: failed to auto-detect a usable RDMA GID index." >&2
+            return 1
+        }
+        export MC_GID_INDEX="$detected_gid_index"
     fi
+
+    mapfile -t rdma_entries < <(list_active_rdma_devices "${MC_GID_INDEX:-}")
+    if [[ "${#rdma_entries[@]}" -eq 0 ]]; then
+        if [[ -n "${MC_GID_INDEX:-}" ]]; then
+            echo "Error: no active RDMA devices matched MC_GID_INDEX=${MC_GID_INDEX}." >&2
+        else
+            echo "Error: no active RDMA devices were discovered." >&2
+        fi
+        return 1
+    fi
+
+    for rdma_entry in "${rdma_entries[@]}"; do
+        IFS='|' read -r device_name _rest <<< "$rdma_entry"
+        unset IFS
+        devices+=("$device_name")
+    done
+
+    DEVICE_NAME="$(IFS=,; printf '%s' "${devices[*]}")"
 }
 
 wait_for_owner_ready() {
     local pid=$1
     local timeout_s=${2:-30}
-    for _ in $(seq "$timeout_s"); do
-        if ! is_our_owner "$pid"; then
-            return 1
-        fi
-        if is_port_listening "$RPC_PORT"; then
-            return 0
-        fi
-        sleep 1
-    done
-    return 1
+    wait_for_tcp_port "$RPC_PORT" "$timeout_s" "$pid"
 }
 
 stop_owner() {
@@ -159,13 +177,12 @@ if [[ -z "$CPU_MEM_GB" ]]; then
 fi
 
 if [[ -z "$OWNER_HOST" ]]; then
-    OWNER_HOST="$(hostname -I 2>/dev/null | awk '{print $1}')"
+    OWNER_HOST="$(detect_local_advertise_host "$OWNER_HOST" || true)"
 fi
-
-if [[ -z "$OWNER_HOST" ]]; then
+[[ -n "${OWNER_HOST//[[:space:]]/}" ]] || {
     echo "Error: failed to determine owner host automatically; pass --host <ip-or-host>." >&2
     exit 1
-fi
+}
 
 if [[ -f "$PID_FILE" ]]; then
     pid="$(<"$PID_FILE")"
@@ -176,14 +193,13 @@ if [[ -f "$PID_FILE" ]]; then
     rm -f "$PID_FILE"
 fi
 
-if is_port_listening "$RPC_PORT"; then
+if tcp_port_is_listening "$RPC_PORT"; then
     echo "Error: owner RPC port ${RPC_PORT} is already in use." >&2
     exit 1
 fi
 
 if [[ "$PROTOCOL" == "rdma" || "$PROTOCOL" == "efa" ]]; then
-    if [[ -z "${DEVICE_NAME//[[:space:]]/}" ]]; then
-        echo "Error: MC_OWNER_DEVICE or --device is required for ${PROTOCOL} owner launches." >&2
+    if ! detect_owner_devices; then
         print_rnic_hint
         exit 1
     fi
@@ -250,7 +266,6 @@ if $OPT_BG; then
     if ! wait_for_owner_ready "$(cat "$PID_FILE")" 30; then
         echo "  ERROR: mooncake_client failed to become ready" >&2
         tail -n 50 "$LOG_FILE" >&2 || true
-        print_owner_failure_hint
         rm -f "$PID_FILE"
         exit 1
     fi

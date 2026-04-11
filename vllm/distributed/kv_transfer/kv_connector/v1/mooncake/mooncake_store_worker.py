@@ -27,6 +27,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_store_data import (
     ChunkedTokenDatabase,
     KeyMetadata,
@@ -122,152 +123,6 @@ def _get_disk_offload_buffer_budget_bytes() -> int:
     if value is None:
         return DEFAULT_MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE
     return _parse_size(value)
-
-
-def _normalize_string_override(value: Any) -> str | None:
-    if not isinstance(value, str):
-        return None
-    normalized = value.strip()
-    return normalized or None
-
-
-def _normalize_single_device_name(value: str | None) -> str | None:
-    normalized = _normalize_string_override(value)
-    if normalized is None or "," in normalized:
-        return None
-    return normalized
-
-
-def _is_full_pci_bus_id(value: str) -> bool:
-    return (
-        re.fullmatch(
-            r"[0-9a-fA-F]{8}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]",
-            value.strip(),
-        )
-        is not None
-    )
-
-
-def _normalize_pci_bus_id(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.strip()
-    match = re.fullmatch(
-        r"(?:(?P<domain>[0-9a-fA-F]{4,8}):)?"
-        r"(?P<bus>[0-9a-fA-F]{2}):"
-        r"(?P<device>[0-9a-fA-F]{2})\.(?P<function>[0-7])",
-        normalized,
-    )
-    if match is None:
-        return None
-    domain = int(match.group("domain") or "0", 16)
-    bus = int(match.group("bus"), 16)
-    device = int(match.group("device"), 16)
-    function = int(match.group("function"), 16)
-    return f"{domain:08x}:{bus:02x}:{device:02x}.{function:x}"
-
-
-def _get_current_cuda_pci_bus_id() -> str | None:
-    try:
-        from vllm.platforms import current_platform
-        from vllm.utils.import_utils import import_pynvml
-    except ImportError:
-        return None
-
-    device_index = torch.accelerator.current_device_index()
-    physical_device_id = current_platform.device_id_to_physical_device_id(device_index)
-    pynvml = import_pynvml()
-    pynvml.nvmlInit()
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
-        pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
-        return _normalize_pci_bus_id(getattr(pci_info, "busId", None))
-    except Exception:
-        return None
-    finally:
-        pynvml.nvmlShutdown()
-
-
-def _get_requester_local_hostname(local_ip: str) -> str:
-    override = _normalize_string_override(os.getenv("MOONCAKE_LOCAL_HOSTNAME"))
-    if override is not None:
-        return override
-    return local_ip
-
-
-def _get_configured_preferred_segment(
-    extra_config: Mapping[str, Any],
-) -> str | None:
-    preferred_segment = _normalize_string_override(
-        extra_config.get("preferred_segment")
-    )
-    if preferred_segment is not None:
-        return preferred_segment
-    if extra_config.get("preferred_segment") is not None:
-        raise ValueError(
-            "Mooncake preferred_segment override must be a non-empty string"
-        )
-    return None
-
-
-def _get_configured_rnic(
-    store_config: "MooncakeStoreConfig", extra_config: Mapping[str, Any]
-) -> str:
-    configured_device = _normalize_string_override(store_config.device_name)
-    if configured_device is not None:
-        if "," in configured_device:
-            raise ValueError(
-                "Mooncake worker device_name must be a single RDMA device name"
-            )
-        return configured_device
-
-    if store_config.protocol not in {"rdma", "efa"}:
-        return ""
-
-    local_gpu_bdf = _get_current_cuda_pci_bus_id()
-    if local_gpu_bdf is None:
-        raise RuntimeError(
-            "Mooncake RDMA requester could not determine the local GPU PCI BDF"
-        )
-
-    raw_map = extra_config.get("gpu_bdf_rnic_map")
-    if not isinstance(raw_map, Mapping) or not raw_map:
-        raise ValueError(
-            "Mooncake RDMA requester requires "
-            "kv_connector_extra_config.gpu_bdf_rnic_map. "
-            "Use scripts/mooncake/recommend_mooncake_rnic_config.sh to "
-            "generate a ready-to-paste mapping."
-        )
-
-    normalized_map: dict[str, str] = {}
-    for raw_key, raw_value in raw_map.items():
-        if not isinstance(raw_key, str) or not _is_full_pci_bus_id(raw_key):
-            raise ValueError(
-                "Mooncake gpu_bdf_rnic_map keys must use full GPU PCI BDFs "
-                "like 00000000:89:00.0"
-            )
-        device_name = _normalize_single_device_name(
-            raw_value if isinstance(raw_value, str) else None
-        )
-        if device_name is None:
-            raise ValueError(
-                "Mooncake gpu_bdf_rnic_map values must be single RDMA device "
-                "names like rocep139s0"
-            )
-        normalized_key = _normalize_pci_bus_id(raw_key)
-        if normalized_key is None:
-            raise ValueError(
-                f"Mooncake gpu_bdf_rnic_map key is not a valid PCI BDF: {raw_key!r}"
-            )
-        normalized_map[normalized_key] = device_name
-
-    device_name = normalized_map.get(local_gpu_bdf)
-    if device_name is None:
-        raise ValueError(
-            "Mooncake gpu_bdf_rnic_map does not contain the local GPU PCI BDF "
-            f"{local_gpu_bdf}"
-        )
-    return device_name
 
 
 def _parse_size(value: Any) -> int:
@@ -863,10 +718,13 @@ class MooncakeStoreWorker:
         # Initialize MooncakeDistributedStore with its own TransferEngine
         store_config = MooncakeStoreConfig.load_from_env()
         extra_config = _get_kv_connector_extra_config(vllm_config)
-        store_config.device_name = _get_configured_rnic(store_config, extra_config)
+        store_config.device_name = rdma_utils.get_configured_worker_rnic(
+            protocol=store_config.protocol,
+            configured_device=store_config.device_name,
+        )
         self.store = MooncakeDistributedStore()
         local_ip = get_ip()
-        local_hostname = _get_requester_local_hostname(local_ip)
+        local_hostname = rdma_utils.get_requester_local_hostname(local_ip)
         ret = self.store.setup(
             local_hostname,
             store_config.metadata_server,
@@ -881,7 +739,7 @@ class MooncakeStoreWorker:
             logger.error(msg)
             raise RuntimeError(msg)
 
-        preferred_segment = _get_configured_preferred_segment(extra_config)
+        preferred_segment = rdma_utils.get_configured_preferred_segment(extra_config)
         self.preferred_segment = preferred_segment
         self.store_replicate_config = None
         if preferred_segment is not None:

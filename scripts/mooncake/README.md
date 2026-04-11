@@ -34,8 +34,6 @@ Start the Mooncake master server:
 
 ```bash
 bash scripts/mooncake/start_mooncake_master.sh
-# Or write a shared env file for managed launches:
-bash scripts/mooncake/start_mooncake_master.sh --bg --env-file /tmp/mooncake_master.env
 ```
 
 In a separate terminal, run the example script to confirm everything works:
@@ -50,25 +48,22 @@ You should see `Hello, Mooncake Store!` printed. Stop the master with Ctrl-C.
 
 Mooncake benchmarks in this branch use an external-owner topology:
 
-- each vLLM rank runs as a requester-only embedded real client
-- one standalone owner real client per node owns CPU memory and disk offload
-- the requester scripts do not launch or configure the owner process
+- each vLLM rank is requester-only
+- one standalone owner per node owns CPU memory and optional disk offload
+- requester helpers do not launch or configure the owner automatically
 
 ### 1. Start the Master Server
 
 ```bash
 bash scripts/mooncake/start_mooncake_master.sh
-# With disk offloading support:
-bash scripts/mooncake/start_mooncake_master.sh --enable-offload
-# Start master and run it in background
 bash scripts/mooncake/start_mooncake_master.sh --bg
-# Start master in background and write connection env for workers/wrappers
 bash scripts/mooncake/start_mooncake_master.sh --bg --env-file /shared/logs/mooncake_master.env
-# With disk offloading support and running in background:
-bash scripts/mooncake/start_mooncake_master.sh --enable-offload --bg
 ```
 
-This starts the master in the background. Logs go to `scripts/mooncake/mooncake_master.log`.
+Use `--env-file` for managed launches. It writes:
+
+- `MOONCAKE_MASTER`
+- `MOONCAKE_TE_META_DATA_SERVER`
 
 Default ports:
 
@@ -76,7 +71,7 @@ Default ports:
 - HTTP metadata: 8080
 - Prometheus metrics: 9003
 
-See the script header for environment variables (`MC_RPC_PORT`, `MC_HTTP_PORT`, `MC_MASTER_HOST`, etc.) to customize ports and the advertised host/IP. The `--env-file` output is the simplest way to feed `MOONCAKE_MASTER` and `MOONCAKE_TE_META_DATA_SERVER` into managed worker launches.
+Set `MC_MASTER_HOST` or `--host` if the detected advertise address is not the right control-plane IP for your cluster.
 
 ### 2. Configure Mooncake
 
@@ -93,13 +88,9 @@ Edit `scripts/mooncake/mooncake_config.json`:
 }
 ```
 
-- `protocol`: Use `"rdma"` for best performance. `"tcp"` works as a fallback but performs poorly.
-- `global_segment_size` and `local_buffer_size` belong to the owner process, not requester ranks.
-- The requester helper no longer edits `global_segment_size` or enables requester offload ownership.
-- The requester still uses `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES` as a batching hint.
-- Start one owner per node before launching vLLM requester ranks.
-- If you want disk offload, the owner process must be launched with disk support separately.
-- On multi-RNIC hosts, keep this file generic. The managed owner wrapper can auto-detect the local RNIC layout and inject `gpu_bdf_rnic_map` at launch time.
+- `protocol`: use `"rdma"` for performance, `"tcp"` only as fallback.
+- Keep this file generic. The managed launcher exports `MOONCAKE_DEVICE` as a comma-separated per-GPU worker list, and the owner helper auto-detects its local RNIC CSV when `MC_OWNER_DEVICE` is unset. If you are not using the managed launcher, set `MOONCAKE_DEVICE` explicitly or leave it unset to let Mooncake auto-select.
+- `global_segment_size` and disk ownership belong to the owner process, not requester ranks.
 
 Generate the node-local RNIC recommendations with:
 
@@ -109,47 +100,34 @@ bash scripts/mooncake/recommend_mooncake_rnic_config.sh
 
 This prints:
 
-- a ready-to-paste `gpu_bdf_rnic_map` JSON object for `kv_connector_extra_config`
+- a ready-to-paste `MOONCAKE_DEVICE=...` line for workers
 - a ready-to-paste `MC_OWNER_DEVICE=...` line for the owner
 
-For managed launches, `run_vllm_with_mooncake_owner.sh` calls this helper automatically. The human-readable output is still useful to inspect the detected topology or debug ambiguous hosts.
-
-The helper exits non-zero when the topology is ambiguous, but still prints the best-effort recommendation for review.
-
-Owner launch contract:
-
-- fixed owner RPC port: `50052`
-- start the owner with `--host=<node-ip>:<segment-port>`
-- start the owner with `--port=50052`
-- use the owner’s advertised segment string as the locality target for requester ranks
-- the owner’s registered segment name is what requester discovery compares against
+The helper exits non-zero on ambiguous topology, but still prints the best-effort recommendation for review. `run_vllm_with_mooncake_owner.sh` uses the same shell-side mapping logic for managed launches.
 
 Owner helper:
 
 ```bash
 # Memory only
-MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80
 
 # Memory + disk offload
-MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400
 
 # Background mode
-MC_OWNER_DEVICE=rocep139s0,rocep140s0 \
 bash scripts/mooncake/start_mooncake_owner.sh --cpu-mem-size 80 --disk-size 400 --bg
 ```
 
 This helper:
 
-- launches `mooncake_client` with the stable owner contract `--host=<node-ip>:50053 --port=50052`
-- sets owner-side disk offload env vars when `--disk-size` is given
-- keeps requester setup separate from owner setup
-- validates the explicit owner RNIC list instead of auto-selecting one
+- auto-detects active owner RNICs when `MC_OWNER_DEVICE` is unset
+- validates `MC_OWNER_DEVICE` when explicitly set
+- launches `mooncake_client` with `--host=<node-ip>:50053 --port=50052`
+- configures owner-side disk offload when `--disk-size` is given
 
 ### 3. Environment Setup (setup_vllm_env.sh)
 
-Before running benchmarks with the Mooncake backend, source `setup_vllm_env.sh` to configure requester-side environment variables. The benchmark scripts do this automatically, but you can also use it directly:
+Before running benchmarks with the Mooncake backend, source `setup_vllm_env.sh` to configure requester-side environment variables:
 
 ```bash
 # Requester-only setup with an 80 GB local-buffer hint
@@ -164,8 +142,7 @@ This script:
 - Sets `MOONCAKE_CONFIG_PATH` if it is not already set
 - Enables `MC_TCP_ENABLE_CONNECTION_POOL`
 - Sets `MOONCAKE_OFFLOAD_LOCAL_BUFFER_SIZE_BYTES`
-- Leaves Mooncake ownership and disk offload to the external owner service
-- Accepts `--disk-size` for compatibility, but does not configure requester ownership from it
+- Leaves ownership and disk offload to the external owner service
 
 ### 4a. Single-Turn Benchmark (benchmark_cpu_offloading.sh)
 
@@ -184,14 +161,6 @@ Supported backends (comma-separated via `BACKENDS`):
 - `native` - Built-in vLLM KV offloading (`--kv-offloading-backend native`)
 - `simple` - Simple native offload (`VLLM_USE_SIMPLE_KV_OFFLOAD=1` + native backend)
 - `mooncake` - MooncakeStoreConnector via `--kv-transfer-config`
-
-Mooncake benchmark expectations:
-
-- start the owner service before launching the benchmark
-- source `setup_vllm_env.sh` only for requester-side environment setup
-- use `kv_connector_extra_config` for connector-specific overrides
-- set `preferred_segment` explicitly in `kv_connector_extra_config` when you want to pin locality
-- on multi-RNIC hosts, also set `gpu_bdf_rnic_map` explicitly in `kv_connector_extra_config`
 
 Environment variables:
 
@@ -236,7 +205,7 @@ Additional environment variables:
 - `GLOBAL_PREFIX_RATIO` - Fraction of input as global prefix (default: 0.1)
 - `CONV_PREFIX_RATIO` - Fraction of input as conversation prefix (default: 0.8)
 
-For Mooncake runs, the owner must already be running when the benchmark starts. The benchmark scripts only set requester-side config and do not launch owner processes.
+For Mooncake runs, start the owner before launching the benchmark. The benchmark scripts only set requester-side config.
 
 ### 5. Compare Results (compare_results.py)
 
@@ -255,23 +224,3 @@ python scripts/mooncake/compare_results.py ./bench_results --prefix mt_
 ```bash
 bash scripts/mooncake/start_mooncake_master.sh --stop
 ```
-
-## Notes
-
-### Cross-DP External Prefix Cache Hits
-
-When running `MooncakeStoreConnector` with DP, set a fixed
-`PYTHONHASHSEED` before launching vLLM if you want cross-DP external
-prefix cache lookup to work reliably, for example:
-
-```bash
-PYTHONHASHSEED=0 BACKENDS=mooncake-mem \
-bash scripts/mooncake/benchmark_multi_turn.sh
-```
-
-If `PYTHONHASHSEED` is unset, each engine process initializes the root
-prefix-cache hash seed randomly. Identical prompts can then produce
-different block-hash chains on different DP ranks, which means a rank
-may query Mooncake external cache but still report
-`external_prefix_cache_hits=0` even when another DP rank already stored
-the same prefix.

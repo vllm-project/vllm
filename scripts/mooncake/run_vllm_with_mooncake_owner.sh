@@ -8,25 +8,25 @@
 # Optional env:
 #   MC_GID_INDEX                    RDMA GID index filter for RNIC detection
 #   MC_MASTER_ENV_FILE              Shared env file written by start_mooncake_master.sh
+#   MOONCAKE_DEVICE                 Optional explicit worker RDMA device or
+#                                   comma-separated per-GPU device list
+#   MC_OWNER_DEVICE                 Optional explicit owner RDMA device CSV
 #   MC_OWNER_DISK_GIB               Owner disk offload quota in GiB
 #   MC_OWNER_DISK_PATH              Base directory for managed owner disk offload data
 #   MC_OWNER_HOST                   Advertised owner host/IP
 #   MC_OWNER_RPC_PORT               Owner RPC port (default: 50052)
 #   MC_OWNER_SEGMENT_PORT           Owner segment port (default: 50053)
-#   MC_OWNER_READY_TIMEOUT_S        Readiness timeout in seconds (default: 60)
-#   MC_OWNER_LOG_DIR                Directory for owner log file
-#   MC_MOONCAKE_LOAD_ASYNC          Connector load_async flag (default: 1)
-#   MC_MOONCAKE_ENABLE_CROSS_LAYERS_BLOCKS  Connector enable_cross_layers_blocks
-#                                        flag (default: 1)
+#   MC_OWNER_READY_TIMEOUT_S        Readiness timeout in seconds (default: 120)
 #
 # The wrapper owns Mooncake-specific config:
 #   - reads MOONCAKE_MASTER / metadata server from the master env file
-#   - auto-detects gpu_bdf_rnic_map and owner RNIC union
+#   - auto-detects a default GID index and owner RNIC union
 #   - injects --kv-transfer-config for MooncakeStoreConnector
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/network_utils.sh"
 source "${SCRIPT_DIR}/rdma_config_utils.sh"
 
 HOST_TAG="$(hostname -s 2>/dev/null || echo local)"
@@ -34,27 +34,19 @@ HOST_TAG="$(hostname -s 2>/dev/null || echo local)"
 OWNER_CPU_MEM_GIB="${MC_OWNER_CPU_MEM_GIB:-}"
 OWNER_DISK_GIB="${MC_OWNER_DISK_GIB:-}"
 OWNER_DISK_PATH="${MC_OWNER_DISK_PATH:-}"
+WORKER_DEVICE="${MOONCAKE_DEVICE:-}"
 OWNER_DEVICE="${MC_OWNER_DEVICE:-}"
 OWNER_HOST="${MC_OWNER_HOST:-}"
 OWNER_RPC_PORT="${MC_OWNER_RPC_PORT:-50052}"
 OWNER_SEGMENT_PORT="${MC_OWNER_SEGMENT_PORT:-50053}"
-OWNER_READY_TIMEOUT_S="${MC_OWNER_READY_TIMEOUT_S:-60}"
-OWNER_LOG_DIR="${MC_OWNER_LOG_DIR:-$SCRIPT_DIR}"
-OWNER_LOG_FILE="${OWNER_LOG_DIR}/mooncake_owner.${HOST_TAG}.managed.log"
+OWNER_READY_TIMEOUT_S="${MC_OWNER_READY_TIMEOUT_S:-120}"
+OWNER_LOG_FILE=""
 MASTER_ENV_FILE="${MC_MASTER_ENV_FILE:-}"
 MOONCAKE_PROTOCOL="${MOONCAKE_PROTOCOL:-rdma}"
-MOONCAKE_LOAD_ASYNC="${MC_MOONCAKE_LOAD_ASYNC:-1}"
-MOONCAKE_ENABLE_CROSS_LAYERS_BLOCKS="${MC_MOONCAKE_ENABLE_CROSS_LAYERS_BLOCKS:-1}"
 
 OWNER_PID=""
 SERVER_PID=""
 OWNER_DISK_RUN_PATH=""
-GPU_BDF_RNIC_MAP_JSON=""
-
-is_port_listening() {
-    local port="$1"
-    ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq "(^|[:.])${port}$"
-}
 
 stop_pid() {
     local pid="$1"
@@ -200,20 +192,14 @@ print_owner_failure_hint() {
 }
 
 wait_for_owner_ready() {
-    for _ in $(seq "$OWNER_READY_TIMEOUT_S"); do
-        if [[ -n "${OWNER_PID:-}" ]] && ! kill -0 "$OWNER_PID" 2>/dev/null; then
-            echo "Mooncake owner exited before becoming ready." >&2
-            tail -n 50 "$OWNER_LOG_FILE" >&2 || true
-            print_owner_failure_hint
-            return 1
-        fi
-        if is_port_listening "$OWNER_RPC_PORT"; then
-            return 0
-        fi
-        sleep 1
-    done
-
-    echo "Timed out waiting for Mooncake owner RPC port ${OWNER_RPC_PORT}." >&2
+    if wait_for_tcp_port "$OWNER_RPC_PORT" "$OWNER_READY_TIMEOUT_S" "${OWNER_PID:-}"; then
+        return 0
+    fi
+    if [[ -n "${OWNER_PID:-}" ]] && ! kill -0 "$OWNER_PID" 2>/dev/null; then
+        echo "Mooncake owner exited before becoming ready." >&2
+    else
+        echo "Timed out waiting for Mooncake owner RPC port ${OWNER_RPC_PORT}." >&2
+    fi
     tail -n 50 "$OWNER_LOG_FILE" >&2 || true
     print_owner_failure_hint
     return 1
@@ -248,38 +234,24 @@ start_owner() {
     return 1
 }
 
-default_mooncake_config_path() {
-    printf '%s\n' "${SCRIPT_DIR}/mooncake_config.json"
-}
-
-detect_owner_host() {
-    local host=""
-    host="$(hostname -I 2>/dev/null | awk '{print $1}')"
-    if [[ -n "${host//[[:space:]]/}" ]]; then
-        printf '%s\n' "$host"
-        return 0
-    fi
-    return 1
-}
-
 load_master_connection_env() {
     local candidate=""
     if [[ -n "${MOONCAKE_MASTER:-}" && -n "${MOONCAKE_TE_META_DATA_SERVER:-}" ]]; then
         return 0
     fi
 
-    if [[ -z "${MASTER_ENV_FILE//[[:space:]]/}" ]]; then
-        for candidate in \
-            "${OWNER_LOG_DIR}/mooncake_master.env" \
-            "$(dirname "${OWNER_LOG_DIR}")/mooncake_master.env"; do
-            if [[ -r "$candidate" ]]; then
-                MASTER_ENV_FILE="$candidate"
-                break
-            fi
-        done
+    if [[ -n "${MASTER_ENV_FILE//[[:space:]]/}" && ! -r "$MASTER_ENV_FILE" ]]; then
+        candidate="$(dirname "$(dirname "$MASTER_ENV_FILE")")/$(basename "$MASTER_ENV_FILE")"
+        if [[ -r "$candidate" ]]; then
+            MASTER_ENV_FILE="$candidate"
+        fi
     fi
 
-    if [[ ! -r "$MASTER_ENV_FILE" ]]; then
+    if [[ -z "${MASTER_ENV_FILE//[[:space:]]/}" && -r "${SCRIPT_DIR}/mooncake_master.env" ]]; then
+        MASTER_ENV_FILE="${SCRIPT_DIR}/mooncake_master.env"
+    fi
+
+    if [[ -z "${MASTER_ENV_FILE//[[:space:]]/}" || ! -r "$MASTER_ENV_FILE" ]]; then
         echo "Error: Mooncake master env file not found: $MASTER_ENV_FILE" >&2
         echo "Hint: start the master via pre_serve with:" >&2
         echo "  bash scripts/mooncake/start_mooncake_master.sh --bg --env-file {log_dir}/mooncake_master.env" >&2
@@ -297,58 +269,17 @@ load_master_connection_env() {
     fi
 }
 
-json_bool() {
-    local raw="${1,,}"
-    local name="$2"
-    case "$raw" in
-        1|true|yes|on) printf 'true\n' ;;
-        0|false|no|off) printf 'false\n' ;;
-        *)
-            echo "Error: ${name} must be one of 1/0/true/false/yes/no/on/off, got: $1" >&2
-            return 1
-            ;;
-    esac
-}
+detect_default_gid_index() {
+    if [[ -n "${MC_GID_INDEX:-}" ]]; then
+        return 0
+    fi
 
-detect_rnic_config() {
-    local output=""
-    local line=""
-    local key=""
-    local value=""
     local detected_gid_index=""
-    local detected_owner_device=""
-    local detected_gpu_map=""
-
-    if ! output="$("${SCRIPT_DIR}/recommend_mooncake_rnic_config.sh" --machine-readable 2>&1)"; then
-        echo "Error: failed to auto-detect Mooncake RNIC configuration." >&2
-        echo "$output" >&2
+    detected_gid_index="$(detect_preferred_gid_index)" || {
+        echo "Error: failed to auto-detect a usable RDMA GID index." >&2
         return 1
-    fi
-
-    while IFS= read -r line; do
-        [[ -n "$line" ]] || continue
-        key="${line%%=*}"
-        value="${line#*=}"
-        case "$key" in
-            MC_GID_INDEX) detected_gid_index="$value" ;;
-            MC_OWNER_DEVICE) detected_owner_device="$value" ;;
-            GPU_BDF_RNIC_MAP_JSON) detected_gpu_map="$value" ;;
-        esac
-    done <<< "$output"
-
-    if [[ -z "${detected_gid_index//[[:space:]]/}" || \
-          -z "${detected_owner_device//[[:space:]]/}" || \
-          -z "${detected_gpu_map//[[:space:]]/}" ]]; then
-        echo "Error: helper did not return MC_GID_INDEX, MC_OWNER_DEVICE, and GPU_BDF_RNIC_MAP_JSON." >&2
-        echo "$output" >&2
-        return 1
-    fi
-
+    }
     export MC_GID_INDEX="$detected_gid_index"
-    if [[ -z "${OWNER_DEVICE//[[:space:]]/}" ]]; then
-        OWNER_DEVICE="$detected_owner_device"
-    fi
-    GPU_BDF_RNIC_MAP_JSON="$detected_gpu_map"
 }
 
 command_has_kv_transfer_config() {
@@ -362,23 +293,7 @@ command_has_kv_transfer_config() {
 }
 
 build_kv_transfer_config_json() {
-    local load_async_json=""
-    local cross_layers_json=""
-    local extra_config_json=""
-
-    load_async_json="$(json_bool "$MOONCAKE_LOAD_ASYNC" "MC_MOONCAKE_LOAD_ASYNC")"
-    cross_layers_json="$(json_bool "$MOONCAKE_ENABLE_CROSS_LAYERS_BLOCKS" "MC_MOONCAKE_ENABLE_CROSS_LAYERS_BLOCKS")"
-
-    extra_config_json=$(printf '{"load_async":%s,"enable_cross_layers_blocks":%s' \
-        "$load_async_json" \
-        "$cross_layers_json")
-    if [[ -n "${GPU_BDF_RNIC_MAP_JSON:-}" ]]; then
-        extra_config_json+=$(printf ',"gpu_bdf_rnic_map":%s' "$GPU_BDF_RNIC_MAP_JSON")
-    fi
-    extra_config_json+='}'
-
-    printf '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":%s}\n' \
-        "$extra_config_json"
+    printf '{"kv_connector":"MooncakeStoreConnector","kv_role":"kv_both","kv_connector_extra_config":{"load_async":true,"enable_cross_layers_blocks":true}}\n'
 }
 
 if [[ -z "$OWNER_CPU_MEM_GIB" ]]; then
@@ -391,12 +306,7 @@ if [[ $# -eq 0 ]]; then
     exit 1
 fi
 
-mkdir -p "$OWNER_LOG_DIR"
-
-if [[ -z "${MOONCAKE_CONFIG_PATH:-}" ]]; then
-    MOONCAKE_CONFIG_PATH="$(default_mooncake_config_path)"
-    export MOONCAKE_CONFIG_PATH
-fi
+export MOONCAKE_CONFIG_PATH="${MOONCAKE_CONFIG_PATH:-${SCRIPT_DIR}/mooncake_config.json}"
 if [[ ! -r "$MOONCAKE_CONFIG_PATH" ]]; then
     echo "Error: MOONCAKE_CONFIG_PATH does not exist: $MOONCAKE_CONFIG_PATH" >&2
     exit 1
@@ -404,10 +314,29 @@ fi
 
 load_master_connection_env
 
+if [[ -n "${MASTER_ENV_FILE//[[:space:]]/}" ]]; then
+    OWNER_LOG_DIR="$(dirname "$MASTER_ENV_FILE")"
+else
+    OWNER_LOG_DIR="$SCRIPT_DIR"
+fi
+mkdir -p "$OWNER_LOG_DIR"
+OWNER_LOG_FILE="${OWNER_LOG_DIR}/mooncake_owner.${HOST_TAG}.managed.log"
+
 if [[ "$MOONCAKE_PROTOCOL" == "rdma" || "$MOONCAKE_PROTOCOL" == "efa" ]]; then
     export MC_ENABLE_DEST_DEVICE_AFFINITY="${MC_ENABLE_DEST_DEVICE_AFFINITY:-1}"
-    detect_rnic_config
-    if ! validate_rdma_device_list "$OWNER_DEVICE"; then
+    detect_default_gid_index
+    if [[ -n "${WORKER_DEVICE//[[:space:]]/}" ]]; then
+        if ! validate_rdma_device_list "$WORKER_DEVICE"; then
+            exit 1
+        fi
+    elif ! WORKER_DEVICE="$(get_worker_rdma_devices_csv "$MC_GID_INDEX")"; then
+        echo "Error: failed to determine per-GPU Mooncake worker RNICs." >&2
+        echo "Hint: run scripts/mooncake/recommend_mooncake_rnic_config.sh or set MOONCAKE_DEVICE explicitly." >&2
+        exit 1
+    fi
+    export MOONCAKE_DEVICE="$WORKER_DEVICE"
+    if [[ -n "${OWNER_DEVICE//[[:space:]]/}" ]] && \
+       ! validate_rdma_device_list "$OWNER_DEVICE"; then
         exit 1
     fi
 fi
@@ -420,7 +349,7 @@ fi
 prepare_owner_disk_path
 
 if [[ -z "${OWNER_HOST//[[:space:]]/}" ]]; then
-    OWNER_HOST="$(detect_owner_host || true)"
+    OWNER_HOST="$(detect_local_advertise_host "$OWNER_HOST" || true)"
 fi
 if [[ -z "${OWNER_HOST//[[:space:]]/}" ]]; then
     echo "Error: failed to determine owner host automatically; set MC_OWNER_HOST." >&2
@@ -457,11 +386,11 @@ echo "Mooncake metadata server: $MOONCAKE_TE_META_DATA_SERVER"
 if [[ -n "${MC_GID_INDEX:-}" ]]; then
     echo "Detected GID index: $MC_GID_INDEX"
 fi
+if [[ -n "${WORKER_DEVICE:-}" ]]; then
+    echo "Detected worker RNICs: $WORKER_DEVICE"
+fi
 if [[ -n "${OWNER_DEVICE:-}" ]]; then
     echo "Detected owner RNICs: $OWNER_DEVICE"
-fi
-if [[ -n "${GPU_BDF_RNIC_MAP_JSON:-}" ]]; then
-    echo "Detected GPU/RNIC map: $GPU_BDF_RNIC_MAP_JSON"
 fi
 
 SERVER_CMD=("$@" "--kv-transfer-config" "$KV_TRANSFER_CONFIG_JSON")

@@ -29,6 +29,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/network_utils.sh"
 PID_FILE="$SCRIPT_DIR/mooncake_master.pid"
 LOG_FILE="$SCRIPT_DIR/mooncake_master.log"
 
@@ -102,29 +103,6 @@ resolve_master_bin() {
 MASTER_BIN="$(resolve_master_bin)"
 
 
-detect_master_host() {
-    if [[ -n "${MASTER_HOST//[[:space:]]/}" ]]; then
-        printf '%s\n' "$MASTER_HOST"
-        return 0
-    fi
-    if command -v hostname >/dev/null 2>&1; then
-        local host_ip
-        host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
-        if [[ -n "${host_ip//[[:space:]]/}" ]]; then
-            printf '%s\n' "$host_ip"
-            return 0
-        fi
-        local host_name
-        host_name="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
-        if [[ -n "${host_name//[[:space:]]/}" ]]; then
-            printf '%s\n' "$host_name"
-            return 0
-        fi
-    fi
-    return 1
-}
-
-
 write_master_env_file() {
     local env_file=$1
     [[ -n "${env_file//[[:space:]]/}" ]] || return 0
@@ -143,16 +121,6 @@ is_our_master() {
     kill -0 "$pid" 2>/dev/null || return 1
     [[ "$(ps -o comm= -p "$pid" 2>/dev/null)" == mooncake_maste* ]] || return 1
     [[ "$(ps -o uid= -p "$pid" 2>/dev/null | tr -d ' ')" == "$(id -u)" ]]
-}
-
-master_ports_ready() {
-    ss -ltnH "( sport = :${MC_RPC_PORT} or sport = :${MC_HTTP_PORT} or sport = :${MC_METRICS_PORT} )" \
-        2>/dev/null | grep -q LISTEN
-}
-
-any_master_port_in_use() {
-    ss -ltnH 2>/dev/null | awk '{print $4}' | grep -Eq \
-        "(^|[:.])(${MC_RPC_PORT}|${MC_HTTP_PORT}|${MC_METRICS_PORT})$"
 }
 
 stop_master() {
@@ -185,12 +153,12 @@ fi
 if [[ -f "$PID_FILE" ]]; then
     pid="$(<"$PID_FILE")"
     if is_our_master "$pid"; then
-        MASTER_HOST="$(detect_master_host)" || {
+        MASTER_HOST="$(detect_local_advertise_host "$MASTER_HOST")" || {
             echo "Error: failed to determine Mooncake master host automatically; pass --host <ip-or-host> or set MC_MASTER_HOST." >&2
             exit 1
         }
         write_master_env_file "$ENV_FILE"
-        if master_ports_ready; then
+        if all_tcp_ports_listening "$MC_RPC_PORT" "$MC_HTTP_PORT" "$MC_METRICS_PORT"; then
             echo "Reusing existing mooncake_master (PID $pid)."
             if [[ -n "${ENV_FILE//[[:space:]]/}" ]]; then
                 echo "  Env file: $ENV_FILE"
@@ -203,12 +171,12 @@ if [[ -f "$PID_FILE" ]]; then
     rm -f "$PID_FILE"
 fi
 
-if any_master_port_in_use; then
+if any_tcp_ports_in_use "$MC_RPC_PORT" "$MC_HTTP_PORT" "$MC_METRICS_PORT"; then
     echo "Error: one of the Mooncake master ports (${MC_RPC_PORT}, ${MC_HTTP_PORT}, ${MC_METRICS_PORT}) is already in use." >&2
     exit 1
 fi
 
-MASTER_HOST="$(detect_master_host)" || {
+MASTER_HOST="$(detect_local_advertise_host "$MASTER_HOST")" || {
     echo "Error: failed to determine Mooncake master host automatically; pass --host <ip-or-host> or set MC_MASTER_HOST." >&2
     exit 1
 }
@@ -257,8 +225,7 @@ if $OPT_BG; then
     echo $! > "$PID_FILE"
     for _ in $(seq 30); do
         if is_our_master "$(cat "$PID_FILE")" \
-            && ss -ltn "( sport = :${MC_RPC_PORT} or sport = :${MC_HTTP_PORT} or sport = :${MC_METRICS_PORT} )" \
-                2>/dev/null | grep -q LISTEN; then
+            && all_tcp_ports_listening "$MC_RPC_PORT" "$MC_HTTP_PORT" "$MC_METRICS_PORT"; then
             break
         fi
         sleep 1

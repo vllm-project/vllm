@@ -395,3 +395,210 @@ pci_bus_distance() {
     ))
     printf '%s\n' "$distance"
 }
+
+get_active_rdma_device_names_csv() {
+    local gid_index=${1:-${MC_GID_INDEX:-}}
+    local rdma_output=""
+    local device_name=""
+    local -a devices=()
+
+    rdma_output="$(list_active_rdma_devices "$gid_index")" || return 1
+    [[ -n "${rdma_output//[[:space:]]/}" ]] || return 1
+
+    while IFS='|' read -r device_name _rest; do
+        [[ -n "$device_name" ]] || continue
+        devices+=("$device_name")
+    done <<< "$rdma_output"
+
+    IFS=,
+    printf '%s\n' "${devices[*]}"
+    unset IFS
+}
+
+plan_worker_rdma_assignments() {
+    local gid_index=${1:-${MC_GID_INDEX:-}}
+    local gpu_output=""
+    local rdma_output=""
+    local gpu_entry=""
+    local rdma_entry=""
+    local gpu_index=""
+    local gpu_bus=""
+    local gpu_numa=""
+    local rdma_name=""
+    local rdma_bus=""
+    local rdma_numa=""
+    local rdma_netdevs=""
+    local chosen_device=""
+    local chosen_reason=""
+    local best_distance=1073741824
+    local distance=0
+    local status=0
+    local -a gpu_entries=()
+    local -a rdma_entries=()
+    local -a exact_matches=()
+    local -A rdma_bus_by_name=()
+    local -A rdma_numa_by_name=()
+    local -A rdma_netdevs_by_name=()
+    local -A map_by_gpu_bdf=()
+    local -A gpu_reason_by_bdf=()
+    local -A used_device=()
+
+    gpu_output="$(get_local_gpu_entries)" || gpu_output=""
+    rdma_output="$(list_active_rdma_devices "$gid_index")" || rdma_output=""
+
+    if [[ -n "${gpu_output//[[:space:]]/}" ]]; then
+        mapfile -t gpu_entries <<< "$gpu_output"
+    fi
+    if [[ -n "${rdma_output//[[:space:]]/}" ]]; then
+        mapfile -t rdma_entries <<< "$rdma_output"
+    fi
+
+    if [[ "${#gpu_entries[@]}" -eq 0 ]]; then
+        echo "Error: no local GPUs were discovered with nvidia-smi." >&2
+        return 1
+    fi
+    if [[ "${#rdma_entries[@]}" -eq 0 ]]; then
+        echo "Error: no active RDMA devices matched MC_GID_INDEX=${gid_index}." >&2
+        return 1
+    fi
+
+    for rdma_entry in "${rdma_entries[@]}"; do
+        IFS='|' read -r rdma_name rdma_bus rdma_numa rdma_netdevs <<< "$rdma_entry"
+        unset IFS
+        rdma_bus_by_name["$rdma_name"]="$rdma_bus"
+        rdma_numa_by_name["$rdma_name"]="$rdma_numa"
+        rdma_netdevs_by_name["$rdma_name"]="$rdma_netdevs"
+    done
+
+    for gpu_entry in "${gpu_entries[@]}"; do
+        IFS='|' read -r gpu_index gpu_bus _gpu_numa <<< "$gpu_entry"
+        unset IFS
+
+        exact_matches=()
+        for rdma_name in "${!rdma_bus_by_name[@]}"; do
+            if gpu_matches_rnic_netdev "$gpu_index" \
+                "${rdma_netdevs_by_name[$rdma_name]}"; then
+                exact_matches+=("$rdma_name")
+            fi
+        done
+
+        if [[ "${#exact_matches[@]}" -gt 1 ]]; then
+            IFS=$'\n' exact_matches=($(printf '%s\n' "${exact_matches[@]}" | sort))
+            unset IFS
+            status=1
+        fi
+        if [[ "${#exact_matches[@]}" -eq 0 ]]; then
+            continue
+        fi
+
+        map_by_gpu_bdf["$gpu_bus"]="${exact_matches[0]}"
+        if [[ "${#exact_matches[@]}" -eq 1 ]]; then
+            gpu_reason_by_bdf["$gpu_bus"]="exact-netdev"
+        else
+            gpu_reason_by_bdf["$gpu_bus"]="ambiguous-exact-netdev"
+        fi
+        used_device["${exact_matches[0]}"]=1
+    done
+
+    for gpu_entry in "${gpu_entries[@]}"; do
+        IFS='|' read -r _gpu_index gpu_bus gpu_numa <<< "$gpu_entry"
+        unset IFS
+
+        if [[ -n "${map_by_gpu_bdf[$gpu_bus]+x}" ]]; then
+            continue
+        fi
+
+        chosen_device=""
+        chosen_reason=""
+        best_distance=1073741824
+
+        for rdma_name in "${!rdma_bus_by_name[@]}"; do
+            if [[ -n "${used_device[$rdma_name]+x}" ]]; then
+                continue
+            fi
+            if [[ "$gpu_numa" == "-1" || \
+                  "$gpu_numa" != "${rdma_numa_by_name[$rdma_name]}" ]]; then
+                continue
+            fi
+            distance="$(pci_bus_distance "$gpu_bus" "${rdma_bus_by_name[$rdma_name]}")"
+            if [[ -z "$chosen_device" || "$distance" -lt "$best_distance" || \
+                  ( "$distance" -eq "$best_distance" && \
+                    "$rdma_name" < "$chosen_device" ) ]]; then
+                chosen_device="$rdma_name"
+                chosen_reason="same-numa-pci-distance"
+                best_distance="$distance"
+            fi
+        done
+
+        if [[ -z "$chosen_device" ]]; then
+            for rdma_name in "${!rdma_bus_by_name[@]}"; do
+                if [[ -n "${used_device[$rdma_name]+x}" ]]; then
+                    continue
+                fi
+                distance="$(pci_bus_distance "$gpu_bus" \
+                    "${rdma_bus_by_name[$rdma_name]}")"
+                if [[ -z "$chosen_device" || "$distance" -lt "$best_distance" || \
+                      ( "$distance" -eq "$best_distance" && \
+                        "$rdma_name" < "$chosen_device" ) ]]; then
+                    chosen_device="$rdma_name"
+                    chosen_reason="global-pci-distance"
+                    best_distance="$distance"
+                fi
+            done
+        fi
+
+        if [[ -z "$chosen_device" ]]; then
+            status=1
+            gpu_reason_by_bdf["$gpu_bus"]="no-unused-rnic-match"
+            continue
+        fi
+
+        map_by_gpu_bdf["$gpu_bus"]="$chosen_device"
+        gpu_reason_by_bdf["$gpu_bus"]="$chosen_reason"
+        used_device["$chosen_device"]=1
+    done
+
+    if [[ "${#map_by_gpu_bdf[@]}" -ne "${#gpu_entries[@]}" ]]; then
+        status=1
+    fi
+
+    for gpu_entry in "${gpu_entries[@]}"; do
+        IFS='|' read -r gpu_index gpu_bus gpu_numa <<< "$gpu_entry"
+        unset IFS
+        printf '%s|%s|%s|%s|%s\n' \
+            "$gpu_index" \
+            "$gpu_bus" \
+            "$gpu_numa" \
+            "${map_by_gpu_bdf[$gpu_bus]:-}" \
+            "${gpu_reason_by_bdf[$gpu_bus]:-missing}"
+    done
+
+    return "$status"
+}
+
+get_worker_rdma_devices_csv() {
+    local gid_index=${1:-${MC_GID_INDEX:-}}
+    local plan_output=""
+    local status=0
+    local device_name=""
+    local -a devices=()
+
+    if plan_output="$(plan_worker_rdma_assignments "$gid_index")"; then
+        status=0
+    else
+        status=$?
+    fi
+    [[ -n "${plan_output//[[:space:]]/}" ]] || return "$status"
+
+    while IFS='|' read -r _gpu_index _gpu_bus _gpu_numa device_name _reason; do
+        [[ -n "$device_name" ]] || continue
+        devices+=("$device_name")
+    done <<< "$plan_output"
+
+    if [[ "${#devices[@]}" -gt 0 ]]; then
+        IFS=,
+        printf '%s\n' "${devices[*]}"
+        unset IFS
+    fi
+    return "$status"
+}
