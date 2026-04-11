@@ -768,10 +768,14 @@ class Scheduler(SchedulerInterface):
                 # This information is used to determine if a load is
                 # needed for this request.
                 if self.connector is not None:
+                    local_num_computed_tokens = (
+                        request.num_computed_tokens + num_new_local_computed_tokens
+                    )
                     self.connector.update_state_after_alloc(
                         request,
                         self.kv_cache_manager.get_blocks(request_id),
                         num_external_computed_tokens,
+                        local_num_computed_tokens,
                     )
                     if (
                         self.connector_prefix_cache_stats is not None

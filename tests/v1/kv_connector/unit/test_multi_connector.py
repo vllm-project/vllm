@@ -79,7 +79,13 @@ class MockConnector(KVConnectorBase_V1):
     def get_num_new_matched_tokens(self, request, num_computed_tokens):
         return (0, False)
 
-    def update_state_after_alloc(self, request, blocks, num_tokens) -> None:
+    def update_state_after_alloc(
+        self,
+        request,
+        blocks,
+        num_tokens,
+        num_computed_tokens=None,
+    ) -> None:
         pass
 
 

@@ -185,7 +185,7 @@ class TestFlexKVConnectorDelegation:
         req = MagicMock()
         blocks = MagicMock()
         connector.update_state_after_alloc(req, blocks, 4)
-        impl.update_state_after_alloc.assert_called_once_with(req, blocks, 4)
+        impl.update_state_after_alloc.assert_called_once_with(req, blocks, 4, None)
 
     def test_build_connector_meta(self, connector_and_impl):
         connector, impl = connector_and_impl

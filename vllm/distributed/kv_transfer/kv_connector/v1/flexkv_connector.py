@@ -198,11 +198,15 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         """Update KVConnector state after block allocation."""
         self._flexkv_connector.update_state_after_alloc(
-            request, blocks, num_external_tokens
+            request, blocks, num_external_tokens, num_computed_tokens
         )
 
     def build_connector_meta(

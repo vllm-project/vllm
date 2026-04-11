@@ -297,7 +297,11 @@ class ExampleConnector(KVConnectorBase_V1):
         return num_tokens_to_check - num_computed_tokens, False
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        num_external_tokens: int,
+        num_computed_tokens: int | None = None,
     ):
         """
         Update KVConnector state after block allocation.
