@@ -17,6 +17,7 @@ import subprocess
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -527,112 +528,48 @@ class UnifiedEvalRunner:
         print(sep)
 
 
+@dataclass
+class EvalConfig:
+    """Config for the optional accuracy eval pass in `vllm bench serve`."""
+
+    backend: str = "lm_eval"
+    """Which eval harness to use. One of `lm_eval` or `gpt_oss`."""
+
+    tasks: str | None = None
+    """Comma-separated task names. e.g. `gsm8k,hellaswag` or `gpqa,aime25`."""
+
+    limit: float | None = None
+    """Cap samples per task. Default None means full dataset. See also `num_samples`."""
+
+    num_samples: float | None = None
+    """Friendly alias for `limit`. If both are set, `num_samples` wins."""
+
+    num_fewshot: int | None = None
+    """Few-shot examples (lm_eval only). Default None uses the task default."""
+
+    max_tokens: int | None = None
+    """Cap the per-request `max_tokens` sent to the server."""
+
+    reasoning_effort: str | None = None
+    """gpt_oss reasoning effort: `low`, `medium`, or `high`."""
+
+    output: str | None = None
+    """JSONL output path. Defaults to eval_results/<model>.jsonl."""
+
+
 def add_eval_args(parser: argparse.ArgumentParser) -> None:
-    """Register --eval args on a bench subcommand parser."""
+    """Register `--eval` as a JSON/dot-notation argument."""
     g = parser.add_argument_group("accuracy eval (optional, requires --eval)")
     g.add_argument(
         "--eval",
-        action="store_true",
-        default=False,
-        help="After benchmarking, run an lm_eval accuracy pass against the "
-        "same server and write a merged JSONL record.",
-    )
-    g.add_argument(
-        "--eval-tasks",
-        type=str,
+        type=json.loads,
         default=None,
-        metavar="TASKS",
-        help="Comma-separated lm_eval task names (required with --eval), "
-        "e.g. gsm8k,hellaswag.",
+        help="Eval configuration as JSON or via dot-notation. "
+        "Examples: `--eval.tasks gsm8k --eval.num_samples 1024` or "
+        "`--eval.backend gpt_oss --eval.tasks gpqa --eval.reasoning_effort low`. "
+        "Accepted keys: backend (lm_eval|gpt_oss), tasks, num_samples (or limit), "
+        "num_fewshot, max_tokens, reasoning_effort, output.",
     )
-    g.add_argument(
-        "--eval-limit",
-        type=float,
-        default=None,
-        metavar="N",
-        help="Cap samples per task for the eval pass (default: full dataset).",
-    )
-    g.add_argument(
-        "--eval-num-fewshot",
-        type=int,
-        default=None,
-        metavar="N",
-        dest="eval_num_fewshot",
-        help="Few-shot examples for the eval pass (default: task default). "
-        "Pass 0 for zero-shot.",
-    )
-    g.add_argument(
-        "--eval-output",
-        type=str,
-        default=None,
-        metavar="PATH",
-        help="JSONL output path for the merged bench+accuracy record. "
-        "Defaults to eval_results/<model>.jsonl.",
-    )
-
-
-def preload_lm_eval_requests(
-    task_names: str,
-    model: str,
-    limit: float | None = None,
-    num_fewshot: int | None = None,
-) -> tuple[list[Any], list[Any], dict]:
-    """Build lm_eval task instances and convert them to SampleRequest objects.
-
-    Runs before the benchmark timer starts so that dataset loading does not
-    pollute the timing signal. Only generate_until tasks are supported.
-
-    Returns (sample_requests, instances, task_dict) where
-    sample_requests[i] corresponds to instances[i].
-    """
-    from lm_eval import tasks as lm_tasks
-
-    from vllm.benchmarks.datasets import SampleRequest
-    from vllm.transformers_utils.tokenizer import get_tokenizer
-
-    tokenizer = get_tokenizer(model)
-    task_dict = lm_tasks.get_task_dict(task_names.split(","))
-
-    sample_requests: list[Any] = []
-    all_instances: list[Any] = []
-
-    for task_obj in task_dict.values():
-        if isinstance(task_obj, tuple):
-            _, task_obj = task_obj
-
-        # set_config must be called BEFORE build_all_requests, which reads
-        # self._config.num_fewshot rather than accepting it as an argument.
-        if num_fewshot is not None:
-            task_obj.set_config(key="num_fewshot", value=num_fewshot)
-        else:
-            if task_obj.get_config("num_fewshot") is None:
-                task_obj.set_config(key="num_fewshot", value=0)
-        task_obj.set_fewshot_seed()
-
-        int_limit = int(limit) if limit is not None else None
-        task_obj.build_all_requests(
-            limit=int_limit,
-            rank=0,
-            world_size=1,
-            fewshot_as_multiturn=False,
-        )
-        for instance in task_obj.instances:
-            if instance.request_type != "generate_until":
-                continue
-            prompt: str = instance.args[0]
-            gen_kwargs: dict = instance.args[1]
-            max_gen = int(gen_kwargs.get("max_gen_toks", 512))
-            prompt_len = len(tokenizer.encode(prompt))
-            sample_requests.append(
-                SampleRequest(
-                    prompt=prompt,
-                    prompt_len=prompt_len,
-                    expected_output_len=max_gen,
-                )
-            )
-            all_instances.append(instance)
-
-    return sample_requests, all_instances, task_dict
 
 
 def score_lm_eval_offline(
@@ -648,8 +585,8 @@ def score_lm_eval_offline(
     import collections as _collections
     import math as _math
 
-    # lm_eval resps are [text] (single-element list).
-    # Filters consume that list; process_results receives [filtered_resp].
+    # lm_eval resps: list of responses for each generation attempt.
+    # With a single generation, each instance gets [text].
     for instance, text in zip(instances, generated_texts):
         instance.resps = [text]
 
@@ -692,6 +629,95 @@ def score_lm_eval_offline(
                     results[task_name][f"{metric}_stderr,{filter_key}"] = stderr
 
     return results
+
+
+def score_gpt_oss_offline(
+    task_evals: dict,
+    row_index: list[tuple[str, int]],
+    generated_texts: list[str],
+) -> dict:
+    """Score gpt_oss eval rows against captured chat completions.
+
+    The `sampler(...)` step inside each gpt_oss `Eval.__call__` is
+    replaced with reading the pre-captured `generated_text`; the
+    per-task results are then aggregated via gpt_oss's own
+    `aggregate_results` so the metrics match `python -m gpt_oss.evals`.
+    """
+    from gpt_oss.evals import report
+    from gpt_oss.evals.types import SingleEvalResult
+
+    per_task: dict[str, list[tuple[int, str]]] = {name: [] for name in task_evals}
+    for (task_name, row_idx), text in zip(row_index, generated_texts):
+        per_task.setdefault(task_name, []).append((row_idx, text))
+
+    results: dict = {}
+    for task_name, eval_obj in task_evals.items():
+        per_row = per_task.get(task_name, [])
+        single_results: list[SingleEvalResult] = []
+        for row_idx, response_text in per_row:
+            row = eval_obj.examples[row_idx]
+            single_results.append(_score_gpt_oss_row(task_name, row, response_text))
+        agg = report.aggregate_results(single_results)
+        task_metrics = dict(agg.metrics or {})
+        if agg.score is not None:
+            task_metrics["score"] = float(agg.score)
+        results[task_name] = task_metrics
+    return results
+
+
+def _score_gpt_oss_row(task_name: str, row: dict, response_text: str):
+    # Modified version of `__call__` in each upstream eval class:
+    # `GPQAEval`, `AIME25Eval`, `BasicEval` from `gpt_oss.evals`.
+    from gpt_oss.evals.types import SingleEvalResult
+
+    if task_name == "gpqa":
+        from gpt_oss.evals.abcd_grader import extract_abcd
+
+        choices = [
+            row["Correct Answer"],
+            row["Incorrect Answer 1"],
+            row["Incorrect Answer 2"],
+            row["Incorrect Answer 3"],
+        ]
+        choices = [choices[i] for i in row["permutation"]]
+        correct_index = choices.index(row["Correct Answer"])
+        correct_answer = "ABCD"[correct_index]
+        extracted = extract_abcd(response_text)
+        score = 1.0 if extracted == correct_answer else 0.0
+        return SingleEvalResult(
+            html=None,
+            score=score,
+            convo=None,
+            metrics={"chars": len(response_text)},
+        )
+
+    if task_name == "aime25":
+        from gpt_oss.evals.aime_eval import extract_boxed_text
+
+        extracted = extract_boxed_text(response_text)
+        try:
+            extracted_int = int(extracted)
+        except (ValueError, TypeError):
+            extracted_int = None
+        correct_int = int(row["answer"])
+        score = 1.0 if extracted_int == correct_int else 0.0
+        return SingleEvalResult(
+            html=None,
+            score=score,
+            convo=None,
+            metrics={"chars": len(response_text)},
+        )
+
+    if task_name == "basic":
+        score = 1.0 if len(response_text) > 0 else 0.0
+        return SingleEvalResult(
+            html=None,
+            score=score,
+            convo=None,
+            metrics={"chars": len(response_text)},
+        )
+
+    raise ValueError(f"Unknown gpt_oss task '{task_name}'")
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> None:

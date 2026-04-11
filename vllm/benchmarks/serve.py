@@ -839,6 +839,14 @@ async def benchmark(
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
+        # Merge per-sample extra_body (e.g. LMEvalDataset's stop sequences,
+        # max_tokens override, seed) over the global extra_body. Per-sample
+        # keys win. Most datasets leave `request.extra_body` as None.
+        if request.extra_body is not None:
+            req_extra_body = {**(extra_body or {}), **request.extra_body}
+        else:
+            req_extra_body = extra_body
+
         request_func_input = RequestFuncInput(
             model=req_model_id,
             model_name=req_model_name,
@@ -850,7 +858,7 @@ async def benchmark(
             multi_modal_content=mm_content,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
-            extra_body=extra_body,
+            extra_body=req_extra_body,
             request_id=request_id,
         )
         tasks.append(
@@ -1632,17 +1640,11 @@ def add_cli_args(parser: argparse.ArgumentParser):
     add_eval_args(parser)
 
 
-def main(
-    args: argparse.Namespace,
-    prebuilt_requests: "list[SampleRequest] | None" = None,
-) -> dict[str, Any]:
-    return asyncio.run(main_async(args, prebuilt_requests))
+def main(args: argparse.Namespace) -> dict[str, Any]:
+    return asyncio.run(main_async(args))
 
 
-async def main_async(
-    args: argparse.Namespace,
-    prebuilt_requests: "list[SampleRequest] | None" = None,
-) -> dict[str, Any]:
+async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -1750,10 +1752,7 @@ async def main_async(
         args.ignore_eos = True
 
     # Load the dataset.
-    if prebuilt_requests is not None:
-        input_requests = prebuilt_requests
-    else:
-        input_requests = get_samples(args, tokenizer)
+    input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
     backend = args.backend
@@ -1951,10 +1950,6 @@ async def main_async(
             warnings.warn(
                 f"Failed to generate dataset statistics plot: {e}", stacklevel=2
             )
-
-    # Preserve generated_texts for offline lm_eval scoring
-    if prebuilt_requests is not None:
-        result_json["_lm_eval_generated_texts"] = result_json.get("generated_texts", [])
 
     if not args.save_detailed:
         # Remove fields with too many data points

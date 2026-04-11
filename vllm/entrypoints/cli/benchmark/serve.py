@@ -10,11 +10,14 @@ from vllm.benchmarks.serve import add_cli_args
 from vllm.benchmarks.serve import main as bench_main
 from vllm.entrypoints.cli.benchmark.base import BenchmarkSubcommandBase
 from vllm.eval.runner import (
+    EvalConfig,
     _collect_environment,
     _sanitize_model_name,
-    preload_lm_eval_requests,
+    score_gpt_oss_offline,
     score_lm_eval_offline,
 )
+
+_VALID_EVAL_BACKENDS = ("lm_eval", "gpt_oss")
 
 
 class BenchmarkServingSubcommand(BenchmarkSubcommandBase):
@@ -30,77 +33,122 @@ class BenchmarkServingSubcommand(BenchmarkSubcommandBase):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         if args.eval:
-            _run_eval(args)
+            eval_cfg = _parse_eval_config(args.eval)
+            _run_eval(args, eval_cfg)
         else:
             bench_main(args)
 
 
-def _run_eval(args: argparse.Namespace) -> None:
-    """Run bench serve with lm_eval accuracy scoring in a single pass."""
-    if not args.eval_tasks:
-        raise SystemExit("--eval requires --eval-tasks, e.g. --eval-tasks gsm8k")
+def _parse_eval_config(raw: dict) -> EvalConfig:
+    """Validate the raw --eval dict and return a typed EvalConfig."""
+    backend = raw.get("backend", "lm_eval")
+    if backend not in _VALID_EVAL_BACKENDS:
+        raise SystemExit(
+            f"--eval.backend must be one of {_VALID_EVAL_BACKENDS}, got '{backend}'."
+        )
+    # num_samples is a friendly alias for limit; num_samples wins if both set.
+    raw_limit = raw.get("num_samples", raw.get("limit"))
+    return EvalConfig(
+        backend=backend,
+        tasks=raw.get("tasks"),
+        limit=float(raw_limit) if raw_limit is not None else None,
+        num_samples=(
+            float(raw["num_samples"]) if raw.get("num_samples") is not None else None
+        ),
+        num_fewshot=(
+            int(raw["num_fewshot"]) if raw.get("num_fewshot") is not None else None
+        ),
+        max_tokens=(
+            int(raw["max_tokens"]) if raw.get("max_tokens") is not None else None
+        ),
+        reasoning_effort=raw.get("reasoning_effort"),
+        output=raw.get("output"),
+    )
+
+
+def _run_eval(args: argparse.Namespace, eval_cfg: EvalConfig) -> None:
+    """Dispatch `--eval.*` to the right backend shim."""
+    if not eval_cfg.tasks:
+        raise SystemExit("--eval requires tasks, e.g. --eval.tasks gsm8k")
     if not args.model:
         raise SystemExit("--eval requires --model to be specified explicitly")
 
-    _BACKEND_DEFAULT_ENDPOINT = {
-        "openai-chat": "/v1/chat/completions",
-    }
-    if args.endpoint == "/v1/completions":
-        corrected = _BACKEND_DEFAULT_ENDPOINT.get(args.backend)
-        if corrected:
-            args.endpoint = corrected
-            print(
-                f"[eval] Auto-set --endpoint to {corrected} for {args.backend} backend"
-            )
+    if eval_cfg.backend == "lm_eval":
+        _run_eval_lm_eval(args, eval_cfg)
+    elif eval_cfg.backend == "gpt_oss":
+        _run_eval_gpt_oss(args, eval_cfg)
+    else:
+        raise SystemExit(f"Unknown eval backend: {eval_cfg.backend}")
 
-    if args.backend == "openai-chat":
-        print(
-            "[eval] WARNING: --backend openai-chat uses chat messages. "
-            "lm_eval tasks expect the completions API (--backend openai). "
-            "Accuracy will differ from canonical lm_eval output."
+
+def _run_eval_lm_eval(args: argparse.Namespace, eval_cfg: EvalConfig) -> None:
+    if args.backend != "openai":
+        raise SystemExit(
+            f"--eval.backend lm_eval requires --backend openai (got '{args.backend}')."
         )
 
-    # Preload lm_eval prompts before the benchmark timer starts
-    print("[eval] Preloading lm_eval task prompts ...")
-    requests, instances, task_dict = preload_lm_eval_requests(
-        task_names=args.eval_tasks,
-        model=args.model,
-        limit=args.eval_limit,
-        num_fewshot=getattr(args, "eval_num_fewshot", None),
+    if getattr(args, "temperature", None) is None:
+        args.temperature = 0
+        print("[eval] Auto-set --temperature 0 for greedy decoding")
+
+    args.dataset_name = "lm_eval"
+    args.lm_eval_tasks = eval_cfg.tasks
+    args.lm_eval_num_fewshot = eval_cfg.num_fewshot
+    args.lm_eval_limit = int(eval_cfg.limit) if eval_cfg.limit is not None else None
+    args.lm_eval_max_tokens = eval_cfg.max_tokens
+    # The scorer needs per-request generations, which bench_main strips
+    # from the result unless --save-detailed is set.
+    args.save_detailed = True
+
+    result = bench_main(args)
+    dataset = args._lm_eval_dataset
+    accuracy = score_lm_eval_offline(
+        dataset.instances, dataset.task_dict, result.get("generated_texts", [])
     )
-    print(f"[eval] Loaded {len(requests)} prompts from {args.eval_tasks}")
-    args.num_prompts = len(requests)
+    _write_eval_record(args, eval_cfg, result, accuracy)
 
-    # Collect stop sequences from all instances so multi-task runs
-    # with different stop tokens are handled correctly.
-    if instances:
-        all_stops: set[str] = set()
-        for inst in instances:
-            until = inst.args[1].get("until", [])
-            if isinstance(until, str):
-                all_stops.add(until)
-            else:
-                all_stops.update(until)
-        if all_stops:
-            extra = dict(getattr(args, "extra_body", None) or {})
-            if "stop" not in extra:
-                extra["stop"] = list(all_stops)
-                args.extra_body = extra
 
-    result = bench_main(args, prebuilt_requests=requests)
+def _run_eval_gpt_oss(args: argparse.Namespace, eval_cfg: EvalConfig) -> None:
+    # gpt_oss reasoning evals are chat-shaped and need /v1/chat/completions.
+    # Promote the default openai backend; reject anything else.
+    if args.backend == "openai":
+        args.backend = "openai-chat"
+        args.endpoint = "/v1/chat/completions"
+        print("[eval] Auto-set --backend openai-chat for gpt_oss")
+    elif args.backend != "openai-chat":
+        raise SystemExit(
+            f"--eval.backend gpt_oss requires --backend openai-chat "
+            f"(got '{args.backend}')."
+        )
 
-    generated_texts = result.pop("_lm_eval_generated_texts", [])
-    accuracy = score_lm_eval_offline(instances, task_dict, generated_texts)
+    # Match `python -m gpt_oss.evals` default sampling temperature.
+    if getattr(args, "temperature", None) is None:
+        args.temperature = 1.0
+        print("[eval] Auto-set --temperature 1.0 (gpt_oss default)")
 
-    _write_eval_record(args, result, accuracy)
+    args.dataset_name = "gpt_oss_eval"
+    args.gpt_oss_eval_tasks = eval_cfg.tasks
+    args.gpt_oss_eval_limit = (
+        int(eval_cfg.limit) if eval_cfg.limit is not None else None
+    )
+    args.gpt_oss_eval_max_tokens = eval_cfg.max_tokens
+    args.gpt_oss_eval_reasoning_effort = eval_cfg.reasoning_effort
+    args.save_detailed = True
+
+    result = bench_main(args)
+    dataset = args._gpt_oss_eval_dataset
+    accuracy = score_gpt_oss_offline(
+        dataset.task_evals, dataset.row_index, result.get("generated_texts", [])
+    )
+    _write_eval_record(args, eval_cfg, result, accuracy)
 
 
 def _write_eval_record(
     args: argparse.Namespace,
+    eval_cfg: EvalConfig,
     result: dict,
     accuracy: dict,
 ) -> None:
-    """Write a merged accuracy + performance JSONL record."""
     base_url = (
         args.base_url
         if args.base_url is not None
@@ -111,7 +159,7 @@ def _write_eval_record(
         "metadata": {
             "run_id": str(uuid.uuid4()),
             "model": model,
-            "tasks": args.eval_tasks,
+            "tasks": eval_cfg.tasks,
             "bench_type": "serve",
             "base_url": base_url,
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -120,7 +168,7 @@ def _write_eval_record(
         "performance": result,
         "environment": _collect_environment(),
     }
-    output = args.eval_output or str(
+    output = eval_cfg.output or str(
         Path("./eval_results") / f"{_sanitize_model_name(model)}.jsonl"
     )
     Path(output).parent.mkdir(parents=True, exist_ok=True)

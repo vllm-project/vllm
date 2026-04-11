@@ -77,6 +77,11 @@ class SampleRequest:
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
+    # Per-request payload overrides merged into the request body alongside
+    # any global `extra_body`. Datasets that need per-sample stop
+    # sequences, max_tokens, or seed (e.g. `LMEvalDataset`) populate
+    # this; for normal datasets it stays `None`.
+    extra_body: dict | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -1975,6 +1980,61 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             **hf_kwargs,
         )
 
+    elif args.dataset_name == "lm_eval":
+        # `vllm bench serve --eval.*` desugars to this branch. The eval
+        # CLI shim sets `args.lm_eval_tasks` etc. and stashes the
+        # constructed dataset onto `args._lm_eval_dataset` so it can
+        # call `score_lm_eval_offline` after the benchmark run.
+        dataset = LMEvalDataset(
+            tasks=args.lm_eval_tasks,
+            model=args.model,
+            num_fewshot=args.lm_eval_num_fewshot,
+            limit=args.lm_eval_limit,
+            max_tokens=getattr(args, "lm_eval_max_tokens", None),
+            # `args.seed` is the bench-serve seed knob. lm_eval's
+            # `--seed N` expands to `N,N,N,N` (python,numpy,torch,
+            # fewshot), so passing `args.seed` here is the analog of
+            # invoking `lm_eval --seed <args.seed>`.
+            fewshot_seed=int(args.seed) if args.seed is not None else 0,
+            random_seed=args.seed,
+        )
+        input_requests = dataset.sample(
+            tokenizer=tokenizer,
+            num_requests=args.num_prompts,
+            request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
+        )
+        args._lm_eval_dataset = dataset
+        # The lm_eval task drives the actual request count, not the
+        # generic `--num-prompts` default. Sync `args.num_prompts`
+        # with the real value so the result JSON metadata matches the
+        # workload that ran (and any downstream logic that reads
+        # `args.num_prompts`, like sweeps, sees the truth).
+        args.num_prompts = len(input_requests)
+
+    elif args.dataset_name == "gpt_oss_eval":
+        # `vllm bench serve --eval.backend gpt_oss --eval.*` desugars
+        # here. Sibling to the lm_eval branch above. The eval CLI shim
+        # sets `args.gpt_oss_eval_*` and stashes the dataset back onto
+        # `args._gpt_oss_eval_dataset` so it can call
+        # `score_gpt_oss_offline` after the benchmark returns.
+        dataset = GptOssEvalDataset(
+            tasks=args.gpt_oss_eval_tasks,
+            model=args.model,
+            limit=args.gpt_oss_eval_limit,
+            max_tokens=getattr(args, "gpt_oss_eval_max_tokens", None),
+            reasoning_effort=getattr(args, "gpt_oss_eval_reasoning_effort", None),
+            random_seed=args.seed,
+        )
+        input_requests = dataset.sample(
+            tokenizer=tokenizer,
+            num_requests=args.num_prompts,
+            request_id_prefix=args.request_id_prefix,
+            no_oversample=args.no_oversample,
+        )
+        args._gpt_oss_eval_dataset = dataset
+        args.num_prompts = len(input_requests)
+
     else:
         # For datasets that follow a similar structure, use a mapping.
         dataset_mapping = {
@@ -2343,6 +2403,395 @@ class SpecBench(CustomDataset):
     def sample(self, **kwargs) -> list:
         # leverage CustomDataset sample
         return super().sample(**kwargs)
+
+
+# -----------------------------------------------------------------------------
+# LM-Eval Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class LMEvalDataset(BenchmarkDataset):
+    """A BenchmarkDataset whose samples come from an lm_eval task.
+
+    Builds prompts the same way `lm_eval simple_evaluate` would (same
+    few-shot template, same `until` stop sequences, same `max_gen_toks`
+    default, same per-request seed) and emits `SampleRequest` objects
+    with a per-sample `extra_body` so the bench serve request loop sends
+    the payload that lm_eval's `LocalCompletionsAPI._create_payload`
+    would.
+
+    The class also retains the lm_eval `Instance` objects and
+    `task_dict` so the eval shim can call `score_lm_eval_offline`
+    after the benchmark run completes.
+    """
+
+    # lm_eval's TemplateAPI default. Tasks may override per-instance via
+    # `gen_kwargs["max_gen_toks"]`.
+    DEFAULT_MAX_GEN_TOKS = 256
+    # lm_eval's LocalCompletionsAPI hardcodes this in _create_payload.
+    LM_EVAL_REQUEST_SEED = 1234
+
+    def __init__(
+        self,
+        tasks: str,
+        model: str,
+        num_fewshot: int | None = None,
+        limit: int | None = None,
+        max_tokens: int | None = None,
+        fewshot_seed: int | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        if not tasks:
+            raise ValueError("LMEvalDataset requires non-empty 'tasks'")
+        self.tasks = tasks
+        self.model = model
+        self.num_fewshot = num_fewshot
+        self.limit = limit
+        # Optional override that caps the per-request `max_tokens` sent
+        # to the server. lm_eval supports the same thing via
+        # `gen_kwargs["max_tokens"]` (see LocalCompletionsAPI._create_payload),
+        # so passing this is faithful to a real lm_eval run started with
+        # `--gen_kwargs max_tokens=N`. Set `None` to honor whatever
+        # the task itself specifies.
+        self.max_tokens_override = max_tokens
+        # Seed for the few-shot example sampler. lm_eval's
+        # `--seed python,numpy,torch,fewshot` uses a default of 1234
+        # for the fewshot slot but a single-int `--seed N` expands to
+        # `N,N,N,N`. We mirror that by defaulting to 0 (to match
+        # `--seed 0`) when not specified, and we ALWAYS call
+        # `set_fewshot_seed` with an explicit value so the few-shot
+        # examples are reproducible across runs of this dataset.
+        self.fewshot_seed = fewshot_seed if fewshot_seed is not None else 0
+        # Populated by `sample()` so the eval scorer can read them
+        # without rebuilding the lm_eval task pipeline a second time.
+        self.instances: list[Any] = []
+        self.task_dict: dict = {}
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        from lm_eval import tasks as lm_tasks
+        from lm_eval.models.utils import handle_stop_sequences
+
+        # Resolve EOS string the same way lm_eval's TemplateAPI does, so
+        # we always append it to the per-request stop list.
+        eos_str: str | None = getattr(tokenizer, "eos_token", None)
+        if eos_str is None:
+            eos_id = getattr(tokenizer, "eos_token_id", None)
+            if eos_id is not None:
+                eos_str = tokenizer.decode([eos_id])
+
+        self.task_dict = lm_tasks.get_task_dict(self.tasks.split(","))
+
+        sample_requests: list[SampleRequest] = []
+        self.instances = []
+
+        for task_obj in self.task_dict.values():
+            if isinstance(task_obj, tuple):
+                _, task_obj = task_obj
+
+            # set_config must be called BEFORE build_all_requests because
+            # the latter reads `self._config.num_fewshot` rather than
+            # accepting it as an argument.
+            if self.num_fewshot is not None:
+                task_obj.set_config(key="num_fewshot", value=self.num_fewshot)
+            elif task_obj.get_config("num_fewshot") is None:
+                task_obj.set_config(key="num_fewshot", value=0)
+            # Always pass an explicit seed so few-shot example selection
+            # is reproducible. `set_fewshot_seed()` with no arg passes
+            # `seed=None` to `random.Random`, which seeds from the
+            # current time -- i.e. different few-shot prompts every run.
+            task_obj.set_fewshot_seed(seed=self.fewshot_seed)
+
+            int_limit = int(self.limit) if self.limit is not None else None
+            task_obj.build_all_requests(
+                limit=int_limit,
+                rank=0,
+                world_size=1,
+                fewshot_as_multiturn=False,
+            )
+            for instance in task_obj.instances:
+                if instance.request_type != "generate_until":
+                    continue
+                prompt: str = instance.args[0]
+                # Copy gen_kwargs locally so we don't mutate the
+                # task's shared config dict.
+                gen_kwargs: dict = dict(instance.args[1])
+
+                # Match LocalCompletionsAPI._create_payload exactly:
+                # priority is "max_tokens" then "max_gen_toks" then default.
+                # An explicit constructor override (mirrors lm_eval's
+                # `--gen_kwargs max_tokens=N`) wins over both.
+                if self.max_tokens_override is not None:
+                    max_tokens = int(self.max_tokens_override)
+                    gen_kwargs.pop("max_tokens", None)
+                    gen_kwargs.pop("max_gen_toks", None)
+                elif "max_tokens" in gen_kwargs:
+                    max_tokens = int(gen_kwargs.pop("max_tokens"))
+                else:
+                    max_tokens = int(
+                        gen_kwargs.pop("max_gen_toks", self.DEFAULT_MAX_GEN_TOKS)
+                    )
+
+                stop = handle_stop_sequences(gen_kwargs.pop("until", None), eos_str)
+
+                prompt_len = len(tokenizer.encode(prompt))
+                sample_requests.append(
+                    SampleRequest(
+                        prompt=prompt,
+                        prompt_len=prompt_len,
+                        expected_output_len=max_tokens,
+                        request_id=request_id_prefix + str(len(sample_requests)),
+                        extra_body={
+                            "stop": stop,
+                            "max_tokens": max_tokens,
+                            "seed": self.LM_EVAL_REQUEST_SEED,
+                        },
+                    )
+                )
+                self.instances.append(instance)
+
+        # Sort by descending prompt length to mirror lm_eval's
+        # `Collator` (sort_fn=-len). lm_eval does this so the longest
+        # prompts hit the server first, packing prefill batches more
+        # efficiently. Matching the order matters for parity: under
+        # bounded concurrency the request arrival order changes which
+        # requests get batched together on the server, which on FP8
+        # kernels can flip argmax tie-breaks.
+        #
+        # `self.instances` must stay aligned with `sample_requests`
+        # so the offline scorer can pair generations with the right
+        # `Instance`. We sort both lists in lockstep, then rebuild
+        # request_ids so they reflect the new send order.
+        paired = sorted(
+            zip(sample_requests, self.instances),
+            key=lambda pair: -pair[0].prompt_len,
+        )
+        sample_requests = []
+        self.instances = []
+        for new_idx, (req, inst) in enumerate(paired):
+            req.request_id = request_id_prefix + str(new_idx)
+            sample_requests.append(req)
+            self.instances.append(inst)
+
+        # `num_requests` is informational here: lm_eval determines the
+        # actual count via `limit` and the task's test split, so we do
+        # not truncate or oversample.
+        if num_requests and num_requests > 0 and num_requests != len(sample_requests):
+            logger.info(
+                "LMEvalDataset built %d sample requests from task '%s' "
+                "(--num-prompts=%d is informational and was not applied).",
+                len(sample_requests),
+                self.tasks,
+                num_requests,
+            )
+        return sample_requests
+
+
+# -----------------------------------------------------------------------------
+# GPT-OSS Eval Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class GptOssEvalDataset(BenchmarkDataset):
+    """A BenchmarkDataset whose samples come from a `gpt_oss.evals` task.
+
+    Sibling to `LMEvalDataset` for the gpt-oss reasoning-model harness
+    (gpqa, aime25, basic). Builds prompts the same way `python -m
+    gpt_oss.evals --sampler chat_completions` would: instantiate the
+    eval class, walk its `examples` list, and format each row through
+    the eval's question template. Each `SampleRequest` carries the
+    row index and the eval task name in its `extra_body` so the
+    offline scorer can replay each row's per-sample scoring function
+    against the captured generation.
+
+    Hits `/v1/chat/completions` (the `openai-chat` backend in bench
+    serve), with `reasoning_effort` plumbed through `extra_body`.
+    The reasoning model interprets it the same way the gpt_oss
+    chat-completions sampler would.
+
+    Supported tasks: `gpqa`, `aime25`, `basic`.
+    Unsupported (raises): any `healthbench*` variant — they require a
+    live grader model (GPT-4.1 by default), which can't be replayed
+    offline against captured text.
+    """
+
+    DEFAULT_MAX_TOKENS = 32_768  # gpt_oss reasoning models need room
+
+    # Map of supported eval task name → factory taking `num_examples`
+    # and returning the gpt_oss Eval instance. Healthbench variants are
+    # explicitly absent and rejected at construction time.
+    @staticmethod
+    def _build_gpt_oss_eval(task_name: str, num_examples: int | None):
+        """Construct a gpt_oss Eval instance for `task_name`.
+
+        Reproduces the dispatch in `gpt_oss.evals.__main__.get_evals`
+        but with single-thread defaults (the bench serve request loop
+        owns concurrency, not gpt_oss's threadpool) and `n_repeats=1`
+        when `num_examples` is set, matching the gpt_oss CLI behavior.
+        """
+        from gpt_oss.evals.aime_eval import AIME25Eval
+        from gpt_oss.evals.basic_eval import BasicEval
+        from gpt_oss.evals.gpqa_eval import GPQAEval
+
+        if task_name == "gpqa":
+            return GPQAEval(
+                n_repeats=1 if num_examples else 8,
+                num_examples=num_examples,
+                debug=False,
+                n_threads=1,
+            )
+        if task_name == "aime25":
+            return AIME25Eval(
+                n_repeats=1 if num_examples else 4,
+                num_examples=num_examples,
+                n_threads=1,
+            )
+        if task_name == "basic":
+            return BasicEval()
+        if task_name.startswith("healthbench"):
+            # TODO: healthbench scoring requires sending each generation
+            # to a *grader* model (GPT-4.1 over the public OpenAI API by
+            # default) in the middle of scoring. That can't be replayed
+            # offline from captured text against a single endpoint, so
+            # it doesn't fit the LMEvalDataset/GptOssEvalDataset model.
+            # Supporting it would require a second post-loop pass that
+            # makes live grader calls.
+            raise NotImplementedError(
+                f"gpt_oss task '{task_name}' is not supported by "
+                "vllm bench serve --eval.backend gpt_oss because it "
+                "requires a live grader model during scoring. Run it "
+                "directly via `python -m gpt_oss.evals --eval "
+                f"{task_name}` against a vllm serve instance instead."
+            )
+        raise ValueError(
+            f"Unknown gpt_oss task '{task_name}'. Supported: gpqa, aime25, basic."
+        )
+
+    def __init__(
+        self,
+        tasks: str,
+        model: str,
+        limit: int | None = None,
+        max_tokens: int | None = None,
+        reasoning_effort: str | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        if not tasks:
+            raise ValueError("GptOssEvalDataset requires non-empty 'tasks'")
+        self.tasks = tasks
+        self.model = model
+        self.limit = limit
+        self.max_tokens_override = max_tokens
+        self.reasoning_effort = reasoning_effort
+        # Populated by `sample()`: `task_evals[task_name]` is the
+        # gpt_oss `Eval` instance whose `examples` produced the
+        # corresponding `SampleRequest` rows. Used by
+        # `score_gpt_oss_offline` to replay scoring against captured
+        # generations.
+        self.task_evals: dict[str, Any] = {}
+        # Parallel to the returned sample_requests: each entry is a
+        # `(task_name, row_index)` tuple identifying which row of which
+        # eval the captured generation belongs to.
+        self.row_index: list[tuple[str, int]] = []
+
+    def _format_prompt(self, task_name: str, row: dict) -> str:
+        """Reproduce the prompt formatting that the gpt_oss eval's own
+        `__call__` would use, without invoking it (since invoking it
+        would require a live sampler)."""
+        if task_name == "gpqa":
+            from gpt_oss.evals.gpqa_eval import format_multichoice_question
+
+            choices = [
+                row["Correct Answer"],
+                row["Incorrect Answer 1"],
+                row["Incorrect Answer 2"],
+                row["Incorrect Answer 3"],
+            ]
+            choices = [choices[i] for i in row["permutation"]]
+            choices_dict = dict(
+                A=choices[0],
+                B=choices[1],
+                C=choices[2],
+                D=choices[3],
+                Question=row["Question"],
+            )
+            return format_multichoice_question(choices_dict)
+        if task_name == "aime25":
+            from gpt_oss.evals.aime_eval import format_aime_question
+
+            return format_aime_question(row)
+        if task_name == "basic":
+            return row["question"]
+        raise ValueError(f"Unknown gpt_oss task '{task_name}'")
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        max_tokens = self.max_tokens_override or self.DEFAULT_MAX_TOKENS
+        # `extra_body` per request: tells the chat completions endpoint
+        # to use the chosen reasoning effort. The vLLM server interprets
+        # this when running gpt-oss reasoning models.
+        per_req_extra: dict[str, Any] = {"max_tokens": max_tokens}
+        if self.reasoning_effort:
+            per_req_extra["reasoning_effort"] = self.reasoning_effort
+
+        sample_requests: list[SampleRequest] = []
+        self.task_evals = {}
+        self.row_index = []
+
+        num_examples = int(self.limit) if self.limit is not None else None
+        for task_name in self.tasks.split(","):
+            task_name = task_name.strip()
+            eval_obj = self._build_gpt_oss_eval(task_name, num_examples)
+            self.task_evals[task_name] = eval_obj
+
+            for row_idx, row in enumerate(eval_obj.examples):
+                prompt = self._format_prompt(task_name, row)
+                # `CustomDataset` and friends apply the chat template
+                # at sample time; `LMEvalDataset` doesn't because lm_eval
+                # builds raw few-shot completions. gpt_oss expects a
+                # chat-style request, so we wrap each prompt as a
+                # single-user-turn chat conversation here. The
+                # `openai-chat` backend will pass it through as-is.
+                wrapped = tokenizer.apply_chat_template(
+                    [{"role": "user", "content": prompt}],
+                    add_generation_prompt=True,
+                    tokenize=False,
+                )
+                prompt_len = len(tokenizer.encode(wrapped))
+                sample_requests.append(
+                    SampleRequest(
+                        prompt=wrapped,
+                        prompt_len=prompt_len,
+                        expected_output_len=max_tokens,
+                        request_id=request_id_prefix + str(len(sample_requests)),
+                        extra_body=dict(per_req_extra),
+                    )
+                )
+                self.row_index.append((task_name, row_idx))
+
+        if num_requests and num_requests > 0 and num_requests != len(sample_requests):
+            logger.info(
+                "GptOssEvalDataset built %d sample requests from task '%s' "
+                "(--num-prompts=%d is informational and was not applied).",
+                len(sample_requests),
+                self.tasks,
+                num_requests,
+            )
+        return sample_requests
 
 
 # -----------------------------------------------------------------------------
@@ -2753,9 +3202,11 @@ class MMVUDataset(HuggingFaceDataset):
 
     DEFAULT_OUTPUT_LEN = 128
     SUPPORTED_DATASET_PATHS = {
-        "yale-nlp/MMVU": lambda x: x["question"]
-        + " "
-        + (" ".join(f"{k}.{v}" for k, v in x["choices"].items())),
+        "yale-nlp/MMVU": lambda x: (
+            x["question"]
+            + " "
+            + (" ".join(f"{k}.{v}" for k, v in x["choices"].items()))
+        ),
     }
 
     def __init__(self, **kwargs) -> None:
