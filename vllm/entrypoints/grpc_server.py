@@ -156,7 +156,7 @@ async def serve_grpc(args: argparse.Namespace):
             stats_task.cancel()
         try:
             health_servicer.set_not_serving()
-        except Exception:
+        except Exception:  # broad: must not prevent server.stop() / shutdown()
             logger.warning("Failed to set health status to NOT_SERVING",
                            exc_info=True)
         await server.stop(grace=5.0)
