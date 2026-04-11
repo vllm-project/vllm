@@ -134,6 +134,8 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
+    fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
+    """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
