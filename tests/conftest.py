@@ -1684,3 +1684,44 @@ def disable_log_dedup(monkeypatch):
     logger._print_warning_once = original_print_warning_once
     logger._print_info_once = original_print_info_once
     logger._print_debug_once = original_print_debug_once
+
+
+@pytest.fixture(scope="function")
+def fake_vllm_ir(monkeypatch):
+    """
+    Pytest fixture to allow isolated IR op registration in tests.
+
+    Replaces IrOp.registry with an empty dict and vllm_ir_torch_lib with a
+    fresh Library fragment for the duration of the test. monkeypatch restores
+    both automatically on teardown, ensuring full isolation without any manual
+    cleanup.
+
+    The test Library is kept alive by this fixture until after monkeypatch
+    teardown completes, preventing the GC from freeing PyTorch's C++ state
+    while it is still in use.
+
+    Usage:
+        def test_my_ir_op(fake_vllm_ir):
+            @vllm.ir.register_op
+            def my_test_op(x: torch.Tensor) -> torch.Tensor:
+                return x * 2
+
+            result = my_test_op(torch.tensor([1, 2, 3]))
+            # Registry and library cleaned up automatically after the test
+    """
+    from torch.library import Library
+    from vllm.ir.op import IrOp
+
+    monkeypatch.setattr(IrOp, "registry", {})
+
+    # Keep a local reference so the Library is not GC'd before monkeypatch
+    # teardown restores the original reference. If the fragment were destroyed
+    # mid-test, PyTorch's C++ op registry would be left in a corrupt state,
+    # causing a segfault when the next test tries to define the same op name.
+    test_lib = Library("vllm_ir", "FRAGMENT")
+    monkeypatch.setattr("vllm.ir.op.vllm_ir_torch_lib", test_lib)
+
+    yield
+
+    # Hold test_lib alive until here so it outlives the monkeypatch undo.
+    del test_lib

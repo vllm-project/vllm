@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
 import inspect
+import traceback
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar, Literal, overload
 
+import regex as re
 import torch
 from torch.library import Library, infer_schema
 
@@ -16,12 +18,25 @@ from vllm.logging_utils import lazy, tensors_str_no_data
 
 InputGenerator = Callable[..., tuple[Any, ...]]
 
-vllm_ir_lib = Library("vllm_ir", "FRAGMENT")
+vllm_ir_torch_lib = Library("vllm_ir", "FRAGMENT")
 
 logger = init_logger(__name__)
 
+_NAME_PATTERN = re.compile(r"^[a-z_][a-z_0-9]*$")
+
 RESERVED_PROVIDERS = ["native", "unfused"]
 """Providers that are reserved and cannot be used for custom implementations."""
+
+
+def _validate_name(name: str, entity_type: str) -> None:
+    """Validate that a name matches the required pattern `[a-z_][a-z_0-9]*`."""
+    if not _NAME_PATTERN.match(name):
+        raise ValueError(
+            f"{entity_type} name '{name}' is invalid. "
+            f"Names must start with a letter or underscore, "
+            f"followed by lowercase letters, underscores, or digits only."
+        )
+
 
 _ENABLE_TORCH_WRAP: bool = True
 """Global override flag to control torch op layer wrapping."""
@@ -100,11 +115,14 @@ def register_op(
 
     def decorator(_f: Callable):
         op_name: str = _f.__name__ if name is None else name
-        assert op_name not in IrOp.registry
+        _validate_name(op_name, "Op")
+        assert op_name not in IrOp.registry, f"Op '{op_name}' is already registered."
+        # Slice out the decorator function frames from the stack
+        stack = traceback.format_stack()[:-2]
         if allow_inplace:
-            op: IrOp = IrOpInplace(op_name, _f, activations)
+            op: IrOp = IrOpInplace(op_name, _f, activations, stack)
         else:
-            op = IrOp(op_name, _f, activations)
+            op = IrOp(op_name, _f, activations, stack)
         IrOp.registry[op_name] = op
         return op
 
@@ -126,6 +144,7 @@ class IrOp:
         name: str,
         native_impl: Callable,
         activations: list[str] | None = None,
+        registration_stack: list[str] | None = None,
     ):
         self._py_signature = inspect.signature(native_impl)
         if any(
@@ -146,6 +165,9 @@ class IrOp:
             ]
 
         self.name = name
+        self._native_impl = native_impl
+        self._docstring = inspect.getdoc(native_impl) or ""
+        self._registration_stack = registration_stack or []
         self.impls: dict[str, IrOpImpl] = {}
         self.activations = activations
         self.activation_indices = [
@@ -166,6 +188,7 @@ class IrOp:
             # always supported
             supported=True,
             supports_args=None,
+            registration_stack=self._registration_stack,
         )
 
         # By default, fake routes directly to native,
@@ -173,13 +196,13 @@ class IrOp:
         self._fake_fn = native_impl
 
         # torch registration
-        vllm_ir_lib.define(self.name + self._schema_str)
+        vllm_ir_torch_lib.define(self.name + self._schema_str)
         # CompositeExplicitAutograd is not decomposed
         # by ATen IR normalization in AOTAutograd
-        vllm_ir_lib.impl(
+        vllm_ir_torch_lib.impl(
             self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
         )
-        vllm_ir_lib._register_fake(self.name, self._fake_call)
+        vllm_ir_torch_lib._register_fake(self.name, self._fake_call)
         assert hasattr(torch.ops.vllm_ir, name)
         self.torch_op: torch._ops.OpOverload = getattr(torch.ops.vllm_ir, name).default
 
@@ -237,9 +260,12 @@ class IrOp:
         assert provider not in RESERVED_PROVIDERS, (
             f"Provider name {provider} is reserved."
         )
+        _validate_name(provider, "Provider")
 
         def _register_impl(f: Callable):
-            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace)
+            # Slice out the decorator function from the stack
+            stack = traceback.format_stack()[:-1]
+            impl = IrOpImpl(self, provider, f, supported, supports_args, inplace, stack)
             self.impls[provider] = impl
 
             if self.get_priority():
@@ -322,6 +348,17 @@ class IrOp:
             return self._inner_call(*args, **kwargs)
 
         return self.torch_op(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        """Return unambiguous string representation."""
+        return f"IrOp('{self.name}')"
+
+    def __str__(self) -> str:
+        """Return human-readable string representation using docstring."""
+        if not self._docstring:
+            return f"IrOp('{self.name}')"
+        first_line = self._docstring.split("\n")[0].strip()
+        return f"IrOp('{self.name}') - {first_line}"
 
     def get_priority(self) -> list[str]:
         """Get the current dispatch priority for implementations for this op."""
@@ -419,8 +456,9 @@ class IrOpInplace(IrOp):
         name: str,
         native_impl: Callable,
         activations: list[str] | None = None,
+        registration_stack: list[str] | None = None,
     ):
-        super().__init__(name, native_impl, activations)
+        super().__init__(name, native_impl, activations, registration_stack)
 
         # Create the inplace overload
         self.maybe_inplace = IrOpInplaceOverload(self)
@@ -446,12 +484,12 @@ class IrOpInplaceOverload:
         )
 
         # torch registration
-        vllm_ir_lib.define(self.name + self._schema_str)
-        vllm_ir_lib.impl(
+        vllm_ir_torch_lib.define(self.name + self._schema_str)
+        vllm_ir_torch_lib.impl(
             self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
         )
         # fake goes to default overload for now
-        vllm_ir_lib._register_fake(self.name, self.op._fake_call)
+        vllm_ir_torch_lib._register_fake(self.name, self.op._fake_call)
 
         assert hasattr(getattr(torch.ops.vllm_ir, self.op.name), "maybe_inplace")
         self.torch_op = getattr(torch.ops.vllm_ir, self.op.name).maybe_inplace
@@ -477,12 +515,15 @@ class IrOpImpl:
         supported: bool,
         supports_args: Callable[..., bool] | None,
         inplace: bool = False,
+        registration_stack: list[str] | None = None,
     ):
         assert provider not in op.impls, (
             f"Implementation for provider {provider} already registered."
         )
         # Native also uses this path, so we allow it here.
-        assert provider == "native" or provider not in RESERVED_PROVIDERS
+        assert provider == "native" or provider not in RESERVED_PROVIDERS, (
+            f"Provider name {provider} is reserved."
+        )
 
         # Enforce the exact same schema as the native implementation.
         # This takes care of names, types, and defaults.
@@ -547,6 +588,7 @@ class IrOpImpl:
         self.supported = supported
         self._supports_args = supports_args
         self.inplace = inplace
+        self._registration_stack = registration_stack or []
 
     @property
     def supports_all_args(self) -> bool:
