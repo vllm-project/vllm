@@ -320,20 +320,25 @@ jobs:
           script: |
             // Configuration: Map labels to GitHub users to CC
             // You can add multiple users per label, and multiple label configurations
+            // {users} will be replaced with @mentions
             const ccConfig = {
               rocm: {
-                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],  // Add more users as needed: ['user1', 'user2', 'user3']
-                message: 'CC {users} for ROCm-related issue'  // {users} will be replaced with @mentions
+                users: ['hongxiayang', 'tjtanaa', 'vllmellm'],
+                message: 'CC {users} for ROCm-related issue',
+              },
+              mistral: {
+                users: ['patrickvonplaten', 'juliendenize', 'andylolu2'],
+                message: 'CC {users} for Mistral-related issue',
               },
               // Add more label -> user mappings here
               // Example:
               // cuda: {
               //   users: ['user1', 'user2'],
-              //   message: 'CC {users} for CUDA-related issue'
+              //   message: 'CC {users} for CUDA-related issue',
               // },
               // performance: {
               //   users: ['perfexpert'],
-              //   message: 'CC {users} for performance issue'
+              //   message: 'CC {users} for performance issue',
               // },
             };
             
