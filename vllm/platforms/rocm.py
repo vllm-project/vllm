@@ -181,6 +181,7 @@ def _get_gcn_arch() -> str:
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
 
+@cache
 def _gcn_arch_contains(*gfx_names: str) -> bool:
     gcn_arch = _get_gcn_arch()
     return any(gfx_name in gcn_arch for gfx_name in gfx_names)
