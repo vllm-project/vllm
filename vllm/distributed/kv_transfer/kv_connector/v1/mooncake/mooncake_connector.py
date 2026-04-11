@@ -41,6 +41,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
@@ -645,6 +646,10 @@ class MooncakeConnectorWorker:
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
+        # may change the current CUDA device during engine.initialize().
+        self.device_id = torch.accelerator.current_device_index()
+        current_platform.set_device(self.device_id)
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
@@ -1200,6 +1205,11 @@ class MooncakeConnectorWorker:
         dst_ptrs: list[int],
         lengths: list[int],
     ) -> int:
+        # This method runs on a ThreadPoolExecutor thread. CUDA device
+        # selection is thread-local, so a pool thread defaults to device 0
+        # unless explicitly rebound. Without this, NVLink transfers fail for
+        # TP ranks > 0 because CUDA IPC ops run under the wrong device context.
+        current_platform.set_device(self.device_id)
         start_time = time.perf_counter()
         ret_value = self.engine.batch_transfer_sync_write(
             remote_session, src_ptrs, dst_ptrs, lengths
