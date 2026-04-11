@@ -104,7 +104,6 @@ pytest -v -s {{ matched_targets | join(' ') }}
        --tag {{ docker_image_amd }}
        -f docker/Dockerfile.rocm
        --target test
-       --no-cache
        --progress plain .
      - "docker push {{ docker_image_amd }}"
      key: "amd-build"
@@ -123,18 +122,9 @@ pytest -v -s {{ matched_targets | join(' ') }}
      agents:
        queue: amd-cpu
 
-   {% set concurrency_limits = {
-     "1gpu": 2,
-     "2gpu": 2,
-     "4gpu": 2,
-     "8gpu": 2,
-     "cpu": 2,
-   } %}
-
    {% for step in steps %}
    {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
 
-   {% set rc = step.resource_class | default("cpu" if step.no_gpu | default(false) else "1gpu") %}
    - label: "{{ step.agent_pool }}: {{ step.label }}"
      depends_on: amd-build
      agents:
@@ -146,8 +136,6 @@ pytest -v -s {{ matched_targets | join(' ') }}
      {% if step.resource_class %}
        resource_class: {{ step.resource_class }}
      {% endif %}
-     concurrency: {{ concurrency_limits[rc] | default(2) }}
-     concurrency_group: "rocm/mi250-{{ rc }}"
      command: bash .buildkite/scripts/hardware_ci/run-amd-test.sh
      env:
        DOCKER_BUILDKIT: "1"
