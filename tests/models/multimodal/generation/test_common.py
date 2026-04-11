@@ -820,7 +820,12 @@ VLM_TEST_SETTINGS = {
             pytest.mark.skipif(
                 Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
                 reason="This model is broken in Transformers v4.57.3",
-            )
+            ),
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+                reason="Model's custom code uses ROPE_INIT_FUNCTIONS"
+                "['default'] which was removed in transformers v5",
+            ),
         ],
     ),
     "phi3v": VLMTestInfo(
