@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pytest
 from importlib.metadata import version
+
+import pytest
 from packaging.version import Version
 
 import vllm
@@ -66,7 +67,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
 
 
 @pytest.mark.skipif(
-    _TRANSFORMERS_VERSION >= Version("5.0"),
+    Version("5.0") <= _TRANSFORMERS_VERSION,
     reason=_SKIP_REASON,
 )
 def test_minicpmv_lora(minicpmv_lora_files):
@@ -90,7 +91,7 @@ def test_minicpmv_lora(minicpmv_lora_files):
 
 
 @pytest.mark.skipif(
-    _TRANSFORMERS_VERSION >= Version("5.0"),
+    Version("5.0") <= _TRANSFORMERS_VERSION,
     reason=_SKIP_REASON,
 )
 @pytest.mark.skipif(
@@ -114,7 +115,7 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
 
 
 @pytest.mark.skipif(
-    _TRANSFORMERS_VERSION >= Version("5.0"),
+    Version("5.0") <= _TRANSFORMERS_VERSION,
     reason=_SKIP_REASON,
 )
 @pytest.mark.skipif(
