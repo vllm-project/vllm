@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 import torch
 
+from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -11,7 +12,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
-    Mxfp8LinearOp,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -35,7 +35,7 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
     """
 
     def __init__(self):
-        self.mxfp8_linear = Mxfp8LinearOp()
+        self.kernel = init_mxfp8_linear_kernel()
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -81,7 +81,7 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        self.mxfp8_linear.process_weights(layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -89,13 +89,4 @@ class CompressedTensorsW8A8Mxfp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.mxfp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=layer.params_dtype,
-            bias=bias,
-            workspace=getattr(layer, "workspace", None),
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-        )
+        return self.kernel.apply_weights(layer, x, bias)
