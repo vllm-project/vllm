@@ -643,19 +643,23 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             )
 
         if "input_features" in processed_outputs:
-            # Keep padded features for batched audio tower execution.
-            processed_outputs["input_features_padded"] = processed_outputs[
-                "input_features"
-            ]
-            # Unpad per-item so each item's cache entry is self-contained.
+            # Unpad per-item so each item's cache entry is
+            # self-contained. The batched() field config in
+            # _get_mm_fields_config will re-pad all fields to the
+            # batch's max length at batch time, ensuring consistent
+            # padding regardless of cache history.
+            masks = processed_outputs["input_features_mask"]
             unpadded_features = [
                 f[mask]
                 for f, mask in zip(
                     processed_outputs["input_features"],
-                    processed_outputs["input_features_mask"],
+                    masks,
                 )
             ]
+            unpadded_masks = [mask[mask] for mask in masks]
             processed_outputs["input_features"] = unpadded_features
+            processed_outputs["input_features_padded"] = unpadded_features
+            processed_outputs["input_features_mask"] = unpadded_masks
 
         # Merge video outputs into the final result
         combined_outputs = dict(processed_outputs, **video_outputs)
