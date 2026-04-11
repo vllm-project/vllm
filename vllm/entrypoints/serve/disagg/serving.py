@@ -3,6 +3,7 @@
 
 
 import asyncio
+import io
 import time
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
@@ -232,13 +233,12 @@ class ServingTokens(OpenAIServing):
                 logprobs = None
 
             routed_experts_b64 = None
-            routed_experts_shape = None
-            routed_experts_dtype = None
             if output.routed_experts is not None:
-                arr = np.ascontiguousarray(output.routed_experts)
-                routed_experts_b64 = base64.b64encode(arr.tobytes()).decode("ascii")
-                routed_experts_shape = list(arr.shape)
-                routed_experts_dtype = str(arr.dtype)
+                buf = io.BytesIO()
+                np.save(buf, output.routed_experts)
+                routed_experts_b64 = base64.b64encode(
+                    buf.getvalue()
+                ).decode("ascii")
 
             choice_data = GenerateResponseChoice(
                 index=output.index,
@@ -246,8 +246,6 @@ class ServingTokens(OpenAIServing):
                 finish_reason=output.finish_reason if output.finish_reason else "stop",
                 token_ids=as_list(output.token_ids),
                 routed_experts=routed_experts_b64,
-                routed_experts_shape=routed_experts_shape,
-                routed_experts_dtype=routed_experts_dtype,
             )
 
             choices.append(choice_data)
