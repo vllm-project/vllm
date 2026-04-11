@@ -149,10 +149,13 @@ impl ClientInner {
     /// Resolve one utility output to the waiting caller. Returns `true` if a waiting caller
     /// existed.
     pub fn resolve_utility_output(&self, output: UtilityOutput) -> bool {
-        let Some(sender) = self.utility_reg.lock().resolve(output.clone()) else {
-            return false;
-        };
-        sender.send(Ok(output)).is_ok()
+        match self.utility_reg.lock().resolve(&output.call_id) {
+            Some(sender) => {
+                sender.send(Ok(output)).unwrap_or_default();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Send the given message to the engine. The request should be first registered via
@@ -335,7 +338,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                         warn!(
                             call_id,
                             engine_index = utility.engine_index,
-                            "dropping output for inactive utility call"
+                            "dropping output for unexpected utility call"
                         );
                     }
                 }

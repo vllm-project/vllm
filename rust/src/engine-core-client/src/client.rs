@@ -510,7 +510,8 @@ impl EngineCoreClient {
                 EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
 
             // Return error immediately once we fail to send to any engine.
-            // TODO: this operation is not atomic.
+            // TODO: clean up registry record if the send fails
+            // TODO: send these in parallel
             self.inner
                 .send_to_engine(&engine.engine_id, EngineCoreRequestType::Utility, &request)
                 .await?;

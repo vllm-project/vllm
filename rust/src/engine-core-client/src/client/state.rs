@@ -298,8 +298,8 @@ impl UtilityRegistry {
     }
 
     /// Resolve a utility output to its waiting receiver.
-    pub fn resolve(&mut self, output: UtilityOutput) -> Option<UtilitySender> {
-        self.utility_calls.remove(&output.call_id)
+    pub fn resolve(&mut self, call_id: &i64) -> Option<UtilitySender> {
+        self.utility_calls.remove(call_id)
     }
 
     /// Mark the registry as closed, detach and return all tracked senders.
@@ -329,7 +329,7 @@ mod tests {
     use super::{EngineRoutingState, RequestRegistry, UtilityRegistry};
     use crate::EngineId;
     use crate::client::state::EngineLoadSnapshot;
-    use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput, UtilityOutput};
+    use crate::protocol::{EngineCoreFinishReason, EngineCoreOutput};
     use crate::transport::ConnectedEngine;
 
     #[test]
@@ -595,15 +595,7 @@ mod tests {
         assert_eq!(call_id_2, 2);
         assert!(registry.contains(1));
         assert!(registry.contains(2));
-        assert!(
-            registry
-                .resolve(UtilityOutput {
-                    call_id: 1,
-                    failure_message: None,
-                    result: None,
-                })
-                .is_some()
-        );
+        assert!(registry.resolve(&1).is_some());
         assert!(!registry.contains(1));
         assert!(registry.contains(2));
     }
