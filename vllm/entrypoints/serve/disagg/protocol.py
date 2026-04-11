@@ -160,6 +160,12 @@ class GenerateResponseChoice(BaseModel):
     # per OpenAI spec this is the default
     finish_reason: str | None = "stop"
     token_ids: list[int] | None = None
+    # Expert routing decisions, base64-encoded numpy array.
+    # Shape: (num_tokens, num_layers, num_experts_per_tok), dtype uint8/int32.
+    # Decode: np.frombuffer(base64.b64decode(s), dtype=...).reshape(shape)
+    routed_experts: str | None = None
+    routed_experts_shape: list[int] | None = None
+    routed_experts_dtype: str | None = None
 
 
 class GenerateResponseStreamChoice(BaseModel):
