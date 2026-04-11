@@ -132,7 +132,7 @@ class NCCLWeightTransferEngine(
 
         # Calculate the global rank in the trainer-worker process group
         # Must account for data parallel to get unique ranks across all workers
-        dp_rank = self.parallel_config.data_parallel_rank
+        dp_rank = self.parallel_config.data_parallel_index
         world_size_per_dp = self.parallel_config.world_size  # TP * PP
         rank_within_dp = self.parallel_config.rank
 
@@ -140,13 +140,14 @@ class NCCLWeightTransferEngine(
         worker_rank = dp_rank * world_size_per_dp + rank_within_dp
         rank = worker_rank + init_info.rank_offset
         # Create stateless process group
+        device = torch.accelerator.current_device_index()
         self.model_update_group = (
             NCCLWeightTransferEngine._stateless_init_process_group(
                 init_info.master_address,
                 init_info.master_port,
                 rank,
                 init_info.world_size,
-                torch.cuda.current_device(),
+                device=device,
             )
         )
 
@@ -275,7 +276,7 @@ class NCCLWeightTransferEngine(
         Initialize NCCL process group for trainer-side weight transfer.
 
         The trainer is always rank 0 in the process group. Uses the current
-        CUDA device (torch.cuda.current_device()).
+        CUDA device (torch.accelerator.current_device_index()).
 
         Args:
             init_info: Either an NCCLWeightTransferInitInfo object or a dict with keys:
@@ -309,8 +310,13 @@ class NCCLWeightTransferEngine(
             world_size = init_info.world_size
 
         # Trainer is always rank 0
+        device = torch.accelerator.current_device_index()
         return NCCLWeightTransferEngine._stateless_init_process_group(
-            master_address, master_port, 0, world_size, torch.cuda.current_device()
+            master_address,
+            master_port,
+            0,
+            world_size,
+            device,
         )
 
     @staticmethod

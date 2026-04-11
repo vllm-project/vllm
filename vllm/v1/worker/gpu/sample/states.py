@@ -64,7 +64,7 @@ class SamplingStates:
     def apply_temperature(
         self,
         logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> None:
         temp_np = self.temperature.np[idx_mapping_np]
@@ -72,23 +72,23 @@ class SamplingStates:
             # No request requires temperature. Skip the kernel launch.
             return
 
-        apply_temperature(logits, idx_mapping, self.temperature.gpu)
+        apply_temperature(logits, expanded_idx_mapping, self.temperature.gpu)
 
     def apply_min_p(
         self,
         logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> None:
         if np.all(self.min_p.np[idx_mapping_np] == 0.0):
             # No request uses min_p. Skip the kernel launch.
             return
-        apply_min_p(logits, idx_mapping, self.min_p.gpu)
+        apply_min_p(logits, expanded_idx_mapping, self.min_p.gpu)
 
     def apply_top_k_top_p(
         self,
         logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
+        expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
     ) -> torch.Tensor:
         do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
@@ -96,8 +96,8 @@ class SamplingStates:
         if not (do_top_k or do_top_p):
             return logits
 
-        top_k = self.top_k.gpu[idx_mapping] if do_top_k else None
-        top_p = self.top_p.gpu[idx_mapping] if do_top_p else None
+        top_k = self.top_k.gpu[expanded_idx_mapping] if do_top_k else None
+        top_p = self.top_p.gpu[expanded_idx_mapping] if do_top_p else None
         return apply_top_k_top_p(logits, top_k, top_p)
 
     def max_num_logprobs(self, idx_mapping_np: np.ndarray) -> int:

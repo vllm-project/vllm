@@ -24,7 +24,7 @@ if command -v rocm-smi &> /dev/null || [[ -d /opt/rocm ]] || [[ -n "${ROCM_PATH:
   BACKENDS=("allgather_reducescatter")
   # Disable MOE padding for ROCm since it is causing eplb to fail
   export VLLM_ROCM_MOE_PADDING=0
-  PLATFORM_ARGS=("--no-async-scheduling")
+  PLATFORM_ARGS=("--no-async-scheduling" "--attention-backend=TRITON_ATTN")
   echo "Disabled async scheduling for ROCm platform due to issues with spec decode."
 else
   # Non-ROCm platform (CUDA/other)

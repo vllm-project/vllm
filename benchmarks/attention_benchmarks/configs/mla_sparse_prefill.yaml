@@ -1,0 +1,62 @@
+# MLA prefill-only benchmark configuration for sparse backends
+
+model:
+  name: "deepseek-v3"
+  num_layers: 60
+  num_q_heads: 128
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+
+# Model parameter sweep: simulate tensor parallelism by varying num_q_heads
+# TP=1: 128 heads, TP=2: 64 heads, TP=4: 32 heads, TP=8: 16 heads
+model_parameter_sweep:
+  param_name: "num_q_heads"
+  values: [128, 64, 32, 16]
+  label_format: "{backend}_{value}h"
+
+batch_specs:
+  # Pure prefill
+  - "1q512"
+  - "1q1k"
+  - "1q2k"
+  - "1q4k"
+  - "1q8k"
+
+  # Batched pure prefill
+  - "2q512"
+  - "2q1k"
+  - "2q2k"
+  - "2q4k"
+  - "2q8k"
+  - "4q512"
+  - "4q1k"
+  - "4q2k"
+  - "4q4k"
+  - "4q8k"
+  - "8q512"
+  - "8q1k"
+  - "8q2k"
+  - "8q4k"
+  - "8q8k"
+
+  # Extend
+  - "1q512s4k"
+  - "1q512s8k"
+  - "1q1ks8k"
+  - "1q2ks8k"
+  - "1q2ks16k"
+  - "1q4ks16k"
+
+backends:
+  - FLASHMLA_SPARSE
+  - FLASHINFER_MLA_SPARSE
+
+device: "cuda:0"
+repeats: 10
+warmup_iters: 3
+profile_memory: true

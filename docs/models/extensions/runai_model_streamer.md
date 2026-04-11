@@ -31,6 +31,16 @@ vllm serve gs://core-llm/Llama-3-8b \
     --load-format runai_streamer
 ```
 
+To run model from Azure Blob Storage run:
+
+```bash
+AZURE_STORAGE_ACCOUNT_NAME=<account> \
+vllm serve az://<container>/<model-path> \
+    --load-format runai_streamer
+```
+
+Authentication uses `DefaultAzureCredential`, which supports `az login`, managed identity, environment variables (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_CLIENT_SECRET`), and other methods.
+
 To run model from a S3 compatible object store run:
 
 ```bash

@@ -12,6 +12,7 @@ import vllm_xpu_kernels._C  # noqa
 import vllm_xpu_kernels._moe_C  # noqa
 import vllm_xpu_kernels._xpu_C  # noqa
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -20,6 +21,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -61,7 +63,8 @@ class XPUPlatform(Platform):
 
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
-            raise NotImplementedError("Sparse Attention is not supported on XPU.")
+            logger.info_once("Using XPU MLA Sparse backend.")
+            return AttentionBackendEnum.XPU_MLA_SPARSE.get_path()
         if attn_selector_config.use_mla:
             logger.info_once("Using Triton MLA backend on V1 engine.")
             return AttentionBackendEnum.TRITON_MLA.get_path()
@@ -123,6 +126,10 @@ class XPUPlatform(Platform):
         torch.xpu.set_device(device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.xpu.manual_seed_all(seed)
+
+    @classmethod
     def get_device_capability(
         cls,
         device_id: int = 0,
@@ -158,15 +165,10 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        cache_config = vllm_config.cache_config
-        model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
-        # in V1(or with chunked prefill) block_size is 64
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 64
 
         # lazy import to avoid circular import
-        from vllm.config import CompilationMode, CUDAGraphMode
+        from vllm.config import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.compile_sizes is None:
@@ -180,6 +182,12 @@ class XPUPlatform(Platform):
             logger.warning(
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
+            )
+        elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(
+                "XPU Graph is disabled by environment variable, "
+                "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
         elif parallel_config.world_size_across_dp > 1:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
@@ -199,8 +207,6 @@ class XPUPlatform(Platform):
                     "falling back to PIECEWISE graph mode on XPU platform."
                 )
 
-        if vllm_config.lora_config is not None:
-            compilation_config.mode = CompilationMode.NONE
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
@@ -210,16 +216,62 @@ class XPUPlatform(Platform):
         if vllm_config.kv_transfer_config is not None:
             vllm_config.kv_transfer_config.enable_permute_local_kv = True
 
-        if model_config and model_config.use_mla:
-            logger.info(
-                "MLA is enabled on a non-GPU platform; forcing chunked "
-                "prefill and prefix caching to be disabled."
+        # In some cases, the internal memory type cache can misdetect GPU
+        # memory as host memory, also leading to invalid memory access.
+        # This cache can be disabled by setting UCX_MEMTYPE_CACHE=n.
+        # ref. https://openucx.readthedocs.io/en/master/faq.html
+        os.environ["UCX_MEMTYPE_CACHE"] = "n"
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        super().update_block_size_for_backend(vllm_config)
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+        from vllm.utils.math_utils import cdiv
+
+        cache_config = vllm_config.cache_config
+        # special fix for GDN since kernel only supports block size dividable by 64
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
+
+        kernel_block_size = None
+        for layer in attn_layers.values():
+            b = layer.get_attn_backend()
+            if b.get_name() == "GDN_ATTN":
+                kernel_block_size = 64
+                break
+
+        if kernel_block_size is None:
+            return
+        new_block_size = (
+            cdiv(cache_config.block_size, kernel_block_size) * kernel_block_size
+        )
+        if new_block_size == cache_config.block_size:
+            return
+
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.mamba_block_size = new_block_size
+        original_mamba_page_size_padded = cache_config.mamba_page_size_padded
+        if cache_config.mamba_page_size_padded is not None:
+            attn_page_size_1_token = (
+                cache_config.mamba_page_size_padded // cache_config.block_size
             )
-            vllm_config.scheduler_config.enable_chunked_prefill = False
-            vllm_config.scheduler_config.max_num_batched_tokens = max(
-                vllm_config.model_config.max_model_len,
-                vllm_config.scheduler_config.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            cache_config.mamba_page_size_padded = (
+                new_block_size * attn_page_size_1_token
             )
+        cache_config.block_size = new_block_size
+        logger.info(
+            "[XPU]Setting attention block size to %d tokens to ensure multiple of %d, "
+            "set mamba_page_size_padded to %d bytes accordingly, before was %d bytes.",
+            new_block_size,
+            kernel_block_size,
+            cache_config.mamba_page_size_padded,
+            original_mamba_page_size_padded,
+        )
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -237,6 +289,7 @@ class XPUPlatform(Platform):
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
+        torch.xpu.empty_cache()
         torch.xpu.reset_peak_memory_stats(device)
         return torch.xpu.max_memory_allocated(device)
 
@@ -259,6 +312,21 @@ class XPUPlatform(Platform):
                 " is not available."
             )
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def get_default_ir_op_priority(
+        cls, vllm_config: "VllmConfig"
+    ) -> "IrOpPriorityConfig":
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use fused kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["xpu_kernels", "native"]
+
+        return IrOpPriorityConfig.with_default(default)
 
     @classmethod
     def device_count(cls) -> int:

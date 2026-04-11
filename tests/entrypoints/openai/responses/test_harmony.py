@@ -13,10 +13,11 @@ from typing import Any
 import pytest
 import pytest_asyncio
 import requests
-from openai import BadRequestError, NotFoundError, OpenAI
+from openai import InternalServerError, NotFoundError, OpenAI
 from openai_harmony import Message
 
-from ....utils import RemoteOpenAIServer
+from tests.utils import RemoteOpenAIServer
+
 from .conftest import (
     BASE_TEST_ENV,
     events_contain_type,
@@ -698,7 +699,7 @@ async def test_function_calling_multi_turn(client: OpenAI, model_name: str):
 async def test_function_calling_required(client: OpenAI, model_name: str):
     tools = [GET_WEATHER_SCHEMA]
 
-    with pytest.raises(BadRequestError):
+    with pytest.raises(InternalServerError):
         await client.responses.create(
             model=model_name,
             input="What's the weather like in Paris today?",
@@ -998,17 +999,21 @@ async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
         (msg.get("recipient") or "").startswith("python")
         for msg in response1.output_messages
     )
+    parsed_output_messages = [
+        Message.from_dict(msg) for msg in response1.output_messages
+    ]
     tool_response_found = any(
-        msg.get("author", {}).get("role") == "tool"
-        and (msg.get("author", {}).get("name") or "").startswith("python")
-        for msg in response1.output_messages
+        (msg.author.role == "tool" and (msg.author.name or "").startswith("python"))
+        for msg in parsed_output_messages
     )
     assert tool_call_found, "MCP tool call not found in output_messages"
     assert tool_response_found, "MCP tool response not found in output_messages"
 
     # No developer messages expected for elevated tools
     developer_msgs = [
-        msg for msg in response1.input_messages if msg["author"]["role"] == "developer"
+        msg
+        for msg in (Message.from_dict(raw) for raw in response1.input_messages)
+        if msg.author.role == "developer"
     ]
     assert len(developer_msgs) == 0, "No developer message expected for elevated tools"
 
@@ -1118,12 +1123,10 @@ async def test_function_call_with_previous_input_messages(
     num_system = 0
     num_developer = 0
     num_tool = 0
-    for msg_dict in response_2.input_messages:
-        # input_messages use {"author": {"role": "..."}} format,
-        # not the top-level {"role": "..."} that Message.from_dict
-        # expects.
-        author = msg_dict.get("author", {})
-        role = author.get("role") if isinstance(author, dict) else None
+    for message in (
+        Message.from_dict(msg_dict) for msg_dict in response_2.input_messages
+    ):
+        role = message.author.role
         if role == "system":
             num_system += 1
         elif role == "developer":
@@ -1182,12 +1185,8 @@ async def test_system_prompt_override_no_duplication(client: OpenAI, model_name:
     assert response.output_text is not None
 
     num_system = 0
-    for msg in response.input_messages:
-        # input_messages use {"author": {"role": "system"}} format,
-        # not the top-level {"role": "system"} that Message.from_dict expects.
-        author = msg.get("author", {})
-        role = author.get("role") if isinstance(author, dict) else None
-        if role == "system":
+    for message in (Message.from_dict(msg) for msg in response.input_messages):
+        if message.author.role == "system":
             num_system += 1
     assert num_system == 1, f"Expected 1 system message, got {num_system}"
 

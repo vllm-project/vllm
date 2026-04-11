@@ -24,6 +24,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -43,7 +44,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
@@ -535,7 +541,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         torch.ops.vllm.mamba_mixer2(
             projected_states,
             ssm_output,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # 4. gated MLP
@@ -575,10 +581,15 @@ class MambaMixer2(MambaBase, PluggableLayer):
             assert isinstance(attn_metadata, dict)
             attn_metadata = attn_metadata[self.prefix]
             assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-            # conv_state = (..., dim, width-1) yet contiguous along 'dim'
-            conv_state = self_kv_cache[0].transpose(-1, -2)
-            ssm_state = self_kv_cache[1]
+            # conv_state must be (..., dim, width-1) for the conv kernels.
+            # DS layout stores it that way directly; SD layout needs a
+            # transpose (which keeps dim contiguous via stride tricks).
+            conv_state = (
+                self.kv_cache[0]
+                if is_conv_state_dim_first()
+                else self.kv_cache[0].transpose(-1, -2)
+            )
+            ssm_state = self.kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -888,6 +899,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=query_start_loc_d,
                 is_blackwell=self.is_blackwell,
+                enable_stochastic_rounding=self.cache_config.enable_mamba_cache_stochastic_rounding,
+                cache_philox_rounds=self.cache_config.mamba_cache_philox_rounds,
             )
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
@@ -919,8 +932,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self.conv_ssm_forward(projected_states=projected_states, output=output)
@@ -929,7 +943,7 @@ def mamba_mixer2(
 def mamba_mixer2_fake(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     return
 

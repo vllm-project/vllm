@@ -8,19 +8,14 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
-if TYPE_CHECKING:
-    from vllm.tokenizers import TokenizerLike
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
-from vllm.entrypoints.openai.engine.protocol import (
-    DeltaMessage,
-)
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParser
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+    from vllm.tokenizers import TokenizerLike
 
 logger = init_logger(__name__)
 
@@ -256,15 +251,15 @@ class Olmo3ReasoningParser(ReasoningParser):
     def extract_reasoning(
         self,
         model_output: str,
-        request: ChatCompletionRequest | ResponsesRequest,
+        request: "ChatCompletionRequest | ResponsesRequest",
     ) -> tuple[str | None, str | None]:
         """Extract the reasoning content & content sections, respectively.
         If the sequence doesn't match what we expect, i.e., the model generates
         something else, all content is considered non-reasoning content.
 
         Args:
-            model_output (str): Output of the model to be parsed.
-            request (ChatCompletionRequest | ResponsesRequest): Request being
+            model_output: Output of the model to be parsed.
+            request: Request being
                 processed.
 
         Returns:

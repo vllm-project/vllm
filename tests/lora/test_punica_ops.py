@@ -9,9 +9,12 @@ import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.fixture(autouse=True)
@@ -146,7 +149,9 @@ def check_lora_shrink_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device="cuda"
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -219,7 +224,9 @@ def check_lora_expand_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device="cuda"
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -367,7 +374,7 @@ test_params = {
 }
 
 DTYPES = [torch.float16, torch.bfloat16]
-DEVICES = [f"cuda:{0}"]
+DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
 
 
@@ -395,7 +402,7 @@ def test_kernels(
     Tests LoRA kernels.
     """
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     set_random_seed(seed)
 
     if op_type == "shrink":
@@ -448,7 +455,7 @@ def test_kernels_hidden_size(
     Tests SGMV and LoRA kernels.
     """
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     set_random_seed(seed)
 
     if op_type == "shrink":

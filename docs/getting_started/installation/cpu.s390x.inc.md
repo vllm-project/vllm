@@ -1,27 +1,28 @@
-# --8<-- [start:installation]
+<!-- markdownlint-disable MD041 -->
+--8<-- [start:installation]
 
 vLLM has experimental support for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
 
 Currently, the CPU implementation for s390x architecture supports FP32 datatype only.
 
-# --8<-- [end:installation]
-# --8<-- [start:requirements]
+--8<-- [end:installation]
+--8<-- [start:requirements]
 
 - OS: `Linux`
 - SDK: `gcc/g++ >= 12.3.0` or later with Command Line Tools
 - Instruction Set Architecture (ISA): VXE support is required. Works with Z14 and above.
 - Build install python packages: `pyarrow`, `torch` and `torchvision`
 
-# --8<-- [end:requirements]
-# --8<-- [start:set-up-using-python]
+--8<-- [end:requirements]
+--8<-- [start:set-up-using-python]
 
-# --8<-- [end:set-up-using-python]
-# --8<-- [start:pre-built-wheels]
+--8<-- [end:set-up-using-python]
+--8<-- [start:pre-built-wheels]
 
 Currently, there are no pre-built IBM Z CPU wheels.
 
-# --8<-- [end:pre-built-wheels]
-# --8<-- [start:build-wheel-from-source]
+--8<-- [end:pre-built-wheels]
+--8<-- [start:build-wheel-from-source]
 
 Install the following packages from the package manager before building the vLLM. For example on RHEL 9.4:
 
@@ -45,10 +46,10 @@ Execute the following commands to build and install vLLM from source.
     Please build the following dependencies, `torchvision`, `pyarrow` from source before building vLLM.
 
 ```bash
-    sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
+    sed -i '/^torch/d' requirements/build/cuda.txt    # remove torch from requirements/build/cuda.txt since we use nightly builds
     uv pip install -v \
         --torch-backend auto \
-        -r requirements/build.txt \
+        -r requirements/build/cuda.txt \
         -r requirements/cpu.txt \
     VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
         uv pip install dist/*.whl
@@ -56,22 +57,22 @@ Execute the following commands to build and install vLLM from source.
 
 ??? console "pip"
     ```bash
-        sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
+        sed -i '/^torch/d' requirements/build/cuda.txt    # remove torch from requirements/build/cuda.txt since we use nightly builds
         pip install -v \
             --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
-            -r requirements/build.txt \
+            -r requirements/build/cuda.txt \
             -r requirements/cpu.txt \
         VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
             pip install dist/*.whl
     ```
 
-# --8<-- [end:build-wheel-from-source]
-# --8<-- [start:pre-built-images]
+--8<-- [end:build-wheel-from-source]
+--8<-- [start:pre-built-images]
 
 Currently, there are no pre-built IBM Z CPU images.
 
-# --8<-- [end:pre-built-images]
-# --8<-- [start:build-image-from-source]
+--8<-- [end:pre-built-images]
+--8<-- [start:build-image-from-source]
 
 ```bash
 docker build -f docker/Dockerfile.s390x \
@@ -93,6 +94,6 @@ docker run --rm \
 !!! tip
     An alternative of `--privileged true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
 
-# --8<-- [end:build-image-from-source]
-# --8<-- [start:extra-information]
-# --8<-- [end:extra-information]
+--8<-- [end:build-image-from-source]
+--8<-- [start:extra-information]
+--8<-- [end:extra-information]

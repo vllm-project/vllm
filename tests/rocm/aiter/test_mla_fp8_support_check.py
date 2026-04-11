@@ -31,7 +31,7 @@ class TestAiterMlaFp8SupportCheck:
 
         # Should return False without raising
         with patch(
-            "vllm._aiter_ops.inspect.signature",
+            "inspect.signature",
             side_effect=ImportError("No module"),
         ):
             result = _check_aiter_mla_fp8_support()
@@ -46,7 +46,7 @@ class TestAiterMlaFp8SupportCheck:
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
         with patch(
-            "vllm._aiter_ops.inspect.signature",
+            "inspect.signature",
             side_effect=ModuleNotFoundError("Module not found"),
         ):
             # Should return False without raising
@@ -63,7 +63,7 @@ class TestAiterMlaFp8SupportCheck:
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
         with patch(
-            "vllm._aiter_ops.inspect.signature",
+            "inspect.signature",
             side_effect=AttributeError("No attribute"),
         ):
             assert _check_aiter_mla_fp8_support() is False
@@ -78,7 +78,7 @@ class TestAiterMlaFp8SupportCheck:
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
         with patch(
-            "vllm._aiter_ops.inspect.signature",
+            "inspect.signature",
             side_effect=ValueError("No signature"),
         ):
             assert _check_aiter_mla_fp8_support() is False
@@ -93,7 +93,7 @@ class TestAiterMlaFp8SupportCheck:
         aiter_ops._AITER_MLA_SUPPORTS_FP8 = None
 
         with patch(
-            "vllm._aiter_ops.inspect.signature",
+            "inspect.signature",
             side_effect=TypeError("Not a callable"),
         ):
             assert _check_aiter_mla_fp8_support() is False
