@@ -613,6 +613,7 @@ async def test_completion_without_max_tokens_uses_normalized_budget(
     completion = await client.completions.create(
         model=model_name,
         prompt="Hello, my name is",
+        max_tokens=None,
         temperature=0.0,
         echo=True,
         extra_body={"return_token_ids": True},
@@ -640,6 +641,7 @@ async def test_completion_stream_without_max_tokens_uses_normalized_budget(
     stream = await client.completions.create(
         model=model_name,
         prompt="Hello, my name is",
+        max_tokens=None,
         temperature=0.0,
         echo=True,
         stream=True,
