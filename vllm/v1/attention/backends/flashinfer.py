@@ -63,7 +63,11 @@ from vllm.v1.attention.backends.utils import (
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVQuantMode,
+    UniformTypeKVCacheSpecs,
+)
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
@@ -600,12 +604,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.head_dim = self.kv_cache_spec.head_size
         self.page_size = self.kv_cache_spec.block_size
 
-        self.cache_dtype = self.cache_config.cache_dtype
-        if is_quantized_kv_cache(self.cache_dtype):
+        if self.kv_cache_spec.kv_quant_mode != KVQuantMode.NONE:
+            self.cache_dtype = self.cache_config.cache_dtype
+            # Cannot use self.kv_cache_spec.dtype here because kv_cache_spec
+            # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
                 self.cache_dtype
             )
         else:
+            self.cache_dtype = "auto"
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
