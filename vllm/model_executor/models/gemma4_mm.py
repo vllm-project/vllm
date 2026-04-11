@@ -505,6 +505,8 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
 
+            video_replacements: list[str] = []
+
             for item in videos:
                 video_array, metadata = item
 
@@ -557,10 +559,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 video_timestamps_per_video.append(timestamps)
                 video_frame_counts.append(len(frames))
 
-                # Build expanded replacement text and replace the
-                # <|video|> placeholder in the prompt.
-                # Use split(token, 1) to avoid collision — the
-                # replacement text itself contains <|video|> tokens.
+                # Build expanded replacement text for this video.
                 ts_strs = [f"{int(s // 60):02d}:{int(s % 60):02d}" for s in timestamps]
                 replacement = " ".join(
                     f"{t} {processor.boi_token}"
@@ -568,9 +567,20 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     f"{processor.eoi_token}"
                     for t, n in zip(ts_strs, num_soft_per_frame)
                 )
-                parts = prompt.split(processor.video_token, 1)
-                if len(parts) == 2:
-                    prompt = parts[0] + replacement + parts[1]
+                video_replacements.append(replacement)
+
+            # Replace all <|video|> placeholders at once. We split on
+            # video_token to get N+1 parts, then interleave with the
+            # N replacement strings. This avoids the iterative
+            # split-replace bug where replacement text (which itself
+            # contains <|video|> tokens) collides with later splits.
+            vt = processor.video_token
+            parts = prompt.split(vt, len(video_replacements))
+            if len(parts) == len(video_replacements) + 1:
+                prompt = ""
+                for i, repl in enumerate(video_replacements):
+                    prompt += parts[i] + repl
+                prompt += parts[-1]
 
             video_outputs = {
                 "pixel_values_videos": torch.cat(all_video_pixel_values, dim=0),
