@@ -224,6 +224,7 @@ from .utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
     from vllm.v1.spec_decode.ngram_proposer import NgramProposer
     from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
@@ -6902,6 +6903,9 @@ class GPUModelRunner(
         computing mm_prefix_range_tensor once and sharing it across all
         metadata objects to avoid redundant host-to-device transfers.
         """
+        from vllm.v1.attention.backends.flash_attn import (
+            FlashAttentionMetadata,
+        )
         from vllm.v1.attention.backends.triton_attn import (
             TritonAttentionMetadata,
         )
@@ -6919,8 +6923,7 @@ class GPUModelRunner(
         for metadata in metadata_list:
             metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
 
-            # Only compute tensor for TritonAttentionMetadata
-            if isinstance(metadata, TritonAttentionMetadata):
+            if isinstance(metadata, (TritonAttentionMetadata, FlashAttentionMetadata)):
                 if shared_tensor is None:
                     shared_tensor = (
                         TritonAttentionMetadata.compute_mm_prefix_range_tensor(
@@ -6930,6 +6933,77 @@ class GPUModelRunner(
                         )
                     )
                 metadata.mm_prefix_range_tensor = shared_tensor
+
+            # Precompute mm_prefix correction indices for FlashAttention
+            # on CPU to avoid GPU-tensor .item() calls in the forward pass.
+            if isinstance(metadata, FlashAttentionMetadata):
+                self._precompute_mm_prefix_indices(metadata, req_doc_ranges)
+
+    def _precompute_mm_prefix_indices(
+        self,
+        metadata: "FlashAttentionMetadata",
+        req_doc_ranges: dict[int, list[tuple[int, int]]],
+    ) -> None:
+        """Precompute mm_prefix correction indices on CPU.
+
+        Reads query_start_loc and seq_lens from CPU-side buffers
+        (no GPU sync) and stores the result as GPU tensors on the
+        metadata for use in _apply_mm_prefix_correction.
+        """
+        num_reqs = self.input_batch.num_reqs
+        qsl = self.query_start_loc.np
+        seq_lens_cpu = self.seq_lens.cpu()
+
+        mm_token_indices: list[int] = []
+        mm_cu_seqlens = [0]
+        mm_seqlens_k: list[int] = []
+        mm_bt_indices: list[int] = []
+
+        for seq_idx in range(num_reqs):
+            ranges = req_doc_ranges.get(seq_idx, [])
+            if not ranges:
+                continue
+            q_start = int(qsl[seq_idx])
+            q_end = int(qsl[seq_idx + 1])
+            query_len = q_end - q_start
+            seq_len = int(seq_lens_cpu[seq_idx])
+            context_len = seq_len - query_len
+
+            for r_start, r_end in ranges:
+                if r_start >= r_end:
+                    continue
+                tokens = [
+                    q_start + off
+                    for off in range(query_len)
+                    if r_start <= context_len + off <= r_end
+                ]
+                if tokens:
+                    mm_token_indices.extend(tokens)
+                    mm_cu_seqlens.append(mm_cu_seqlens[-1] + len(tokens))
+                    mm_seqlens_k.append(r_end - r_start + 1)
+                    mm_bt_indices.append(seq_idx)
+
+        if not mm_token_indices:
+            return
+
+        device = metadata.seq_lens.device  # type: ignore[union-attr]
+        metadata.mm_prefix_indices = torch.tensor(
+            mm_token_indices, dtype=torch.long, device=device
+        )
+        metadata.mm_prefix_cu_seqlens = torch.tensor(
+            mm_cu_seqlens, dtype=torch.int32, device=device
+        )
+        metadata.mm_prefix_seqlens_k = torch.tensor(
+            mm_seqlens_k, dtype=torch.int32, device=device
+        )
+        metadata.mm_prefix_bt_indices = torch.tensor(
+            mm_bt_indices, dtype=torch.long, device=device
+        )
+        metadata.mm_prefix_max_seqlen_q = max(
+            mm_cu_seqlens[i + 1] - mm_cu_seqlens[i]
+            for i in range(len(mm_cu_seqlens) - 1)
+        )
+        metadata.mm_prefix_max_seqlen_k = max(mm_seqlens_k)
 
     def may_reinitialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]

@@ -193,6 +193,10 @@ class FlashAttentionBackend(AttentionBackend):
         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 
     @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_sink(cls) -> bool:
         if not is_flash_attn_varlen_func_available():
             return False
@@ -254,6 +258,19 @@ class FlashAttentionMetadata:
     max_num_splits: int = 0
 
     causal: bool = True
+
+    # PrefixLM bidirectional ranges for multimodal tokens.
+    # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
+    mm_prefix_range_tensor: torch.Tensor | None = None
+
+    # Precomputed indices for mm_prefix correction (set by
+    # gpu_model_runner to avoid CPU-GPU sync in the forward pass).
+    mm_prefix_indices: torch.Tensor | None = None
+    mm_prefix_cu_seqlens: torch.Tensor | None = None
+    mm_prefix_seqlens_k: torch.Tensor | None = None
+    mm_prefix_bt_indices: torch.Tensor | None = None
+    mm_prefix_max_seqlen_q: int = 0
+    mm_prefix_max_seqlen_k: int = 0
 
 
 def _get_sliding_window_configs(
@@ -793,7 +810,11 @@ class FlashAttentionImpl(AttentionImpl):
                     if self.sliding_window is not None
                     else None
                 )
-                flash_attn_varlen_func(
+                need_mm_prefix = (
+                    attn_metadata.mm_prefix_range_tensor is not None
+                    and attn_metadata.causal
+                )
+                result = flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
                     k=key_cache,
                     v=value_cache,
@@ -815,7 +836,26 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=v_descale,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
+                    return_softmax_lse=need_mm_prefix,
                 )
+                if need_mm_prefix:
+                    causal_out, causal_lse = result
+                    _apply_mm_prefix_correction(
+                        causal_out,
+                        causal_lse,
+                        query[:num_actual_tokens],
+                        key_cache,
+                        value_cache,
+                        attn_metadata,
+                        scale=self.scale,
+                        sliding_window=sliding_window_size,
+                        logits_soft_cap=self.logits_soft_cap,
+                        block_table=block_table,
+                        fa_version=self.vllm_flash_attn_version,
+                        q_descale=q_descale,
+                        k_descale=k_descale,
+                        v_descale=v_descale,
+                    )
                 return output
 
         # Cascade attention (rare case).
@@ -1049,6 +1089,72 @@ class FlashAttentionImpl(AttentionImpl):
         )
 
         return output
+
+
+def _apply_mm_prefix_correction(
+    causal_out: torch.Tensor,
+    causal_lse: torch.Tensor,
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    attn_metadata: FlashAttentionMetadata,
+    scale: float,
+    sliding_window: list[int] | None,
+    logits_soft_cap: float,
+    block_table: torch.Tensor,
+    fa_version: int,
+    q_descale: torch.Tensor | None,
+    k_descale: torch.Tensor | None,
+    v_descale: torch.Tensor | None,
+) -> None:
+    """Correct multimodal token attention from causal to bidirectional.
+
+    Uses precomputed indices from FlashAttentionMetadata (populated by
+    gpu_model_runner before the forward pass) to avoid CPU-GPU sync.
+
+    NOTE: The causal call and the non-causal correction call have
+    overlapping KV ranges for tokens within mm_prefix regions. The
+    LSE-based merge slightly over-weights keys in the overlap region
+    compared to the exact (causal OR mm_prefix) mask that the Triton
+    backend computes in a single kernel. This is a known approximation
+    until FA4 supports mask_mod with varlen sequences.
+    """
+    mm_idx = attn_metadata.mm_prefix_indices
+    if mm_idx is None or mm_idx.numel() == 0:
+        return
+
+    bt_indices = attn_metadata.mm_prefix_bt_indices
+
+    mm_out, mm_lse = flash_attn_varlen_func(
+        q=query[mm_idx],
+        k=key_cache,
+        v=value_cache,
+        cu_seqlens_q=attn_metadata.mm_prefix_cu_seqlens,
+        max_seqlen_q=attn_metadata.mm_prefix_max_seqlen_q,
+        seqused_k=attn_metadata.mm_prefix_seqlens_k,
+        max_seqlen_k=attn_metadata.mm_prefix_max_seqlen_k,
+        softmax_scale=scale,
+        causal=False,
+        window_size=sliding_window,
+        block_table=(block_table[bt_indices] if block_table is not None else None),
+        softcap=logits_soft_cap,
+        fa_version=fa_version,
+        q_descale=(q_descale[bt_indices] if q_descale is not None else None),
+        k_descale=(k_descale[bt_indices] if k_descale is not None else None),
+        v_descale=(v_descale[bt_indices] if v_descale is not None else None),
+        return_softmax_lse=True,
+    )
+
+    # Fancy indexing creates a copy, so merge into a temporary and scatter back.
+    merged = causal_out[mm_idx].clone()
+    merge_attn_states(
+        merged,
+        merged.clone(),
+        causal_lse[:, mm_idx],
+        mm_out,
+        mm_lse,
+    )
+    causal_out[mm_idx] = merged
 
 
 def use_cascade_attention(
