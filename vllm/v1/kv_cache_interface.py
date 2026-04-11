@@ -117,6 +117,7 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    cache_dtype_str: str | None = None
 
     @property
     def page_size_bytes(self) -> int:
@@ -251,8 +252,7 @@ class FullAttentionSpec(AttentionSpec):
 
 @dataclass(frozen=True, kw_only=True)
 class MLAAttentionSpec(FullAttentionSpec):
-    # TODO(Lucas/Chen): less hacky way to do this
-    cache_dtype_str: str | None = None
+    # cache_dtype_str is inherited from AttentionSpec
 
     @property
     def real_page_size_bytes(self) -> int:
