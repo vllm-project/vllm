@@ -11,34 +11,15 @@
                 description:<|"|>{{ value['description'] }}<|"|>
                 {%- set add_comma = true -%}
             {%- endif -%}
-            {%- if value['nullable'] %}
-                {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
-                nullable:true
-            {%- endif -%}
             {%- if value['type'] | upper == 'STRING' -%}
                 {%- if value['enum'] -%}
                     {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
                     enum:{{ format_argument(value['enum']) }}
                 {%- endif -%}
-            {%- elif value['type'] | upper == 'OBJECT' -%}
-                ,properties:{
-                {%- if value['properties'] is defined and value['properties'] is mapping -%}
-                    {{- format_parameters(value['properties'], value['required'] | default([])) -}}
-                {%- elif value is mapping -%}
-                    {{- format_parameters(value, value['required'] | default([])) -}}
-                {%- endif -%}
-                }
-                {%- if value['required'] -%}
-                    ,required:[
-                    {%- for item in value['required'] | default([]) -%}
-                        <|"|>{{- item -}}<|"|>
-                        {%- if not loop.last %},{% endif -%}
-                    {%- endfor -%}
-                    ]
-                {%- endif -%}
             {%- elif value['type'] | upper == 'ARRAY' -%}
                 {%- if value['items'] is mapping and value['items'] -%}
-                    ,items:{
+                    {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
+                    items:{
                     {%- set ns_items = namespace(found_first=false) -%}
                     {%- for item_key, item_value in value['items'] | dictsort -%}
                         {%- if item_value is not none -%}
@@ -69,6 +50,32 @@
                         {%- endif -%}
                     {%- endfor -%}
                     }
+                {%- endif -%}
+            {%- endif -%}
+            {%- if value['nullable'] %}
+                {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
+                nullable:true
+            {%- endif -%}
+            {%- if value['type'] | upper == 'OBJECT' -%}
+                {%- if value['properties'] is defined and value['properties'] is mapping -%}
+                    {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
+                    properties:{
+                    {{- format_parameters(value['properties'], value['required'] | default([])) -}}
+                    }
+                {%- elif value is mapping -%}
+                    {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
+                    properties:{
+                    {{- format_parameters(value, value['required'] | default([])) -}}
+                    }
+                {%- endif -%}
+                {%- if value['required'] -%}
+                    {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
+                    required:[
+                    {%- for item in value['required'] | default([]) -%}
+                        <|"|>{{- item -}}<|"|>
+                        {%- if not loop.last %},{% endif -%}
+                    {%- endfor -%}
+                    ]
                 {%- endif -%}
             {%- endif -%}
             {%- if add_comma %},{%- else -%} {%- set add_comma = true -%} {% endif -%}
