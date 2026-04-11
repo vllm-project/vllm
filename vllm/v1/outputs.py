@@ -201,6 +201,11 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # (batch_data, slot_mapping) — batch_data shape
+    # (num_tokens, num_layers, num_experts_per_tok), slot_mapping shape
+    # (num_tokens,).  Scheduler writes slot_buffer[slot_mapping] = batch_data.
+    routed_experts: tuple[np.ndarray, np.ndarray] | None = None
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):

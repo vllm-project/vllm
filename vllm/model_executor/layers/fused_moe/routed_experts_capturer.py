@@ -5,159 +5,58 @@
 
 from __future__ import annotations
 
-import fcntl
 import logging
-import os
-import tempfile
-from collections.abc import Generator
-from contextlib import contextmanager
-from multiprocessing import shared_memory
-from unittest.mock import patch
 
 import numpy as np
 import torch
 
 from vllm.config import VllmConfig
-from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 
 logger = logging.getLogger(__name__)
 
-# Constants
-_TMP_DIR = tempfile.gettempdir()
-_LOCK_FILE_PREFIX = os.path.join(_TMP_DIR, "vllm_routed_experts")
-_BUFFER_PREFIX = "vllm_routed_experts_buffer"
 
-# Global singleton instances
-_global_experts_capturer: RoutedExpertsCapturer | None = None
-_global_experts_reader: RoutedExpertsReader | None = None
-
-
-@contextmanager
-def _file_lock(lock_file: str, mode: str = "wb+") -> Generator[None, None, None]:
-    """Context manager for file-based locking."""
-    with open(lock_file, mode) as fp:
-        fcntl.flock(fp, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fp, fcntl.LOCK_UN)
-
-
-def _create_or_attach_shared_memory(
-    name: str, size: int, lock_file: str
-) -> shared_memory.SharedMemory:
-    """Create or attach to shared memory with proper locking."""
-    # Ensure lock file exists before acquiring lock
-    with open(lock_file, "wb"):
-        pass
-
-    with _file_lock(lock_file):
-        try:
-            shm = shared_memory.SharedMemory(name=name, create=True, size=size)
-        except FileExistsError:
-            shm = shared_memory.SharedMemory(name=name, create=False, size=size)
-
-        if shm.size != size:
-            logger.warning(
-                "Shared memory %s size mismatch; recreating",
-                name,
-            )
-            shm.close()
-            shm.unlink()
-            try:
-                shm = shared_memory.SharedMemory(name=name, create=True, size=size)
-                logger.info("Created shared memory %s", name)
-            except FileExistsError:
-                shm = shared_memory.SharedMemory(name=name, create=False, size=size)
-                logger.info("Linked to existing shared memory %s", name)
-
-    return shm
+def _resolve_num_experts(hf_config) -> int:
+    for key in ("num_experts", "n_routed_experts", "num_local_experts"):
+        val = getattr(hf_config, key, None)
+        if val is not None:
+            return val
+    raise ValueError(
+        "Could not resolve num_experts from model config. "
+        "Expected one of 'num_experts', 'n_routed_experts', "
+        "or 'num_local_experts'."
+    )
 
 
 class RoutedExpertsCapturer:
     """
-    Capturer for routed experts with device and optional shared memory buffer.
+    Capturer for routed experts with device buffer.
 
     This class captures expert routing decisions during model forward passes
-    and optionally stores them in shared memory for cross-process access.
+    and stores them in a device buffer for later extraction via
+    ModelRunnerOutput.
     """
 
-    _instance: RoutedExpertsCapturer | None = None
-
-    def __init__(self) -> None:
-        self._device_buffer: torch.Tensor | None = None
-        self._shm: shared_memory.SharedMemory | None = None
-        self._host_buffer_view: np.ndarray | None = None
-        self._lock_file: str | None = None
-
-    @classmethod
-    def create(cls) -> RoutedExpertsCapturer:
-        """Create a global singleton instance."""
-        global _global_experts_capturer
-        if _global_experts_capturer is not None:
-            raise RuntimeError("Experts capturer already created.")
-
-        _global_experts_capturer = cls()
-        return _global_experts_capturer
-
-    @staticmethod
-    def get_instance() -> RoutedExpertsCapturer | None:
-        """Get the global singleton instance."""
-        return _global_experts_capturer
-
-    def init_buffer(
+    def __init__(
         self,
         max_num_batched_tokens: int,
-        max_num_kv_tokens: int,
         vllm_config: VllmConfig,
     ) -> None:
-        """
-        Initialize the device buffer and optionally shared memory buffer.
-
-        Args:
-            max_num_batched_tokens: Maximum number of tokens in a batch.
-            max_num_kv_tokens: Maximum number of KV tokens for shared memory.
-            vllm_config: vllm configuration containing layer and expert info.
-        """
-
-        if self._device_buffer is not None:
-            raise RuntimeError("Device buffer has already been initialized")
-
         hf_config = vllm_config.model_config.hf_text_config
-        num_layers = hf_config.num_hidden_layers
-        num_experts_per_tok = hf_config.num_experts_per_tok
-
-        # Initialize device buffer
-        self._device_buffer = torch.zeros(
-            (max_num_batched_tokens, num_layers, num_experts_per_tok),
-            dtype=torch.int32,
+        num_experts = _resolve_num_experts(hf_config)
+        dtype = torch.uint8 if num_experts <= 256 else torch.int32
+        self.device_buffer = torch.zeros(
+            (
+                max_num_batched_tokens,
+                hf_config.num_hidden_layers,
+                hf_config.num_experts_per_tok,
+            ),
+            dtype=dtype,
             device=current_platform.device_type,
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-
-        if get_tensor_model_parallel_rank() != 0:
-            return
-
-        # Initialize shared memory
-        shape = (max_num_kv_tokens, num_layers, num_experts_per_tok)
-        buffer_size = int(np.prod(shape)) * np.dtype(np.int32).itemsize
-        instance_id = vllm_config.instance_id
-        self._lock_file = f"{_LOCK_FILE_PREFIX}_{instance_id}_{self.dp_rank}.lock"
-        shm_name = f"{_BUFFER_PREFIX}_{instance_id}_{self.dp_rank}"
-
-        self._shm = _create_or_attach_shared_memory(
-            shm_name, buffer_size, self._lock_file
-        )
-        self._host_buffer_view = np.ndarray(shape, dtype=np.int32, buffer=self._shm.buf)
-        self._host_buffer_view.fill(0)
-
-        logger.debug(
-            "Created shared memory buffer '%s' with shape %s",
-            shm_name,
-            shape,
-        )
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         """
@@ -167,8 +66,6 @@ class RoutedExpertsCapturer:
             layer_id: The layer index.
             topk_ids: Tensor of shape (batch_size, num_routed_experts).
         """
-        if self._device_buffer is None:
-            raise RuntimeError("Buffer not initialized. Call init_buffer() first.")
 
         ctx = get_forward_context()
         if ctx.dp_metadata is None:  # single dp
@@ -176,178 +73,90 @@ class RoutedExpertsCapturer:
             end_loc = topk_ids.shape[0]
             token_num_per_dp = topk_ids.shape[0]
         else:  # multi dp
-            num_tokens_dp = ctx.dp_metadata.num_tokens_across_dp_cpu
-            token_num_per_dp = int(num_tokens_dp[self.dp_rank].item())
-            total = int(num_tokens_dp.sum().item())
-            n = topk_ids.shape[0]
-
-            if n == total:
-                # Naive dispatch: all DP ranks' tokens concatenated before routing.
-                cumsum = torch.cumsum(num_tokens_dp, dim=0)
-                end_loc = int(cumsum[self.dp_rank].item())
-                start_loc = end_loc - token_num_per_dp
-            elif n == token_num_per_dp:
-                # Modular-kernel path: DP combine happens inside quant_method.apply;
-                # select_experts only sees this rank's tokens.
-                start_loc = 0
-                end_loc = token_num_per_dp
-            else:
-                raise AssertionError(
-                    "RoutedExpertsCapturer: unexpected topk_ids batch dim "
-                    f"{n} (expected {total} or {token_num_per_dp} "
-                    f"for dp_rank={self.dp_rank})"
-                )
+            token_num_per_dp = ctx.dp_metadata.num_tokens_across_dp_cpu[self.dp_rank]
+            cumsum = torch.cumsum(ctx.dp_metadata.num_tokens_across_dp_cpu, dim=0)
+            assert cumsum[-1] == topk_ids.shape[0]
+            end_loc = cumsum[self.dp_rank]
+            start_loc = end_loc - token_num_per_dp
 
         if layer_id >= self._device_buffer.shape[1]:
             return
 
-        self._device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
+        self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
             start_loc:end_loc, :
         ]
 
     def clear_buffer(self) -> None:
         """Clear the device buffer."""
-        if self._device_buffer is not None:
-            self._device_buffer.zero_()
+        self.device_buffer.zero_()
 
-    def save_captured_experts(self, indices: np.ndarray) -> None:
-        """
-        Save captured experts from device buffer to shared memory.
-
-        Args:
-            indices: Array of indices indicating where to store the data.
-        """
-        if get_tensor_model_parallel_rank() != 0:
-            return
-        if self._lock_file is None:
-            raise RuntimeError("Shared memory not initialized.")
-        if self._host_buffer_view is None:
-            return
-        if self._device_buffer is None:
-            raise RuntimeError("Device buffer not initialized.")
-
-        num_tokens = len(indices)
-        data = self._device_buffer[:num_tokens, :, :].cpu().numpy()
-
-        with _file_lock(self._lock_file):
-            self._host_buffer_view[indices, :, :] = data
-
-    def cleanup(self) -> None:
-        """Explicitly clean up shared memory resources."""
-        if self._shm is not None:
-            try:
-                self._shm.close()
-                self._shm.unlink()
-            except Exception:
-                logger.debug("Exception during cleanup for capturer", exc_info=True)
-            finally:
-                self._shm = None
-
-    def __del__(self) -> None:
-        """Clean up shared memory on destruction."""
-        self.cleanup()
+    def get_device_buffer(self) -> torch.Tensor:
+        """Get the device buffer for external extraction."""
+        return self.device_buffer
 
 
-class RoutedExpertsReader:
-    """
-    Reader for routed experts from shared memory.
+class RoutedExpertsManager:
+    """Slot-indexed buffer that stores and retrieves routed experts data.
 
-    This class attaches to shared memory created by RoutedExpertsCapturer
-    and reads expert routing decisions.
+    Each slot corresponds to block_id * block_size + offset_in_block, so
+    data is tied to physical KV-cache blocks and survives preemption for
+    prefix-cached blocks.
     """
 
-    _instance: RoutedExpertsReader | None = None
-
-    def __init__(self) -> None:
-        self._shm: shared_memory.SharedMemory | None = None
-        self._host_buffer_view: np.ndarray | None = None
-        self._lock_file: str | None = None
-
-    @classmethod
-    def create(cls) -> RoutedExpertsReader:
-        """Create a global singleton instance."""
-        global _global_experts_reader
-        if _global_experts_reader is not None:
-            raise RuntimeError("Experts reader already created.")
-
-        _global_experts_reader = cls()
-        return _global_experts_reader
-
-    @staticmethod
-    def get_instance() -> RoutedExpertsReader | None:
-        """Get the global singleton instance."""
-        if _global_experts_reader is None:
-            logger.info("Experts reader not initialized.")
-        return _global_experts_reader
-
-    def attach_buffer(
+    def __init__(
         self,
-        max_num_kv_tokens: int,
         vllm_config: VllmConfig,
+        kv_cache_config: KVCacheConfig,
     ) -> None:
-        """
-        Attach to an existing shared memory buffer.
+        # Find the attention group for block/slot mapping.
+        self.attn_gid = next(
+            (
+                gid
+                for gid, g in enumerate(kv_cache_config.kv_cache_groups)
+                if isinstance(g.kv_cache_spec, AttentionSpec)
+            ),
+            0,
+        )
+        attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
+        self.block_size = attn_group.kv_cache_spec.block_size
 
-        Args:
-            max_num_kv_tokens: Maximum number of KV tokens.
-            vllm_config: vllm configuration.
-        """
-        if self._shm is not None:
-            logger.warning("Already attached to shared memory buffer.")
-            return  # Already attached
-
+        # Routed experts indexed by KV-cache slot.
         hf_config = vllm_config.model_config.hf_text_config
-        shape = (
-            max_num_kv_tokens,
-            hf_config.num_hidden_layers,
-            hf_config.num_experts_per_tok,
+        num_experts = _resolve_num_experts(hf_config)
+        dtype = np.uint8 if num_experts <= 256 else np.int32
+        num_groups = len(kv_cache_config.kv_cache_groups)
+        max_num_slots = (kv_cache_config.num_blocks // num_groups) * self.block_size
+        self._routed_experts_by_slot = np.zeros(
+            (
+                max_num_slots,
+                hf_config.num_hidden_layers,
+                hf_config.num_experts_per_tok,
+            ),
+            dtype=dtype,
         )
 
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        instance_id = vllm_config.instance_id
-        self._lock_file = f"{_LOCK_FILE_PREFIX}_{instance_id}_{self.dp_rank}.lock"
-        shm_name = f"{_BUFFER_PREFIX}_{instance_id}_{self.dp_rank}"
+    def store_batch(self, data: np.ndarray, slot_mapping: np.ndarray) -> None:
+        """Store a whole batch of routed experts using pre-computed slot mapping.
 
-        with _file_lock(self._lock_file, mode="rb+"):
-            # Avoid resource_tracker registering the shared memory
-            with patch(
-                "multiprocessing.resource_tracker.register",
-                lambda *args, **kwargs: None,
-            ):
-                self._shm = shared_memory.SharedMemory(name=shm_name)
-
-            self._host_buffer_view = np.ndarray(
-                shape, dtype=np.int32, buffer=self._shm.buf
-            )
-
-    def get_routed_experts(self, indices: np.ndarray) -> np.ndarray:
+        Equivalent to the old shared-memory write:
+            shared_memory[slot_mapping] = data
         """
-        Read routed expert data from shared memory.
+        self._routed_experts_by_slot[slot_mapping] = data
+
+    def get(self, block_ids: list[int], num_tokens: int) -> np.ndarray:
+        """Read routed experts data for a completed request.
 
         Args:
-            indices: Array of indices to read.
+            block_ids: Block IDs from the attention KV-cache group.
+            num_tokens: Number of generated tokens (excluding the last).
 
         Returns:
-            Copy of the expert routing data for the given indices.
+            Array of shape (num_tokens, num_layers, num_experts_per_tok).
         """
-        if self._host_buffer_view is None:
-            raise RuntimeError("Buffer not attached. Call attach_buffer() first.")
-        if self._lock_file is None:
-            raise RuntimeError("Lock file not initialized.")
-
-        with _file_lock(self._lock_file, mode="rb+"):
-            return self._host_buffer_view[indices, :, :].copy()
-
-    def cleanup(self) -> None:
-        """Explicitly clean up resources (close without unlink)."""
-        if self._shm is not None:
-            try:
-                self._shm.close()
-            except Exception:
-                logger.debug("Exception during cleanup for reader", exc_info=True)
-            finally:
-                self._shm = None
-
-    def __del__(self) -> None:
-        """Close shared memory on destruction (do not unlink)."""
-        self.cleanup()
+        bs = self.block_size
+        block_ids_array = np.array(block_ids, dtype=np.int32)
+        block_offsets = np.arange(bs)
+        slot_mapping = (
+            block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
+        ).flatten()[:num_tokens]
+        return self._routed_experts_by_slot[slot_mapping]

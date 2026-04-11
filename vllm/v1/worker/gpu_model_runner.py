@@ -233,6 +233,9 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
+        re_cpu: torch.Tensor | None = None,
+        re_total: int | None = None,
+        re_slot_mapping: np.ndarray | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -245,6 +248,12 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._sampled_token_ids = sampled_token_ids
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
+
+        # Routed experts async D2H metadata (copy already issued on
+        # default stream before this constructor is called).
+        self._re_cpu = re_cpu
+        self._re_total = re_total
+        self._re_slot_mapping = re_slot_mapping
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -289,6 +298,14 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         output.logprobs = logprobs_lists
+
+        # Finalize routed experts from non-blocking D2H copy.
+        if self._re_total is not None:
+            assert self._re_cpu is not None
+            batch = self._re_cpu[: self._re_total].numpy()
+            output.routed_experts = (batch, self._re_slot_mapping)
+            self._re_total = None
+
         return output
 
 
@@ -434,6 +451,8 @@ class GPUModelRunner(
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
+        self._re_total: int | None = None
+        self._re_slot_mapping: np.ndarray | None = None
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -2149,7 +2168,10 @@ class GPUModelRunner(
         if self.routed_experts_initialized:
             attn_gid = self.routed_experts_attn_gid
             slot_mapping_attn = slot_mappings[attn_gid]
-            self.slot_mapping = slot_mapping_attn[:num_tokens].cpu().numpy()
+            self.routed_experts_slot_mapping = (
+                slot_mapping_attn[:num_tokens].cpu().numpy()
+            )
+
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
             :num_reqs_padded
         ]
@@ -3795,11 +3817,7 @@ class GPUModelRunner(
             )
 
         if self.routed_experts_initialized:
-            capturer = RoutedExpertsCapturer.get_instance()
-            if capturer is not None:
-                capturer.clear_buffer()  # noqa
-            else:
-                logger.error("RoutedExpertsCapturer not initialized.")
+            self.routed_experts_capturer.clear_buffer()
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
         # the modification has influence on the scheduler_output in engine core process.
@@ -4328,11 +4346,16 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             if self.routed_experts_initialized:
-                capturer = RoutedExpertsCapturer.get_instance()
-                if capturer is not None:
-                    capturer.save_captured_experts(indices=self.slot_mapping)  # noqa
-                else:
-                    logger.error("RoutedExpertsCapturer not initialized.")
+                # Non-blocking D2H on the default stream into pinned memory.
+                # clear_buffer() in the next step is also on the default
+                # stream, so it is automatically ordered after this copy.
+                # For async scheduling, the copy stream's wait_stream(default)
+                # ensures async_copy_ready_event covers this copy too.
+                buf = self.routed_experts_capturer.get_device_buffer()
+                total = scheduler_output.total_num_scheduled_tokens
+                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
+                self._re_total = total
+                self._re_slot_mapping = self.routed_experts_slot_mapping
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4346,9 +4369,18 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                routed_experts=None,
             )
 
         if not self.use_async_scheduling:
+            # Sync path: wait for the non-blocking D2H, then finalize.
+            if self._re_total is not None:
+                torch.cuda.current_stream().synchronize()
+                output.routed_experts = (
+                    self.routed_experts_cpu[: self._re_total].numpy(),
+                    self._re_slot_mapping,
+                )
+                self._re_total = None
             return output
 
         with record_function_or_nullcontext(
@@ -4361,6 +4393,9 @@ class GPUModelRunner(
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
+                re_cpu=getattr(self, "routed_experts_cpu", None),
+                re_total=getattr(self, "_re_total", None),
+                re_slot_mapping=getattr(self, "_re_slot_mapping", None),
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -6839,29 +6874,20 @@ class GPUModelRunner(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,
         )
-        routed_experts_capturer = RoutedExpertsCapturer.create()
-        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
-        min_block_size = min(
-            [
-                group.kv_cache_spec.block_size
-                for group in self.kv_cache_config.kv_cache_groups
-            ]
-        )
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
-        self.max_num_kv_tokens = (
-            self.kv_cache_config.num_blocks // num_groups
-        ) * min_block_size
-        dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size * dcp_size > 1:
-            self.max_num_kv_tokens *= pcp_size * dcp_size
-
-        routed_experts_capturer.init_buffer(
+        self.routed_experts_capturer = RoutedExpertsCapturer(
             max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
-            max_num_kv_tokens=self.max_num_kv_tokens,
             vllm_config=self.vllm_config,
         )
-        self._bind_routed_experts_capturer(routed_experts_capturer)
+        self.routed_experts_attn_gid = self._get_attention_kv_cache_gid()
+        self._bind_routed_experts_capturer(self.routed_experts_capturer)
+
+        # Pinned CPU buffer for async non-blocking D2H copy.
+        self.routed_experts_cpu = torch.empty(
+            self.routed_experts_capturer.device_buffer.shape,
+            dtype=self.routed_experts_capturer.device_buffer.dtype,
+            device="cpu",
+            pin_memory=self.pin_memory,
+        )
         self.routed_experts_initialized = True
 
     def _bind_routed_experts_capturer(self, capturer: RoutedExpertsCapturer) -> None:

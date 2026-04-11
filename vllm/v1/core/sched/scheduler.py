@@ -28,7 +28,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
-    RoutedExpertsReader,
+    RoutedExpertsManager,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -52,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -262,38 +262,15 @@ class Scheduler(SchedulerInterface):
                 "(dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
-            self.routed_experts_reader = RoutedExpertsReader.create()
-
-            assert len(kv_cache_config.kv_cache_groups) > 0, (
-                "enable_return_routed_experts requires at least one kv cache group"
-            )
-            # Find the attention group for routed experts indexing.
-            self.routed_experts_attn_gid = 0
-            for gid, group in enumerate(kv_cache_config.kv_cache_groups):
-                if isinstance(group.kv_cache_spec, AttentionSpec):
-                    self.routed_experts_attn_gid = gid
-                    break
-            min_block_size = min(
-                [
-                    group.kv_cache_spec.block_size
-                    for group in kv_cache_config.kv_cache_groups
-                ]
-            )
-            num_groups = len(kv_cache_config.kv_cache_groups)
-            self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // num_groups
-            ) * min_block_size
-            dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
-            pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-            if pcp_size * dcp_size > 1:
-                self.max_num_kv_tokens *= pcp_size * dcp_size
-
-            self.routed_experts_reader.attach_buffer(
-                max_num_kv_tokens=self.max_num_kv_tokens,
-                vllm_config=self.vllm_config,
+            self.routed_experts_mgr = RoutedExpertsManager(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+
+        # Routed experts captured for aborted requests (before blocks freed).
+        self._aborted_routed_experts: dict[str, np.ndarray] = {}
 
     def _mamba_block_aligned_split(
         self,
@@ -1334,6 +1311,11 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
+        # Store routed experts into slot buffer (one batch write).
+        if model_runner_output.routed_experts is not None:
+            batch_data, slot_mapping = model_runner_output.routed_experts
+            self.routed_experts_mgr.store_batch(batch_data, slot_mapping)
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -1603,30 +1585,28 @@ class Scheduler(SchedulerInterface):
         self._enqueue_waiting_request(request)
         return False
 
+    def _get_routed_experts_block_ids(self, request: Request) -> list[int] | None:
+        """Get block IDs for the attention KV-cache group, or None."""
+        kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
+        if kv_blocks is None:
+            return None
+        all_block_ids = kv_blocks.get_block_ids()
+        if self.routed_experts_mgr.attn_gid >= len(all_block_ids):
+            return None
+        block_ids = all_block_ids[self.routed_experts_mgr.attn_gid]
+        return block_ids if block_ids else None
+
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
         if not self.vllm_config.model_config.enable_return_routed_experts:
             return None
+        block_ids = self._get_routed_experts_block_ids(request)
+        if block_ids is None:
+            return None
+        return self.routed_experts_mgr.get(block_ids, request.num_tokens - 1)
 
-        kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
-        block_ids = kv_blocks.get_block_ids()[self.routed_experts_attn_gid]
-        num_tokens = request.num_tokens - 1
-
-        # compute slot mapping using attention group's block_size
-        block_ids_array = np.array(block_ids, dtype=np.int32)
-        num_blocks = len(block_ids)
-        attn_group = self.kv_cache_config.kv_cache_groups[self.routed_experts_attn_gid]
-        block_size = attn_group.kv_cache_spec.block_size
-
-        # generate block offsets
-        block_offsets = np.arange(0, block_size)
-
-        # compute slot mapping: slot = block_id * block_size + offset
-        slot_mapping = (
-            block_offsets.reshape((1, block_size))
-            + block_ids_array.reshape((num_blocks, 1)) * block_size
-        ).flatten()[:num_tokens]
-
-        return self.routed_experts_reader.get_routed_experts(indices=slot_mapping)
+    def pop_aborted_routed_experts(self, req_id: str) -> np.ndarray | None:
+        """Pop cached routed experts for an aborted request."""
+        return self._aborted_routed_experts.pop(req_id, None)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
@@ -1804,8 +1784,13 @@ class Scheduler(SchedulerInterface):
             self.waiting.remove_requests(waiting_requests_to_remove)
             self.skipped_waiting.remove_requests(waiting_requests_to_remove)
 
-        # Second pass: set status and free requests
+        # Second pass: capture routed experts, set status and free requests
         for request in valid_requests:
+            # Capture routed experts BEFORE freeing blocks.
+            re = self._get_routed_experts(request)
+            if re is not None:
+                self._aborted_routed_experts[request.request_id] = re
+
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 delay_free_blocks = (
