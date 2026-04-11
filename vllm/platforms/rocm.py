@@ -160,10 +160,13 @@ def _query_gcn_arch_from_amdsmi() -> str:
     raise RuntimeError("amdsmi did not return valid GCN arch")
 
 
+@cache
 def _get_gcn_arch() -> str:
     """
     Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
-    Called once at module level; result stored in _GCN_ARCH.
+
+    The result is cached lazily so importing vLLM does not initialize HIP
+    before multiprocessing has selected the worker start method.
     """
     try:
         return _query_gcn_arch_from_amdsmi()
@@ -178,18 +181,9 @@ def _get_gcn_arch() -> str:
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
 
-# Resolve once at module load. Uses amdsmi (no CUDA init) so Ray workers
-# can still set CUDA_VISIBLE_DEVICES after import.
-# These are plain Python bools — fully torch.compile/Dynamo safe.
-_GCN_ARCH = _get_gcn_arch()
-
-_ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
-_ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
-_ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
-_ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
-_ON_GFX90A = "gfx90a" in _GCN_ARCH
-_ON_GFX942 = "gfx942" in _GCN_ARCH
-_ON_GFX950 = "gfx950" in _GCN_ARCH
+def _gcn_arch_contains(*gfx_names: str) -> bool:
+    gcn_arch = _get_gcn_arch()
+    return any(gfx_name in gcn_arch for gfx_name in gfx_names)
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -264,31 +258,31 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
 
 
 def on_gfx1x() -> bool:
-    return _ON_GFX1X
+    return _gcn_arch_contains("gfx11", "gfx12")
 
 
 def on_gfx12x() -> bool:
-    return _ON_GFX12X
+    return _gcn_arch_contains("gfx12")
 
 
 def on_mi3xx() -> bool:
-    return _ON_MI3XX
+    return _gcn_arch_contains("gfx942", "gfx950")
 
 
 def on_gfx9() -> bool:
-    return _ON_GFX9
+    return _gcn_arch_contains("gfx90a", "gfx942", "gfx950")
 
 
 def on_gfx90a() -> bool:
-    return _ON_GFX90A
+    return _gcn_arch_contains("gfx90a")
 
 
 def on_gfx942() -> bool:
-    return _ON_GFX942
+    return _gcn_arch_contains("gfx942")
 
 
 def on_gfx950() -> bool:
-    return _ON_GFX950
+    return _gcn_arch_contains("gfx950")
 
 
 @cache
@@ -305,7 +299,7 @@ def use_rocm_custom_paged_attention(
 ) -> bool:
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
-    if _ON_GFX9:
+    if on_gfx9():
         return (
             (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
@@ -318,7 +312,7 @@ def use_rocm_custom_paged_attention(
 
     else:
         return (
-            _ON_GFX1X
+            on_gfx1x()
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and head_size == 128
@@ -617,14 +611,15 @@ class RocmPlatform(Platform):
     @classmethod
     @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
-        cap = _capability_from_gcn_arch(_GCN_ARCH)
+        gcn_arch = _get_gcn_arch()
+        cap = _capability_from_gcn_arch(gcn_arch)
         if cap is not None:
             return DeviceCapability(major=cap[0], minor=cap[1])
 
         logger.warning_once(
             "Could not derive device capability from GCN arch '%s', "
             "falling back to torch.cuda (this will initialize CUDA).",
-            _GCN_ARCH,
+            gcn_arch,
         )
         major, minor = torch.cuda.get_device_capability(device_id)
         return DeviceCapability(major=major, minor=minor)
@@ -794,16 +789,16 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_mx(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx95"])
+        return _gcn_arch_contains("gfx95")
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"])
+        return _gcn_arch_contains("gfx94", "gfx95", "gfx12")
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
-        return "gfx94" in _GCN_ARCH
+        return _gcn_arch_contains("gfx94")
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
@@ -815,7 +810,7 @@ class RocmPlatform(Platform):
     @classmethod
     def use_custom_allreduce(cls) -> bool:
         # We only enable custom allreduce for MI300 series
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
+        return _gcn_arch_contains("gfx94", "gfx95")
 
     @classmethod
     def opaque_attention_op(cls) -> bool:
@@ -823,7 +818,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def is_navi(cls) -> bool:
-        return "gfx1" in _GCN_ARCH
+        return _gcn_arch_contains("gfx1")
 
     @classmethod
     def get_static_graph_wrapper_cls(cls) -> str:
