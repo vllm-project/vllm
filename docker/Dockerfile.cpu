@@ -143,6 +143,8 @@ RUN \
     sed -i 's/^torch==.*/torch==2.11.0/g' requirements/test/cpu.in && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/test/cpu.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/test/cpu.in && \
+    # Related issue: https://github.com/vllm-project/vllm/pull/38800#issuecomment-4228314305
+    sed -i 's/^sentence-transformers.*/sentence-transformers==5.3.0/g' requirements/test/cpu.in && \
     uv pip compile requirements/test/cpu.in -o requirements/test/cpu.txt --index-strategy unsafe-best-match --torch-backend cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
