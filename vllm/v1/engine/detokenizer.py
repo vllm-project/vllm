@@ -173,6 +173,10 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
 
         self.request_id = request.request_id
         self.skip_special_tokens = sampling_params.skip_special_tokens
+        skip_token_ids = sampling_params.skip_token_ids
+        self.skip_token_ids: frozenset[int] = (
+            frozenset(skip_token_ids) if skip_token_ids else frozenset()
+        )
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
 
@@ -205,6 +209,10 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
                 self.spaces_between_special_tokens = True
 
     def decode_next(self, next_token_id: int) -> str:
+        if next_token_id in self.skip_token_ids:
+            self._protected_step(next_token_id)
+            return ""
+
         token = self._protected_step(next_token_id)
 
         if not self.spaces_between_special_tokens:
@@ -272,6 +280,10 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.token_ids.extend(request.prompt_token_ids or [0] * self.prompt_len)
 
         self.skip_special_tokens = params.skip_special_tokens
+        skip_token_ids = params.skip_token_ids
+        self.skip_token_ids: frozenset[int] = (
+            frozenset(skip_token_ids) if skip_token_ids else frozenset()
+        )
         self.spaces_between_special_tokens = params.spaces_between_special_tokens
 
     @property
@@ -284,6 +296,12 @@ class SlowIncrementalDetokenizer(BaseIncrementalDetokenizer):
         return len(self.token_ids) - self.prompt_len
 
     def decode_next(self, next_token_id: int) -> str:
+        if next_token_id in self.skip_token_ids:
+            self.tokens.append("")
+            self.prefix_offset = self.read_offset
+            self.read_offset = len(self.tokens)
+            return ""
+
         new_tokens, decoded_text, prefix_offset, read_offset = detokenize_incrementally(
             tokenizer=self.tokenizer,
             all_input_ids=self.token_ids,

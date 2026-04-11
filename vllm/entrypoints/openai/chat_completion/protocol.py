@@ -198,6 +198,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     ignore_eos: bool = False
     min_tokens: int = 0
     skip_special_tokens: bool = True
+    skip_token_ids: list[int] | None = None
     spaces_between_special_tokens: bool = True
     truncate_prompt_tokens: Annotated[int, Field(ge=-1, le=_INT64_MAX)] | None = None
     prompt_logprobs: int | None = None
@@ -508,6 +509,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
             skip_special_tokens=self.skip_special_tokens,
+            skip_token_ids=self.skip_token_ids,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
             output_kind=RequestOutputKind.DELTA

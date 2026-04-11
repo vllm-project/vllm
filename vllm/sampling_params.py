@@ -255,6 +255,11 @@ class SamplingParams(
     """Whether to detokenize the output."""
     skip_special_tokens: bool = True
     """Whether to skip special tokens in the output."""
+    skip_token_ids: list[int] | None = None
+    """If provided, these specific token IDs are always suppressed from the
+    detokenized output regardless of ``skip_special_tokens``. Useful for
+    selectively hiding certain special tokens (e.g. tool-call delimiters)
+    while preserving others (e.g. reasoning channel markers)."""
     spaces_between_special_tokens: bool = True
     """Whether to add spaces between special tokens in the output."""
     include_stop_str_in_output: bool = False
@@ -329,6 +334,7 @@ class SamplingParams(
         prompt_logprobs: int | None = None,
         detokenize: bool = True,
         skip_special_tokens: bool = True,
+        skip_token_ids: list[int] | None = None,
         spaces_between_special_tokens: bool = True,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
@@ -370,6 +376,7 @@ class SamplingParams(
             prompt_logprobs=prompt_logprobs,
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
+            skip_token_ids=skip_token_ids,
             spaces_between_special_tokens=spaces_between_special_tokens,
             output_kind=output_kind,
             structured_outputs=structured_outputs,

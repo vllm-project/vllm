@@ -55,12 +55,36 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
         self.new_turn_token_id = self.vocab["<|turn>"]
         self.tool_call_token_id = self.vocab["<|tool_call>"]
         self.tool_response_token_id = self.vocab["<|tool_response>"]
+        self._tool_call_end_token_id: int | None = self.vocab.get("<tool_call|>")
+        self._escape_token_id: int | None = self.vocab.get('<|"|>')
 
     def adjust_request(
         self, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> "ChatCompletionRequest | ResponsesRequest":
-        """Disable special-token stripping to preserve boundary tokens."""
+        """Disable special-token stripping to preserve reasoning boundary tokens.
+
+        When ``tool_choice="none"`` we additionally mark the tool-call delimiter
+        tokens for selective suppression so they are stripped from the decoded
+        output without affecting the reasoning channel tokens.
+        """
+        chat_template_kwargs = getattr(request, "chat_template_kwargs", None) or {}
+        if not chat_template_kwargs.get("enable_thinking", True):
+            return request
         request.skip_special_tokens = False
+        if getattr(request, "tool_choice", None) == "none" and getattr(
+            request, "tools", None
+        ):
+            tool_call_ids = [self.tool_call_token_id]
+            for optional_id in (
+                self._tool_call_end_token_id,
+                self._escape_token_id,
+            ):
+                if optional_id is not None:
+                    tool_call_ids.append(optional_id)
+            existing = list(getattr(request, "skip_token_ids", None) or [])
+            request.skip_token_ids = existing + [
+                tid for tid in tool_call_ids if tid not in existing
+            ]
         return request
 
     @property
