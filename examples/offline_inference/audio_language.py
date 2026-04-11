@@ -72,8 +72,7 @@ def run_audioflamingo3(question: str, audio_count: int) -> ModelRequestData:
 # CohereASR
 def run_cohere_asr(question: str, audio_count: int) -> ModelRequestData:
     assert audio_count == 1, "CohereASR only support single audio input per prompt"
-    # TODO (ekagra): add HF ckpt after asr release
-    model_name = "/host/engines/vllm/audio/2b-release"
+    model_name = "CohereLabs/cohere-transcribe-03-2026"
 
     prompt = (
         "<|startofcontext|><|startoftranscript|>"
@@ -538,9 +537,30 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# FireRedLID
+def run_fireredlid(question: str, audio_count: int) -> ModelRequestData:
+    assert audio_count == 1, "FireRedLID only supports single audio input per prompt"
+    model_name = "PatchyTisa/FireRedLID-vllm"
+
+    prompt = "<sos>"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=8,
+        max_num_seqs=5,
+        limit_mm_per_prompt={"audio": audio_count},
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt=prompt,
+    )
+
+
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "cohere_asr": run_cohere_asr,
+    "fireredlid": run_fireredlid,
     "funaudiochat": run_funaudiochat,
     "gemma3n": run_gemma3n,
     "glmasr": run_glmasr,

@@ -15,7 +15,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer, set_random_seed
 
 
 class SimpleLinear(nn.Module):
@@ -137,15 +137,14 @@ def test_routed_input_transform_inside_vs_outside(
     Method A (inside): SharedFusedMoE with routed_input_transform
     Method B (outside): Manually transform, then SharedFusedMoE without transform
     """
-    if current_platform.is_rocm() and use_rocm_aiter:
+    if current_platform.is_rocm():
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
         monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1" if use_rocm_aiter else "0")
         from vllm._aiter_ops import rocm_aiter_ops
 
         rocm_aiter_ops.refresh_env_variables()
 
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    set_random_seed(42)
 
     num_experts = 8
     top_k = 2

@@ -371,6 +371,17 @@ class KeyeVL1_5ProcessingInfo(KeyeProcessingInfo):
 
 
 class KeyeVL1_5MultiModalProcessor(BaseMultiModalProcessor[KeyeVL1_5ProcessingInfo]):
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        # Override to use the text path instead of token path to use the
+        # video-specific logic in processing_keye.py
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,

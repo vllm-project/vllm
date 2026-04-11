@@ -125,8 +125,15 @@ def test_routing_strategy_integration(monkeypatch, device):
             env_name = "VLLM_MOE_ROUTING_SIMULATION_STRATEGY"
             monkeypatch.setenv(env_name, strategy)
 
-            # Force reload of environment variable
-            envs.environment_variables[env_name] = lambda s=strategy: s
+            # Temporarily override the envs lookup so the router factory
+            # reads the monkeypatched value instead of the module-load-time
+            # default. Use monkeypatch.setitem so the original lambda is
+            # restored automatically at teardown.
+            monkeypatch.setitem(
+                envs.environment_variables,
+                env_name,
+                lambda s=strategy: s,
+            )
 
             # Test the select_experts method
             topk_weights, topk_ids = fused_moe.router.select_experts(

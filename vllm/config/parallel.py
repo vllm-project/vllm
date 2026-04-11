@@ -6,6 +6,7 @@ import socket
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, Literal, overload
 
+import regex as re
 import torch
 from pydantic import Field, field_validator, model_validator
 from torch.distributed import ProcessGroup, ReduceOp, Store
@@ -16,7 +17,6 @@ from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_ports_list
-from vllm.utils.torch_utils import cuda_device_count_stateless
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
@@ -29,12 +29,14 @@ else:
     Executor = Any
 
 logger = init_logger(__name__)
+_NUMACTL_CPUSET_PATTERN = re.compile(r"^\d+(?:-\d+)?(?:,\d+(?:-\d+)?)*$")
 
 ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
 DCPCommBackend = Literal["ag_rs", "a2a"]
+EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "pynccl"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -53,9 +55,9 @@ All2AllBackend = Literal[
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
 
-    window_size: int = 1000
+    window_size: int = Field(default=1000, gt=0)
     """Window size for expert load recording."""
-    step_interval: int = 3000
+    step_interval: int = Field(default=3000, gt=0)
     """
     Interval for rearranging experts in expert parallelism.
 
@@ -71,7 +73,7 @@ class EPLBConfig:
     Log the balancedness each step of expert parallelism.
     This is turned off by default since it will cause communication overhead.
     """
-    log_balancedness_interval: int = 1
+    log_balancedness_interval: int = Field(default=1, gt=0)
     """
     Interval for logging the balancedness.
     """
@@ -82,6 +84,15 @@ class EPLBConfig:
 
     policy: EPLBPolicyOption = "default"
     """The policy type for expert parallel load balancing (EPLB)."""
+
+    communicator: EPLBCommunicatorBackend | None = None
+    """
+    Backend for EPLB expert weight communication:
+    - "torch_nccl": Use torch.distributed on the device process group
+    - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "pynccl": Use PyNccl send/recv
+    - None: Auto-select backend ("torch_gloo" for async, "torch_nccl" for sync)
+    """
 
     @model_validator(mode="after")
     def _validate_eplb_config(self) -> Self:
@@ -148,10 +159,11 @@ class ParallelConfig:
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"
-    """The expert placement strategy for MoE layers:\n
+    """The expert placement strategy for MoE layers:
+
     - "linear": Experts are placed in a contiguous manner. For example, with 4
       experts and 2 ranks, rank 0 will have experts [0, 1] and rank 1 will have
-      experts [2, 3].\n
+      experts [2, 3].
     - "round_robin": Experts are placed in a round-robin manner. For example,
       with 4 experts and 2 ranks, rank 0 will have experts [0, 2] and rank 1
       will have experts [1, 3]. This strategy can help improve load balancing
@@ -159,11 +171,11 @@ class ParallelConfig:
     all2all_backend: All2AllBackend = "allgather_reducescatter"
     """All2All backend for MoE expert parallel communication. Available options:
 
-    - "allgather_reducescatter": All2all based on allgather and reducescatter\n
-    - "deepep_high_throughput": Use deepep high-throughput kernels\n
-    - "deepep_low_latency": Use deepep low-latency kernels\n
-    - "mori": Use mori kernels\n
-    - "nixl_ep": Use nixl-ep kernels\n
+    - "allgather_reducescatter": All2all based on allgather and reducescatter
+    - "deepep_high_throughput": Use deepep high-throughput kernels
+    - "deepep_low_latency": Use deepep low-latency kernels
+    - "mori": Use mori kernels
+    - "nixl_ep": Use nixl-ep kernels
     - "flashinfer_nvlink_two_sided": Use flashinfer two-sided kernels for mnnvl
     - "flashinfer_nvlink_one_sided": Use flashinfer high-throughput a2a kernels"""
 
@@ -213,14 +225,18 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model workers, either "ray" or "mp"
+    """
+    Backend to use for distributed model workers, either "ray" or "mp"
     (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
     is less than or equal to the number of GPUs available, "mp" will be used to
     keep processing on a single host. Otherwise, an error will be raised. To use "mp"
     you must also set nnodes, and to use "ray" you must manually set
     distributed_executor_backend to "ray".
 
-    Note that tpu only support Ray for distributed inference."""
+    Note:
+        [TPU](https://docs.vllm.ai/projects/tpu/en/latest/) platform only supports Ray
+        for distributed inference.
+    """
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -245,6 +261,27 @@ class ParallelConfig:
     nnodes: int = 1
     """num of nodes for multi-node distributed
     inference when distributed_executor_backend is mp."""
+    numa_bind: bool = False
+    """Enable NUMA binding for GPU worker subprocesses."""
+    numa_bind_nodes: list[int] | None = None
+    """NUMA node to bind each GPU worker to.
+
+    Specify one NUMA node per visible GPU, for example `[0, 0, 1, 1]`
+    for a 4-GPU system with GPUs 0-1 on NUMA node 0 and GPUs 2-3 on
+    NUMA node 1. If unset and `numa_bind=True`, vLLM auto-detects the
+    GPU-to-NUMA topology. The values are passed to `numactl --membind`
+    and `--cpunodebind`, so they must be valid `numactl` NUMA node indices.
+    """
+    numa_bind_cpus: list[str] | None = None
+    """Optional CPU lists to bind each GPU worker to.
+
+    Specify one CPU list per visible GPU, for example
+    `["0-3", "4-7", "8-11", "12-15"]`. When set, vLLM uses
+    `numactl --physcpubind` instead of `--cpunodebind`. This is useful
+    for custom policies such as binding to PCT or other high-frequency cores.
+    Each entry must use `numactl --physcpubind` CPU-list syntax, for example
+    `"0-3"` or `"0,2,4-7"`.
+    """
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
@@ -331,6 +368,43 @@ class ParallelConfig:
         """Skip validation if the value is `None` when initialisation is delayed."""
         return None if value is None else handler(value)
 
+    @field_validator("numa_bind_nodes")
+    @classmethod
+    def _validate_numa_bind_nodes(cls, value: list[int] | None) -> list[int] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("numa_bind_nodes must not be empty.")
+        if any(node < 0 for node in value):
+            raise ValueError("numa_bind_nodes must contain non-negative integers.")
+        return value
+
+    @field_validator("numa_bind_cpus")
+    @classmethod
+    def _validate_numa_bind_cpus(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("numa_bind_cpus must not be empty.")
+
+        for cpuset in value:
+            if not cpuset:
+                raise ValueError("numa_bind_cpus entries must not be empty.")
+            if not _NUMACTL_CPUSET_PATTERN.fullmatch(cpuset):
+                raise ValueError(
+                    "numa_bind_cpus entries must use numactl CPU list syntax, "
+                    "for example '0-3' or '0,2,4-7'."
+                )
+            for part in cpuset.split(","):
+                if "-" not in part:
+                    continue
+                start_str, end_str = part.split("-", 1)
+                if int(start_str) > int(end_str):
+                    raise ValueError(
+                        f"numa_bind_cpus ranges must be ascending, but got '{cpuset}'."
+                    )
+        return value
+
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
@@ -357,6 +431,13 @@ class ParallelConfig:
         if self.data_parallel_size <= 1 and self.data_parallel_external_lb:
             raise ValueError(
                 "data_parallel_external_lb can only be set when data_parallel_size > 1"
+            )
+
+        if not self.numa_bind and (
+            self.numa_bind_nodes is not None or self.numa_bind_cpus is not None
+        ):
+            raise ValueError(
+                "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
             )
 
         if self.enable_eplb:
@@ -711,9 +792,9 @@ class ParallelConfig:
                 backend = "mp"
             elif (
                 current_platform.is_cuda()
-                and cuda_device_count_stateless() < self.world_size
+                and current_platform.device_count() < self.world_size
             ):
-                gpu_count = cuda_device_count_stateless()
+                gpu_count = current_platform.device_count()
                 raise ValueError(
                     f"World size ({self.world_size}) is larger than the number of "
                     f"available GPUs ({gpu_count}) in this node. If this is "
@@ -759,16 +840,18 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
-        if (
-            self.all2all_backend in ("allgather_reducescatter")
-            and self.eplb_config.use_async
-        ):
-            logger.warning(
-                "Async EPLB causes hangs with the '%s' all2all backend. "
-                "Forcing synchronous EPLB.",
-                self.all2all_backend,
-            )
-            self.eplb_config.use_async = False
+        if self.enable_eplb and self.eplb_config.communicator is None:
+            if self.enable_elastic_ep:
+                # Elastic EP requires stateless mode
+                # (torch.distributed.batch_isend_irecv doesn't
+                # support stateless mode), so we use PyNCCL backend
+                self.eplb_config.communicator = "pynccl"
+            elif self.eplb_config.use_async:
+                # Torch Gloo is a backend that allows avoiding hangs
+                # due to NCCL multi-thread conflicts in async EPLB
+                self.eplb_config.communicator = "torch_gloo"
+            else:
+                self.eplb_config.communicator = "torch_nccl"
 
     @property
     def use_ray(self) -> bool:

@@ -25,14 +25,8 @@ def glm47_tokenizer():
 
 
 @pytest.fixture
-def glm47_tool_parser(glm47_tokenizer):
-    return Glm47MoeModelToolParser(glm47_tokenizer)
-
-
-@pytest.fixture
-def mock_request() -> ChatCompletionRequest:
-    request = Mock(spec=ChatCompletionRequest)
-    request.tools = [
+def sample_tools():
+    return [
         ChatCompletionToolsParam(
             function=FunctionDefinition(name="get_current_date", parameters={}),
         ),
@@ -49,6 +43,17 @@ def mock_request() -> ChatCompletionRequest:
             ),
         ),
     ]
+
+
+@pytest.fixture
+def glm47_tool_parser(glm47_tokenizer, sample_tools):
+    return Glm47MoeModelToolParser(glm47_tokenizer, tools=sample_tools)
+
+
+@pytest.fixture
+def mock_request(sample_tools) -> ChatCompletionRequest:
+    request = Mock(spec=ChatCompletionRequest)
+    request.tools = sample_tools
     request.tool_choice = "auto"
     return request
 

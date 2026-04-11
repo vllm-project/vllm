@@ -31,14 +31,12 @@ class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpForma
     def _split_lines(self, text, width):
         """
         1. Sentences split across lines have their single newlines removed.
-        2. Paragraphs and explicit newlines are split into separate lines.
+        2. Paragraphs and lists are split into separate lines.
         3. Each line is wrapped to the specified width (width of terminal).
         """
-        # The patterns also include whitespace after the newline
-        single_newline = re.compile(r"(?<!\n)\n(?!\n)\s*")
-        multiple_newlines = re.compile(r"\n{2,}\s*")
-        text = single_newline.sub(" ", text)
-        lines = re.split(multiple_newlines, text)
+        # The pattern also includes whitespace after the newline
+        newlines_to_remove = re.compile(r"(?<!\n)\n(?!\n)(?!\s*(-|\*|\+|\d+\.))\s*")
+        lines = newlines_to_remove.sub(" ", text).splitlines()
         return sum([textwrap.wrap(line, width) for line in lines], [])
 
     def add_arguments(self, actions):
