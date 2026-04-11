@@ -2332,13 +2332,8 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 
-            if isinstance(attn_metadata, list):
-                for ub_metadata in attn_metadata:
-                    for _metadata in ub_metadata.values():
-                        _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
-            else:
-                for _metadata in attn_metadata.values():
-                    _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+            # Set mm_prefix_range for all attention metadata
+            self._set_mm_prefix_range_for_metadata(attn_metadata, req_doc_ranges)
 
         if spec_decode_common_attn_metadata is not None and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
@@ -2788,7 +2783,20 @@ class GPUModelRunner(
             )
             self.lora_manager.set_active_adapters(lora_requests, tower_mapping)
 
-            if hasattr(self.model, "get_num_mm_connector_tokens"):
+            # Only set connector mapping if the model actually has a connector.
+            # Some multimodal models inherit a stub `get_num_mm_connector_tokens`
+            # from `SupportsMultiModal`, which returns None and should not be
+            # treated as a signal that connector LoRA is supported.
+            mm_mapping = (
+                self.model.get_mm_mapping()  # type: ignore[attr-defined]
+                if hasattr(self.model, "get_mm_mapping")
+                else None
+            )
+            if (
+                mm_mapping is not None
+                and mm_mapping.connector
+                and hasattr(self.model, "get_num_mm_connector_tokens")
+            ):
                 post_op_counts = [
                     self.model.get_num_mm_connector_tokens(num_tokens)  # type: ignore[attr-defined]
                     for num_tokens in encoder_token_counts
@@ -5361,11 +5369,17 @@ class GPUModelRunner(
         attn_metadata: PerLayerAttnMetadata | None = None
 
         slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
-            num_tokens_padded=num_tokens,
+            num_tokens_padded=num_tokens_padded,
             num_reqs_padded=num_reqs_padded,
             num_tokens_unpadded=num_tokens_unpadded,
             ubatch_slices=ubatch_slices_padded,
         )
+
+        # Dummy runs have no real slot assignments — fill with -1 so
+        # concat_and_cache kernels skip the KV write.
+        if slot_mappings_by_group is not None:
+            for sm in slot_mappings_by_group.values():
+                sm.fill_(-1)
 
         # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
         # etc.) with execute_model.  It must participate in the same event
@@ -6293,7 +6307,7 @@ class GPUModelRunner(
         cudagraph_mode.
         """
         min_cg_support = AttentionCGSupport.ALWAYS
-        min_cg_backend_name = None
+        min_cg_attn_backend = None
 
         for attn_backend_set, kv_cache_group in zip(
             attention_backends, kv_cache_groups
@@ -6306,152 +6320,18 @@ class GPUModelRunner(
                 )
                 if cg_support.value < min_cg_support.value:
                     min_cg_support = cg_support
-                    min_cg_backend_name = attn_backend.__name__
-        # Flexible resolve the cudagraph mode
-        cudagraph_mode = self.compilation_config.cudagraph_mode
-        assert cudagraph_mode is not None
-        # check cudagraph for mixed batch is supported
-        if (
-            cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
-            and min_cg_support != AttentionCGSupport.ALWAYS
-        ):
-            msg = (
-                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
-                f"with {min_cg_backend_name} backend (support: "
-                f"{min_cg_support})"
-            )
-            if min_cg_support == AttentionCGSupport.NEVER:
-                # if not supported any full cudagraphs, just raise it.
-                msg += (
-                    "; please try cudagraph_mode=PIECEWISE, and "
-                    "make sure compilation mode is VLLM_COMPILE"
-                )
-                raise ValueError(msg)
-
-            # attempt to resolve the full cudagraph related mode
-            if self.compilation_config.splitting_ops_contain_attention():
-                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
-                cudagraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.FULL_AND_PIECEWISE
-                )
-            else:
-                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
-                cudagraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.FULL_DECODE_ONLY
-                )
-            logger.warning(msg)
-
-        # check that if we are doing decode full-cudagraphs it is supported
-        if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and min_cg_support == AttentionCGSupport.NEVER
-        ):
-            msg = (
-                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
-                f"with {min_cg_backend_name} backend (support: "
-                f"{min_cg_support})"
-            )
-            if self.compilation_config.mode == CompilationMode.VLLM_COMPILE and (
-                self.compilation_config.splitting_ops_contain_attention()
-                or self.compilation_config.use_inductor_graph_partition
-            ):
-                msg += (
-                    "; setting cudagraph_mode=PIECEWISE because "
-                    "attention is compiled piecewise"
-                )
-                cudagraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.PIECEWISE
-                )
-            else:
-                msg += (
-                    "; setting cudagraph_mode=NONE because "
-                    "attention is not compiled piecewise"
-                )
-                cudagraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.NONE
-                )
-            logger.warning(msg)
-
-        # check that if we are doing spec-decode + decode full-cudagraphs it is
-        # supported
-        if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and self.uniform_decode_query_len > 1
-            and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value
-        ):
-            msg = (
-                f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
-                f" with spec-decode for attention backend "
-                f"{min_cg_backend_name} (support: {min_cg_support})"
-            )
-            if self.compilation_config.splitting_ops_contain_attention():
-                msg += "; setting cudagraph_mode=PIECEWISE"
-                cudagraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.PIECEWISE
-                )
-            else:
-                msg += "; setting cudagraph_mode=NONE"
-                cudagraph_mode = self.compilation_config.cudagraph_mode = (
-                    CUDAGraphMode.NONE
-                )
-            logger.warning(msg)
-
-        # double check that we can support full cudagraph if they are requested
-        # even after automatic downgrades
-        if (
-            cudagraph_mode.has_full_cudagraphs()
-            and min_cg_support == AttentionCGSupport.NEVER
-        ):
-            raise ValueError(
-                f"CUDAGraphMode.{cudagraph_mode.name} is not "
-                f"supported with {min_cg_backend_name} backend ("
-                f"support:{min_cg_support}) "
-                "; please try cudagraph_mode=PIECEWISE, "
-                "and make sure compilation mode is VLLM_COMPILE"
-            )
-
-        # if we have dedicated decode cudagraphs, and spec-decode is enabled,
-        # we need to adjust the cudagraph sizes to be a multiple of the uniform
-        # decode query length to avoid: https://github.com/vllm-project/vllm/issues/28207
-        # temp-fix: https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
-        # Will be removed in the near future when we have separate cudagraph capture
-        # sizes for decode and mixed prefill-decode.
-        if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and cudagraph_mode.separate_routine()
-            and self.uniform_decode_query_len > 1
-        ):
-            self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
-                self.uniform_decode_query_len, self.parallel_config.tensor_parallel_size
-            )
-
-        # For Mamba models with FULL decode cudagraphs, each decode
-        # sequence needs one Mamba cache block. The decode cudagraph
-        # dispatcher already caps batch sizes at max_num_seqs, so we just
-        # need to verify that enough blocks exist. Raising here instead
-        # of silently capping cudagraph_capture_sizes avoids unintended
-        # restrictions on PIECEWISE (prefill) cudagraphs.
-        # See: https://github.com/vllm-project/vllm/issues/34094
-        if cudagraph_mode.has_full_cudagraphs() and not is_profiling:
-            has_mamba = any(
-                isinstance(g.kv_cache_spec, MambaSpec) for g in kv_cache_groups
-            )
-            if has_mamba and self.kv_cache_config is not None:
-                num_blocks = self.kv_cache_config.num_blocks
-                if self.max_num_reqs > num_blocks:
-                    raise ValueError(
-                        f"max_num_seqs ({self.max_num_reqs}) exceeds "
-                        f"available Mamba cache blocks ({num_blocks}). "
-                        f"Each decode sequence requires one Mamba cache "
-                        f"block, so CUDA graph capture cannot proceed. "
-                        f"Please lower max_num_seqs to at most "
-                        f"{num_blocks} or increase "
-                        f"gpu_memory_utilization."
-                    )
-
+                    min_cg_attn_backend = attn_backend.__name__
+        cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
+            min_cg_support,
+            min_cg_attn_backend,
+            self.uniform_decode_query_len,
+            self.parallel_config.tensor_parallel_size,
+            self.kv_cache_config,
+            self.max_num_reqs,
+            is_profiling=is_profiling,
+        )
         # Trigger cudagraph dispatching keys initialization after
         # resolved cudagraph mode.
-        self.compilation_config.cudagraph_mode = cudagraph_mode
         self.cudagraph_dispatcher.initialize_cudagraph_keys(
             cudagraph_mode, self.uniform_decode_query_len
         )
@@ -6486,6 +6366,46 @@ class GPUModelRunner(
             self.reorder_batch_threshold = None
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
+
+    def _set_mm_prefix_range_for_metadata(
+        self,
+        attn_metadata: Any,
+        req_doc_ranges: dict[int, list[tuple[int, int]]],
+    ) -> None:
+        """Set mm_prefix_range for all attention metadata objects.
+
+        This method handles both list and non-list attention metadata,
+        computing mm_prefix_range_tensor once and sharing it across all
+        metadata objects to avoid redundant host-to-device transfers.
+        """
+        from vllm.v1.attention.backends.triton_attn import (
+            TritonAttentionMetadata,
+        )
+
+        # Get all metadata objects from either list or dict structure
+        metadata_list = []
+        if isinstance(attn_metadata, list):
+            for ub_metadata in attn_metadata:
+                metadata_list.extend(ub_metadata.values())
+        else:
+            metadata_list.extend(attn_metadata.values())
+
+        # Set mm_prefix_range for all metadata and compute tensor once
+        shared_tensor = None
+        for metadata in metadata_list:
+            metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
+
+            # Only compute tensor for TritonAttentionMetadata
+            if isinstance(metadata, TritonAttentionMetadata):
+                if shared_tensor is None:
+                    shared_tensor = (
+                        TritonAttentionMetadata.compute_mm_prefix_range_tensor(
+                            req_doc_ranges,
+                            metadata.seq_lens.shape[0],  # type: ignore[attr-defined]
+                            metadata.seq_lens.device,  # type: ignore[attr-defined]
+                        )
+                    )
+                metadata.mm_prefix_range_tensor = shared_tensor
 
     def may_reinitialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
