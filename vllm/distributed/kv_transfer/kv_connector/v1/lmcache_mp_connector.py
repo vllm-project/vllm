@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
-import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -126,7 +125,7 @@ def create_scheduler_adapter(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size
+        vllm_config.parallel_config.pipeline_parallel_size,
     )
 
     return LMCacheMPSchedulerAdapter(
@@ -159,7 +158,7 @@ def create_worker_adapter(
         vllm_config.parallel_config.world_size,
         vllm_config.parallel_config.rank,
         vllm_config.parallel_config.tensor_parallel_size,
-        vllm_config.parallel_config.pipeline_parallel_size
+        vllm_config.parallel_config.pipeline_parallel_size,
     )
 
     return LMCacheMPWorkerAdapter(
@@ -609,7 +608,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         """
         # In MLA scenario, only the first rank of the pipeline group
         # needs to save the KV cache.
-        if self.worker_adapter.use_mla and not self.worker_adapter.is_first_rank_of_pp_group:
+        if (
+            self.worker_adapter.use_mla
+            and not self.worker_adapter.is_first_rank_of_pp_group
+        ):
             return
 
         metadata = self._get_connector_metadata()
