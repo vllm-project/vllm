@@ -591,6 +591,9 @@ torch::Tensor marlin_gemm(
                   "When b_type = float4_e2m1f, b_scale scalar type must be",
                   "float8_e4m3fn (for NVFP4) or float8_e8m0fnu (for MXFP4).");
     }
+  } else if (b_type_id == vllm::kFE4M3fn.id() &&
+             b_scales.scalar_type() == at::ScalarType::Float8_e8m0fnu) {
+    s_type_id = vllm::kFE8M0fnu.id();
   }
 
   vllm::ScalarType a_type = vllm::ScalarType::from_id(a_type_id);

@@ -68,10 +68,13 @@ class IrOpPriorityConfig:
     def set_priority(self):
         """
         Context manager to set the IR op priority for all op members.
-        It also imports vllm.kernels to ensure all implementations are made available.
+        It also imports IR kernel implementations for the current platform
+        to ensure all implementations are made available.
         """
-        import vllm.kernels  # noqa: F401, registers IR op implementations
         from vllm.ir.op import IrOp
+        from vllm.platforms import current_platform
+
+        current_platform.import_ir_kernels()
 
         with contextlib.ExitStack() as stack:
             for field in fields(self):

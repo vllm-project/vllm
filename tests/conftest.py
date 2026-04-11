@@ -246,8 +246,9 @@ def default_vllm_config():
     """
     from vllm.config import VllmConfig, set_current_vllm_config
 
-    with set_current_vllm_config(VllmConfig()):
-        yield
+    config = VllmConfig()
+    with set_current_vllm_config(config):
+        yield config
 
 
 @pytest.fixture()
