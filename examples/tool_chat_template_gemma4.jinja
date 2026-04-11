@@ -179,7 +179,7 @@
     {{- '<|turn>system\n' -}}
 
     {%- if enable_thinking is defined and enable_thinking -%}
-        {{- '<|think|>' -}}
+        {{- '<|think|>\n' -}}
         {%- set ns.prev_message_type = 'think' -%}
     {%- endif -%}
 
@@ -229,8 +229,9 @@
         {{- '<|turn>' + role + '\n' }}
     {%- endif -%}
 
-    {%- if message.get('reasoning') and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}
-        {{- '<|channel>thought\n' + message['reasoning'] + '\n<channel|>'}}
+    {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}
+    {%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}
+        {{- '<|channel>thought\n' + thinking_text + '\n<channel|>' -}}
     {%- endif -%}
 
             {%- if message['tool_calls'] -%}
