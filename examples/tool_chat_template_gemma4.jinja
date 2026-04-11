@@ -311,29 +311,31 @@
                             {{- item['text'] | trim -}}
                         {%- endif -%}
                     {%- elif item['type'] == 'image' -%}
-                        {{- '\n\n<|image|>\n\n' -}}
+                        {{- '<|image|>' -}}
                         {%- set ns.prev_message_type = 'image' -%}
                     {%- elif item['type'] == 'audio' -%}
                         {{- '<|audio|>' -}}
                         {%- set ns.prev_message_type = 'audio' -%}
                     {%- elif item['type'] == 'video' -%}
-                        {{- '\n\n<|video|>\n\n' -}}
+                        {{- '<|video|>' -}}
                         {%- set ns.prev_message_type = 'video' -%}
                     {%- endif -%}
                 {%- endfor -%}
             {%- endif -%}
 
-        {%- if not (ns_tr_out.flag and not message.get('content')) -%}
+        {%- if ns.prev_message_type == 'tool_call' and not ns_tr_out.flag -%}
+            {{- '<|tool_response>' -}}
+        {%- elif not (ns_tr_out.flag and not message.get('content')) -%}
             {{- '<turn|>\n' -}}
         {%- endif -%}
     {%- endif -%}
 {%- endfor -%}
 
 {%- if add_generation_prompt -%}
-    {%- if ns.prev_message_type != 'tool_response' -%}
+    {%- if ns.prev_message_type != 'tool_response' and ns.prev_message_type != 'tool_call' -%}
         {{- '<|turn>model\n' -}}
-    {%- endif -%}
-    {%- if not enable_thinking | default(false) -%}
-        {{- '<|channel>thought\n<channel|>' -}}
+        {%- if not enable_thinking | default(false) -%}
+            {{- '<|channel>thought\n<channel|>' -}}
+        {%- endif -%}
     {%- endif -%}
 {%- endif -%}
