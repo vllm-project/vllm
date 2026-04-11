@@ -1229,8 +1229,14 @@ class VllmConfig:
         if not current_platform.support_hybrid_kv_cache():
             # Hybrid KV cache manager is not supported on non-GPU platforms.
             need_disable_hybrid_kv_cache_manager = True
-        if self.kv_events_config is not None:
-            # Hybrid KV cache manager is not compatible with KV events.
+        if (
+            self.kv_events_config is not None
+            and self.scheduler_config.disable_hybrid_kv_cache_manager is not False
+        ):
+            # Hybrid KV cache manager is not compatible with KV events
+            # by default. When explicitly enabled via
+            # --no-disable-hybrid-kv-cache-manager (e.g. for hybrid models
+            # using NixlConnector which implements SupportsHMA), allow it.
             need_disable_hybrid_kv_cache_manager = True
         if (
             self.model_config is not None
