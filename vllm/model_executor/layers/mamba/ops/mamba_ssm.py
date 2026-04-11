@@ -4,13 +4,23 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/v2.2.4/mamba_ssm/ops/triton/selective_state_update.py
 
+import functools
+import json
+import os
+from typing import Any
+
 import torch
 from packaging import version
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+
+logger = init_logger(__name__)
 
 TRITON3 = HAS_TRITON and (version.parse(triton.__version__) >= version.parse("3.0.0"))
 
@@ -316,6 +326,133 @@ def _selective_scan_update_kernel(
         tl.store(dst_state_ptrs, state, mask=mask)
 
 
+def get_ssu_config_file_name(dim: int, dstate: int) -> str:
+    """Generate the config filename for selective_state_update tuning.
+
+    Args:
+        dim: The intermediate dimension of the SSM.
+        dstate: The state dimension of the SSM.
+
+    Returns:
+        A filename string encoding the dimension parameters and GPU name.
+    """
+    device_name = current_platform.get_device_name().replace(" ", "_")
+    if "H200" in device_name.split("_"):
+        device_name = "NVIDIA_H200"
+    return f"dim={dim},dstate={dstate},device_name={device_name}.json"
+
+
+@functools.lru_cache
+def get_ssu_configs(
+    dim: int,
+    dstate: int,
+) -> dict[str, Any] | None:
+    """Return optimized configurations for the selective_state_update kernel.
+
+    Looks up a JSON config file keyed by (dim, dstate, device_name). Returns
+    a dict mapping ``dstate`` values (as strings) to ``{BLOCK_SIZE_M,
+    num_warps}`` dicts, or ``None`` when no config file exists.
+
+    Args:
+        dim: The intermediate dimension of the SSM.
+        dstate: The state dimension of the SSM.
+
+    Returns:
+        A dictionary mapping dstate values to kernel config dicts, or None
+        if no config file is found.
+    """
+    json_file_name = get_ssu_config_file_name(dim, dstate)
+
+    config_file_paths: list[str] = []
+
+    user_defined_config_folder = envs.VLLM_TUNED_CONFIG_FOLDER
+    if user_defined_config_folder is not None:
+        config_file_paths.append(
+            os.path.join(user_defined_config_folder, json_file_name)
+        )
+
+    default_config_file_path = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        os.pardir,
+        "configs",
+        "selective_state_update",
+        json_file_name,
+    )
+    config_file_paths.append(default_config_file_path)
+
+    for config_file_path in config_file_paths:
+        if os.path.exists(config_file_path):
+            with open(config_file_path) as f:
+                logger.info_once(
+                    "Using configuration from %s for selective_state_update.",
+                    config_file_path,
+                    scope="global",
+                )
+                tuned_config: dict[str, Any] = json.load(f)
+                tuned_config.pop("triton_version", None)
+                return {str(key): val for key, val in tuned_config.items()}
+
+    return None
+
+
+def get_ssu_default_config(
+    dstate: int,
+    is_blackwell: bool = False,
+) -> dict[str, int]:
+    """Return default BLOCK_SIZE_M and num_warps for selective_state_update.
+
+    These are the original hand-tuned heuristics based on ``dstate``.
+
+    Args:
+        dstate: The state dimension of the SSM.
+        is_blackwell: Whether the target GPU is a Blackwell-class device.
+
+    Returns:
+        A dict with ``BLOCK_SIZE_M`` and ``num_warps`` keys.
+    """
+    block_size_m, num_warps = 4, 8
+
+    if dstate <= 16:
+        block_size_m, num_warps = 32, 4
+    elif dstate <= 32:
+        block_size_m, num_warps = 16, 4
+    elif dstate <= 64:
+        block_size_m, num_warps = 8, 4
+    else:
+        if is_blackwell:
+            block_size_m, num_warps = 32, 8
+        elif dstate <= 128:
+            block_size_m, num_warps = 4, 4
+
+    return {"BLOCK_SIZE_M": block_size_m, "num_warps": num_warps}
+
+
+def get_ssu_kernel_config(
+    dim: int,
+    dstate: int,
+    is_blackwell: bool = False,
+) -> dict[str, int]:
+    """Look up the optimal kernel config, falling back to defaults.
+
+    Args:
+        dim: The intermediate dimension of the SSM.
+        dstate: The state dimension of the SSM.
+        is_blackwell: Whether the target GPU is a Blackwell-class device.
+
+    Returns:
+        A dict with ``BLOCK_SIZE_M`` and ``num_warps`` keys.
+    """
+    configs = get_ssu_configs(dim, dstate)
+    if configs is not None:
+        key = str(dstate)
+        if key in configs:
+            return configs[key]
+        closest_key = min(configs.keys(), key=lambda k: abs(int(k) - dstate))
+        return configs[closest_key]
+
+    return get_ssu_default_config(dstate, is_blackwell=is_blackwell)
+
+
 def selective_state_update(
     state,
     x,
@@ -442,24 +579,10 @@ def selective_state_update(
         else (0, 0)
     )
     # We don't want autotune since it will overwrite the state.
-    # We instead tune by hand based on dstate.
-
-    # Default
-    BLOCK_SIZE_M, num_warps = 4, 8
-
-    if dstate <= 16:
-        BLOCK_SIZE_M, num_warps = 32, 4
-    elif dstate <= 32:
-        BLOCK_SIZE_M, num_warps = 16, 4
-    elif dstate <= 64:
-        BLOCK_SIZE_M, num_warps = 8, 4
-    else:
-        # dstate > 64
-        if is_blackwell:
-            # Optimized for B200 with dstate>64
-            BLOCK_SIZE_M, num_warps = 32, 8
-        elif dstate <= 128:
-            BLOCK_SIZE_M, num_warps = 4, 4
+    # Look up tuned config from JSON, falling back to hand-tuned heuristics.
+    kernel_config = get_ssu_kernel_config(dim, dstate, is_blackwell=is_blackwell)
+    BLOCK_SIZE_M = kernel_config["BLOCK_SIZE_M"]
+    num_warps = kernel_config["num_warps"]
 
     tie_hdim = (
         A.stride(-1) == 0
