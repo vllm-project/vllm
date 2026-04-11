@@ -213,6 +213,7 @@ class HFConfigParser(ConfigParserBase):
             config_class = _CONFIG_REGISTRY[model_type]
             config_class.model_type = model_type
             AutoConfig.register(model_type, config_class, exist_ok=True)
+            trust_remote_code = False
             config = config_class.from_pretrained(
                 model,
                 revision=revision,
