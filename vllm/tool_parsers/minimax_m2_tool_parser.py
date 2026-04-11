@@ -160,10 +160,6 @@ class MinimaxM2ToolParser(ToolParser):
         Returns:
             The converted value
         """
-        # Check if the VALUE itself indicates null (not just if null is allowed)
-        if value.lower() in ("null", "none", "nil"):
-            return None
-
         # Normalize types
         normalized_types = [t.lower() for t in param_types]
 
