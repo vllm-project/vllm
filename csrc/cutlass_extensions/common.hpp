@@ -115,7 +115,7 @@ struct enable_sm100f_only : Kernel {
   template <typename... Args>
   CUTLASS_DEVICE void operator()(Args&&... args) {
 #if defined __CUDA_ARCH__
-  #if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
+  #if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030 || __CUDA_ARCH__ == 1100
     Kernel::operator()(std::forward<Args>(args)...);
   #else
     printf("This kernel only supports sm100f.\n");
