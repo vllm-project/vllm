@@ -56,7 +56,12 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -568,7 +573,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             b,
             a,
             core_attn_out,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # ============================================================
@@ -1084,13 +1089,14 @@ def gdn_attention_core(
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     """
     Custom op for the core attention computation.
     Only handles the convolution + recurrent attention part.
     Input/output projections are handled outside this op.
     """
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self._forward_core(
@@ -1106,7 +1112,7 @@ def gdn_attention_core_fake(
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     """Fake implementation for torch.compile."""
     return

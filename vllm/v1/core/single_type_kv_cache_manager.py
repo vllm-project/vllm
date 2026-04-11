@@ -565,11 +565,17 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 for computed in computed_blocks:
                     computed.pop()
         if use_eagle and computed_blocks[0]:
-            assert kv_cache_spec.block_size == alignment_tokens, (
-                "aligned_length is not compatible with eagle now"
-            )
             for computed in computed_blocks:
                 computed.pop()
+            # Re-align after eagle pop: the pop may break the alignment
+            # when block_size != alignment_tokens (hybrid models with
+            # different page sizes, e.g. Gemma4).
+            while (
+                block_size != alignment_tokens
+                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+            ):
+                for computed in computed_blocks:
+                    computed.pop()
         return computed_blocks
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
