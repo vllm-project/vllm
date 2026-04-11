@@ -20,7 +20,7 @@ class CustomError(Exception):
 
 @pytest.fixture
 def custom_add_op(fake_vllm_ir):
-    """Fixture that registers _custom_add op with implementations."""
+    """Register ``_custom_add`` plus impl_a, impl_b, impl_even for this test."""
 
     @vllm.ir.register_op(allow_inplace=True)
     def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
@@ -107,8 +107,10 @@ class TestIrOpCustomAdd:
 
     def test_torch_op_is_registered(self, custom_add_op):
         _custom_add = custom_add_op
-        assert hasattr(torch.ops.vllm_ir, "_custom_add")
-        assert callable(torch.ops.vllm_ir._custom_add.default)
+        torch_ops = getattr(torch.ops, vllm.ir.op.vllm_ir_torch_lib.ns)
+        assert hasattr(torch_ops, "_custom_add")
+        assert callable(torch_ops._custom_add.default)
+        assert _custom_add.torch_op is torch_ops._custom_add.default
 
     # Semantic correctness
     def test_semantics_match_native(self, custom_add_op):
@@ -165,7 +167,11 @@ class TestIrOpCustomAdd:
     ):
         _custom_add = custom_add_op
         op_fn = _custom_add if overload == "default" else _custom_add.maybe_inplace
-        torch_op = getattr(torch.ops.vllm_ir._custom_add, overload)
+        torch_op = (
+            _custom_add.torch_op
+            if overload == "default"
+            else _custom_add.maybe_inplace.torch_op
+        )
 
         def fn(x, y):
             return op_fn(x, y)
@@ -270,7 +276,11 @@ class TestIrOpImplDispatch:
     def test_dispatch_priority_order(self, custom_add_op, overload: str):
         _custom_add = custom_add_op
         op_fn = _custom_add if overload == "default" else _custom_add.maybe_inplace
-        torch_op = getattr(torch.ops.vllm_ir._custom_add, overload)
+        torch_op = (
+            _custom_add.torch_op
+            if overload == "default"
+            else _custom_add.maybe_inplace.torch_op
+        )
 
         x = torch.tensor(1, dtype=torch.int32)
         y = torch.tensor(2, dtype=torch.int32)
@@ -344,7 +354,10 @@ class TestIrOpImplDispatch:
         assert torch.all(out2 == 1 + 2)
 
     def test_default_priority(
-        self, custom_add_op, caplog_vllm: pytest.LogCaptureFixture, disable_log_dedup
+        self,
+        custom_add_op,
+        caplog_vllm: pytest.LogCaptureFixture,
+        disable_log_dedup,
     ):
         _custom_add = custom_add_op
         # Make sure logs are not deduplicated to properly test the warning
@@ -370,7 +383,7 @@ class TestIrOpImplDispatch:
 
 @pytest.fixture
 def custom_mm_op(fake_vllm_ir):
-    """Fixture that registers _custom_mm op."""
+    """Fixture that registers ``_custom_mm`` (isolated by ``fake_vllm_ir``)."""
 
     @vllm.ir.register_op
     def _custom_mm(

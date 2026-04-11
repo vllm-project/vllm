@@ -18,9 +18,18 @@ from vllm.logging_utils import lazy, tensors_str_no_data
 
 InputGenerator = Callable[..., tuple[Any, ...]]
 
-vllm_ir_torch_lib = Library("vllm_ir", "FRAGMENT")
+vllm_ir_torch_lib = Library("vllm_ir", "FRAGMENT")  # IR op lib; monkeypatch in tests.
 
 logger = init_logger(__name__)
+
+
+def _torch_ops_subtree(lib: Any) -> Any:
+    """``torch.ops`` subtree for ``lib.ns``; fall back if doc mocks replace ``ns``."""
+    ns = getattr(lib, "ns", None)
+    if isinstance(ns, str):
+        return getattr(torch.ops, ns)
+    return torch.ops.vllm_ir
+
 
 _NAME_PATTERN = re.compile(r"^[a-z_][a-z_0-9]*$")
 
@@ -165,7 +174,6 @@ class IrOp:
             ]
 
         self.name = name
-        self._native_impl = native_impl
         self._docstring = inspect.getdoc(native_impl) or ""
         self._registration_stack = registration_stack or []
         self.impls: dict[str, IrOpImpl] = {}
@@ -195,16 +203,16 @@ class IrOp:
         # can be overridden by register_fake
         self._fake_fn = native_impl
 
-        # torch registration
-        vllm_ir_torch_lib.define(self.name + self._schema_str)
+        # torch registration (resolve ``torch.ops`` subtree from ``lib.ns``)
+        lib = vllm_ir_torch_lib
+        lib.define(self.name + self._schema_str)
         # CompositeExplicitAutograd is not decomposed
         # by ATen IR normalization in AOTAutograd
-        vllm_ir_torch_lib.impl(
-            self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
-        )
-        vllm_ir_torch_lib._register_fake(self.name, self._fake_call)
-        assert hasattr(torch.ops.vllm_ir, name)
-        self.torch_op: torch._ops.OpOverload = getattr(torch.ops.vllm_ir, name).default
+        lib.impl(self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd")
+        lib._register_fake(self.name, self._fake_call)
+        torch_ops = _torch_ops_subtree(lib)
+        assert hasattr(torch_ops, name)
+        self.torch_op: torch._ops.OpOverload = getattr(torch_ops, name).default
 
     def register_fake(self, fn: Callable) -> Callable:
         """
@@ -483,16 +491,16 @@ class IrOpInplaceOverload:
             op.impls["native"].impl_fn, mutates_args=op.activations
         )
 
-        # torch registration
-        vllm_ir_torch_lib.define(self.name + self._schema_str)
-        vllm_ir_torch_lib.impl(
-            self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd"
-        )
+        # torch registration (resolve ``torch.ops`` subtree from ``lib.ns``)
+        lib = vllm_ir_torch_lib
+        lib.define(self.name + self._schema_str)
+        lib.impl(self.name, self._inner_call, dispatch_key="CompositeExplicitAutograd")
         # fake goes to default overload for now
-        vllm_ir_torch_lib._register_fake(self.name, self.op._fake_call)
+        lib._register_fake(self.name, self.op._fake_call)
 
-        assert hasattr(getattr(torch.ops.vllm_ir, self.op.name), "maybe_inplace")
-        self.torch_op = getattr(torch.ops.vllm_ir, self.op.name).maybe_inplace
+        torch_ops = _torch_ops_subtree(lib)
+        assert hasattr(getattr(torch_ops, self.op.name), "maybe_inplace")
+        self.torch_op = getattr(torch_ops, self.op.name).maybe_inplace
 
     def __call__(self, *args, **kwargs) -> Any:
         if not _ENABLE_TORCH_WRAP:
