@@ -25,7 +25,7 @@ import subprocess
 
 import pytest
 
-from tests.utils import RemoteOpenAIServer, multi_gpu_only
+from tests.utils import RemoteOpenAIServer, large_gpu_test, multi_gpu_only
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -323,6 +323,7 @@ def test_eval_matches_lm_eval_llama_8b(llama_8b_server, tmp_path):
     )
 
 
+@large_gpu_test(min_gb=64)
 @pytest.mark.slow_test
 @pytest.mark.benchmark
 def test_eval_matches_lm_eval_qwen_35b_fp8(qwen_35b_fp8_server, tmp_path):
@@ -395,6 +396,7 @@ def gpt_oss_20b_server(tmp_path_factory):
         yield s
 
 
+@large_gpu_test(min_gb=64)
 @multi_gpu_only(num_gpus=2)
 @pytest.mark.slow_test
 @pytest.mark.benchmark
