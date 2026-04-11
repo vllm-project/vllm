@@ -60,7 +60,13 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
 
-from .interfaces import MixtureOfExperts, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     extract_layer_index,
@@ -838,7 +844,7 @@ class Gemma4CrossDecoderLayers(nn.Module):
 @support_torch_compile(
     enable_if=lambda vllm_config: not vllm_config.cache_config.kv_sharing_fast_prefill
 )
-class Gemma4Model(nn.Module):
+class Gemma4Model(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = _get_text_config(vllm_config.model_config.hf_config)
@@ -1168,7 +1174,7 @@ class Gemma4Model(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         per_layer_inputs: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if self.fast_prefill_enabled:
             hidden_states = self.fast_prefill_forward(
                 input_ids,
@@ -1204,6 +1210,7 @@ class Gemma4Model(nn.Module):
             residual = intermediate_tensors["residual"]
             per_layer_inputs = intermediate_tensors.get("per_layer_inputs")
 
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for layer_idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
@@ -1222,6 +1229,9 @@ class Gemma4Model(nn.Module):
                 per_layer_input=layer_per_input,
                 **kwargs,
             )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {
@@ -1236,6 +1246,9 @@ class Gemma4Model(nn.Module):
             hidden_states = self.norm(hidden_states)
         else:
             hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1248,21 +1261,27 @@ class Gemma4Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
 
-        # MoE expert weight mapping: checkpoint 3D packed tensors are
-        # exploded in _weight_iterator to per-expert 2D weights like:
+        # MoE expert weight mapping: checkpoint can have either:
+        #   1. 3D packed tensors (exploded in _weight_iterator to per-expert 2D)
+        #   2. Already per-expert 2D weights (if quantized)
+        # Map to FusedMoE parameters:
         #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
         #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
         #   moe.experts.{id}.down_proj → FusedMoE w2
-        # We build the mapping directly since Gemma4 uses bare param
-        # names (no .weight suffix) unlike standard MoE checkpoints.
+        #
+        # Use prefix matching to handle both weights and
+        # quantization scale parameters. The param_name is a prefix ending
+        # in underscore, and weight_name ends with a dot, so that:
+        #   "experts.0.gate_proj.weight_scale" -> "experts.w13_weight_scale"
+        #   "experts.0.gate_proj.weight" -> "experts.w13_weight"
         num_experts = getattr(self.config, "num_experts", None) or 0
         expert_params_mapping = [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                "experts.w13_weight"
+                "experts.w13_"
                 if proj_name in ["gate_proj", "up_proj"]
-                else "experts.w2_weight",
-                f"experts.{expert_id}.{proj_name}",
+                else "experts.w2_",
+                f"experts.{expert_id}.{proj_name}.",
                 expert_id,
                 shard_id,
             )
@@ -1322,9 +1341,21 @@ class Gemma4Model(nn.Module):
                     expert_id,
                     shard_id,
                 ) in expert_params_mapping:
-                    if weight_name not in name:
+                    # Match both:
+                    #  - Bare weights: "experts.0.down_proj" (from 3D explosion)
+                    #  - With suffix: "experts.0.down_proj.weight_scale" (2D quantized)
+                    # weight_name has trailing dot, so check with and without it
+                    weight_name_base = weight_name.rstrip(".")
+                    if weight_name in name:
+                        # Has suffix (e.g., .weight_scale)
+                        moe_name = name.replace(weight_name, param_name)
+                    elif name.endswith(weight_name_base):
+                        # Bare weight (no suffix)
+                        moe_name = name.replace(
+                            weight_name_base, param_name.rstrip("_") + "_weight"
+                        )
+                    else:
                         continue
-                    moe_name = name.replace(weight_name, param_name)
                     if moe_name not in params_dict:
                         continue
                     if is_pp_missing_parameter(moe_name, self):
@@ -1334,15 +1365,12 @@ class Gemma4Model(nn.Module):
                     # orientation for FusedMoE after _weight_iterator:
                     #   gate/up: [I, H] → w1/w3 expects [I, H]
                     #   down:    [H, I] → w2 expects [H, I]
-                    assert loaded_weight.dim() == 2, (
-                        f"Expected 2D expert weight for {weight_name}, "
-                        f"got shape {loaded_weight.shape}"
-                    )
+                    # Scales and other quantization params may be 1D or scalar.
                     weight_loader = param.weight_loader
                     weight_loader(
                         param,
                         loaded_weight,
-                        weight_name + ".weight",
+                        moe_name,  # Pass mapped name (handles both weights and scales)
                         shard_id=shard_id,
                         expert_id=expert_id,
                     )
@@ -1366,7 +1394,9 @@ class Gemma4Model(nn.Module):
         return loaded_params
 
 
-class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
+class Gemma4ForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
+):
     # Note: qkv_proj packing applies to non-k_eq_v layers (sliding
     # attention and full attention without k_eq_v). k_eq_v layers use
     # separate q_proj + k_proj without packing.
@@ -1448,7 +1478,7 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds, **kwargs
         )
@@ -1498,6 +1528,11 @@ class Gemma4ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts):
                         ".experts.down_proj",
                         ".moe.down_proj",
                     )
+
+                # Remap individual 2D expert weights:
+                # .experts.{id}.{proj} → .moe.experts.{id}.{proj}
+                # (This handles per-expert 2D quantized weights)
+                name = re.sub(r"\.experts\.(\d+)\.", r".moe.experts.\1.", name)
 
                 # MoE expert weights: checkpoint stores as 3D packed
                 # tensors.  Explode into per-expert 2D weights for

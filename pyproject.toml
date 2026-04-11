@@ -1,12 +1,12 @@
 [build-system]
-# Should be mirrored in requirements/build.txt
+# Should be mirrored in requirements/build/cuda.txt
 requires = [
     "cmake>=3.26.1",
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.10.0",
+    "torch == 2.11.0",
     "wheel",
     "jinja2",
 ]
@@ -120,7 +120,8 @@ python = "./.venv"
 [tool.typos.files]
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
-    "benchmarks/sonnet.txt", "tests/lora/data/*", "examples/pooling/token_embed/*", "build/*",
+    "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
+    "examples/pooling/token_embed/*", "tests/models/language/pooling/*",
     "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", "tests/entrypoints/openai/speech_to_text/test_transcription_validation.py",
     "docs/governance/process.md", "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*"]
 ignore-hidden = false

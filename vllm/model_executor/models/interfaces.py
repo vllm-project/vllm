@@ -1098,6 +1098,12 @@ class SupportsTranscription(Protocol):
     :meth:`get_language_token_ids`.
     """
 
+    no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
+    """
+    Languages that don't need a space between words.
+    For example, Japanese (ja) and Chinese (zh) don't need a space between words.
+    """
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         # language codes in supported_languages
