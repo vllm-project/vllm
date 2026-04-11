@@ -267,6 +267,15 @@ void selective_scan_fwd(
     const std::optional<torch::Tensor>& cu_chunk_seqlen,
     const std::optional<torch::Tensor>& last_chunk_indices);
 
+namespace vllm {
+void gdn_decode_step(
+    torch::Tensor& q, torch::Tensor& k,
+    torch::Tensor& v, torch::Tensor& g_decay, torch::Tensor& beta,
+    torch::Tensor& state, torch::Tensor& output,
+    torch::Tensor& state_indices,
+    float scale, bool use_l2norm);
+}  // namespace vllm
+
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
     torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,

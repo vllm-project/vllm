@@ -68,6 +68,94 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 logger = init_logger(__name__)
 
 
+def _has_cuda_gdn_decode() -> bool:
+    """Check if the CUDA-native GDN decode kernel is available."""
+    try:
+        torch.ops.vllm.gdn_decode_step
+        return True
+    except AttributeError:
+        return False
+
+
+def _get_gdn_decode_backend() -> str:
+    """Select the GDN decode backend: 'cuda', 'triton', or 'auto'."""
+    cfg = get_current_vllm_config().additional_config.get(
+        "gdn_decode_backend", "auto"
+    )
+    backend = str(cfg).strip().lower()
+    if backend == "cuda":
+        if not _has_cuda_gdn_decode():
+            logger.warning(
+                "GDN decode backend 'cuda' requested but CUDA kernel not "
+                "available. Falling back to Triton."
+            )
+            return "triton"
+        return "cuda"
+    if backend == "triton":
+        return "triton"
+    # auto: prefer CUDA on Blackwell (SM 12.0+) where Triton may deadlock
+    if (
+        _has_cuda_gdn_decode()
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(120)
+    ):
+        logger.info_once(
+            "Using CUDA-native GDN decode kernel (Blackwell detected)",
+            scope="local",
+        )
+        return "cuda"
+    return "triton"
+
+
+def gdn_decode_step_cuda(
+    mixed_qkv: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    scale: float,
+    initial_state: torch.Tensor,
+    out: torch.Tensor,
+    ssm_state_indices: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = False,
+) -> None:
+    """
+    CUDA-native GDN decode step. Bridges the Triton interface
+    (packed mixed_qkv, raw a/b params) to the CUDA kernel interface
+    (split q/k/v, pre-computed g_decay/beta).
+    """
+    HV, V, K = initial_state.shape[-3:]
+    q_dim = (mixed_qkv.shape[1] - HV * V) // 2
+    H = q_dim // K
+    B = mixed_qkv.shape[0]
+
+    # Split packed mixed_qkv into q, k, v
+    q = mixed_qkv[:, :q_dim].reshape(B, H, K)
+    k = mixed_qkv[:, q_dim:2 * q_dim].reshape(B, H, K)
+    v = mixed_qkv[:, 2 * q_dim:].reshape(B, HV, V)
+
+    # Pre-compute decay: g = exp(-exp(A_log) * softplus(a + dt_bias))
+    x = a + dt_bias.unsqueeze(0)
+    softplus_x = torch.where(
+        x <= 20.0, torch.log1p(torch.exp(x)), x
+    )
+    g_raw = -torch.exp(A_log.unsqueeze(0)) * softplus_x
+    g_decay = torch.exp(g_raw)
+
+    # Pre-compute beta: sigmoid(b)
+    beta = torch.sigmoid(b.float())
+
+    # Prepare output buffer — CUDA kernel outputs [B, HV, V]
+    out_flat = out.squeeze(1)  # [B, HV, V]
+
+    torch.ops.vllm.gdn_decode_step(
+        q, k, v, g_decay, beta,
+        initial_state, out_flat,
+        ssm_state_indices,
+        scale, use_qk_l2norm_in_kernel,
+    )
+
+
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -1069,7 +1157,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             validate_data=False,
         )
         out_buf = core_attn_out[:num_actual_tokens].unsqueeze(1)
-        fused_recurrent_gated_delta_rule_packed_decode(
+        decode_args = dict(
             mixed_qkv=mixed_qkv_non_spec,
             a=a,
             b=b,
@@ -1081,6 +1169,10 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             ssm_state_indices=non_spec_state_indices_tensor[:num_actual_tokens],
             use_qk_l2norm_in_kernel=True,
         )
+        if _get_gdn_decode_backend() == "cuda":
+            gdn_decode_step_cuda(**decode_args)
+        else:
+            fused_recurrent_gated_delta_rule_packed_decode(**decode_args)
         return
 
 

@@ -477,6 +477,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? last_chunk_indices) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
+  // GDN (Gated DeltaNet) decode step — CUDA-native alternative to Triton FLA
+  ops.def(
+      "gdn_decode_step(Tensor! q, Tensor! k,"
+      "Tensor! v, Tensor! g_decay, Tensor! beta,"
+      "Tensor! state, Tensor! output,"
+      "Tensor! state_indices,"
+      "float scale, bool use_l2norm) -> ()");
+  ops.impl("gdn_decode_step", torch::kCUDA, &vllm::gdn_decode_step);
+
   // Hadamard transforms
   ops.def("hadacore_transform(Tensor! x, bool inplace) -> Tensor");
 
