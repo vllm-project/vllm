@@ -174,10 +174,12 @@
 
 {%- set ns = namespace(prev_message_type=None) -%}
 {%- set loop_messages = messages -%}
-{{ bos_token }}
+{{- bos_token -}}
+{#- Handle System/Tool Definitions Block -#}
 {%- if (enable_thinking is defined and enable_thinking) or tools or messages[0]['role'] in ['system', 'developer'] -%}
     {{- '<|turn>system\n' -}}
 
+    {#- Inject Thinking token at the very top of the FIRST system turn -#}
     {%- if enable_thinking is defined and enable_thinking -%}
         {{- '<|think|>\n' -}}
         {%- set ns.prev_message_type = 'think' -%}
@@ -200,6 +202,7 @@
     {{- '<turn|>\n' -}}
 {%- endif %}
 
+{#- Pre-scan: find last user message index for reasoning guard -#}
 {%- set ns_turn = namespace(last_user_idx=-1) -%}
 {%- for i in range(loop_messages | length) -%}
     {%- if loop_messages[i]['role'] == 'user' -%}
@@ -207,12 +210,12 @@
     {%- endif -%}
 {%- endfor -%}
 
+{#- Loop through messages -#}
 {%- for message in loop_messages -%}
     {%- if message['role'] != 'tool' -%}
     {%- set ns.prev_message_type = None -%}
     {%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}
-    {#- OpenAI may emit multiple assistant messages in one tool loop (user → asst → tool → asst → tool).
-        Only the first of those should open <|turn>model; later ones continue the same model turn. -#}
+    {#- Detect continuation: suppress duplicate <|turn>model when previous non-tool message was also assistant -#}
     {%- set prev_nt = namespace(role=None, found=false) -%}
     {%- if loop.index0 > 0 -%}
         {%- for j in range(loop.index0 - 1, -1, -1) -%}
@@ -229,6 +232,7 @@
         {{- '<|turn>' + role + '\n' }}
     {%- endif -%}
 
+    {#- Render reasoning/reasoning_content as thinking channel -#}
     {%- set thinking_text = message.get('reasoning') or message.get('reasoning_content') -%}
     {%- if thinking_text and loop.index0 > ns_turn.last_user_idx and message.get('tool_calls') -%}
         {{- '<|channel>thought\n' + thinking_text + '\n<channel|>' -}}
@@ -255,14 +259,14 @@
 
             {%- set ns_tr_out = namespace(flag=false) -%}
             {%- if message.get('tool_responses') -%}
-                {#- Legacy: tool_responses embedded on the assistant message -#}
+                {#- Legacy: tool_responses embedded on the assistant message (Google/Gemma native) -#}
                 {%- for tool_response in message['tool_responses'] -%}
                     {{- format_tool_response_block(tool_response['name'] | default('unknown'), tool_response['response']) -}}
                     {%- set ns_tr_out.flag = true -%}
                     {%- set ns.prev_message_type = 'tool_response' -%}
                 {%- endfor -%}
             {%- elif message.get('tool_calls') -%}
-                {#- OpenAI Chat Completions: consecutive following messages with role "tool" (no break/continue; range scan) -#}
+                {#- OpenAI Chat Completions: forward-scan consecutive role:tool messages -#}
                 {%- set ns_tool_scan = namespace(stopped=false) -%}
                 {%- for k in range(loop.index0 + 1, loop_messages | length) -%}
                     {%- if ns_tool_scan.stopped -%}
@@ -270,12 +274,14 @@
                         {%- set ns_tool_scan.stopped = true -%}
                     {%- else -%}
                         {%- set follow = loop_messages[k] -%}
+                        {#- Resolve tool_call_id to function name -#}
                         {%- set ns_tname = namespace(name=follow.get('name') | default('unknown')) -%}
                         {%- for tc in message['tool_calls'] -%}
                             {%- if tc.get('id') == follow.get('tool_call_id') -%}
                                 {%- set ns_tname.name = tc['function']['name'] -%}
                             {%- endif -%}
                         {%- endfor -%}
+                        {#- Handle content as string or content-parts array -#}
                         {%- set tool_body = follow.get('content') -%}
                         {%- if tool_body is string -%}
                             {{- format_tool_response_block(ns_tname.name, tool_body) -}}
