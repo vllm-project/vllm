@@ -49,6 +49,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsW4A16Mxfp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
 )
@@ -404,6 +405,27 @@ class CompressedTensorsConfig(QuantizationConfig):
         )
 
     @staticmethod
+    def _is_mxfp8(quant_args: QuantizationArgs) -> bool:
+        if quant_args is None:
+            return False
+
+        is_group_quant = quant_args.strategy == QuantizationStrategy.GROUP.value
+        is_symmetric = quant_args.symmetric
+        is_group_size_32 = quant_args.group_size == 32
+        is_float_type = quant_args.type == QuantizationType.FLOAT
+        is_8_bits = quant_args.num_bits == 8
+        is_mxfp8_scale_dtype = quant_args.scale_dtype == torch.uint8
+
+        return (
+            is_group_quant
+            and is_float_type
+            and is_8_bits
+            and is_group_size_32
+            and is_symmetric
+            and is_mxfp8_scale_dtype
+        )
+
+    @staticmethod
     def _is_static_tensor_w8a8(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
@@ -605,6 +627,9 @@ class CompressedTensorsConfig(QuantizationConfig):
 
         if self._is_mxfp4(weight_quant):
             return CompressedTensorsW4A16Mxfp4()
+
+        if self._is_mxfp8(weight_quant):
+            return CompressedTensorsW8A8Mxfp8()
 
         if self._is_fp8_w4a8_sm90(weight_quant, input_quant):
             return CompressedTensorsW4A8Fp8(
