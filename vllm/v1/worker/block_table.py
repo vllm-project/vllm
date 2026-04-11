@@ -104,7 +104,7 @@ class BlockTable:
         block_ids: list[int],
         row_idx: int,
     ) -> None:
-        if not block_ids:
+        if len(block_ids) == 0:
             return
 
         if self.use_hybrid_blocks:
@@ -114,8 +114,15 @@ class BlockTable:
 
         num_blocks = len(block_ids)
         start = self.num_blocks_per_row[row_idx]
-        self.num_blocks_per_row[row_idx] += num_blocks
-        self.block_table.np[row_idx, start : start + num_blocks] = block_ids
+        end = start + num_blocks
+        self.num_blocks_per_row[row_idx] = end
+        self.block_table.np[row_idx, start:end] = block_ids
+        # Zero the tail so kernels that scan past num_blocks_per_row[row_idx]
+        # (e.g. FlashInfer's _copy_page_indices_kernel called with a stale
+        # num_blocks derived from a prior batch) cannot read block IDs
+        # belonging to a previous request that used this row.
+        # See vllm-project/vllm#39589.
+        self.block_table.np[row_idx, end : self.max_num_blocks_per_req] = 0
 
     def add_row(self, block_ids: list[int], row_idx: int) -> None:
         self.num_blocks_per_row[row_idx] = 0
@@ -131,6 +138,10 @@ class BlockTable:
         num_blocks = self.num_blocks_per_row[src]
         block_table_np = self.block_table.np
         block_table_np[tgt, :num_blocks] = block_table_np[src, :num_blocks]
+        # Zero the tail of tgt so stale block IDs from tgt's previous
+        # (longer) occupant cannot leak past num_blocks_per_row[tgt].
+        # See vllm-project/vllm#39589.
+        block_table_np[tgt, num_blocks : self.max_num_blocks_per_req] = 0
         self.num_blocks_per_row[tgt] = num_blocks
 
     def swap_row(self, src: int, tgt: int) -> None:
