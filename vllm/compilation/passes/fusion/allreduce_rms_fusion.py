@@ -65,6 +65,12 @@ if find_spec("flashinfer"):
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
+PACKED_GROUP_QUANT_OP = getattr(
+    getattr(torch.ops._C, "per_token_group_fp8_quant_packed", None),
+    "default",
+    None,
+)
+
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
 FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
@@ -242,6 +248,101 @@ if flashinfer_comm is not None:
     )
     flashinfer_trtllm_fused_allreduce_norm = (
         torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
+    )
+
+    # Separate op for group FP8 quant fusion (AR + RMSNorm + group quant).
+    # Kept separate from the existing op to avoid changing its schema.
+    def call_trtllm_fused_allreduce_norm_group_quant(
+        allreduce_in: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        rms_eps: float,
+        world_size: int,
+        launch_with_pdl: bool,
+        fp32_acc: bool,
+        max_token_num: int,
+        group_size: int,
+        quant_out: torch.Tensor | None = None,
+        scale_out: torch.Tensor | None = None,
+    ) -> None:
+        num_tokens, hidden_size = allreduce_in.shape
+        element_size = allreduce_in.element_size()
+        current_tensor_size = num_tokens * hidden_size * element_size
+        max_tensor_size = max_token_num * hidden_size * element_size
+        assert current_tensor_size <= max_tensor_size, (
+            f"Current tensor size {current_tensor_size} is larger than "
+            f"max token num {max_token_num} * hidden size {hidden_size} * "
+            f"element size {element_size}"
+        )
+        curr_device = current_platform.get_device_capability()
+        device_capability = curr_device.to_int() if curr_device is not None else None
+        max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
+            device_capability,  # type: ignore[arg-type, unused-ignore]
+            {},
+        ).get(world_size, None)
+        use_oneshot = (
+            max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
+        )
+        # Group quant uses the non-quant workspace (no per-tensor scale input)
+        workspace = get_fi_ar_workspace(
+            world_size=world_size,
+            rank=get_tensor_model_parallel_rank(),
+            max_token_num=max_token_num,
+            hidden_dim=hidden_size,
+            dtype=allreduce_in.dtype,
+            group=get_tp_group().device_group,
+        )
+        assert workspace is not None
+        assert flashinfer_comm is not None
+        # norm_out=None: RMSNorm result overwrites allreduce_in,
+        # residual gets residual_out
+        flashinfer_comm.allreduce_fusion(
+            input=allreduce_in,
+            workspace=workspace,
+            pattern=ar_fusion_patterns.kARResidualRMSNormGroupFP8Quant,
+            launch_with_pdl=launch_with_pdl,
+            output=None,
+            residual_out=residual,
+            norm_out=allreduce_in,
+            quant_out=quant_out,
+            scale_out=scale_out,
+            residual_in=residual,
+            rms_gamma=rms_gamma,
+            rms_eps=rms_eps,
+            use_oneshot=use_oneshot,
+            fp32_acc=fp32_acc,
+            group_size=group_size,
+        )
+
+    def call_trtllm_fused_allreduce_norm_group_quant_fake(
+        allreduce_in: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        rms_eps: float,
+        world_size: int,
+        launch_with_pdl: bool,
+        fp32_acc: bool,
+        max_token_num: int,
+        group_size: int,
+        quant_out: torch.Tensor | None = None,
+        scale_out: torch.Tensor | None = None,
+    ) -> None:
+        pass
+
+    direct_register_custom_op(
+        op_name="flashinfer_trtllm_fused_allreduce_norm_group_quant",
+        op_func=call_trtllm_fused_allreduce_norm_group_quant,
+        mutates_args=[
+            "allreduce_in",
+            "residual",
+            "quant_out",
+            "scale_out",
+        ],
+        fake_impl=call_trtllm_fused_allreduce_norm_group_quant_fake,
+    )
+    flashinfer_trtllm_fused_allreduce_norm_group_quant = (
+        torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_group_quant
+        .default
     )
 
 
@@ -758,6 +859,188 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         )
 
 
+class AllReduceFusedRMSNormGroupQuantFP8PackedPattern(BasePattern):
+    """
+    Fuses allreduce + rms_norm (without residual) + per-token-group FP8 quant
+    with UE8M0 packed scales (for DeepGEMM).
+    Applies to the first Transformer block where there is no residual.
+
+    Uses flashinfer kARResidualRMSNormGroupFP8Quant (single kernel).
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        group_size: int,
+        dtype: torch.dtype,
+        device: str | None,
+        allreduce_params: FlashInferFusedAllReduceParams,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.group_size = group_size
+        self.allreduce_params = allreduce_params
+        self.quant_dtype = torch.float8_e4m3fn
+        finfo = torch.finfo(self.quant_dtype)
+        self.fp8_min = float(finfo.min)
+        self.fp8_max = float(finfo.max)
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        input_t = self.empty(5, 16)
+        weight = self.empty(16)
+        output_q = torch.empty(
+            (5, 16), device=self.device, dtype=self.quant_dtype
+        )
+        output_s_packed = torch.empty(
+            (5, 1), device=self.device, dtype=torch.int32
+        )
+        return [input_t, weight, output_q, output_s_packed]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            output_q: torch.Tensor,
+            output_s_packed: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            all_reduce = tensor_model_parallel_all_reduce(input)
+            rms = vllm.ir.ops.rms_norm(all_reduce, weight, self.epsilon)
+            quant_out = auto_functionalized(
+                PACKED_GROUP_QUANT_OP,
+                input=rms,
+                output_q=output_q,
+                output_s_packed=output_s_packed,
+                group_size=self.group_size,
+                eps=1e-10,
+                fp8_min=self.fp8_min,
+                fp8_max=self.fp8_max,
+            )
+            # quant_out[1] = output_q, quant_out[2] = output_s_packed
+            return quant_out[1], quant_out[2], all_reduce
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            output_q: torch.Tensor,
+            output_s_packed: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            residual = torch.zeros_like(input)
+            assert flashinfer_comm is not None
+            allreduce = auto_functionalized(
+                flashinfer_trtllm_fused_allreduce_norm_group_quant,
+                allreduce_in=input,
+                residual=residual,
+                rms_gamma=weight,
+                rms_eps=self.epsilon,
+                group_size=self.group_size,
+                quant_out=output_q,
+                scale_out=output_s_packed,
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+            )
+            # quant_out, scale_out, allreduce_in (holds allreduce output)
+            return allreduce[3], allreduce[4], allreduce[1]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            extra_check=_rms_input_weight_dtype_match,
+        )
+
+
+class AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(BasePattern):
+    """
+    Fuses allreduce + fused_add_rms_norm + per-token-group FP8 quant
+    with UE8M0 packed scales (for DeepGEMM).
+    Applies to o_proj + rmsnorm after attn and mlp + rmsnorm before attn.
+
+    Uses flashinfer kARResidualRMSNormGroupFP8Quant (single kernel).
+    """
+
+    def __init__(
+        self,
+        epsilon: float,
+        group_size: int,
+        dtype: torch.dtype,
+        device: str | None,
+        allreduce_params: FlashInferFusedAllReduceParams,
+    ) -> None:
+        super().__init__(dtype, device)
+        self.epsilon = epsilon
+        self.group_size = group_size
+        self.allreduce_params = allreduce_params
+        self.quant_dtype = torch.float8_e4m3fn
+        finfo = torch.finfo(self.quant_dtype)
+        self.fp8_min = float(finfo.min)
+        self.fp8_max = float(finfo.max)
+        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        input_t, residual, weight = self.rmsnorm_matcher.inputs()
+        output_q = torch.empty(
+            (5, 16), device=self.device, dtype=self.quant_dtype
+        )
+        output_s_packed = torch.empty(
+            (5, 1), device=self.device, dtype=torch.int32
+        )
+        return [
+            residual, input_t.to(self.dtype), weight,
+            output_q, output_s_packed,
+        ]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            output_q: torch.Tensor,
+            output_s_packed: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            allreduce_output = tensor_model_parallel_all_reduce(input)
+            rms, residual = self.rmsnorm_matcher(
+                allreduce_output, weight, residual
+            )
+            quant_out = auto_functionalized(
+                PACKED_GROUP_QUANT_OP,
+                input=rms,
+                output_q=output_q,
+                output_s_packed=output_s_packed,
+                group_size=self.group_size,
+                eps=1e-10,
+                fp8_min=self.fp8_min,
+                fp8_max=self.fp8_max,
+            )
+            return quant_out[1], residual, quant_out[2]
+
+        def replacement(
+            residual: torch.Tensor,
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            output_q: torch.Tensor,
+            output_s_packed: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            assert flashinfer_comm is not None
+            allreduce = auto_functionalized(
+                flashinfer_trtllm_fused_allreduce_norm_group_quant,
+                allreduce_in=input,
+                residual=residual,
+                rms_gamma=weight,
+                rms_eps=self.epsilon,
+                group_size=self.group_size,
+                quant_out=output_q,
+                scale_out=output_s_packed,
+                **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+            )
+            # quant_out, residual_out, scale_out
+            return allreduce[3], allreduce[2], allreduce[4]
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
+        )
+
+
 class AllReduceFusionPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
@@ -865,6 +1148,24 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                     ).register(self.patterns)
                     AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
                         epsilon,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                    ).register(self.patterns)
+            # Per-token-group FP8 packed quant patterns (DeepGEMM).
+            # Registered before non-quant patterns so the longer match wins.
+            if current_platform.is_cuda() and PACKED_GROUP_QUANT_OP is not None:
+                for group_size in [128, 64]:
+                    AllReduceFusedRMSNormGroupQuantFP8PackedPattern(
+                        epsilon,
+                        group_size,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                    ).register(self.patterns)
+                    AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(
+                        epsilon,
+                        group_size,
                         self.model_dtype,
                         self.device,
                         self.allreduce_params,
