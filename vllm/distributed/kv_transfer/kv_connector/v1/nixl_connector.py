@@ -2383,8 +2383,11 @@ class NixlConnectorWorker:
                     "heterogeneous attn post process is not supported with HMA"
                 )
             logger.info(
-                "[Experimental] CPU_ATTN backend is used, "
-                "hint heterogeneous attn post process"
+                "Detect heterogenous attention_back that prefiller uses %s and "
+                "decoder uses %s, allow inline KV Cache post process on decoder "
+                "side upon receiving KV cache",
+                nixl_agent_meta.attn_backend_name,
+                self.backend_name,
             )
             self.enable_heterogeneous_attn_post_process = True
 
@@ -2573,7 +2576,7 @@ class NixlConnectorWorker:
 
         for _, cache_or_caches in self.device_kv_caches.items():
             blocks_to_update = cache_or_caches.index_select(1, indices)
-            current_platform.pack_kv_cache(
+            current_platform.in_place_kv_cache_post_process(
                 key=blocks_to_update[0],
                 value=blocks_to_update[1],
                 key_cache=cache_or_caches[0],

@@ -526,7 +526,7 @@ class CpuPlatform(Platform):
                 logger.warning("Failed to import from vllm._C: %r", e)
 
     @classmethod
-    def pack_kv_cache(
+    def in_place_kv_cache_post_process(
         cls,
         key: torch.Tensor,
         value: torch.Tensor,
