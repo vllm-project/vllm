@@ -10,7 +10,7 @@ import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import is_strictly_contiguous, set_random_seed
 
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
 
@@ -183,6 +183,164 @@ def check_lora_shrink_kernel(
     assert_close(out_tensor, ref_out_tensor)
 
 
+def test_lora_shrink_kernel_accepts_non_contiguous_output():
+    device = DEVICES[0]
+    dtype = DTYPES[0]
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(SEED[0])
+
+    batches = 4
+    num_loras = 4
+    rank = 8
+    hidden_size = 128
+    nslices = 2
+    seq_length = 16
+    scaling = 0.5
+
+    data: PunicaTensors = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        dtype,
+        "shrink",
+        device,
+    )
+    _, token_nums = data.meta()
+
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
+    )
+    lora_meta.prepare_tensors(data.token_lora_mapping)
+
+    out_storage = torch.zeros(
+        (token_nums, nslices, rank), dtype=torch.float32, device=device
+    )
+    out_tensor = out_storage.transpose(0, 1)
+    assert out_tensor.shape == (nslices, token_nums, rank)
+    assert not out_tensor.is_contiguous()
+
+    ref_out_tensor = data.ref_out_tensor.clone()
+
+    with _dict_lock:
+        _LORA_A_PTR_DICT.clear()
+        triton_ops.lora_shrink(
+            data.inputs_tensor,
+            data.lora_weights,
+            out_tensor,
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
+            scaling,
+        )
+
+    sgmv_shrink_for_nslices(
+        nslices,
+        data.inputs_tensor,
+        data.lora_weights,
+        ref_out_tensor,
+        data.b_seq_start_loc,
+        data.seq_len_tensor,
+        data.prompt_lora_mapping,
+        batches,
+        seq_length,
+        token_nums,
+        scaling,
+    )
+
+    assert_close(out_tensor, ref_out_tensor)
+
+
+def test_lora_shrink_kernel_accepts_degenerate_contiguous_layouts():
+    device = DEVICES[0]
+    dtype = DTYPES[0]
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(SEED[0])
+
+    batches = 1
+    num_loras = 4
+    rank = 8
+    hidden_size = 128
+    nslices = 2
+    seq_length = 1
+    scaling = 0.5
+
+    data: PunicaTensors = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        dtype,
+        "shrink",
+        device,
+    )
+    _, token_nums = data.meta()
+    assert token_nums == 1
+
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
+    )
+    lora_meta.prepare_tensors(data.token_lora_mapping)
+
+    input_tensor = torch.empty_strided(
+        data.inputs_tensor.shape,
+        (1, 1),
+        dtype=data.inputs_tensor.dtype,
+        device=device,
+    )
+    input_tensor.copy_(data.inputs_tensor)
+    assert input_tensor.is_contiguous()
+    assert not is_strictly_contiguous(input_tensor)
+
+    out_tensor = torch.empty_strided(
+        data.our_out_tensor.shape,
+        (rank, 1, 1),
+        dtype=data.our_out_tensor.dtype,
+        device=device,
+    )
+    out_tensor.copy_(data.our_out_tensor)
+    assert out_tensor.is_contiguous()
+    assert not is_strictly_contiguous(out_tensor)
+
+    ref_out_tensor = data.ref_out_tensor.clone()
+
+    with _dict_lock:
+        _LORA_A_PTR_DICT.clear()
+        triton_ops.lora_shrink(
+            input_tensor,
+            data.lora_weights,
+            out_tensor,
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
+            scaling,
+        )
+
+    sgmv_shrink_for_nslices(
+        nslices,
+        input_tensor,
+        data.lora_weights,
+        ref_out_tensor,
+        data.b_seq_start_loc,
+        data.seq_len_tensor,
+        data.prompt_lora_mapping,
+        batches,
+        seq_length,
+        token_nums,
+        scaling,
+    )
+
+    assert_close(out_tensor, ref_out_tensor)
+
+
 def check_lora_expand_kernel(
     batches: int,
     num_loras: int,
@@ -258,6 +416,270 @@ def check_lora_expand_kernel(
     )
 
     assert_close(out_tensor, ref_out_tensor)
+
+
+def test_lora_expand_kernel_accepts_degenerate_contiguous_layouts():
+    device = DEVICES[0]
+    dtype = DTYPES[0]
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(SEED[0])
+
+    batches = 1
+    num_loras = 4
+    rank = 8
+    hidden_size = 128
+    nslices = 2
+    seq_length = 1
+
+    data: PunicaTensors = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        dtype,
+        "expand",
+        device,
+    )
+    max_seq_length, token_nums = data.meta()
+    assert token_nums == 1
+
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
+    )
+    lora_meta.prepare_tensors(data.token_lora_mapping)
+
+    input_tensor = torch.empty_strided(
+        data.inputs_tensor.shape,
+        (rank, 1, 1),
+        dtype=data.inputs_tensor.dtype,
+        device=device,
+    )
+    input_tensor.copy_(data.inputs_tensor)
+    assert input_tensor.is_contiguous()
+    assert not is_strictly_contiguous(input_tensor)
+
+    out_tensor = torch.empty_strided(
+        data.our_out_tensor.shape,
+        (1, 1),
+        dtype=data.our_out_tensor.dtype,
+        device=device,
+    )
+    out_tensor.copy_(data.our_out_tensor)
+    assert out_tensor.is_contiguous()
+    assert not is_strictly_contiguous(out_tensor)
+
+    ref_out_tensor = data.ref_out_tensor.clone()
+
+    with _dict_lock:
+        _LORA_B_PTR_DICT.clear()
+        triton_ops.lora_expand(
+            input_tensor,
+            data.lora_weights,
+            out_tensor,
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
+            offset_start=0,
+            add_inputs=True,
+        )
+
+    sgmv_expand_for_nslices(
+        nslices,
+        hidden_size,
+        input_tensor,
+        data.lora_weights,
+        ref_out_tensor,
+        data.b_seq_start_loc,
+        data.seq_len_tensor,
+        data.prompt_lora_mapping,
+        batches,
+        max_seq_length,
+        token_nums,
+        add_inputs=True,
+    )
+
+    assert_close(out_tensor, ref_out_tensor)
+
+
+def test_lora_shrink_canonicalizes_degenerate_contiguous_inputs_before_kernel(
+    monkeypatch,
+):
+    import vllm.lora.ops.triton_ops.lora_shrink_op as lora_shrink_op
+
+    device = DEVICES[0]
+    dtype = DTYPES[0]
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(SEED[0])
+
+    batches = 1
+    num_loras = 4
+    rank = 8
+    hidden_size = 128
+    nslices = 2
+    seq_length = 1
+    scaling = 0.5
+
+    data: PunicaTensors = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        dtype,
+        "shrink",
+        device,
+    )
+    _, token_nums = data.meta()
+    assert token_nums == 1
+
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
+    )
+    lora_meta.prepare_tensors(data.token_lora_mapping)
+
+    input_tensor = torch.empty_strided(
+        data.inputs_tensor.shape,
+        (1, 1),
+        dtype=data.inputs_tensor.dtype,
+        device=device,
+    )
+    input_tensor.copy_(data.inputs_tensor)
+    assert input_tensor.is_contiguous()
+    assert not is_strictly_contiguous(input_tensor)
+
+    out_tensor = torch.empty_strided(
+        data.our_out_tensor.shape,
+        (rank, 1, 1),
+        dtype=data.our_out_tensor.dtype,
+        device=device,
+    )
+    out_tensor.copy_(data.our_out_tensor)
+    assert out_tensor.is_contiguous()
+    assert not is_strictly_contiguous(out_tensor)
+
+    captured: dict[str, torch.Tensor] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def runner(*args, **kwargs):
+                captured["inputs"] = args[0]
+                captured["output"] = args[2]
+
+            return runner
+
+    monkeypatch.setattr(lora_shrink_op, "_lora_shrink_kernel", FakeKernel())
+
+    with _dict_lock:
+        _LORA_A_PTR_DICT.clear()
+        lora_shrink_op._lora_shrink(
+            input_tensor,
+            data.lora_weights,
+            out_tensor,
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
+            scaling,
+        )
+
+    assert is_strictly_contiguous(captured["inputs"])
+    assert captured["inputs"].data_ptr() != input_tensor.data_ptr()
+    assert is_strictly_contiguous(captured["output"])
+
+
+def test_lora_expand_canonicalizes_degenerate_contiguous_buffers_before_kernel(
+    monkeypatch,
+):
+    import vllm.lora.ops.triton_ops.lora_expand_op as lora_expand_op
+
+    device = DEVICES[0]
+    dtype = DTYPES[0]
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+    set_random_seed(SEED[0])
+
+    batches = 1
+    num_loras = 4
+    rank = 8
+    hidden_size = 128
+    nslices = 2
+    seq_length = 1
+
+    data: PunicaTensors = generate_data_for_nslices(
+        batches,
+        hidden_size,
+        num_loras,
+        rank,
+        seq_length,
+        nslices,
+        dtype,
+        "expand",
+        device,
+    )
+    _, token_nums = data.meta()
+    assert token_nums == 1
+
+    lora_meta = LoRAKernelMeta.make(
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
+    )
+    lora_meta.prepare_tensors(data.token_lora_mapping)
+
+    input_tensor = torch.empty_strided(
+        data.inputs_tensor.shape,
+        (rank, 1, 1),
+        dtype=data.inputs_tensor.dtype,
+        device=device,
+    )
+    input_tensor.copy_(data.inputs_tensor)
+    assert input_tensor.is_contiguous()
+    assert not is_strictly_contiguous(input_tensor)
+
+    out_tensor = torch.empty_strided(
+        data.our_out_tensor.shape,
+        (1, 1),
+        dtype=data.our_out_tensor.dtype,
+        device=device,
+    )
+    out_tensor.copy_(data.our_out_tensor)
+    assert out_tensor.is_contiguous()
+    assert not is_strictly_contiguous(out_tensor)
+
+    captured: dict[str, torch.Tensor] = {}
+
+    class FakeKernel:
+        def __getitem__(self, grid):
+            def runner(*args, **kwargs):
+                captured["inputs"] = args[0]
+                captured["output"] = args[2]
+
+            return runner
+
+    monkeypatch.setattr(lora_expand_op, "_lora_expand_kernel", FakeKernel())
+
+    with _dict_lock:
+        _LORA_B_PTR_DICT.clear()
+        lora_expand_op._lora_expand(
+            input_tensor,
+            data.lora_weights,
+            out_tensor,
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
+            offset_start=0,
+            add_inputs=True,
+        )
+
+    assert is_strictly_contiguous(captured["inputs"])
+    assert captured["inputs"].data_ptr() != input_tensor.data_ptr()
+    assert is_strictly_contiguous(captured["output"])
+    assert captured["output"].data_ptr() != out_tensor.data_ptr()
 
 
 # Tests
