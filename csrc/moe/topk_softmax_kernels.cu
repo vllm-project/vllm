@@ -54,11 +54,11 @@ struct alignas(Alignment) AlignedArray {
 template <typename T>
 __device__ __forceinline__ float toFloat(T value) {
     if constexpr (std::is_same_v<T, float>) {
-        return value;
+        return fmaxf(value, -FLT_MAX);
     } else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
-        return __bfloat162float(value);
+        return fmaxf(__bfloat162float(value), -FLT_MAX);
     } else if constexpr (std::is_same_v<T, __half>) {
-        return __half2float(value);
+        return fmaxf(__half2float(value), -FLT_MAX);
     }
 }
 
@@ -388,6 +388,11 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE_PARAM) __global__
                 row_chunk[ii] = __half2float(*scalar_ptr);
             }
         }
+    }
+
+#pragma unroll
+    for (int ii = 0; ii < VPT; ++ii) {
+        row_chunk[ii] = fmaxf(row_chunk[ii], -FLT_MAX);
     }
 
     if constexpr (SF == SCORING_SOFTMAX) {
