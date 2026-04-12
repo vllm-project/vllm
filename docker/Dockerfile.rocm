@@ -122,7 +122,7 @@ FROM base AS build_rixl
 ARG RIXL_BRANCH="bf4a7214"
 ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
 ARG UCX_BRANCH="7009d7a1"
-ARG UCX_REPO="https://github.com/openucx/ucx"
+ARG UCX_REPO="https://github.com/openucx/ucx.git"
 ENV ROCM_PATH=/opt/rocm
 ENV UCX_HOME=/usr/local/ucx
 ENV RIXL_HOME=/usr/local/rixl
