@@ -57,6 +57,9 @@ This guide will help you quickly get started with vLLM to perform:
         It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
 
     !!! note
+        If you install into another Python version, or use plain `pip` instead of `uv pip`, you may end up with the default CUDA wheel rather than the ROCm build. If that happens, recreate the environment with Python 3.12 and reinstall from `https://wheels.vllm.ai/rocm/`.
+
+    !!! note
         Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vllm-dev`. This is being deprecated by using vLLM's docker release pipeline.
 
     !!! tip

@@ -33,6 +33,11 @@ To install the latest version of vLLM for Python 3.12, ROCm 7.0 and `glibc >= 2.
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
 ```
 
+!!! note
+    The pre-built ROCm wheels currently support Python 3.12 only. If you install into a different Python version, or use plain `pip` without pinning the ROCm wheel exactly, you may silently get the default CUDA wheel instead of the ROCm build.
+
+    After installation, verify that `uv pip show vllm` reports a ROCm wheel version such as `+rocm700` or `+rocm721`. If it does not, recreate the environment with Python 3.12 and reinstall from the ROCm index.
+
 !!! tip
     You can find out about which ROCm version the latest vLLM supports by checking the `vllm` package in index in extra-index-url <https://wheels.vllm.ai/rocm/> at [https://wheels.vllm.ai/rocm/vllm](https://wheels.vllm.ai/rocm/vllm) .
 
