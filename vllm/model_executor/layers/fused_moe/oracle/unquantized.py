@@ -71,12 +71,6 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             UnquantizedMoeBackend.BATCHED_TRITON,
         ]
 
-        # HACK: Qwen3.5 has crash with FLASHINFER_CUTLASS BF16 if DEP.
-        # Updating the oracle querying logic is out of the scope of this
-        # PR. Need to fix the kernel or update structure in follow up.
-        if moe_config.moe_parallel_config.dp_size > 1:
-            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
-
     elif current_platform.is_xpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
     elif current_platform.is_cpu():
