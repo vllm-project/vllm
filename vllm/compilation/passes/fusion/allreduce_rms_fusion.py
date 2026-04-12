@@ -261,7 +261,7 @@ if flashinfer_comm is not None:
         launch_with_pdl: bool,
         fp32_acc: bool,
         max_token_num: int,
-        group_size: int,
+        block_quant_group_size: int,
         quant_out: torch.Tensor | None = None,
         scale_out: torch.Tensor | None = None,
     ) -> None:
@@ -299,7 +299,7 @@ if flashinfer_comm is not None:
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
             workspace=workspace,
-            pattern=ar_fusion_patterns.kARResidualRMSNormGroupFP8Quant,
+            pattern=ar_fusion_patterns.kARResidualRMSNormPerTokenGroupFP8PackedQuant,
             launch_with_pdl=launch_with_pdl,
             output=None,
             residual_out=residual,
@@ -311,7 +311,7 @@ if flashinfer_comm is not None:
             rms_eps=rms_eps,
             use_oneshot=use_oneshot,
             fp32_acc=fp32_acc,
-            group_size=group_size,
+            block_quant_group_size=block_quant_group_size,
         )
 
     def call_trtllm_fused_allreduce_norm_group_quant_fake(
@@ -323,7 +323,7 @@ if flashinfer_comm is not None:
         launch_with_pdl: bool,
         fp32_acc: bool,
         max_token_num: int,
-        group_size: int,
+        block_quant_group_size: int,
         quant_out: torch.Tensor | None = None,
         scale_out: torch.Tensor | None = None,
     ) -> None:
@@ -341,8 +341,7 @@ if flashinfer_comm is not None:
         fake_impl=call_trtllm_fused_allreduce_norm_group_quant_fake,
     )
     flashinfer_trtllm_fused_allreduce_norm_group_quant = (
-        torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_group_quant
-        .default
+        torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_group_quant.default
     )
 
 
@@ -865,7 +864,7 @@ class AllReduceFusedRMSNormGroupQuantFP8PackedPattern(BasePattern):
     with UE8M0 packed scales (for DeepGEMM).
     Applies to the first Transformer block where there is no residual.
 
-    Uses flashinfer kARResidualRMSNormGroupFP8Quant (single kernel).
+    Uses flashinfer kARResidualRMSNormPerTokenGroupFP8PackedQuant (single kernel).
     """
 
     def __init__(
@@ -888,12 +887,8 @@ class AllReduceFusedRMSNormGroupQuantFP8PackedPattern(BasePattern):
     def get_inputs(self) -> list[torch.Tensor]:
         input_t = self.empty(5, 16)
         weight = self.empty(16)
-        output_q = torch.empty(
-            (5, 16), device=self.device, dtype=self.quant_dtype
-        )
-        output_s_packed = torch.empty(
-            (5, 1), device=self.device, dtype=torch.int32
-        )
+        output_q = torch.empty((5, 16), device=self.device, dtype=self.quant_dtype)
+        output_s_packed = torch.empty((5, 1), device=self.device, dtype=torch.int32)
         return [input_t, weight, output_q, output_s_packed]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -932,7 +927,7 @@ class AllReduceFusedRMSNormGroupQuantFP8PackedPattern(BasePattern):
                 residual=residual,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                group_size=self.group_size,
+                block_quant_group_size=self.group_size,
                 quant_out=output_q,
                 scale_out=output_s_packed,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
@@ -956,7 +951,7 @@ class AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(BasePattern):
     with UE8M0 packed scales (for DeepGEMM).
     Applies to o_proj + rmsnorm after attn and mlp + rmsnorm before attn.
 
-    Uses flashinfer kARResidualRMSNormGroupFP8Quant (single kernel).
+    Uses flashinfer kARResidualRMSNormPerTokenGroupFP8PackedQuant (single kernel).
     """
 
     def __init__(
@@ -979,15 +974,14 @@ class AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(BasePattern):
 
     def get_inputs(self) -> list[torch.Tensor]:
         input_t, residual, weight = self.rmsnorm_matcher.inputs()
-        output_q = torch.empty(
-            (5, 16), device=self.device, dtype=self.quant_dtype
-        )
-        output_s_packed = torch.empty(
-            (5, 1), device=self.device, dtype=torch.int32
-        )
+        output_q = torch.empty((5, 16), device=self.device, dtype=self.quant_dtype)
+        output_s_packed = torch.empty((5, 1), device=self.device, dtype=torch.int32)
         return [
-            residual, input_t.to(self.dtype), weight,
-            output_q, output_s_packed,
+            residual,
+            input_t.to(self.dtype),
+            weight,
+            output_q,
+            output_s_packed,
         ]
 
     def register(self, pm_pass: PatternMatcherPass) -> None:
@@ -999,9 +993,7 @@ class AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(BasePattern):
             output_s_packed: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             allreduce_output = tensor_model_parallel_all_reduce(input)
-            rms, residual = self.rmsnorm_matcher(
-                allreduce_output, weight, residual
-            )
+            rms, residual = self.rmsnorm_matcher(allreduce_output, weight, residual)
             quant_out = auto_functionalized(
                 PACKED_GROUP_QUANT_OP,
                 input=rms,
@@ -1028,7 +1020,7 @@ class AllReduceFusedAddRMSNormGroupQuantFP8PackedPattern(BasePattern):
                 residual=residual,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
-                group_size=self.group_size,
+                block_quant_group_size=self.group_size,
                 quant_out=output_q,
                 scale_out=output_s_packed,
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),

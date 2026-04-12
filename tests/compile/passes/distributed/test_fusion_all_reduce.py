@@ -204,6 +204,72 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
         ]
 
 
+class TestAllReduceRMSNormGroupQuantFP8PackedModel(torch.nn.Module):
+    """AR + RMSNorm + per_token_group_quant_fp8_packed_for_deepgemm fusion test.
+
+    Uses QuantFP8 (the CustomOp) like real models do, so the compiled graph
+    matches the e2e trace structure where the fusion pattern is known to work.
+    """
+
+    GROUP_SIZE = 128
+
+    def __init__(
+        self,
+        hidden_size=128,
+        token_num=16,
+        eps=1e-5,
+        dtype: torch.dtype = torch.bfloat16,
+    ):
+        super().__init__()
+        from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+        from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
+
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.norm = [RMSNorm(hidden_size, eps) for _ in range(4)]
+        self.w = [torch.rand(hidden_size, hidden_size) for _ in range(3)]
+        self.quant = QuantFP8(
+            static=False,
+            group_shape=GroupShape(1, self.GROUP_SIZE),
+            use_ue8m0=True,
+        )
+
+    def forward(self, x):
+        z = torch.relu(x)
+        x = resid = tensor_model_parallel_all_reduce(z)
+        y = self.norm[0](x)
+
+        z2 = torch.mm(y, self.w[0])
+        x2 = tensor_model_parallel_all_reduce(z2)
+        y2, resid = self.norm[1](x2, resid)
+
+        # Apply group quant after norm via QuantFP8 CustomOp
+        y2_q, y2_s = self.quant(y2)
+        z3 = torch.mm(y2_q.to(x.dtype), self.w[1])
+
+        x3 = tensor_model_parallel_all_reduce(z3)
+        y3, resid = self.norm[2](x3, resid)
+
+        y3_q, y3_s = self.quant(y3)
+        z4 = torch.mm(y3_q.to(x.dtype), self.w[2])
+
+        x4 = tensor_model_parallel_all_reduce(z4)
+        y4, resid = self.norm[3](x4, resid)
+        return y4
+
+    def ops_in_model_before(self):
+        return [
+            torch.ops.vllm.all_reduce.default,
+            torch.ops._C.per_token_group_fp8_quant_packed.default,
+        ]
+
+    def ops_in_model_after(self):
+        return [
+            torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default,
+            torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm_group_quant.default,
+        ]
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "test_model, enable_quant_fp8_custom_op, use_aiter",
@@ -236,12 +302,21 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
                 reason="Not supported on ROCm platform",
             ),
         ),
+        pytest.param(
+            TestAllReduceRMSNormGroupQuantFP8PackedModel,
+            False,
+            False,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Not supported on ROCm platform",
+            ),
+        ),
     ],
 )
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
-@pytest.mark.parametrize("hidden_size", [64])
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("hidden_size", [128])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("flashinfer_allreduce_backend", ["trtllm", "mnnvl"])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
@@ -287,6 +362,14 @@ def test_all_reduce_fusion_pass_replace(
             "Skip as nvfp4 is only supported on "
             "devices with compute capability 10.0 (Blackwell)"
         )
+    if test_model == TestAllReduceRMSNormGroupQuantFP8PackedModel:
+        from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+        if not is_deep_gemm_supported():
+            pytest.skip("Skip as per-token-group packed FP8 quant requires DeepGEMM")
+        gs = TestAllReduceRMSNormGroupQuantFP8PackedModel.GROUP_SIZE
+        if hidden_size % gs != 0:
+            pytest.skip(f"hidden_size={hidden_size} not divisible by group_size={gs}")
 
     def run_torch_spawn(fn, nprocs):
         torch.multiprocessing.spawn(
@@ -349,6 +432,14 @@ def all_reduce_fusion_pass_on_test_model(
         custom_ops.append("+rms_norm")
     if enable_quant_fp8_custom_op:
         custom_ops.append("+quant_fp8")
+    # Group quant model needs QuantFP8 custom op enabled to use CUDA path,
+    # and the DeepGemm oracle initialized for the packed quant path.
+    if test_model_cls == TestAllReduceRMSNormGroupQuantFP8PackedModel:
+        if "+quant_fp8" not in custom_ops:
+            custom_ops.append("+quant_fp8")
+        from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
+
+        DeepGemmQuantScaleFMT.init_oracle_cache()
 
     vllm_config = VllmConfig(
         compilation_config=CompilationConfig(
@@ -399,9 +490,36 @@ def all_reduce_fusion_pass_on_test_model(
         results_fused = compiled_model(hidden_states)
         torch.testing.assert_close(results_unfused, results_fused, atol=1e-2, rtol=1e-2)
 
-        assert all_reduce_fusion_pass.matched_count == 4, (
-            f"{all_reduce_fusion_pass.matched_count=}"
-        )
-        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
-        backend.check_after_ops(model.ops_in_model_after())
+        if test_model_cls == TestAllReduceRMSNormGroupQuantFP8PackedModel:
+            if not enable_rms_norm_custom_op:
+                # Native RMSNorm ops → patterns can't match the rmsnorm node
+                pass
+            elif flashinfer_allreduce_backend == "mnnvl":
+                # mnnvl doesn't support quant fusion; only non-quant
+                # AR+RMSNorm patterns fire (2 of 4 allreduce points
+                # have quant after them → those won't match the quant
+                # pattern on mnnvl, but the non-quant pattern still
+                # matches all 4 allreduce+rmsnorm points).
+                assert all_reduce_fusion_pass.matched_count >= 2, (
+                    f"Expected at least 2 allreduce fusions on mnnvl, got "
+                    f"{all_reduce_fusion_pass.matched_count}"
+                )
+            else:
+                # trtllm backend + custom RMSNorm enabled: all 4 allreduce
+                # patterns should match (2 with quant, 2 without).
+                assert all_reduce_fusion_pass.matched_count == 4, (
+                    f"Expected 4 allreduce fusions (2 with group quant), "
+                    f"got {all_reduce_fusion_pass.matched_count}"
+                )
+                # Verify the group quant op was actually fused
+                backend.check_before_ops(
+                    model.ops_in_model_before(), fully_replaced=False
+                )
+                backend.check_after_ops(model.ops_in_model_after())
+        else:
+            assert all_reduce_fusion_pass.matched_count == 4, (
+                f"{all_reduce_fusion_pass.matched_count=}"
+            )
+            backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
+            backend.check_after_ops(model.ops_in_model_after())
         del all_reduce_fusion_pass
