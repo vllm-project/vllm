@@ -1000,7 +1000,42 @@ class TestForcedToolStreaming:
 
     @pytest.mark.skip_global_cleanup
     @pytest.mark.asyncio
-    async def test_required_tool_choice_streams_function_call_events(
+    async def test_required_tool_choice_streams_function_call_events(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice="required",
+            stream=True,
+            extra_body={
+                "_test_chunks": [
+                    '[{"name":"get_weather","parameters":{"location":"',
+                    "Berlin",
+                    '"}}]',
+                ]
+            },
+        )
+
+        events = await self._collect_events_for_request(request)
+        self._assert_structured_function_call(
+            events, "get_weather", '{"location":"Berlin"}'
+        )
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_required_tool_choice_streams_multiple_function_call_items(
         self, monkeypatch
     ):
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
@@ -1024,22 +1059,68 @@ class TestForcedToolStreaming:
             extra_body={
                 "_test_chunks": [
                     '[{"name":"get_weather","parameters":{"location":"',
-                    'Berlin',
+                    "Vienna",
+                    '"}},{"name":"get_weather","parameters":{"location":"',
+                    "Berlin",
                     '"}}]',
                 ]
             },
         )
 
         events = await self._collect_events_for_request(request)
-        self._assert_structured_function_call(
-            events, "get_weather", '{"location":"Berlin"}'
-        )
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 2
+        assert [event.item.name for event in function_items] == [
+            "get_weather",
+            "get_weather",
+        ]
+        assert [event.output_index for event in function_items] == [0, 1]
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas == [
+            '{"location":"',
+            "Vienna",
+            '"}',
+            '{"location":"Berlin',
+            '"}',
+        ]
+
+        argument_done = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.done"
+        ]
+        assert [event.arguments for event in argument_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in argument_done] == [0, 1]
+
+        function_done = [
+            event
+            for event in events
+            if event.type == "response.output_item.done"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert [event.item.arguments for event in function_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in function_done] == [0, 1]
 
     @pytest.mark.skip_global_cleanup
     @pytest.mark.asyncio
-    async def test_named_tool_choice_streams_function_call_events(
-        self, monkeypatch
-    ):
+    async def test_named_tool_choice_streams_function_call_events(self, monkeypatch):
         monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
         request = ResponsesRequest(
             input="hi",
@@ -1061,7 +1142,7 @@ class TestForcedToolStreaming:
             extra_body={
                 "_test_chunks": [
                     '{"location":"',
-                    'Berlin',
+                    "Berlin",
                     '"}',
                 ]
             },
@@ -1074,6 +1155,144 @@ class TestForcedToolStreaming:
 
 
 class TestAutoToolStreaming:
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_auto_multi_tool_streaming_opens_one_item_per_tool(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+
+        delta_sequence = [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_vienna",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments="",
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(
+                            arguments='{"location":"Vienna"}',
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_berlin",
+                        type="function",
+                        index=1,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments='{"location":"Berlin"}',
+                        ),
+                    )
+                ]
+            ),
+        ]
+        _mock_parser_with_deltas(serving, delta_sequence)
+
+        contexts = [
+            _make_simple_context_with_output("chunk1", [10]),
+            _make_simple_context_with_output("chunk2", [20]),
+            _make_simple_context_with_output("chunk3", [30]),
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice="auto",
+            stream=True,
+        )
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 2
+        assert [event.item.name for event in function_items] == [
+            "get_weather",
+            "get_weather",
+        ]
+        assert [event.output_index for event in function_items] == [0, 1]
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+
+        argument_done = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.done"
+        ]
+        assert [event.arguments for event in argument_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in argument_done] == [0, 1]
+
+        function_done = [
+            event
+            for event in events
+            if event.type == "response.output_item.done"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert [event.item.arguments for event in function_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in function_done] == [0, 1]
+
     @pytest.mark.skip_global_cleanup
     @pytest.mark.asyncio
     async def test_auto_tool_choice_first_delta_tool_call_does_not_duplicate_item(

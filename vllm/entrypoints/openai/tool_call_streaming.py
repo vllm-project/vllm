@@ -133,6 +133,31 @@ def extract_required_tool_call_streaming(
 
     _, finishes_previous_tool = filter_delta_text(delta_text, previous_text)
     current_tool_call = obj[-1]
+    current_tool_call_index = len(obj) - 1
+
+    if (
+        function_name_returned
+        and tool_call_idx is not None
+        and current_tool_call_index >= tool_call_idx
+    ):
+        if finishes_previous_tool:
+            filtered_delta_text, _ = filter_delta_text(delta_text, previous_text)
+            if filtered_delta_text == "":
+                return None, False, False
+            previous_tool_call_index = tool_call_idx - 1 if tool_call_idx > 0 else 0
+            delta_message = DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        function=DeltaFunctionCall(
+                            name=None,
+                            arguments=filtered_delta_text,
+                        ),
+                        index=previous_tool_call_index,
+                    )
+                ]
+            )
+            return delta_message, False, False
+        function_name_returned = False
 
     if not finishes_previous_tool and (
         "name" not in current_tool_call or "parameters" not in current_tool_call
