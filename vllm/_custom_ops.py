@@ -657,7 +657,7 @@ def silu_and_mul_per_block_quant_triton_fake(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_tokens = input.size(0)
     hidden_size = input.size(1) // 2
-    num_groups = hidden_size // group_size
+    num_groups = (hidden_size + group_size - 1) // group_size
     output = torch.empty((num_tokens, hidden_size),
                          device=input.device,
                          dtype=quant_dtype)
