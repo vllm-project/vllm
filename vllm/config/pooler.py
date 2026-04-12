@@ -83,6 +83,13 @@ class PoolerConfig:
     If provided, apply classification logit biases. Defaults to None.
     """
 
+    logit_scale: float | None = None
+    """
+    If provided, scale the classification logits by this factor before
+    activation. Combined with logit_bias, enables affine score calibration:
+    activation(logit_scale * (score - logit_bias)). Defaults to None.
+    """
+
     ## for reward models
     step_tag_id: int | None = None
     """

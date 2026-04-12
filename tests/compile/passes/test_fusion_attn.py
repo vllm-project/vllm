@@ -39,7 +39,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, get_kv_quant_mode
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -53,7 +53,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
         num_qo_heads: int,
         num_kv_heads: int,
         head_size: int,
-        kv_cache_dtype: torch.dtype,
         device: torch.device,
         vllm_config: VllmConfig,
         block_size: int,
@@ -63,7 +62,6 @@ class AttentionQuantPatternModel(torch.nn.Module):
         self.num_qo_heads = num_qo_heads
         self.num_kv_heads = num_kv_heads
         self.head_size = head_size
-        self.kv_cache_dtype = kv_cache_dtype
         self.device = device
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
@@ -81,13 +79,14 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         self.block_size = block_size
 
-        # Initialize attn MetadataBuilder
+        # Initialize attn MetadataBuilder (match Attention.get_kv_cache_spec)
         self.builder = self.attn.attn_backend.get_builder_cls()(
             kv_cache_spec=AttentionSpec(
                 block_size=self.block_size,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
-                dtype=self.kv_cache_dtype,
+                dtype=self.attn.kv_cache_torch_dtype,
+                kv_quant_mode=get_kv_quant_mode(self.attn.kv_cache_dtype),
             ),
             layer_names=[self.attn.layer_name],
             vllm_config=self.vllm_config,
@@ -126,7 +125,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         # Create dummy KV cache
         raw_tensor = torch.zeros(
             2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
-            dtype=self.kv_cache_dtype,
+            dtype=self.attn.kv_cache_torch_dtype,
             device=self.device,
         )
         raw_tensor = raw_tensor.view(kv_cache_shape)
@@ -348,7 +347,6 @@ def test_attention_quant_pattern(
             num_qo_heads=num_qo_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
-            kv_cache_dtype=FP8_DTYPE,
             device=device,
             vllm_config=vllm_config_unfused,
             block_size=block_size,
@@ -376,7 +374,6 @@ def test_attention_quant_pattern(
             num_qo_heads=num_qo_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
-            kv_cache_dtype=FP8_DTYPE,
             device=device,
             vllm_config=vllm_config,
             w=model_unfused.w,

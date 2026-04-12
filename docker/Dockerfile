@@ -204,7 +204,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PYTORCH_NIGHTLY
 
 # Install build dependencies
-COPY requirements/build.txt requirements/build.txt
+COPY requirements/build/cuda.txt requirements/build/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 
@@ -219,13 +219,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
@@ -355,7 +355,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PYTORCH_NIGHTLY
 
 # Install build dependencies
-COPY requirements/build.txt requirements/build.txt
+COPY requirements/build/cuda.txt requirements/build/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 
@@ -370,13 +370,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
@@ -450,8 +450,8 @@ ARG PYTORCH_NIGHTLY
 
 # Install development dependencies
 COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.in requirements/test.in
-COPY requirements/test.txt requirements/test.txt
+COPY requirements/test/cuda.in requirements/test/cuda.in
+COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
@@ -459,8 +459,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 use_existing_torch.py --prefix \
-        && cat torch_lib_versions.txt >> requirements/test.in \
-        && uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match \
+        && cat torch_lib_versions.txt >> requirements/test/cuda.in \
+        && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
         -r requirements/dev.txt \
@@ -538,7 +538,9 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
-        libcublas-${CUDA_VERSION_DASH} && \
+        libcublas-${CUDA_VERSION_DASH} \
+        # Required by fastsafetensors (fixes #20384)
+        libnuma-dev && \
     # Fixes nccl_allocator requiring nccl.h at runtime
     # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
     # NCCL packages don't use the cuda-MAJOR-MINOR naming convention,
@@ -725,8 +727,8 @@ ARG PYTORCH_NIGHTLY
 
 # Install development dependencies (for testing)
 COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.in requirements/test.in
-COPY requirements/test.txt requirements/test.txt
+COPY requirements/test/cuda.in requirements/test/cuda.in
+COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
@@ -736,8 +738,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
             echo "Installing dev requirements plus torch nightly..." \
             && python3 use_existing_torch.py --prefix \
-            && cat torch_lib_versions.txt >> requirements/test.in \
-            && uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match \
+            && cat torch_lib_versions.txt >> requirements/test/cuda.in \
+            && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
             -r requirements/dev.txt \
