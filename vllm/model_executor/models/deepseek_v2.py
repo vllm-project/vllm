@@ -1509,7 +1509,7 @@ class DeepseekV2ForCausalLM(
             if "rotary_emb.inv_freq" in name:
                 continue
 
-            if envs.VLLM_MLA_FORCE_DENSE and "indexer." in name:
+            if not self.model.is_v32 and "indexer." in name:
                 continue
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
