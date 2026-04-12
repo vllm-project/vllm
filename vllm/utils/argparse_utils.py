@@ -192,7 +192,7 @@ class FlexibleArgumentParser(ArgumentParser):
                     "With `vllm serve`, you should provide the model as a "
                     "positional argument or in a config file instead of via "
                     "the `--model` option. "
-                    "The `--model` option will be removed in v0.13."
+                    "The `--model` option will be removed in a future version."
                 )
 
                 if args[model_idx] == "--model":
