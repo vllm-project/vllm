@@ -443,7 +443,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
             if actual_expanded < num_decode_tokens:
                 self.expanded_block_table_buffer[
-                    actual_expanded:num_decode_tokens, 0
+                    actual_expanded:num_decode_tokens
                 ] = 0
             block_table = self.expanded_block_table_buffer[:num_decode_tokens]
 
