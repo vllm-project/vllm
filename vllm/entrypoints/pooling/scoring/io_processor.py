@@ -416,11 +416,137 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
+class JinaRankingIOProcessorMixin:
+    @staticmethod
+    def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
+        for token in special_tokens.values():
+            text = text.replace(token, "")
+        return text
+
+    @staticmethod
+    def format_docs_prompts_func(
+        query: str,
+        docs: list[str],
+        special_tokens: dict[str, str] | None = None,
+        instruction: str | None = None,
+        no_thinking: bool = True,
+    ) -> str:
+        # TODO: Try converting the code below into a chat template.
+
+        default_special_tokens = {
+            "query_embed_token": "<|rerank_token|>",
+            "doc_embed_token": "<|embed_token|>",
+        }
+        if special_tokens is None:
+            special_tokens = default_special_tokens
+
+        query = JinaRankingIOProcessorMixin.sanitize_input(query, special_tokens)
+        docs = [
+            JinaRankingIOProcessorMixin.sanitize_input(doc, special_tokens)
+            for doc in docs
+        ]
+
+        prefix = (
+            "<|im_start|>system\n"
+            "You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. "  # noqa: E501
+            "If the query is a question, how relevant a passage is depends on how well it answers the question. "  # noqa: E501
+            "If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. "  # noqa: E501
+            "If an instruction is provided, you should follow the instruction when determining the ranking."  # noqa: E501
+            "<|im_end|>\n<|im_start|>user\n"
+        )
+        suffix = "<|im_end|>\n<|im_start|>assistant\n"
+        if no_thinking:
+            suffix += "<think>\n\n</think>\n\n"
+
+        doc_emb_token = special_tokens["doc_embed_token"]
+        query_emb_token = special_tokens["query_embed_token"]
+
+        prompt = (
+            f"I will provide you with {len(docs)} passages, each indicated by a numerical identifier. "  # noqa: E501
+            f"Rank the passages based on their relevance to query: {query}\n"
+        )
+
+        if instruction:
+            prompt += f"<instruct>\n{instruction}\n</instruct>\n"
+
+        doc_prompts = [
+            f'<passage id="{i}">\n{doc}{doc_emb_token}\n</passage>'
+            for i, doc in enumerate(docs)
+        ]
+        prompt += "\n".join(doc_prompts) + "\n"
+        prompt += f"<query>\n{query}{query_emb_token}\n</query>"
+
+        return prefix + prompt + suffix
+
+    @staticmethod
+    def ensure_str(data: Sequence[Any]) -> list[str]:
+        text: list[str] = []
+        for prompt in data:
+            if not isinstance(prompt, str):
+                raise ValueError(
+                    "The JinaForRanking model only supports text as input."
+                )
+            text.append(prompt)
+        return text
+
+
+class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorMixin):
+    name = "jina-reranking-scoring"
+    pooling_task: PoolingTask = "token_embed"
+
+    def _pre_process(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        queries = self.ensure_str(scoring_data.data_1)
+        docs = self.ensure_str(scoring_data.data_2)
+
+        if len(queries) == 1:
+            prompts = [self.format_docs_prompts_func(query=queries[0], docs=docs)]
+        else:
+            prompts = [
+                self.format_docs_prompts_func(query=q, docs=[d])
+                for q, d in zip(queries, docs)
+            ]
+
+        return self._preprocess_completion_offline(
+            prompts=prompts, tok_params=tok_params, prompt_extras=prompt_extras
+        )
+
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
+        final_res_batch: list[PoolingRequestOutput] = []
+
+        for i in range(len(outputs)):
+            embeds = outputs[i].outputs.data.float()
+
+            # The JinaForRanking model concatenates docs first, then query.
+            # Let's stay consistent with this novel design.
+            query_embeds = embeds[-1]
+            doc_embeds = embeds[:-1]
+
+            scores = F.cosine_similarity(query_embeds, doc_embeds)
+
+            for score in scores:
+                final_res_batch.append(
+                    PoolingRequestOutput(
+                        request_id=outputs[i].request_id,
+                        outputs=score,
+                        prompt_token_ids=outputs[i].prompt_token_ids,
+                        num_cached_tokens=outputs[i].num_cached_tokens,
+                        finished=True,
+                    )
+                )
+        return final_res_batch
+
+
 ScoringIOProcessors: dict[str, type[ScoringIOProcessor]] = {
     p.name: p
     for p in [
         BiEncoderIOProcessor,
         LateInteractionIOProcessor,
+        JinaRankingIOProcessor,
         FlashLateInteractionIOProcessor,
         CrossEncoderIOProcessor,
     ]
