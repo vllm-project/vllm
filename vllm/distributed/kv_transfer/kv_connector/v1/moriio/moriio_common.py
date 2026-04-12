@@ -207,9 +207,10 @@ class MoRIIOConfig:
         kv_transfer_config = vllm_config.kv_transfer_config
         extra_config = kv_transfer_config.kv_connector_extra_config
         tp_rank = get_tensor_model_parallel_rank()
-        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        dp_rank = (vllm_config.parallel_config.data_parallel_rank
+                   % vllm_config.parallel_config.data_parallel_size_local)
         base_notify_port = int(extra_config["notify_port"])
-        dp_size = vllm_config.parallel_config.data_parallel_size
+        dp_size = vllm_config.parallel_config.data_parallel_size_local
         tp_size = get_tensor_model_parallel_world_size()
         port_offset = get_port_offset(dp_rank, tp_rank)
 
@@ -293,8 +294,14 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
-            remote_handshake_port=kv_transfer_params["remote_handshake_port"],
-            remote_notify_port=kv_transfer_params["remote_notify_port"],
+            remote_handshake_port=kv_transfer_params.get(
+                "remote_handshake_port",
+                int(MoRIIOConstants.DEFAULT_HANDSHAKE_PORT),
+            ),
+            remote_notify_port=kv_transfer_params.get(
+                "remote_notify_port",
+                int(MoRIIOConstants.DEFAULT_NOTIFY_PORT),
+            ),
             tp_size=kv_transfer_params.get("tp_size", 1),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
         )
