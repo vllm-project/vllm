@@ -10,7 +10,7 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits, has_deep_gemm
+from vllm.utils.deep_gemm import fp8_mqa_logits, fp8_paged_mqa_logits, is_deep_gemm_supported
 from vllm.utils.torch_utils import (
     LayerNameType,
     _encode_layer_name,
@@ -317,9 +317,11 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
-        if current_platform.is_cuda() and not has_deep_gemm():
+        if current_platform.is_cuda() and not is_deep_gemm_supported():
             raise RuntimeError(
-                "Sparse Attention Indexer CUDA op requires DeepGEMM to be installed."
+                "Sparse Attention Indexer CUDA op requires DeepGEMM "
+                "to be installed and supported on this architecture. "
+                "Set VLLM_MLA_FORCE_DENSE=1 to use dense attention instead."
             )
 
     def forward_native(

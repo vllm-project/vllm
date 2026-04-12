@@ -169,6 +169,7 @@ if TYPE_CHECKING:
         "full",
         "relax",
     ] = "relax"
+    VLLM_MLA_FORCE_DENSE: bool = False
     VLLM_USE_FUSED_MOE_GROUPED_TOPK: bool = True
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_FP16: bool = False
@@ -1262,6 +1263,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
             "full",
             "relax",
         ],
+    ),
+    # Force MLA to use dense attention, disabling the sparse attention
+    # indexer. Useful on architectures where DeepGEMM is not supported.
+    "VLLM_MLA_FORCE_DENSE": lambda: bool(
+        int(os.getenv("VLLM_MLA_FORCE_DENSE", "0"))
     ),
     # Whether to use fused grouped_topk used for MoE expert selection.
     "VLLM_USE_FUSED_MOE_GROUPED_TOPK": lambda: bool(
