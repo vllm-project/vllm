@@ -345,6 +345,8 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         w13, w13_scale, w2, w2_scale, padded_hidden = (
             align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
         )
+        if layer.moe_config.hidden_dim_unpadded is None:
+            layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim
         layer.moe_config.hidden_dim = padded_hidden
 
         # Align weights for FI NVFP4 MoE kernels.

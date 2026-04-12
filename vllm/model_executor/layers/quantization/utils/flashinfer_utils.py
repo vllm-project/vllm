@@ -279,8 +279,10 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
     if padded_hidden_size == hidden_size:
         return w13, w13_scale, w2, w2_scale, hidden_size
 
-    logger.info_once(
-        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights.",
+    logger.warning_once(
+        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights. "
+        "This requires activation slicing at runtime and may cause "
+        "performance degradation.",
         hidden_size,
         padded_hidden_size,
         scope="local",

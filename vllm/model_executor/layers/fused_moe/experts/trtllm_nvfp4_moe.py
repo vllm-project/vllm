@@ -117,9 +117,12 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
-        """Supports 16-aligned hidden dims; weights are padded to 256-aligned at load
-        time and the MoE runner pads activations via _maybe_pad_hidden_states."""
-        return hidden_dim % 16 == 0
+        # Weights are zero-padded to 256-alignment at load time and the MoE
+        # runner pads activations via _maybe_pad_hidden_states, so any
+        # hidden_dim is accepted.
+        # NOTE: non-256-aligned dims will trigger a warning log and may
+        # cause performance degradation due to activation slicing.
+        return True
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -198,7 +201,6 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         import vllm.utils.flashinfer as fi_utils
 
         if fi_utils._is_fi_autotuning:
-            output.zero_()
             return
 
         # Invoke kernel.
