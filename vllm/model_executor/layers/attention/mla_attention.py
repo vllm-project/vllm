@@ -367,6 +367,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "KV cache format, please set `--attention-backend FLASHMLA_SPARSE`"
             )
 
+        # The C++ cache ops only accept "auto" or fp8 variants.
+        if kv_cache_dtype in ("bfloat16", "float16"):
+            kv_cache_dtype = "auto"
         # Initialize KV cache quantization attributes
         self.kv_cache_dtype = kv_cache_dtype
         self.calculate_kv_scales = calculate_kv_scales
@@ -543,6 +546,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
         use_quant = output_scale is not None or output_block_scale is not None
         if use_quant:
             # The fusion pass has allocated output with quantized dtype
@@ -2704,7 +2708,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         if has_context:
             assert prefill_metadata.chunked_context is not None
             suffix_output, suffix_lse = output_prefill
-            if self.dcp_world_size > 1:
+            use_dcp_prefill = (
+                self.dcp_world_size > 1
+                and prefill_metadata.chunked_context.
+                padded_local_chunk_seq_lens is not None
+            )
+            if use_dcp_prefill:
                 context_output, context_lse = (
                     self._context_parallel_compute_prefill_context(
                         q,
