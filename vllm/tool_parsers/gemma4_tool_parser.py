@@ -122,14 +122,16 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
 
         # Parse value
         if i >= n:
-            result[key] = ""
+            if not partial:
+                result[key] = ""
             break
 
         # Skip whitespace after ':'
         while i < n and args_str[i] in (" ", "\n", "\t"):
             i += 1
         if i >= n:
-            result[key] = ""
+            if not partial:
+                result[key] = ""
             break
 
         # String value: <|"|>...<|"|>

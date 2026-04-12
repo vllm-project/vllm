@@ -114,9 +114,9 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           int64_t numRows, int64_t stride0, int64_t stride1,
                           int64_t topK);
 
-void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
-                        const torch::Tensor& lengths,
-                        std::optional<torch::Tensor> row_starts_opt);
+void persistent_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+                     torch::Tensor& output, torch::Tensor& workspace, int64_t k,
+                     int64_t max_seq_len);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
@@ -308,4 +308,16 @@ int64_t qr_max_size();
 #ifndef USE_ROCM
 void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
                        torch::Tensor const& mat_b);
+#endif
+
+#ifndef USE_ROCM
+torch::Tensor minimax_allreduce_rms(torch::Tensor const& input,
+                                    torch::Tensor const& norm_weight,
+                                    torch::Tensor workspace, int64_t const rank,
+                                    int64_t const nranks, double const eps);
+std::tuple<torch::Tensor, torch::Tensor> minimax_allreduce_rms_qk(
+    torch::Tensor qkv, torch::Tensor const& norm_weight_q,
+    torch::Tensor const& norm_weight_k, torch::Tensor workspace,
+    int64_t const q_size, int64_t const kv_size, int64_t const rank,
+    int64_t const nranks, double const eps);
 #endif
