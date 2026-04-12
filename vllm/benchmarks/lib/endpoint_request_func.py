@@ -795,6 +795,17 @@ ASYNC_REQUEST_FUNCS: dict[str, RequestFunc] = {
     "vllm-rerank": async_request_vllm_rerank,
 }
 
+POOLING_BACKENDS = {
+    "openai-embeddings",
+    "openai-embeddings-chat",
+    "openai-embeddings-clip",
+    "openai-embeddings-vlm2vec",
+    "infinity-embeddings",
+    "infinity-embeddings-clip",
+    "vllm-pooling",
+    "vllm-rerank",
+}
+
 OPENAI_COMPATIBLE_BACKENDS = [
     k
     for k, v in ASYNC_REQUEST_FUNCS.items()
