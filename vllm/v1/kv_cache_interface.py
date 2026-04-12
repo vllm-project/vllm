@@ -339,11 +339,15 @@ class MambaSpec(KVCacheSpec):
     num_speculative_blocks: int = 0
 
     @property
-    def page_size_bytes(self) -> int:
-        page_size = sum(
+    def real_page_size_bytes(self) -> int:
+        return sum(
             prod(shape) * get_dtype_size(dtype)
             for (shape, dtype) in zip(self.shapes, self.dtypes)
         )
+
+    @property
+    def page_size_bytes(self) -> int:
+        page_size = self.real_page_size_bytes
         if self.page_size_padded is not None:
             assert self.page_size_padded >= page_size
             return self.page_size_padded
@@ -548,6 +552,14 @@ class KVCacheConfig:
     contains all layers.
     For models with multiple types of attention, there will be multiple groups,
     see `_get_kv_cache_config_uniform_page_size` for more details.
+    """
+    mamba_num_blocks: int | None = None
+    """
+    Number of compact Mamba blocks when using separate Mamba allocation.
+    None means Mamba shares the attention block pool (mamba_cache_mode="all").
+    When set, Mamba tensors are sized for this many blocks instead of
+    num_blocks. This avoids large memory waste in hybrid models where Mamba
+    state is O(1) per request but the shared pool forces O(n)-sized tensors.
     """
 
     @property
