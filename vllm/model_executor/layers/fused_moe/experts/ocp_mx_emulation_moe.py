@@ -146,14 +146,59 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
         assert w1.dtype == torch.uint8
         assert w2.dtype == torch.uint8
 
-        # Dequantize w1 and w2 from packed OCP MX format to bf16/fp16
-        w1_dequant = self._dequantize_weights(
-            w1, self.w1_scale_val, hidden_states.dtype
-        )
-        w2_dequant = self._dequantize_weights(
-            w2, self.w2_scale_val, hidden_states.dtype
+        w1_scale = self.w1_scale_val
+        w2_scale = self.w2_scale_val
+
+        # Single-token decode without Expert Parallel: topk_ids is
+        # [1, top_k] with no repeats, so dequant only the active experts
+        # (typically top_k ~= 8 vs total ~= 64-256).  sort() has fixed
+        # output size -> graph-compatible.  EP (expert_map is not None)
+        # is excluded: topk_ids then contains global IDs spanning all
+        # ranks, and isolating this rank's experts requires boolean
+        # indexing which produces dynamic tensor shapes.  Biases exist
+        # on quant_config and are read directly by TritonExperts.apply
+        # from self.w1_bias/self.w2_bias, so the fast path is also
+        # gated on no biases (slicing self.* would mutate shared state).
+        use_fast_path = (
+            hidden_states.shape[0] == 1
+            and expert_map is None
+            and self.quant_config.w1_bias is None
+            and self.quant_config.w2_bias is None
         )
 
+        if use_fast_path:
+            unique_expert_ids = topk_ids.view(-1).sort().values
+            num_active = unique_expert_ids.shape[0]    # always == top_k
+            w1_dequant = self._dequantize_weights(
+                w1[unique_expert_ids],
+                w1_scale[unique_expert_ids],
+                hidden_states.dtype,
+            )
+            w2_dequant = self._dequantize_weights(
+                w2[unique_expert_ids],
+                w2_scale[unique_expert_ids],
+                hidden_states.dtype,
+            )
+            # Remap expert IDs -> contiguous [0, num_active).
+            id_map = topk_ids.new_full((global_num_experts,), -1)
+            id_map[unique_expert_ids] = torch.arange(
+                num_active, dtype=topk_ids.dtype, device=topk_ids.device
+            )
+            topk_ids = id_map[topk_ids.view(-1)].view(topk_ids.shape)
+            global_num_experts = num_active
+            # expert_tokens_meta is keyed by the old expert-id space;
+            # let TritonExperts derive fresh metadata from the remapped
+            # topk_ids instead of trusting a stale table.
+            expert_tokens_meta = None
+        else:
+            # Prefill, multi-token decode, EP, or biased path: dequant
+            # the full weight tables.
+            w1_dequant = self._dequantize_weights(
+                w1, w1_scale, hidden_states.dtype
+            )
+            w2_dequant = self._dequantize_weights(
+                w2, w2_scale, hidden_states.dtype
+            )
         # Activation quantization/dequantization is deferred to
         # `moe_kernel_quantize_input` in TritonExperts.apply.
         super().apply(
