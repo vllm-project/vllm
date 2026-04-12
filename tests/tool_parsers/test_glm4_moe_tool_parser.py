@@ -5,6 +5,7 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from openai.types.responses import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -12,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.engine.protocol import FunctionCall, ToolCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm4_moe_tool_parser import (
     Glm4MoeModelToolParser,
@@ -1363,3 +1365,105 @@ def test_stream_interval_content_between_tool_calls(
     args1 = json.loads("".join(tools_found[1]["args_fragments"]))
     assert args0 == {"city": "Beijing"}
     assert args1 == {"city": "Shanghai"}
+
+def test_extract_tool_calls_with_responses_format_tools(glm4_moe_tokenizer):
+    """Test extract tool call with Responses API FunctionTool input.
+
+    The parser's _is_string_type reads self.tools (set at construction),
+    so we must pass FunctionTool via the constructor — not request.tools —
+    to actually exercise _extract_tool_info with FunctionTool objects.
+    """
+    responses_tools = [
+        FunctionTool(
+            type="function",
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                },
+            },
+        )
+    ]
+
+    # Key: parser constructed with FunctionTool so self.tools has FunctionTool
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=responses_tools)
+
+    request = Mock(spec=ResponsesRequest)
+    request.tools = responses_tools
+
+    model_output = """<tool_call>get_weather
+<arg_key>city</arg_key>
+<arg_value>Beijing</arg_value>
+</tool_call>"""
+
+    extracted_tool_calls = parser.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+    assert extracted_tool_calls.tool_calls[0].function.name == "get_weather"
+
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+
+    assert args["city"] == "Beijing"
+    assert isinstance(args["city"], str)
+
+
+def test_extract_tool_calls_with_responses_format_tools_streaming(
+    glm4_moe_tokenizer,
+):
+    """Test streaming extract tool call with Responses API FunctionTool input.
+
+    Same as the non-streaming variant: parser must be constructed with
+    FunctionTool so self.tools contains FunctionTool objects, otherwise
+    _is_string_type never calls _extract_tool_info on FunctionTool.
+    """
+    responses_tools = [
+        FunctionTool(
+            type="function",
+            name="get_weather",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "city": {"type": "string"},
+                },
+            },
+        )
+    ]
+
+    # Key: parser constructed with FunctionTool so self.tools has FunctionTool
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=responses_tools)
+    _reset_streaming_state(parser)
+
+    request = Mock(spec=ResponsesRequest)
+    request.tools = responses_tools
+
+    chunks = [
+        "<tool_call>",
+        "get_weather\n",
+        "<arg_key>city</arg_key>",
+        "<arg_value>",
+        "Bei",
+        "jing",
+        "</arg_value>",
+        "</tool_call>",
+    ]
+
+    for chunk in chunks:
+        parser.extract_tool_calls_streaming(
+            previous_text="",
+            current_text="",
+            delta_text=chunk,
+            previous_token_ids=[],
+            current_token_ids=[],
+            delta_token_ids=[],
+            request=request,
+        )
+
+    assert len(parser.streamed_args_for_tool) == 1
+    args = json.loads(parser.streamed_args_for_tool[0])
+
+    assert args["city"] == "Beijing"
+    assert isinstance(args["city"], str)
