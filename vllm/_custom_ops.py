@@ -592,7 +592,8 @@ def silu_and_mul_per_block_quant(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if envs.VLLM_USE_TRITON_ACT_QUANT:
         return torch.ops.vllm.silu_and_mul_per_block_quant_triton(
-            input, group_size, quant_dtype, scale_ub, is_scale_transposed)
+            input, group_size, quant_dtype, scale_ub, is_scale_transposed
+        )
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
     assert input.shape[-1] % 2 == 0, (
         f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
@@ -642,10 +643,11 @@ def silu_and_mul_per_block_quant_triton(
     scale_ub: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from vllm.model_executor.layers.quantization.triton_quantization import \
-        silu_and_mul_per_block_quant_triton as TritonImpl
-    return TritonImpl(input, group_size, quant_dtype, scale_ub,
-                      is_scale_transposed)
+    from vllm.model_executor.layers.quantization.triton_quantization import (
+        silu_and_mul_per_block_quant_triton as TritonImpl,
+    )
+
+    return TritonImpl(input, group_size, quant_dtype, scale_ub, is_scale_transposed)
 
 
 def silu_and_mul_per_block_quant_triton_fake(
@@ -658,17 +660,17 @@ def silu_and_mul_per_block_quant_triton_fake(
     num_tokens = input.size(0)
     hidden_size = input.size(1) // 2
     num_groups = (hidden_size + group_size - 1) // group_size
-    output = torch.empty((num_tokens, hidden_size),
-                         device=input.device,
-                         dtype=quant_dtype)
+    output = torch.empty(
+        (num_tokens, hidden_size), device=input.device, dtype=quant_dtype
+    )
     if is_scale_transposed:
-        scales = torch.empty((num_groups, num_tokens),
-                             device=input.device,
-                             dtype=torch.float32).t()
+        scales = torch.empty(
+            (num_groups, num_tokens), device=input.device, dtype=torch.float32
+        ).t()
     else:
-        scales = torch.empty((num_tokens, num_groups),
-                             device=input.device,
-                             dtype=torch.float32)
+        scales = torch.empty(
+            (num_tokens, num_groups), device=input.device, dtype=torch.float32
+        )
     return output, scales
 
 

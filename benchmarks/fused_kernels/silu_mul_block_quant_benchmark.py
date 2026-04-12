@@ -91,12 +91,8 @@ def cuda_fused_impl(
     num_tokens = x.shape[0]
     hidden_size = x.shape[-1] // 2
     num_groups = hidden_size // group_size
-    output = torch.empty((num_tokens, hidden_size),
-                         device=x.device,
-                         dtype=quant_dtype)
-    scales = torch.empty((num_tokens, num_groups),
-                         device=x.device,
-                         dtype=torch.float32)
+    output = torch.empty((num_tokens, hidden_size), device=x.device, dtype=quant_dtype)
+    scales = torch.empty((num_tokens, num_groups), device=x.device, dtype=torch.float32)
     torch.ops._C.silu_and_mul_per_block_quant(
         output,
         x,

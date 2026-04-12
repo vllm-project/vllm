@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import patch
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -14,8 +16,6 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
 from vllm.platforms import current_platform
-import vllm.envs as envs
-from unittest.mock import patch
 
 DTYPES = [torch.float16, torch.bfloat16]
 QUANT_DTYPES = [current_platform.fp8_dtype(), torch.int8]
