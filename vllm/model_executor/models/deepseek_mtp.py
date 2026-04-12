@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from copy import copy
 
 import torch
 import torch.nn as nn
@@ -10,7 +11,7 @@ from transformers import PretrainedConfig
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.logger import init_logger
+from vllm.config.utils import replace
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -32,9 +33,25 @@ from .deepseek_v2 import (
     DeepseekV2MoE,
     get_spec_layer_idx_from_weight_name,
 )
-from .utils import maybe_prefix
+from .utils import get_draft_quant_config, maybe_prefix
 
-logger = init_logger(__name__)
+
+def _get_nextn_vllm_config(
+    vllm_config: VllmConfig,
+) -> tuple[VllmConfig, QuantizationConfig | None]:
+    quant_config = get_draft_quant_config(vllm_config)
+    # GLM-5 stores NextN/MTP weights in a separate `mtp.safetensors` file and
+    # those tensors are BF16 rather than NVFP4-packed. Keep the draft path
+    # unquantized so MoE/attention params match the checkpoint layout.
+    if quant_config is not None and quant_config.get_name() == "modelopt_fp4":
+        nextn_vllm_config = copy(vllm_config)
+        nextn_vllm_config.quant_config = None
+        return nextn_vllm_config, None
+
+    if quant_config is vllm_config.quant_config:
+        return vllm_config, quant_config
+
+    return replace(vllm_config, quant_config=quant_config), quant_config
 
 
 class SharedHead(nn.Module):
@@ -63,7 +80,8 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
 
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config
-        quant_config = vllm_config.quant_config
+        mtp_vllm_config, quant_config = _get_nextn_vllm_config(vllm_config)
+        layer_idx = int(prefix.rsplit(".", 1)[-1])
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -87,10 +105,12 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
             config=config, prefix=prefix, quant_config=quant_config
         )
         self.mtp_block = DeepseekV2DecoderLayer(
-            vllm_config,
-            prefix,
-            config=self.config,
+            mtp_vllm_config,
+            f"{prefix}.mtp_block",
+            config=config,
             topk_indices_buffer=topk_indices_buffer,
+            layer_idx_override=layer_idx,
+            is_nextn=True,
         )
 
     def forward(
@@ -99,23 +119,24 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
-        spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # masking inputs at position 0, as not needed by MTP
-        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
-        inputs_embeds = self.enorm(inputs_embeds)
-        previous_hidden_states = self.hnorm(previous_hidden_states)
+        normed_inputs_embeds = self.enorm(inputs_embeds)
+        normed_previous_hidden_states = self.hnorm(previous_hidden_states)
 
-        hidden_states = self.eh_proj(
-            torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
+        eh_proj_hidden_states = self.eh_proj(
+            torch.cat([normed_inputs_embeds, normed_previous_hidden_states], dim=-1)
         )
 
-        hidden_states, residual = self.mtp_block(
-            positions=positions, hidden_states=hidden_states, residual=None
+        decoder_hidden_states, residual = self.mtp_block(
+            positions=positions, hidden_states=eh_proj_hidden_states, residual=None
         )
-        hidden_states = residual + hidden_states
-        return hidden_states
+        hidden_states = (
+            decoder_hidden_states
+            if residual is None
+            else decoder_hidden_states + residual
+        )
+        return self.shared_head(hidden_states)
 
 
 class DeepSeekMultiTokenPredictor(nn.Module):
@@ -124,17 +145,17 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         config = vllm_config.model_config.hf_config
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = config.num_nextn_predict_layers
-        # to map the exact layer index from weights
+        # Keep internal layer ids zero-based so the NextN decoder behaves like
+        # SGLang's single-layer draft path while weight loading still maps from
+        # checkpoint layers appended after the target stack.
+        self.mtp_internal_start_idx = 0
 
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): DeepSeekMultiTokenPredictorLayer(
                     vllm_config, f"{prefix}.layers.{idx}"
                 )
-                for idx in range(
-                    self.mtp_start_layer_idx,
-                    self.mtp_start_layer_idx + self.num_mtp_layers,
-                )
+                for idx in range(self.mtp_internal_start_idx, self.num_mtp_layers)
             }
         )
         self.embed_tokens = VocabParallelEmbedding(
@@ -158,12 +179,11 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        return self.layers[str(self.mtp_start_layer_idx + current_step_idx)](
+        return self.layers[str(current_step_idx)](
             input_ids,
             positions,
             previous_hidden_states,
             inputs_embeds,
-            current_step_idx,
         )
 
     def compute_logits(
@@ -172,11 +192,23 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = spec_step_idx % self.num_mtp_layers
-        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
-        logits = self.logits_processor(
-            mtp_layer.shared_head.head, mtp_layer.shared_head(hidden_states)
+        mtp_layer = self.layers[str(current_step_idx)]
+        return self.logits_processor(
+            mtp_layer.shared_head.head,
+            hidden_states,
         )
-        return logits
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[str(current_step_idx)]
+        return self.logits_processor.get_top_tokens(
+            mtp_layer.shared_head.head,
+            hidden_states,
+        )
 
 
 @support_torch_compile
@@ -184,16 +216,11 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
-        self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         # Set MoE hyperparameters
         self.set_moe_parameters()
-        self.is_fp4_ckpt = (
-            self.quant_config is not None
-            and self.quant_config.get_name() == "modelopt_fp4"
-        )
 
     def set_moe_parameters(self):
         self.expert_weights = []
@@ -237,6 +264,13 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
 
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        return self.model.get_top_tokens(hidden_states, spec_step_idx)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
@@ -247,14 +281,6 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("fused_qkv_a_proj", "q_a_proj", 0),
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
-
-        if self.is_fp4_ckpt:
-            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-            indexer_fused_mapping = [
-                ("wk_weights_proj", "wk", 0),
-                ("wk_weights_proj", "weights_proj", 1),
-            ]
-            stacked_params_mapping.extend(indexer_fused_mapping)
 
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
             self,
@@ -271,6 +297,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        loaded_spec_layers: set[int] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -313,6 +340,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                loaded_spec_layers.add(spec_layer)
                 break
             else:
                 # Special handling: when AITER fusion_shared_experts is enabled,
@@ -393,6 +421,7 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                             return_success=True,
                         )
                         if success:
+                            loaded_spec_layers.add(spec_layer)
                             if not is_fusion_moe_shared_experts_layer:
                                 name = name_mapped
                             else:
@@ -426,20 +455,16 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
+                        loaded_spec_layers.add(spec_layer)
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
 
         # Validate that weights were loaded for each expected MTP layer.
-        loaded_layers: set[int] = set()
-        for param_name in loaded_params:
-            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
-            if spec_layer is not None:
-                loaded_layers.add(spec_layer)
         for layer_idx in range(
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_spec_layers:
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint. The checkpoint may have "
@@ -456,6 +481,13 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         Add .mtp_block for modules in transformer layer block for spec layer
         and rename shared layer weights to be top level.
         """
+        internal_layer_idx = spec_layer - self.model.mtp_start_layer_idx
+        if internal_layer_idx < 0 or internal_layer_idx >= self.model.num_mtp_layers:
+            raise ValueError(
+                f"Unexpected MTP checkpoint layer {spec_layer}; expected "
+                f"{self.model.mtp_start_layer_idx}.."
+                f"{self.model.mtp_start_layer_idx + self.model.num_mtp_layers - 1}."
+            )
         spec_layer_weight_names = [
             "embed_tokens",
             "enorm",
@@ -475,9 +507,18 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
             name = name.replace(
-                f"model.layers.{spec_layer}.", f"model.layers.{spec_layer}.mtp_block."
+                f"model.layers.{spec_layer}.",
+                f"model.layers.{internal_layer_idx}.mtp_block.",
             )
         elif shared_weight:
             # treat shared weights as top level weights
             name = name.replace(f"model.layers.{spec_layer}.", "model.")
+        else:
+            name = name.replace(
+                f"model.layers.{spec_layer}.", f"model.layers.{internal_layer_idx}."
+            )
         return name
+
+
+class DeepSeekNextNMTP(DeepSeekMTP):
+    pass
