@@ -7,6 +7,9 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
+    ResponseFunctionCallArgumentsDeltaEvent,
+    ResponseFunctionCallArgumentsDoneEvent,
+    ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
@@ -1124,3 +1127,234 @@ class TestAutoToolStreaming:
             if event.type == "response.function_call_arguments.delta"
         ]
         assert "".join(argument_deltas) == '{"location":"Berlin"}'
+# ── helpers for parallel tool call tests ─────────────────────────────────────
+
+def _make_serving_instance_for_tool_calls():
+    """Create a minimal OpenAIServingResponses instance for tool call tests."""
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 1000
+    model_config.hf_config.model_type = "test"
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+    return OpenAIServingResponses(
+        engine_client=engine_client,
+        models=MagicMock(),
+        openai_serving_render=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+
+def _mock_parser_with_tool_calls(serving, delta_sequence: list[DeltaMessage]):
+    """Attach a mock parser to *serving* that returns *delta_sequence* in order."""
+    call_count = 0
+
+    def _parse_delta(**kwargs):
+        nonlocal call_count
+        if call_count >= len(delta_sequence):
+            return None
+        result = delta_sequence[call_count]
+        call_count += 1
+        return result
+
+    mock_parser_instance = MagicMock()
+    mock_parser_instance.tool_parser = MagicMock()  # truthy so TCs are expected
+    mock_parser_instance.reasoning_parser = None
+    mock_parser_instance.parse_delta = _parse_delta
+    serving.parser = MagicMock(return_value=mock_parser_instance)
+
+
+def _tc(index: int, name: str | None = None, args: str | None = None) -> DeltaToolCall:
+    """Build a DeltaToolCall with an optional function name and/or argument chunk."""
+    return DeltaToolCall(
+        index=index,
+        function=DeltaFunctionCall(name=name, arguments=args),
+    )
+
+
+async def _run_simple_streaming(
+    serving,
+    delta_sequence: list[DeltaMessage],
+    *,
+    parallel_tool_calls: bool | None = None,
+) -> list:
+    """Drive _process_simple_streaming_events and return all emitted events."""
+    _mock_parser_with_tool_calls(serving, delta_sequence)
+
+    contexts = [
+        _make_simple_context_with_output(f"chunk{i}", [i + 1])
+        for i in range(len(delta_sequence))
+    ]
+
+    async def _result_gen():
+        for ctx in contexts:
+            yield ctx
+
+    request = ResponsesRequest(
+        input="test",
+        tools=[],
+        stream=True,
+        parallel_tool_calls=parallel_tool_calls,
+    )
+    sampling_params = SamplingParams(max_tokens=100)
+    metadata = RequestResponseMetadata(request_id="test-req")
+    _identity_increment._counter = 0  # type: ignore
+
+    events: list = []
+    async for event in serving._process_simple_streaming_events(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=_result_gen(),
+        context=SimpleContext(),
+        model_name="test-model",
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+        created_time=0,
+        _increment_sequence_number_and_return=_identity_increment,
+    ):
+        events.append(event)
+    return events
+
+
+class TestParallelToolCallStreaming:
+    """Unit tests for parallel tool call streaming (GitHub issue #39584).
+
+    Verifies that _process_simple_streaming_events correctly handles multiple
+    tool calls in a single SSE delta using per-call ToolCallStreamState tracking.
+    Prior to the fix, these cases crashed with AssertionError or silently dropped
+    all tool calls beyond the first.
+    """
+
+    @pytest.mark.asyncio
+    async def test_single_tool_call_no_regression(self, monkeypatch):
+        """Single TC streaming still works correctly after the parallel-TC fix."""
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_for_tool_calls()
+
+        delta_sequence = [
+            DeltaMessage(tool_calls=[_tc(0, "get_weather")]),
+            DeltaMessage(tool_calls=[_tc(0, args='{"city": "B')]),
+            DeltaMessage(tool_calls=[_tc(0, args='erlin"}')]),
+        ]
+        events = await _run_simple_streaming(serving, delta_sequence)
+
+        types = [e.type for e in events]
+        assert types.count("response.output_item.added") == 1
+        assert types.count("response.function_call_arguments.done") == 1
+        assert types.count("response.output_item.done") == 1
+
+        added = next(e for e in events if e.type == "response.output_item.added")
+        assert added.output_index == 0
+        assert added.item.name == "get_weather"
+
+        args_done = next(
+            e for e in events if e.type == "response.function_call_arguments.done"
+        )
+        assert args_done.arguments == '{"city": "Berlin"}'
+
+    @pytest.mark.asyncio
+    async def test_two_tool_calls_in_first_delta(self, monkeypatch):
+        """Two TCs in the first delta produce two separate output items at
+        consecutive output_indexes (0 and 1)."""
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_for_tool_calls()
+
+        delta_sequence = [
+            DeltaMessage(tool_calls=[
+                _tc(0, "get_weather"),
+                _tc(1, "get_forecast"),
+            ]),
+            DeltaMessage(tool_calls=[
+                _tc(0, args='{"city": "Berlin"}'),
+                _tc(1, args='{"city": "London"}'),
+            ]),
+        ]
+        events = await _run_simple_streaming(serving, delta_sequence)
+
+        types = [e.type for e in events]
+        # One output_item.added per tool call
+        assert types.count("response.output_item.added") == 2
+        # One args delta per TC per args-carrying delta
+        assert types.count("response.function_call_arguments.delta") == 2
+        # One args done + item done per TC
+        assert types.count("response.function_call_arguments.done") == 2
+        assert types.count("response.output_item.done") == 2
+
+        added_events = [e for e in events if e.type == "response.output_item.added"]
+        output_indexes = sorted(e.output_index for e in added_events)
+        assert output_indexes == [0, 1], "Output indexes must be distinct and sequential"
+
+        names = {e.output_index: e.item.name for e in added_events}
+        assert names[0] == "get_weather"
+        assert names[1] == "get_forecast"
+
+    @pytest.mark.asyncio
+    async def test_parallel_args_attributed_correctly_by_index(self, monkeypatch):
+        """Argument fragments across multiple deltas are routed to the correct
+        TC by DeltaToolCall.index, not by arrival order."""
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_for_tool_calls()
+
+        delta_sequence = [
+            # Both TCs announced together in first delta
+            DeltaMessage(tool_calls=[_tc(0, "tc_a"), _tc(1, "tc_b")]),
+            # First fragment — index 0 gets '{"x":', index 1 gets '{"y":'
+            DeltaMessage(tool_calls=[
+                _tc(0, args='{"x":'),
+                _tc(1, args='{"y":'),
+            ]),
+            # Second fragment
+            DeltaMessage(tool_calls=[
+                _tc(0, args="1}"),
+                _tc(1, args="2}"),
+            ]),
+        ]
+        events = await _run_simple_streaming(serving, delta_sequence)
+
+        done_events = [
+            e for e in events
+            if e.type == "response.function_call_arguments.done"
+        ]
+        assert len(done_events) == 2
+
+        args_by_name: dict[str, str] = {e.name: e.arguments for e in done_events}
+        assert args_by_name["tc_a"] == '{"x":1}'
+        assert args_by_name["tc_b"] == '{"y":2}'
+
+    @pytest.mark.asyncio
+    async def test_parallel_tool_calls_false_keeps_only_first(self, monkeypatch):
+        """parallel_tool_calls=False must filter all TCs with index != 0,
+        keeping only the first tool call in the output."""
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_for_tool_calls()
+
+        delta_sequence = [
+            DeltaMessage(tool_calls=[
+                _tc(0, "tc_a"),
+                _tc(1, "tc_b"),  # should be filtered out
+            ]),
+            DeltaMessage(tool_calls=[
+                _tc(0, args='{"x": 1}'),
+                _tc(1, args='{"y": 2}'),  # filtered
+            ]),
+        ]
+        events = await _run_simple_streaming(
+            serving, delta_sequence, parallel_tool_calls=False
+        )
+
+        types = [e.type for e in events]
+        assert types.count("response.output_item.added") == 1
+        assert types.count("response.function_call_arguments.done") == 1
+
+        added = next(e for e in events if e.type == "response.output_item.added")
+        assert added.item.name == "tc_a"
+
+        done = next(
+            e for e in events if e.type == "response.function_call_arguments.done"
+        )
+        assert done.name == "tc_a"
+        assert done.arguments == '{"x": 1}'
