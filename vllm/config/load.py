@@ -27,8 +27,10 @@ class LoadConfig:
     """
     The format of the model weights to load.
 
-    - "auto" will try to load the weights in the safetensors format and fall
-      back to the pytorch bin format if safetensors format is not available.
+    - "auto" will load Mistral consolidated checkpoints with the Mistral
+      loader, prefer fastsafetensors on CUDA/ROCm for safetensors checkpoints,
+      and otherwise fall back to the standard Hugging Face safetensors/bin
+      loading path.
     - "pt" will load the weights in the pytorch bin format.
     - "safetensors" will load the weights in the safetensors format.
     - "instanttensor" will load the Safetensors weights on CUDA devices using

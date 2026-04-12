@@ -34,6 +34,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
 
@@ -103,25 +104,12 @@ class DefaultModelLoader(BaseModelLoader):
         )
 
         is_local = os.path.isdir(model_name_or_path)
-        load_format = self.load_config.load_format
+        load_format = self._resolve_load_format(
+            model_name_or_path=model_name_or_path,
+            revision=revision,
+        )
         use_safetensors = False
         index_file = SAFE_WEIGHTS_INDEX_NAME
-
-        # First check for 'auto' format that mistral files format are present.
-        # This is to load mistral models with official format by default.
-        if load_format == "auto":
-            load_format = (
-                "mistral"
-                if len(
-                    list_filtered_repo_files(
-                        model_name_or_path=model_name_or_path,
-                        allow_patterns=["consolidated*.safetensors"],
-                        revision=revision,
-                    )
-                )
-                > 0
-                else "hf"
-            )
 
         # Some quantized models use .pt files for storing the weights.
         if load_format == "hf":
@@ -199,6 +187,33 @@ class DefaultModelLoader(BaseModelLoader):
             )
 
         return hf_folder, hf_weights_files, use_safetensors
+
+    def _resolve_load_format(
+        self,
+        *,
+        model_name_or_path: str,
+        revision: str | None,
+    ) -> str:
+        """Resolve the effective load format from the user config."""
+        load_format = self.load_config.load_format
+        if load_format != "auto":
+            return load_format
+
+        # Load Mistral consolidated checkpoints with the dedicated loader.
+        if len(
+            list_filtered_repo_files(
+                model_name_or_path=model_name_or_path,
+                allow_patterns=["consolidated*.safetensors"],
+                revision=revision,
+            )
+        ) > 0:
+            return "mistral"
+
+        # On CUDA/ROCm, default to the faster GPU-oriented safetensors loader.
+        if current_platform.is_cuda_alike():
+            return "fastsafetensors"
+
+        return "hf"
 
     def _get_weights_iterator(
         self, source: "Source"
