@@ -576,7 +576,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 num_local_experts, self.max_num_tokens, hidden_dim
             )
 
-            b_a1_scale = torch.empty(scale_shape, dtype=torch.float32, device=a1.device)
+            b_a1_scale = torch.zeros(scale_shape, dtype=torch.float32, device=a1.device)
         else:
             assert quant_config.a1_scale is None
             b_a1_scale = None
@@ -836,7 +836,7 @@ def batched_moe_kernel_quantize_input(
     elif qtype is None:
         return A, normalize_batched_scales_shape(A_scale, E)
     else:
-        A_q = torch.empty_like(A, dtype=qtype)
+        A_q = torch.zeros_like(A, dtype=qtype)
 
         if per_act_token_quant:
             assert block_shape is None
