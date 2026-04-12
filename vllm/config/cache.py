@@ -29,6 +29,7 @@ CacheDType = Literal[
 ]
 MambaDType = Literal["auto", "float32", "float16"]
 MambaCacheMode = Literal["all", "align", "none"]
+AttnPackSize = Literal[1, 2, 4, 8]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -131,6 +132,9 @@ class CacheConfig:
     """Number of Philox PRNG rounds for stochastic rounding random number
     generation. 0 uses the Triton default. Higher values improve randomness
     quality at the cost of compute."""
+    attn_pack_size: AttnPackSize = 1
+    """The number of attention pages to allocate for Mamba layers. 
+    This is only relevant for models that includes Mamba layers."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
