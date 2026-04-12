@@ -529,6 +529,39 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
         graph.graph.erase_node(node)
 
 
+def _move_get_attr_after_placeholders(split_gm: fx.GraphModule) -> None:
+    for _, submod in split_gm.named_children():
+        placeholders = submod.graph.find_nodes(op="placeholder")
+        if not placeholders:
+            continue
+        last_ph = placeholders[-1]
+        get_attrs_to_move: list[fx.Node] = []
+        for node in submod.graph.nodes:
+            if node is last_ph:
+                break
+            if node.op == "get_attr":
+                get_attrs_to_move.append(node)
+        if not get_attrs_to_move:
+            continue
+        insert_pt = last_ph
+        for node in get_attrs_to_move:
+            insert_pt.append(node)
+            insert_pt = node
+        submod.graph.lint()
+        submod.recompile()
+
+        node = last_ph._prev
+        while node is not None and node.op != "placeholder":
+            if node.op == "get_attr":
+                raise RuntimeError(
+                    f"get_attr '{node.name}' still precedes placeholder "
+                    f"'{last_ph.name}' after reordering — split_module "
+                    f"produced a node pattern that "
+                    f"_move_get_attr_after_placeholders does not handle."
+                )
+            node = node._prev
+
+
 def split_graph(
     graph: fx.GraphModule, splitting_ops: list[str]
 ) -> tuple[fx.GraphModule, list[SplitItem]]:
@@ -585,6 +618,14 @@ def split_graph(
             keep_original_order=True,
             **tuple_return_kwarg,
         )
+
+    # Ideally PyTorch's split_module would maintain the invariant that all
+    # placeholder nodes precede get_attr nodes in each submodule graph.
+    # Currently it can interleave them (e.g. torch.cond branch subgraphs
+    # produce get_attr nodes that land between placeholders).  Until that
+    # is fixed upstream, enforce the invariant here so that downstream code
+    # like get_fake_args_from_graph can rely on placeholders coming first.
+    _move_get_attr_after_placeholders(split_gm)
 
     outputs = []
 

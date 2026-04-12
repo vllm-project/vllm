@@ -11,6 +11,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 from vllm.compilation.backends import _is_empty_allocation_node, split_graph
 from vllm.compilation.passes.fx_utils import find_op_nodes
+from vllm.compilation.piecewise_backend import get_fake_args_from_graph
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
@@ -622,3 +623,98 @@ def test_sym_size_metadata_propagated():
             else:
                 example_inputs.append(int(ev))
         standalone_compile(submod, example_inputs, dynamic_shapes="from_example_inputs")
+
+
+class _SingleCondModel(torch.nn.Module):
+    def __init__(self, d=64):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(d, d)
+        self.fc2 = torch.nn.Linear(d, d)
+
+    def forward(self, x):
+        x = self.fc1(x)
+
+        def true_fn(x):
+            return x * 2.0
+
+        def false_fn(x):
+            return x * 3.0
+
+        x = torch.cond(x.shape[0] < 32, true_fn, false_fn, (x,))
+        return self.fc2(x)
+
+
+class _MultiCondModel(torch.nn.Module):
+    def __init__(self, d=64):
+        super().__init__()
+        self.fc1 = torch.nn.Linear(d, d)
+        self.fc2 = torch.nn.Linear(d, d)
+        self.fc3 = torch.nn.Linear(d, d)
+
+    def forward(self, x):
+        x = self.fc1(x)
+
+        def true1(x):
+            return x * 2.0
+
+        def false1(x):
+            return x * 3.0
+
+        x = torch.cond(x.shape[0] < 32, true1, false1, (x,))
+        x = self.fc2(x)
+
+        def true2(x):
+            return torch.relu(x)
+
+        def false2(x):
+            return torch.sigmoid(x)
+
+        x = torch.cond(x.shape[0] < 16, true2, false2, (x,))
+        return self.fc3(x)
+
+
+@pytest.mark.parametrize(
+    "model_cls,expected_get_attrs",
+    [(_SingleCondModel, 2), (_MultiCondModel, 4)],
+    ids=["single_cond", "multi_cond"],
+)
+def test_split_graph_placeholders_before_get_attr(model_cls, expected_get_attrs):
+    from torch._inductor.compile_fx import compile_fx
+
+    model = model_cls().cuda().eval()
+    result = {}
+
+    def capture_backend(gm, example_inputs):
+        split_gm, items = split_graph(gm, [])
+        for item in items:
+            if not item.is_splitting_graph:
+                result["submod"] = getattr(split_gm, item.submod_name)
+                result["example_inputs"] = example_inputs
+        return gm.forward
+
+    torch.compile(model, backend=capture_backend, dynamic=True)(
+        torch.randn(16, 64, device="cuda")
+    )
+
+    submod = result["submod"]
+    example_inputs = result["example_inputs"]
+
+    get_attrs = [n for n in submod.graph.nodes if n.op == "get_attr"]
+    all_ph = [n for n in submod.graph.nodes if n.op == "placeholder"]
+    assert len(get_attrs) == expected_get_attrs
+
+    seen_get_attr = False
+    for node in submod.graph.nodes:
+        if node.op == "get_attr":
+            seen_get_attr = True
+        elif node.op == "placeholder" and seen_get_attr:
+            raise AssertionError(
+                f"placeholder '{node.name}' found after get_attr"
+            )
+
+    fake = get_fake_args_from_graph(submod)
+    assert len(fake) == len(all_ph)
+    assert len(fake) == len(example_inputs)
+
+    compiled = compile_fx(submod, fake)
+    assert compiled is not None

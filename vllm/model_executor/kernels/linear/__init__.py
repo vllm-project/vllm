@@ -101,6 +101,7 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
     ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterFp8BlockScaledDynamicMMKernel,
     AiterFp8BlockScaledMMKernel,
     AiterInt8ScaledMMLinearKernel,
 )
@@ -188,6 +189,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterFp8BlockScaledDynamicMMKernel,
         AiterFp8BlockScaledMMKernel,
         TritonFp8BlockScaledMMKernel,
     ],

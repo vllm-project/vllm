@@ -4,12 +4,14 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
@@ -165,3 +167,141 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         return gemm_a8w8_blockscale_op(
             A, B, As, Bs, list(self.weight_group_shape), output_dtype=out_dtype
         )
+
+
+class AiterFp8BlockScaledDynamicMMKernel(Fp8BlockScaledMMLinearKernel):
+    """
+    Dynamic Triton / CK FP8 block-scaled GEMM for ROCm.
+
+    Dispatches between two kernels based on input batch size:
+    - Small batches (M <= threshold): Triton for low-concurrency efficiency.
+    - Large batches (M > threshold): CK for high-concurrency throughput.
+
+    Threshold is controlled by VLLM_ROCM_W8A8_TRITON_MAX_M (default 16).
+
+    Uses torch.cond for compile-safe runtime branching, following the same
+    pattern as FlashInferFp8DeepGEMMDynamicBlockScaledKernel on CUDA.
+    Only activated when Triton has a tuned config for the (N, K) shape.
+    """
+
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig):
+        super().__init__(config)
+        self.use_triton = True
+
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        return (
+            rocm_aiter_ops.is_linear_enabled(),
+            "Only supported on ROCm platform "
+            "with aiter package installed.",
+        )
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
+
+        n, k = config.weight_shape
+        if current_platform.is_fp8_fnuz():
+            return (
+                False,
+                "Dynamic dispatch not available for fnuz FP8 format.",
+            )
+        if not rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k):
+            return (
+                False,
+                "No tuned Triton config for this (N, K) shape.",
+            )
+
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        out_dtype = self.config.out_dtype
+        return torch.ops.vllm.dynamic_aiter_triton_ck_blockscale_gemm(
+            A, B, As, Bs, out_dtype
+        )
+
+
+def _dynamic_aiter_triton_ck_blockscale_gemm_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """
+    Conditional Triton / CK FP8 blockscale GEMM with batch-size dispatch.
+
+    - M <= VLLM_ROCM_W8A8_TRITON_MAX_M: Triton (better at low concurrency).
+    - M > threshold: CK (better throughput at high concurrency).
+
+    Uses torch.cond so torch.compile can capture both branches in the graph.
+    """
+    threshold = envs.VLLM_ROCM_W8A8_TRITON_MAX_M
+
+    def run_triton(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_triton_gemm_a8w8_blockscale(
+            A, B, As, Bs, out_dtype
+        )
+
+    def run_ck(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_a8w8_blockscale(
+            A, B, As, Bs, out_dtype
+        )
+
+    if envs.VLLM_BATCH_INVARIANT:
+        return run_ck(A, B, As, Bs)
+
+    condition = A.shape[0] <= threshold
+
+    return torch.cond(
+        condition,
+        run_triton,
+        run_ck,
+        (A, B, As, Bs),
+    )
+
+
+def _dynamic_aiter_triton_ck_blockscale_gemm_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    """Fake/meta implementation for torch.compile graph tracing."""
+    return torch.empty(
+        A.shape[0], B.shape[0], dtype=out_dtype, device=A.device
+    )
+
+
+direct_register_custom_op(
+    "dynamic_aiter_triton_ck_blockscale_gemm",
+    _dynamic_aiter_triton_ck_blockscale_gemm_impl,
+    fake_impl=_dynamic_aiter_triton_ck_blockscale_gemm_fake,
+)
