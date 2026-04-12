@@ -236,6 +236,7 @@ class TestAttentionFp8GroupQuantPatternModel(AttentionQuantPatternModel):
             weight_shape=(hidden_size, hidden_size),
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
+            input_dtype=torch.bfloat16,
             device=self.device,
         )
 
