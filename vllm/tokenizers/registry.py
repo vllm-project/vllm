@@ -10,7 +10,6 @@ from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_format import get_model_format_handler
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
@@ -108,16 +107,6 @@ def resolve_tokenizer_args(
                     ignore_file_pattern=[".*.pt", ".*.safetensors", ".*.bin"],
                 )
                 tokenizer_name = tokenizer_path
-
-    if handler := get_model_format_handler(tokenizer_name):
-        tokenizer_name, args, kwargs = handler.resolve_tokenizer_init(
-            tokenizer_name,
-            *args,
-            revision=revision,
-            runner_type=runner_type,
-            tokenizer_mode=tokenizer_mode,
-            **kwargs,
-        )
 
     if "truncation_side" not in kwargs:
         if runner_type == "generate" or runner_type == "draft":
