@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
+import vllm.envs as envs
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -46,8 +47,16 @@ if silu_and_mul_nvfp4_quant_supported:
     FUSED_OPS[kNvfp4Dynamic] = torch.ops._C.silu_and_mul_nvfp4_quant.default  # noqa: E501
 
 if current_platform.is_cuda_alike():
-    FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
-    FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
+    if envs.VLLM_USE_TRITON_ACT_QUANT:
+        FUSED_OPS[kFp8Dynamic128Sym] = (
+            torch.ops.vllm.silu_and_mul_per_block_quant_triton.default)
+        FUSED_OPS[kFp8Dynamic64Sym] = (
+            torch.ops.vllm.silu_and_mul_per_block_quant_triton.default)
+    else:
+        FUSED_OPS[kFp8Dynamic128Sym] = (
+            torch.ops._C.silu_and_mul_per_block_quant.default)
+        FUSED_OPS[kFp8Dynamic64Sym] = (
+            torch.ops._C.silu_and_mul_per_block_quant.default)
 
 
 class ActivationQuantPattern(ABC):

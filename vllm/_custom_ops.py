@@ -13,6 +13,7 @@ from vllm.utils.flashinfer import (
     flashinfer_quant_nvfp4_8x4_sf_layout,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -589,6 +590,9 @@ def silu_and_mul_per_block_quant(
     scale_ub: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    if envs.VLLM_USE_TRITON_ACT_QUANT:
+        return torch.ops.vllm.silu_and_mul_per_block_quant_triton(
+            input, group_size, quant_dtype, scale_ub, is_scale_transposed)
     assert input.ndim == 2, f"input must be 2D [batch, hidden*2], got {input.shape}"
     assert input.shape[-1] % 2 == 0, (
         f"input last dim must be even (gate||up layout), got {input.shape[-1]}"
@@ -629,6 +633,51 @@ def silu_and_mul_per_block_quant(
     )
 
     return output, scales
+
+
+def silu_and_mul_per_block_quant_triton(
+    input: torch.Tensor,
+    group_size: int,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.triton_quantization import \
+        silu_and_mul_per_block_quant_triton as TritonImpl
+    return TritonImpl(input, group_size, quant_dtype, scale_ub,
+                      is_scale_transposed)
+
+
+def silu_and_mul_per_block_quant_triton_fake(
+    input: torch.Tensor,
+    group_size: int,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+    is_scale_transposed: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = input.size(0)
+    hidden_size = input.size(1) // 2
+    num_groups = hidden_size // group_size
+    output = torch.empty((num_tokens, hidden_size),
+                         device=input.device,
+                         dtype=quant_dtype)
+    if is_scale_transposed:
+        scales = torch.empty((num_groups, num_tokens),
+                             device=input.device,
+                             dtype=torch.float32).t()
+    else:
+        scales = torch.empty((num_tokens, num_groups),
+                             device=input.device,
+                             dtype=torch.float32)
+    return output, scales
+
+
+direct_register_custom_op(
+    op_name="silu_and_mul_per_block_quant_triton",
+    op_func=silu_and_mul_per_block_quant_triton,
+    mutates_args=[],
+    fake_impl=silu_and_mul_per_block_quant_triton_fake,
+)
 
 
 # quantization ops

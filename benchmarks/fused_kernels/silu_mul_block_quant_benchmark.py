@@ -82,13 +82,38 @@ def unfused_groupwise_fp8_impl(
     )
 
 
-def fused_impl(
+def cuda_fused_impl(
     x: torch.Tensor,
     quant_dtype: torch.dtype,
     group_size: int,
 ):
-    """Fused: SiLU+Mul+Block Quantization in single kernel."""
-    out, _ = ops.silu_and_mul_per_block_quant(
+    """Fused CUDA: SiLU+Mul+Block Quantization in single kernel."""
+    num_tokens = x.shape[0]
+    hidden_size = x.shape[-1] // 2
+    num_groups = hidden_size // group_size
+    output = torch.empty((num_tokens, hidden_size),
+                         device=x.device,
+                         dtype=quant_dtype)
+    scales = torch.empty((num_tokens, num_groups),
+                         device=x.device,
+                         dtype=torch.float32)
+    torch.ops._C.silu_and_mul_per_block_quant(
+        output,
+        x,
+        scales,
+        group_size,
+        None,  # scale_ub
+        False,  # is_scale_transposed
+    )
+
+
+def triton_fused_impl(
+    x: torch.Tensor,
+    quant_dtype: torch.dtype,
+    group_size: int,
+):
+    """Fused Triton: SiLU+Mul+Block Quantization."""
+    torch.ops.vllm.silu_and_mul_per_block_quant_triton(
         x,
         group_size=group_size,
         quant_dtype=quant_dtype,
@@ -165,7 +190,7 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
         )
     )
 
-    # Fused group-wise FP8
+    # Fused group-wise FP8 (CUDA)
     timers.append(
         bench_fn(
             x,
@@ -173,8 +198,21 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
             params.group_size,
             label,
             sub_label,
-            fused_impl,
-            "fused_groupwise_fp8_impl",
+            cuda_fused_impl,
+            "cuda_fused_groupwise_fp8_impl",
+        )
+    )
+
+    # Fused group-wise FP8 (Triton)
+    timers.append(
+        bench_fn(
+            x,
+            torch.float8_e4m3fn,
+            params.group_size,
+            label,
+            sub_label,
+            triton_fused_impl,
+            "triton_fused_groupwise_fp8_impl",
         )
     )
 
