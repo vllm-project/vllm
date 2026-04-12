@@ -1254,9 +1254,6 @@ class MooncakeConnectorWorker:
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
                 )
-
-                kernel_block_size = cache.shape[-2 if self.use_mla else -3]
-                assert self.block_size == kernel_block_size
                 kv_data_ptrs.append(base_addr)
                 kv_data_lens.append(curr_tensor_size_bytes)
 
