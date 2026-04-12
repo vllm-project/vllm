@@ -10,16 +10,33 @@ from vllm.v1.kv_offload.worker.worker import TransferSpec
 
 ReqId = str
 
-# A store entry bundles a scheduler-assigned job ID with the transfer spec.
-# The job ID allows per-job completion tracking: the worker reports it back
-# when the DMA finishes, and the scheduler calls complete_store immediately.
-StoreJobEntry = tuple[int, TransferSpec]
+
+@dataclass
+class StoreJobEntry:
+    """A store job entry bundling request context with transfer spec.
+
+    Keyed by scheduler-assigned job ID in the metadata dict.
+    The worker reports the job ID back when the transfer finishes,
+    and the scheduler calls complete_store immediately.
+    """
+
+    req_id: ReqId
+    transfer_spec: TransferSpec
+
+
+@dataclass
+class LoadJobEntry:
+    """A load job entry bundling request context with transfer spec."""
+
+    req_id: ReqId
+    transfer_spec: TransferSpec
 
 
 @dataclass
 class OffloadingConnectorMetadata(KVConnectorMetadata):
-    reqs_to_load: dict[ReqId, TransferSpec]
-    reqs_to_store: dict[ReqId, StoreJobEntry]
+    # Keyed by scheduler-assigned job IDs.
+    reqs_to_load: dict[int, LoadJobEntry]
+    reqs_to_store: dict[int, StoreJobEntry]
     reqs_to_flush: set[str] | None = None
 
 
@@ -30,7 +47,7 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     Each worker reports {job_id: 1} for newly completed stores.
     aggregate() sums counts across workers within a step.
     The scheduler accumulates across steps and processes
-    a store completion only when count reaches world_size.
+    a store completion only when count reaches num_workers.
     """
 
     completed_store_jobs: dict[int, int]

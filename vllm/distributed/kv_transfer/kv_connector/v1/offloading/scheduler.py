@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
 from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    LoadJobEntry,
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
@@ -26,11 +27,20 @@ from vllm.v1.kv_offload.abstract import (
 )
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import OffloadingSpec
-from vllm.v1.kv_offload.worker.worker import TransferSpec
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+
+@dataclass(slots=True)
+class StoreJobStatus:
+    """Tracks scheduler-side state for a single store job."""
+
+    req_id: ReqId
+    # Number of TP workers still pending. Starts at num_workers,
+    # decremented as each worker reports completion. Job is done at 0.
+    pending_count: int
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -43,10 +53,12 @@ class GroupOffloadConfig(NamedTuple):
 class SchedulerOffloadConfig(NamedTuple):
     kv_group_configs: tuple[GroupOffloadConfig, ...]
     block_size_factor: int
+    num_workers: int
 
     @classmethod
     def from_spec(cls, spec: OffloadingSpec) -> "SchedulerOffloadConfig":
         return cls(
+            num_workers=spec.vllm_config.parallel_config.world_size,
             kv_group_configs=tuple(
                 GroupOffloadConfig(
                     group_idx=idx,
@@ -78,6 +90,7 @@ class RequestOffloadState:
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
+    store_jobs: dict[int, set[OffloadKey]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -119,8 +132,7 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
-        # requests to load for the current scheduler step
-        self._reqs_to_load: dict[ReqId, TransferSpec] = {}
+        self._reqs_to_load: dict[int, LoadJobEntry] = {}
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
         self._blocks_being_loaded: set[OffloadKey] | None = (
@@ -131,15 +143,14 @@ class OffloadingConnectorScheduler:
         self._reqs_being_stored = defaultdict[ReqId, set[OffloadKey]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[OffloadKey]](set)
 
-        # Per-job store completion tracking.
-        # Scheduler assigns job IDs so it can call complete_store per-job.
-        self._store_job_counter: int = 0
-        self._store_job_hashes: dict[int, set[OffloadKey]] = {}
-        self._store_job_to_req: dict[int, ReqId] = {}
-        self._req_to_jobs: dict[ReqId, set[int]] = defaultdict(set)
-        # Accumulate partial TP completions across steps.
-        self._expected_worker_count: int = spec.vllm_config.parallel_config.world_size
-        self._store_job_pending_counts: dict[int, int] = {}
+        # Job ID counter shared by loads and stores.
+        self._job_counter: int = 0
+        self._store_jobs: dict[int, StoreJobStatus] = {}
+
+    def _generate_job_id(self) -> int:
+        job_id = self._job_counter
+        self._job_counter += 1
+        return job_id
 
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
@@ -268,7 +279,11 @@ class OffloadingConnectorScheduler:
             block_indices=(num_computed_gpu_blocks,),
         )
 
-        self._reqs_to_load[request.request_id] = (src_spec, dst_spec)
+        load_job_id = self._generate_job_id()
+        self._reqs_to_load[load_job_id] = LoadJobEntry(
+            req_id=request.request_id,
+            transfer_spec=(src_spec, dst_spec),
+        )
         req_blocks_being_loaded = self._reqs_being_loaded[request.request_id]
         req_blocks_being_loaded.update(offload_keys)
         group_state.next_stored_block_idx = num_blocks
@@ -278,12 +293,12 @@ class OffloadingConnectorScheduler:
 
     def _get_reqs_to_store(
         self, scheduler_output: SchedulerOutput
-    ) -> dict[ReqId, StoreJobEntry]:
+    ) -> dict[int, StoreJobEntry]:
         # Below assertion will be removed once this function supports HMA
         assert len(self.config.kv_group_configs) == 1
         group_config = self.config.kv_group_configs[0]
 
-        reqs_to_store: dict[ReqId, StoreJobEntry] = {}
+        reqs_to_store: dict[int, StoreJobEntry] = {}
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
@@ -346,14 +361,16 @@ class OffloadingConnectorScheduler:
                 src_block_ids, group_sizes=(len(src_block_ids),)
             )
 
-            # Assign a scheduler job ID for per-job completion tracking.
-            job_id = self._store_job_counter
-            self._store_job_counter += 1
-            self._store_job_hashes[job_id] = set(keys_to_store)
-            self._store_job_to_req[job_id] = req_id
-            self._req_to_jobs[req_id].add(job_id)
+            job_id = self._generate_job_id()
+            req_status.store_jobs[job_id] = set(keys_to_store)
+            self._store_jobs[job_id] = StoreJobStatus(
+                req_id=req_id,
+                pending_count=self.config.num_workers,
+            )
 
-            reqs_to_store[req_id] = (job_id, (src_spec, dst_spec))
+            reqs_to_store[job_id] = StoreJobEntry(
+                req_id=req_id, transfer_spec=(src_spec, dst_spec)
+            )
             self._reqs_being_stored[req_id] |= keys_to_store
 
             logger.debug(
@@ -368,10 +385,12 @@ class OffloadingConnectorScheduler:
 
     def _cleanup_store_jobs_for_req(self, req_id: ReqId) -> None:
         """Remove per-job tracking state for a given request."""
-        for jid in self._req_to_jobs.pop(req_id, ()):
-            self._store_job_hashes.pop(jid, None)
-            self._store_job_to_req.pop(jid, None)
-            self._store_job_pending_counts.pop(jid, None)
+        req_status = self._req_status.get(req_id)
+        if req_status is None:
+            return
+        for jid in req_status.store_jobs:
+            self._store_jobs.pop(jid, None)
+        req_status.store_jobs.clear()
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -403,33 +422,34 @@ class OffloadingConnectorScheduler:
                 connectors output.
         """
         # Process per-job store completions via worker metadata.
-        # Each worker reports {job_id: 1} when its DMA finishes.
-        # We accumulate across steps; once count >= world_size,
-        # the job is fully complete and we call complete_store.
         meta = connector_output.kv_connector_worker_meta
-        if isinstance(meta, OffloadingWorkerMetadata):
-            for job_id, count in meta.completed_store_jobs.items():
-                total = self._store_job_pending_counts.get(job_id, 0) + count
-                if total >= self._expected_worker_count:
-                    self._store_job_pending_counts.pop(job_id, None)
-                    block_hashes = self._store_job_hashes.pop(job_id, None)
-                    if block_hashes:
-                        self.manager.complete_store(block_hashes)
-                        req_id = self._store_job_to_req.pop(job_id, None)
-                        if req_id is not None:
-                            self._req_to_jobs.get(req_id, set()).discard(job_id)
-                            remaining = self._reqs_being_stored.get(req_id)
-                            if remaining is not None:
-                                remaining -= block_hashes
-                                # Keep the empty set so request_finished()
-                                # still returns True, ensuring _free_blocks
-                                # waits for finished_sending.
-                else:
-                    self._store_job_pending_counts[job_id] = total
+        assert isinstance(meta, OffloadingWorkerMetadata)
+
+        for job_id, count in meta.completed_store_jobs.items():
+            job_status = self._store_jobs.get(job_id)
+            if job_status is None:
+                continue
+            job_status.pending_count -= count
+            if job_status.pending_count > 0:
+                continue
+
+            # All TP workers reported — job is complete.
+            self._store_jobs.pop(job_id)
+            req_status = self._req_status.get(job_status.req_id)
+            if req_status is None:
+                continue
+            keys = req_status.store_jobs.pop(job_id, None)
+            if not keys:
+                continue
+            self.manager.complete_store(keys)
+            remaining = self._reqs_being_stored.get(job_status.req_id)
+            if remaining is not None:
+                remaining -= keys
+                # Keep the empty set so request_finished()
+                # still returns True, ensuring _free_blocks
+                # waits for finished_sending.
 
         # Handle request-level completion (for _free_blocks in scheduler).
-        # If per-job tracking already cleared _reqs_being_stored, the pop
-        # returns None and complete_store is a no-op.
         for req_id in connector_output.finished_sending or []:
             keys = self._reqs_being_stored.pop(req_id, None)
             if keys:
