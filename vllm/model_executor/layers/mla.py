@@ -5,9 +5,12 @@ from dataclasses import dataclass
 import torch
 
 from vllm.config import CacheConfig
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -107,6 +110,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
         )
+
+        if self.is_sparse and not self.mla_attn.attn_backend.is_sparse():
+            logger.warning_once(
+                "Sparse MLA requested but backend %s is not sparse. "
+                "Falling back to dense attention (all KV attended).",
+                self.mla_attn.attn_backend.get_name(),
+            )
+            self.is_sparse = False
 
         self.prefix = prefix
 
