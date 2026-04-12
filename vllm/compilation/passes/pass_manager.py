@@ -27,6 +27,7 @@ if rocm_aiter_ops.is_enabled():
 if current_platform.is_cuda_alike():
     from .fusion.act_quant_fusion import ActivationQuantFusionPass
     from .fusion.attn_quant_fusion import AttnQuantFusionPass
+    from .fusion.mla_attn_quant_fusion import MLAAttnQuantFusionPass
     from .fusion.qk_norm_rope_fusion import QKNormRoPEFusionPass
     from .fusion.rms_quant_fusion import RMSNormQuantFusionPass
     from .fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
@@ -37,6 +38,7 @@ if current_platform.is_cuda_alike():
 if current_platform.is_cuda():
     from .fusion.allreduce_rms_fusion import AllReduceFusionPass
     from .fusion.collective_fusion import AsyncTPPass
+    from .fusion.minimax_qk_norm_fusion import MiniMaxQKNormPass
 
 from .inductor_pass import (
     CustomGraphPass,
@@ -136,6 +138,9 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.fuse_allreduce_rms:
                 self.passes += [AllReduceFusionPass(config)]
 
+            if self.pass_config.fuse_minimax_qk_norm:
+                self.passes += [MiniMaxQKNormPass(config)]
+
             if self.pass_config.fuse_norm_quant:
                 self.passes += [RMSNormQuantFusionPass(config)]
                 if rocm_aiter_ops.is_enabled():
@@ -157,6 +162,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
             if self.pass_config.fuse_attn_quant:
                 self.passes += [AttnQuantFusionPass(config)]
+                self.passes += [MLAAttnQuantFusionPass(config)]
 
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]

@@ -149,9 +149,8 @@ class VllmIRLoweringPass(VllmInductorPass):
         )
 
         impl_uuids_str = ";".join(
-            f"{name}={
-                ','.join(IrOp.registry[name].impls[provider].uuid() for provider in p)
-            }"
+            f"{name}="
+            + ",".join(IrOp.registry[name].impls[provider].uuid() for provider in p)
             for name, p in priorities.items()
         )
 
