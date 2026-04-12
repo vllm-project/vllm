@@ -403,15 +403,13 @@ class OpenAIServingChat(OpenAIServing):
         function_name_returned: bool,
         tool_call_idx: int | None = None,
     ) -> tuple[DeltaMessage | None, bool]:
-        delta_message, function_name_returned, _ = (
-            extract_required_tool_call_streaming(
-                previous_text=previous_text,
-                current_text=current_text,
-                delta_text=delta_text,
-                function_name_returned=function_name_returned,
-                tool_call_idx=tool_call_idx,
-                tool_call_id_type=self.tool_call_id_type,
-            )
+        delta_message, function_name_returned, _ = extract_required_tool_call_streaming(
+            previous_text=previous_text,
+            current_text=current_text,
+            delta_text=delta_text,
+            function_name_returned=function_name_returned,
+            tool_call_idx=tool_call_idx,
+            tool_call_id_type=self.tool_call_id_type,
         )
         return delta_message, function_name_returned
 
