@@ -430,6 +430,14 @@ class CoreEngineActorManager:
             dp_vllm_config.parallel_config.placement_group = pg
             local_client = index < local_engine_count
 
+            if dp_size > 1 and dp_vllm_config.kv_transfer_config is not None:
+                # Use the global index (not local_index) to ensure
+                # engine_ids are globally unique across all nodes in
+                # multi-node data parallel deployments.
+                dp_vllm_config.kv_transfer_config.engine_id = (
+                    f"{dp_vllm_config.kv_transfer_config.engine_id}_dp{index}"
+                )
+
             # Ray XPU known issue: dpctl initializes the GPU runtime early, so
             # setting device env vars in Ray actor's initialization method
             # will not affect device selection. See:

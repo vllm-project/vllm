@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 import threading
 import time
 from typing import TYPE_CHECKING, Any
@@ -156,7 +157,6 @@ class MoRIIOWriter:
         defer_timeout = self._defer_timeout
         now = time.perf_counter()
         still_deferred: list[WriteTask] = []
-
         for task in self._deferred_tasks:
             if now - task.enqueue_time > defer_timeout:
                 logger.error(
@@ -657,18 +657,33 @@ class MoRIIOWrapper:
         req_list = req_ids if isinstance(req_ids, list) else [req_ids]
 
         sock = self.paths[path]
-        try:
-            for req_id in req_list:
-                if not isinstance(req_id, str):
-                    logger.warning(
-                        "Invalid req_id type: %s, expected str", type(req_id)
-                    )
-                    continue
-                sock.send(req_id.encode("utf-8"))
-        except Exception as e:
-            logger.error("Failed to send notification to %s: %s", path, e)
-            self.paths.pop(path, None)
-            raise
+        _MAX_RETRIES = 3
+        for req_id in req_list:
+            if not isinstance(req_id, str):
+                logger.warning(
+                    "Invalid req_id type: %s, expected str", type(req_id))
+                continue
+            for _attempt in range(_MAX_RETRIES):
+                try:
+                    sock.send(req_id.encode("utf-8"), zmq.NOBLOCK)
+                    break
+                except zmq.Again:
+                    if _attempt < _MAX_RETRIES - 1:
+                        time.sleep(0.01 * (_attempt + 1))
+                        logger.warning(
+                            "ZMQ send retry %d for req %s to %s",
+                            _attempt + 1, req_id, path)
+                    else:
+                        logger.error(
+                            "ZMQ send FAILED after %d retries "
+                            "for req %s to %s",
+                            _MAX_RETRIES, req_id, path)
+                except Exception as e:
+                    logger.error(
+                        "Failed to send notification to %s: %s",
+                        path, e)
+                    self.paths.pop(path, None)
+                    raise
 
     def pop_finished_req_ids(self):
         # producer invocation: get the set of completed requests at the decode
