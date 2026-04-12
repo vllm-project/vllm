@@ -71,6 +71,11 @@ PACKED_GROUP_QUANT_OP = getattr(
     None,
 )
 
+# Supported group sizes for per-token-group FP8 packed quant fusion.
+# Must be power-of-2 multiples of VEC_SIZE (8 for bf16/fp16) for the
+# warp-shuffle group reduction to stay within group boundaries.
+SUPPORTED_PACKED_GROUP_QUANT_SIZES = (64, 128)
+
 # Max size of the input tensor per world size per device capability
 # to use flashinfer fused allreduce
 FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
@@ -1147,7 +1152,7 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             # Per-token-group FP8 packed quant patterns (DeepGEMM).
             # Registered before non-quant patterns so the longer match wins.
             if current_platform.is_cuda() and PACKED_GROUP_QUANT_OP is not None:
-                for group_size in [128, 64]:
+                for group_size in SUPPORTED_PACKED_GROUP_QUANT_SIZES:
                     AllReduceFusedRMSNormGroupQuantFP8PackedPattern(
                         epsilon,
                         group_size,
