@@ -108,16 +108,22 @@ class TestGetSSUDefaultConfig:
         assert config["num_warps"] == 8
 
 
+def _clear_ssu_caches():
+    """Clear all LRU caches for config loading functions."""
+    get_ssu_configs.cache_clear()
+    get_ssu_kernel_config.cache_clear()
+
+
 class TestGetSSUConfigs:
     """Tests for get_ssu_configs with file-based config loading."""
 
     def test_returns_none_without_config_file(self):
-        get_ssu_configs.cache_clear()
+        _clear_ssu_caches()
         result = get_ssu_configs(99999, 99999)
         assert result is None
 
     def test_loads_from_custom_folder(self, monkeypatch, tmp_path):
-        get_ssu_configs.cache_clear()
+        _clear_ssu_caches()
         config_data = {
             "16": {"BLOCK_SIZE_M": 64, "num_warps": 2},
         }
@@ -136,10 +142,10 @@ class TestGetSSUConfigs:
         assert result["16"]["BLOCK_SIZE_M"] == 64
         assert result["16"]["num_warps"] == 2
 
-        get_ssu_configs.cache_clear()
+        _clear_ssu_caches()
 
     def test_strips_triton_version(self, tmp_path, monkeypatch):
-        get_ssu_configs.cache_clear()
+        _clear_ssu_caches()
         config_data = {
             "triton_version": "3.0.0",
             "16": {"BLOCK_SIZE_M": 32, "num_warps": 4},
@@ -158,25 +164,102 @@ class TestGetSSUConfigs:
         assert result is not None
         assert "triton_version" not in result
 
-        get_ssu_configs.cache_clear()
+        _clear_ssu_caches()
+
+    def test_handles_invalid_json(self, tmp_path, monkeypatch):
+        _clear_ssu_caches()
+        config_file = tmp_path / get_ssu_config_file_name(2048, 16)
+        config_file.write_text("not valid json {{{")
+
+        monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        result = get_ssu_configs(2048, 16)
+        assert result is None
+
+        _clear_ssu_caches()
+
+    def test_handles_non_dict_json(self, tmp_path, monkeypatch):
+        _clear_ssu_caches()
+        config_file = tmp_path / get_ssu_config_file_name(2048, 16)
+        config_file.write_text(json.dumps([1, 2, 3]))
+
+        monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        result = get_ssu_configs(2048, 16)
+        assert result is None
+
+        _clear_ssu_caches()
 
 
 class TestGetSSUKernelConfig:
     """Tests for get_ssu_kernel_config."""
 
     def test_falls_back_to_defaults(self):
-        get_ssu_configs.cache_clear()
+        _clear_ssu_caches()
         config = get_ssu_kernel_config(99999, 16)
         expected = get_ssu_default_config(16)
         assert config == expected
 
     def test_returns_valid_config_keys(self):
-        get_ssu_configs.cache_clear()
+        _clear_ssu_caches()
         config = get_ssu_kernel_config(2048, 64)
         assert "BLOCK_SIZE_M" in config
         assert "num_warps" in config
         assert isinstance(config["BLOCK_SIZE_M"], int)
         assert isinstance(config["num_warps"], int)
+
+    def test_handles_empty_config_after_triton_version_strip(
+        self, tmp_path, monkeypatch
+    ):
+        _clear_ssu_caches()
+        config_data = {"triton_version": "3.0.0"}
+        config_file = tmp_path / get_ssu_config_file_name(2048, 16)
+        config_file.write_text(json.dumps(config_data))
+
+        monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        config = get_ssu_kernel_config(2048, 16)
+        expected = get_ssu_default_config(16)
+        assert config == expected
+
+        _clear_ssu_caches()
+
+    def test_handles_non_numeric_keys_in_config(self, tmp_path, monkeypatch):
+        _clear_ssu_caches()
+        config_data = {
+            "metadata": {"info": "test"},
+            "16": {"BLOCK_SIZE_M": 64, "num_warps": 2},
+        }
+        config_file = tmp_path / get_ssu_config_file_name(2048, 32)
+        config_file.write_text(json.dumps(config_data))
+
+        monkeypatch.setenv("VLLM_TUNED_CONFIG_FOLDER", str(tmp_path))
+        import importlib
+
+        import vllm.envs
+
+        importlib.reload(vllm.envs)
+
+        config = get_ssu_kernel_config(2048, 32)
+        assert config["BLOCK_SIZE_M"] == 64
+        assert config["num_warps"] == 2
+
+        _clear_ssu_caches()
 
 
 @pytest.mark.parametrize("dstate", [16, 64])

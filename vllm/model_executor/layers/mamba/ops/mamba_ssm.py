@@ -382,15 +382,29 @@ def get_ssu_configs(
 
     for config_file_path in config_file_paths:
         if os.path.exists(config_file_path):
-            with open(config_file_path) as f:
-                logger.info_once(
-                    "Using configuration from %s for selective_state_update.",
+            try:
+                with open(config_file_path) as f:
+                    tuned_config = json.load(f)
+                    if not isinstance(tuned_config, dict):
+                        logger.warning(
+                            "Invalid config format in %s for selective_state_update.",
+                            config_file_path,
+                        )
+                        continue
+                    tuned_config.pop("triton_version", None)
+                    logger.info_once(
+                        "Using configuration from %s for selective_state_update.",
+                        config_file_path,
+                        scope="global",
+                    )
+                    return {str(key): val for key, val in tuned_config.items()}
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning(
+                    "Failed to load config from %s: %s",
                     config_file_path,
-                    scope="global",
+                    e,
                 )
-                tuned_config: dict[str, Any] = json.load(f)
-                tuned_config.pop("triton_version", None)
-                return {str(key): val for key, val in tuned_config.items()}
+                continue
 
     return None
 
@@ -427,6 +441,7 @@ def get_ssu_default_config(
     return {"BLOCK_SIZE_M": block_size_m, "num_warps": num_warps}
 
 
+@functools.lru_cache
 def get_ssu_kernel_config(
     dim: int,
     dstate: int,
@@ -443,12 +458,15 @@ def get_ssu_kernel_config(
         A dict with ``BLOCK_SIZE_M`` and ``num_warps`` keys.
     """
     configs = get_ssu_configs(dim, dstate)
-    if configs is not None:
+    if configs:
         key = str(dstate)
         if key in configs:
             return configs[key]
-        closest_key = min(configs.keys(), key=lambda k: abs(int(k) - dstate))
-        return configs[closest_key]
+
+        numeric_configs = {int(k): k for k in configs if k.isdigit()}
+        if numeric_configs:
+            closest_dstate = min(numeric_configs, key=lambda k: abs(k - dstate))
+            return configs[numeric_configs[closest_dstate]]
 
     return get_ssu_default_config(dstate, is_blackwell=is_blackwell)
 
