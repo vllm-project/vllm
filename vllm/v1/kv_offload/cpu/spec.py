@@ -24,15 +24,6 @@ class CPUOffloadingSpec(OffloadingSpec):
                 "cpu_bytes_to_use must be specified in kv_connector_extra_config"
             )
 
-        # Calculate the number of bytes for one offloaded block across the
-        # whole tensor-parallel group.
-        #
-        # `kv_cache_group.kv_cache_spec.page_size_bytes` is already the page
-        # size of the whole KV cache group. In particular, for
-        # `UniformTypeKVCacheSpecs`, it is the sum of all per-layer page sizes
-        # in that group. Multiplying by `len(kv_cache_tensors)` again would
-        # over-count the KV bytes per block and dramatically under-size the CPU
-        # offload pool.
         assert kv_cache_config is not None
         page_sizes = {
             kv_cache_group.kv_cache_spec.page_size_bytes
