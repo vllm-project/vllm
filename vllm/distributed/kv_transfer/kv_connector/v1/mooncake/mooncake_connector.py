@@ -710,9 +710,12 @@ class MooncakeConnectorWorker:
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
             # Background threads for sending kvcaches to D.
+            # Each pool thread must be bound to the correct CUDA device
+            # because CUDA device selection is thread-local.
             self._sender_executor = ThreadPoolExecutor(
                 max_workers=self.num_sender_workers,
                 thread_name_prefix="vllm-mooncake-sender",
+                initializer=self._bind_sender_thread_device,
             )
             logger.debug(
                 "Mooncake Prefiller: use %d workers to send kvcaches",
@@ -1198,6 +1201,12 @@ class MooncakeConnectorWorker:
 
         return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
 
+    def _bind_sender_thread_device(self) -> None:
+        """ThreadPoolExecutor initializer — binds each pool thread to the
+        correct CUDA device.  CUDA device selection is thread-local, so
+        without this, NVLink transfers fail for TP ranks > 0."""
+        current_platform.set_device(self.device_id)
+
     def _send_blocks(
         self,
         remote_session: str,
@@ -1205,11 +1214,6 @@ class MooncakeConnectorWorker:
         dst_ptrs: list[int],
         lengths: list[int],
     ) -> int:
-        # This method runs on a ThreadPoolExecutor thread. CUDA device
-        # selection is thread-local, so a pool thread defaults to device 0
-        # unless explicitly rebound. Without this, NVLink transfers fail for
-        # TP ranks > 0 because CUDA IPC ops run under the wrong device context.
-        current_platform.set_device(self.device_id)
         start_time = time.perf_counter()
         ret_value = self.engine.batch_transfer_sync_write(
             remote_session, src_ptrs, dst_ptrs, lengths
