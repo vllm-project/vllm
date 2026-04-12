@@ -70,6 +70,14 @@ def _adapter_accepts_tp_size() -> bool:
     return "tp_size" in sig.parameters
 
 
+def _adapter_accepts_extra_config(
+    adapter_cls: type,
+) -> bool:
+    """Check if the imported adapter accepts extra_config."""
+    sig = inspect.signature(adapter_cls.__init__)
+    return "extra_config" in sig.parameters
+
+
 # Helper functions
 def reformat_block_ids(block_ids: tuple[list[int], ...] | None) -> list[int]:
     if block_ids is None:
@@ -131,6 +139,15 @@ def create_scheduler_adapter(
     if _adapter_accepts_tp_size():
         kwargs["tp_size"] = tp_size
 
+    # TODO(baoloongmao): Once LMCacheMPSchedulerAdapter supports extra_config, move all
+    # lmcache-specific config reading (mq_timeout, heartbeat_interval, host,
+    # port, etc.) out of this connector and into the adapter itself.
+    assert vllm_config.kv_transfer_config is not None
+    if _adapter_accepts_extra_config(LMCacheMPSchedulerAdapter):
+        kwargs["extra_config"] = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+        )
+
     return LMCacheMPSchedulerAdapter(
         server_url,
         zmq_context,
@@ -156,6 +173,17 @@ def create_worker_adapter(
         vllm_config.parallel_config.rank,
         vllm_config,
     )
+
+    # TODO(baoloongmao): Once LMCacheMPWorkerAdapter supports extra_config, move all
+    # lmcache-specific config reading (mq_timeout, heartbeat_interval, host,
+    # port, etc.) out of this connector and into the adapter itself.
+    kwargs: dict[str, Any] = {}
+    assert vllm_config.kv_transfer_config is not None
+    if _adapter_accepts_extra_config(LMCacheMPWorkerAdapter):
+        kwargs["extra_config"] = (
+            vllm_config.kv_transfer_config.kv_connector_extra_config
+        )
+
     return LMCacheMPWorkerAdapter(
         server_url,
         zmq_context,
@@ -165,6 +193,7 @@ def create_worker_adapter(
         vllm_config.cache_config.block_size,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
+        **kwargs,
     )
 
 
@@ -450,6 +479,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         super().__init__(vllm_config, role, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
+        # TODO(baoloongmao): Remove this after pass extra_config
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.host", "tcp://localhost"
         )
