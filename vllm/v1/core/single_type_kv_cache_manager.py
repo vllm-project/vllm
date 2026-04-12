@@ -1143,7 +1143,9 @@ class MambaManager(SingleTypeKVCacheManager):
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
-            if num_required_blocks == len(req_blocks):
+            # `num_required_blocks` might be less than `len(req_blocks)` if blocks are
+            # over-allocated at last round.
+            if num_required_blocks <= len(req_blocks):
                 return []
             else:
                 assert num_required_blocks > len(req_blocks), (
