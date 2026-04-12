@@ -160,8 +160,10 @@ class MinimaxM2ToolParser(ToolParser):
         Returns:
             The converted value
         """
-        # Check if the VALUE itself indicates null (not just if null is allowed)
-        if value.lower() in ("null", "none", "nil"):
+        # "null" (case-insensitive) represents JSON null; json.loads is case-sensitive
+        # so we handle it explicitly. "none"/"nil" are NOT converted as they may be
+        # legitimate enum string values.
+        if value.lower() == "null":
             return None
 
         # Normalize types
