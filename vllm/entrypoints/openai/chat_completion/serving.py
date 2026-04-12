@@ -1107,17 +1107,29 @@ class OpenAIServingChat(OpenAIServing):
                         # only check if there are any tool calls
                         # detected by partial parsing
                         if should_check and tool_parser and auto_tools_called:
+                            # Compute the length of the arguments
+                            # string in the latest delta so we can
+                            # subtract it from what we've already
+                            # streamed.  Guard against delta_message
+                            # having no tool_calls (e.g. MTP /
+                            # speculative decoding).
                             latest_delta_len = 0
                             if (
-                                isinstance(
+                                delta_message
+                                and delta_message.tool_calls
+                                and isinstance(
                                     delta_message.tool_calls[0].function,
                                     DeltaFunctionCall,
                                 )
-                            ) and isinstance(
-                                delta_message.tool_calls[0].function.arguments, str
+                                and isinstance(
+                                    delta_message.tool_calls[0]
+                                    .function.arguments,
+                                    str,
+                                )
                             ):
                                 latest_delta_len = len(
-                                    delta_message.tool_calls[0].function.arguments
+                                    delta_message.tool_calls[0]
+                                    .function.arguments
                                 )
 
                             # get the expected call based on partial JSON
@@ -1764,21 +1776,17 @@ class OpenAIServingChat(OpenAIServing):
     ) -> bool:
         """
         Check to see if we should check for unstreamed tool arguments tokens.
-        This is only applicable when auto tool parsing is enabled, the delta
-        is a tool call with arguments.
+        This is applicable when auto tool parsing is enabled and we have
+        reached a finish reason.  We intentionally do NOT require
+        ``delta_message.tool_calls`` to be non-empty because with MTP /
+        speculative decoding the final delta before finish may carry no
+        tool_calls even though tool calls are still in progress.
         """
 
         return bool(
-            # if there is a delta message that includes tool calls which
-            # include a function that has arguments
             output.finish_reason is not None
             and self.enable_auto_tools
             and self.tool_parser
-            and delta_message
-            and delta_message.tool_calls
-            and delta_message.tool_calls[0]
-            and delta_message.tool_calls[0].function
-            and delta_message.tool_calls[0].function.arguments is not None
         )
 
     @staticmethod
@@ -1790,22 +1798,34 @@ class OpenAIServingChat(OpenAIServing):
         """
         Create a delta message for remaining tool arguments, preserving
         id/type/name from the original delta.
+
+        We use **post-construction assignment** for optional fields
+        (id, type, name) instead of passing them to the constructor so
+        that Pydantic v2 treats absent values as *unset*.  When the
+        response is later serialized with
+        ``model_dump(exclude_unset=True)`` / ``model_dump_json(
+        exclude_unset=True)``, truly-absent fields are omitted from
+        the JSON rather than emitted as ``null``.  Passing
+        ``id=None`` to the constructor would mark the field as "set"
+        in ``model_fields_set``, causing ``"id": null`` in the
+        output — which violates the OpenAI API spec and breaks
+        client-side validation.
         """
         original_tc = next(
             (tc for tc in delta_message.tool_calls if tc.index == index),
             None,
         )
         original_fn = original_tc.function if original_tc else None
-        return DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=index,
-                    id=original_tc.id if original_tc else None,
-                    type=original_tc.type if original_tc else None,
-                    function=DeltaFunctionCall(
-                        name=original_fn.name if original_fn else None,
-                        arguments=remaining_call,
-                    ),
-                )
-            ]
-        )
+
+        # Build function delta — only set name if genuinely present.
+        delta_fn = DeltaFunctionCall(arguments=remaining_call)
+        if original_fn and original_fn.name is not None:
+            delta_fn.name = original_fn.name
+
+        # Build tool-call delta — only set id/type if genuinely present.
+        tc = DeltaToolCall(index=index, function=delta_fn)
+        if original_tc and original_tc.id is not None:
+            tc.id = original_tc.id
+            tc.type = original_tc.type or "function"
+
+        return DeltaMessage(tool_calls=[tc])

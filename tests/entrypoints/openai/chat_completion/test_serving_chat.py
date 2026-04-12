@@ -2047,9 +2047,12 @@ class TestCreateRemainingArgsDelta:
         assert len(result.tool_calls) == 1
         tc = result.tool_calls[0]
         assert tc.index == 5
-        assert tc.id is None
-        assert tc.type is None
-        assert tc.function.name is None
+        # With the post-construction fix, unmatched fields should be
+        # *unset* (not explicitly None) so exclude_unset serialization
+        # omits them.
+        assert "id" not in tc.model_fields_set
+        assert "type" not in tc.model_fields_set
+        assert "name" not in tc.function.model_fields_set
         assert tc.function.arguments == '{"arg": 1}'
 
     def test_function_is_none(self):
@@ -2077,5 +2080,177 @@ class TestCreateRemainingArgsDelta:
         assert tc.index == 0
         assert tc.id == "call_nofunc"
         assert tc.type == "function"
-        assert tc.function.name is None
+        # function.name should be unset (original function was None)
+        assert "name" not in tc.function.model_fields_set
         assert tc.function.arguments == '{"data": "value"}'
+
+
+class TestCreateRemainingArgsDeltaSerialization:
+    """Tests that _create_remaining_args_delta produces deltas whose
+    serialized JSON (via ``model_dump(exclude_unset=True)``) matches
+    the OpenAI API spec — absent optional fields must NOT appear as
+    ``null`` in the output.
+
+    These tests are the regression suite for GitHub issue #38603.
+    """
+
+    def test_no_match_excludes_null_fields(self):
+        """When the original delta has no tool call at the requested
+        index, the resulting DeltaToolCall serialized with
+        ``model_dump(exclude_unset=True)`` must NOT contain "id",
+        "type", or "name" keys."""
+        from vllm.entrypoints.openai.chat_completion.serving import (
+            OpenAIServingChat,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_zero",
+                    type="function",
+                    function=DeltaFunctionCall(name="func", arguments="{}"),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '{"arg": 1}', 5  # index 5 does not exist
+        )
+
+        tc = result.tool_calls[0]
+        dumped = tc.model_dump(exclude_unset=True)
+        assert "id" not in dumped
+        assert "type" not in dumped
+        fn_dumped = tc.function.model_dump(exclude_unset=True)
+        assert "name" not in fn_dumped
+        assert fn_dumped["arguments"] == '{"arg": 1}'
+
+    def test_follow_up_chunk_excludes_null_fields(self):
+        """A follow-up chunk where the tool call exists but id/type/name
+        are None must not emit those null fields in serialized output."""
+        from vllm.entrypoints.openai.chat_completion.serving import (
+            OpenAIServingChat,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        # Simulate a follow-up chunk: id/type/name are None on the
+        # original because the first chunk already sent them.
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    function=DeltaFunctionCall(arguments='{"key":'),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, ' "value"}', 0
+        )
+
+        tc = result.tool_calls[0]
+        dumped = tc.model_dump(exclude_unset=True)
+        assert "id" not in dumped
+        assert "type" not in dumped
+        fn_dumped = tc.function.model_dump(exclude_unset=True)
+        assert "name" not in fn_dumped
+        assert fn_dumped["arguments"] == ' "value"}'
+
+    def test_first_chunk_preserves_fields_in_serialization(self):
+        """The first chunk with id/type/name present must include them
+        in the serialized JSON."""
+        from vllm.entrypoints.openai.chat_completion.serving import (
+            OpenAIServingChat,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_abc",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="get_weather",
+                        arguments='{"loc": "NYC"}',
+                    ),
+                )
+            ]
+        )
+
+        result = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '"}', 0
+        )
+
+        tc = result.tool_calls[0]
+        dumped = tc.model_dump(exclude_unset=True)
+        assert dumped["id"] == "call_abc"
+        assert dumped["type"] == "function"
+        fn_dumped = tc.function.model_dump(exclude_unset=True)
+        assert fn_dumped["name"] == "get_weather"
+        assert fn_dumped["arguments"] == '"}'
+
+    def test_parallel_tool_calls_serialization(self):
+        """Parallel tool calls: the index WITH id serializes id/type;
+        the index WITHOUT id does not."""
+        from vllm.entrypoints.openai.chat_completion.serving import (
+            OpenAIServingChat,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        original_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_first",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="func_a", arguments="{}"
+                    ),
+                ),
+                DeltaToolCall(
+                    index=1,
+                    function=DeltaFunctionCall(arguments='{"x":'),
+                ),
+            ]
+        )
+
+        # Index 0 — has id/type/name
+        r0 = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, '{"extra": true}', 0
+        )
+        tc0 = r0.tool_calls[0]
+        d0 = tc0.model_dump(exclude_unset=True)
+        assert d0["id"] == "call_first"
+        assert d0["type"] == "function"
+        fn0 = tc0.function.model_dump(exclude_unset=True)
+        assert fn0["name"] == "func_a"
+
+        # Index 1 — no id/type/name
+        r1 = OpenAIServingChat._create_remaining_args_delta(
+            original_delta, ' 1}', 1
+        )
+        tc1 = r1.tool_calls[0]
+        d1 = tc1.model_dump(exclude_unset=True)
+        assert "id" not in d1
+        assert "type" not in d1
+        fn1 = tc1.function.model_dump(exclude_unset=True)
+        assert "name" not in fn1
