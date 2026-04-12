@@ -12,7 +12,7 @@ ReqId = str
 
 # A store entry bundles a scheduler-assigned job ID with the transfer spec.
 # The job ID allows per-job completion tracking: the worker reports it back
-# when the DMA finishes, and the scheduler calls complete_store immediately.
+# when finished, and the scheduler calls complete_store immediately.
 StoreJobEntry = tuple[int, TransferSpec]
 
 
