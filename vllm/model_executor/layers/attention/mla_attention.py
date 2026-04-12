@@ -590,6 +590,92 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Sparse MLA impls only support forward_mqa (decode-style attention)
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
 
+        # Dense MHA fallback for short-sequence prefill with sparse backends
+        dense_threshold = envs.VLLM_NSA_PREFILL_DENSE_ATTN_KV_LEN_THRESHOLD
+        use_dense_fallback = (
+            is_sparse_impl
+            and dense_threshold > 0
+            and flash_attn_varlen_func is not None
+            and hasattr(attn_metadata, "max_seq_len")
+            and hasattr(attn_metadata, "max_query_len")
+            and attn_metadata.max_seq_len <= dense_threshold
+            and attn_metadata.max_query_len > 1
+            and getattr(attn_metadata, "num_decode_tokens", None) in (0, None)
+            and attn_metadata.max_seq_len == attn_metadata.max_query_len
+            and num_actual_toks == attn_metadata.query_start_loc[-1].item()
+        )
+
+        if use_dense_fallback:
+            logger.info_once(
+                "NSA dense fallback: max_seq_len=%d <= threshold=%d, "
+                "using dense MHA for prefill",
+                attn_metadata.max_seq_len,
+                dense_threshold,
+                scope="local",
+            )
+            kv = self.kv_b_proj(k_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+            )
+            k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            k = torch.empty(
+                (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
+                dtype=k_nope.dtype,
+                device=k_nope.device,
+            )
+            k[..., : k_nope.shape[-1]] = k_nope
+            k_pe_for_cat = k_pe.unsqueeze(1) if k_pe.dim() == 2 else k_pe
+            k[..., k_nope.shape[-1] :] = k_pe_for_cat
+
+            fa_version = get_flash_attn_version(
+                head_size=self.qk_nope_head_dim + self.qk_rope_head_dim
+            )
+            device_cap = current_platform.get_device_capability()
+            pad_v = not (
+                (fa_version == 3 and device_cap is not None and device_cap[0] == 9)
+                or (fa_version is not None and fa_version >= 4)
+            )
+            if pad_v:
+                v = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]])
+
+            fa_kwargs: dict = {}
+            if is_vllm_fa and fa_version is not None:
+                fa_kwargs["fa_version"] = fa_version
+            if is_vllm_fa:
+                fa_kwargs["return_softmax_lse"] = False
+            else:
+                fa_kwargs["return_attn_probs"] = False
+
+            attn_out = flash_attn_varlen_func(
+                q=q,
+                k=k,
+                v=v,
+                cu_seqlens_q=attn_metadata.query_start_loc,
+                cu_seqlens_k=attn_metadata.query_start_loc,
+                max_seqlen_q=attn_metadata.max_query_len,
+                max_seqlen_k=attn_metadata.max_query_len,
+                softmax_scale=self.scale,
+                causal=True,
+                **fa_kwargs,
+            )
+            if isinstance(attn_out, tuple):
+                attn_out = attn_out[0]
+
+            attn_out = attn_out[..., : self.v_head_dim].flatten(start_dim=-2)
+            output.copy_(attn_out)
+
+            if use_quant:
+                actual = output[:num_actual_toks]
+                if output_block_scale is not None:
+                    fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
+                    quant_output[:num_actual_toks].copy_(fp4_data)
+                    output_block_scale.copy_(fp4_scales)
+                else:
+                    fp8_data, _ = self._quant_fp8_op(actual, output_scale)
+                    quant_output[:num_actual_toks].copy_(fp8_data)
+                return quant_output
+
+            return output_padded
+
         if is_sparse_impl:
             num_mqa_tokens = q.size(0)
             num_mha_tokens = 0
