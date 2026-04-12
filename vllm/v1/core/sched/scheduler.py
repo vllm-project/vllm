@@ -406,7 +406,10 @@ class Scheduler(SchedulerInterface):
                 + request.num_output_placeholders
                 - request.num_computed_tokens
             )
-            if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
+            if (
+                0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens
+                and self.scheduler_config.enable_chunked_prefill
+            ):
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
             num_new_tokens = min(num_new_tokens, token_budget)
 
@@ -663,9 +666,6 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
-                    threshold = self.scheduler_config.long_prefill_token_threshold
-                    if 0 < threshold < num_new_tokens:
-                        num_new_tokens = threshold
 
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
@@ -676,6 +676,10 @@ class Scheduler(SchedulerInterface):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
+                    elif self.scheduler_config.enable_chunked_prefill:
+                        threshold = self.scheduler_config.long_prefill_token_threshold
+                        if 0 < threshold < num_new_tokens:
+                            num_new_tokens = threshold
 
                     num_new_tokens = min(num_new_tokens, token_budget)
                     assert num_new_tokens > 0
