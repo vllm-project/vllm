@@ -24,8 +24,8 @@ from transformers.video_utils import VideoInput
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.model_format import get_model_format_handler
 from vllm.transformers_utils import processors
-from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -341,13 +341,8 @@ def cached_processor_from_config(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    if is_gguf(model_config.model):
-        assert not is_gguf(model_config.tokenizer), (
-            "For multimodal GGUF models, the original tokenizer "
-            "should be used to correctly load processor."
-        )
-        model = model_config.tokenizer
-        revision = model_config.tokenizer_revision
+    if handler := get_model_format_handler(model_config.model):
+        model, revision = handler.resolve_processor_source(model_config, "processor")
     else:
         model = model_config.model
         revision = model_config.revision
@@ -455,13 +450,10 @@ def cached_image_processor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
 ):
-    if is_gguf(model_config.model):
-        assert not is_gguf(model_config.tokenizer), (
-            "For multimodal GGUF models, the original tokenizer "
-            "should be used to correctly load image processor."
+    if handler := get_model_format_handler(model_config.model):
+        model, revision = handler.resolve_processor_source(
+            model_config, "image_processor"
         )
-        model = model_config.tokenizer
-        revision = model_config.tokenizer_revision
     else:
         model = model_config.model
         revision = model_config.revision

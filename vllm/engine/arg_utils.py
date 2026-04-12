@@ -93,6 +93,7 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
+from vllm.model_format import get_model_format_handler
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -100,7 +101,6 @@ from vllm.transformers_utils.config import (
     is_interleaved,
     maybe_override_with_speculators,
 )
-from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -1416,9 +1416,10 @@ class EngineArgs:
         return engine_args
 
     def create_model_config(self) -> ModelConfig:
-        # gguf file needs a specific model loader
-        if is_gguf(self.model):
-            self.quantization = self.load_format = "gguf"
+        load_general_plugins()
+
+        if handler := get_model_format_handler(self.model):
+            handler.update_engine_args(self)
 
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(
@@ -1559,6 +1560,7 @@ class EngineArgs:
         NOTE: If VllmConfig is incompatible, we raise an error.
         """
         current_platform.pre_register_and_update()
+        load_general_plugins()
 
         device_config = DeviceConfig(device=cast(Device, current_platform.device_type))
 

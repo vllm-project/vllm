@@ -25,6 +25,7 @@ from vllm.config.quantization import OnlineQuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
+from vllm.model_format import get_model_format_handler
 from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
@@ -41,12 +42,6 @@ from vllm.transformers_utils.config import (
     try_get_tokenizer_config,
     uses_mrope,
     uses_xdrope_dim,
-)
-from vllm.transformers_utils.gguf_utils import (
-    is_gguf,
-    is_remote_gguf,
-    maybe_patch_hf_config_from_gguf,
-    split_remote_gguf,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     MODEL_ARCH_CONFIG_CONVERTORS,
@@ -503,10 +498,8 @@ class ModelConfig:
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
         )
-        hf_config = maybe_patch_hf_config_from_gguf(
-            self.model,
-            hf_config,
-        )
+        if handler := get_model_format_handler(self.model):
+            hf_config = handler.patch_model_hf_config(self.model, hf_config)
 
         self.hf_config = hf_config
         if dict_overrides:
@@ -666,12 +659,8 @@ class ModelConfig:
                 )
 
         # Multimodal GGUF models must use original repo for mm processing
-        if is_gguf(self.tokenizer) and self.is_multimodal_model:
-            raise ValueError(
-                "Loading a multimodal GGUF model needs to use original "
-                "tokenizer. Please specify the unquantized hf model's "
-                "repo name or path using the --tokenizer argument."
-            )
+        if handler := get_model_format_handler(self.model):
+            handler.validate_model_config(self)
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
@@ -826,8 +815,8 @@ class ModelConfig:
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
         model = self.model
-        if is_remote_gguf(model):
-            model, _ = split_remote_gguf(model)
+        if handler := get_model_format_handler(model):
+            model = handler.resolve_sentence_transformer_source(model, self.revision)
         return get_sentence_transformer_tokenizer_config(model, self.revision)
 
     def _get_default_runner_type(
@@ -952,7 +941,6 @@ class ModelConfig:
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
                 "cpu_awq",
-                "gguf",
             ]
             quantization_methods = [
                 q for q in supported_quantization if q not in overrides

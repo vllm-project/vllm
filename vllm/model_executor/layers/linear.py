@@ -360,15 +360,16 @@ class ReplicatedLinear(LinearBase):
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         # If the weight on disk does not have a shape, give it one
         # (such scales for AutoFp8).
-        # Special case for GGUF
-
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
+        needs_custom_weight_materialization = getattr(
+            param, "needs_custom_weight_materialization", False
+        )
+        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
+        if needs_custom_weight_type:
             param.weight_type = loaded_weight.item()
 
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
+        if needs_custom_weight_materialization and isinstance(
+            param, UninitializedParameter
+        ):
             param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
 
         if len(loaded_weight.shape) == 0:
@@ -534,14 +535,16 @@ class ColumnParallelLinear(LinearBase):
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
-        # Special case for GGUF
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
+        needs_custom_weight_materialization = getattr(
+            param, "needs_custom_weight_materialization", False
+        )
+        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
+        if needs_custom_weight_type:
             param.weight_type = loaded_weight.item()
 
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
+        if needs_custom_weight_materialization and isinstance(
+            param, UninitializedParameter
+        ):
             final_shape = list(loaded_weight.shape)
             if output_dim is not None:
                 assert final_shape[output_dim] % self.tp_size == 0
@@ -692,17 +695,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
         self.validate_shard_id(loaded_shard_id)
-        # Special case for GGUF
-        # initialize GGUF param after we know the quantize type
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
+        needs_custom_weight_materialization = getattr(
+            param, "needs_custom_weight_materialization", False
+        )
+        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
         if isinstance(loaded_shard_id, tuple) and (
-            is_gguf_weight or is_gguf_weight_type
+            needs_custom_weight_materialization or needs_custom_weight_type
         ):
             raise NotImplementedError(
-                "Shard id with multiple indices is not supported for GGUF."
+                "Shard id with multiple indices is not supported for this "
+                "format-specific weight loader."
             )
-        if is_gguf_weight_type:
+        if needs_custom_weight_type:
             if loaded_shard_id is not None:
                 param.data[loaded_shard_id].copy_(loaded_weight)
                 param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
@@ -712,7 +716,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 }
             return
 
-        if is_gguf_weight:
+        if needs_custom_weight_materialization:
             output_dim = getattr(param, "output_dim", None)
             shard_size = loaded_weight.size(output_dim) // self.tp_size
             start_idx = self.tp_rank * shard_size
@@ -1168,11 +1172,11 @@ class QKVParallelLinear(ColumnParallelLinear):
         loaded_shard_id: str | None = None,
     ):
         self.validate_shard_id(loaded_shard_id)
-        # Special case for GGUF
-        # initialize GGUF param after we know the quantize type
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
+        needs_custom_weight_materialization = getattr(
+            param, "needs_custom_weight_materialization", False
+        )
+        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
+        if needs_custom_weight_type:
             idx_map = {"q": 0, "k": 1, "v": 2}
             if loaded_shard_id is not None:
                 param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
@@ -1181,7 +1185,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 param.shard_weight_type = {k: loaded_weight.item() for k in idx_map}
             return
 
-        if is_gguf_weight:
+        if needs_custom_weight_materialization:
             output_dim = getattr(param, "output_dim", None)
             shard_size = loaded_weight.size(output_dim) // self.tp_size
             start_idx = self.tp_rank * shard_size
@@ -1480,14 +1484,16 @@ class RowParallelLinear(LinearBase):
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
-        # Special case for GGUF
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
+        needs_custom_weight_materialization = getattr(
+            param, "needs_custom_weight_materialization", False
+        )
+        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
+        if needs_custom_weight_type:
             param.weight_type = loaded_weight.item()
 
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
+        if needs_custom_weight_materialization and isinstance(
+            param, UninitializedParameter
+        ):
             weight_shape = list(loaded_weight.shape)
             if input_dim:
                 weight_shape[input_dim] = weight_shape[input_dim] // self.tp_size

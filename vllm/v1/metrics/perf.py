@@ -66,7 +66,6 @@ _QUANT_WEIGHT_BYTE_SIZE: dict[str, float] = {
     "bitsandbytes": 0.5,
     "modelopt_fp4": 0.5,
     "petit_nvfp4": 0.5,
-    "gguf": 0.5,
     "compressed-tensors": 0.5,
     "torchao": 0.5,
     "quark": 0.5,

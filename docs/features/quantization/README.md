@@ -9,7 +9,6 @@ The following are the supported quantization formats for vLLM:
 
 - [AutoAWQ](auto_awq.md)
 - [BitsAndBytes](bnb.md)
-- [GGUF](gguf.md)
 - [GPTQModel](gptqmodel.md)
 - [Intel Neural Compressor](inc.md)
 - [INT4 W4A16](int4.md)
@@ -53,7 +52,6 @@ th:not(:first-child) {
 | FP8 (W8A8)                | ❌    | ❌     | ❌     | ✅︎  | ✅︎     | ✅︎      | ❌        | ❌      |
 | bitsandbytes              | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      |
 | DeepSpeedFP               | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ❌      | ❌        | ❌      |
-| GGUF                      | ✅︎    | ✅︎     | ✅︎     | ✅︎  | ✅︎     | ✅︎      | ❌        | ❌      |
 
 - Volta refers to SM 7.0, Turing to SM 7.5, Ampere to SM 8.0/8.6, Ada to SM 8.9, and Hopper to SM 9.0.
 - ✅︎ indicates that the quantization method is supported on the specified hardware.

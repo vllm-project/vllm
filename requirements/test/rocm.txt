@@ -322,10 +322,6 @@ genson==1.3.0
     # via datamodel-code-generator
 geopandas==1.1.3
     # via terratorch
-gguf==0.18.0
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 gitdb==4.0.12
     # via gitpython
 gitpython==3.1.46
@@ -686,7 +682,6 @@ numpy==2.2.6
     #   fastparquet
     #   genai-perf
     #   geopandas
-    #   gguf
     #   h5py
     #   imagehash
     #   imageio
@@ -1119,7 +1114,6 @@ pyyaml==6.0.3
     #   datamodel-code-generator
     #   datasets
     #   genai-perf
-    #   gguf
     #   huggingface-hub
     #   jsonargparse
     #   lightning
@@ -1176,7 +1170,6 @@ requests==2.32.5
     #   diffusers
     #   docker
     #   evaluate
-    #   gguf
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
@@ -1453,7 +1446,6 @@ tqdm==4.67.3
     #   -r requirements/test/../common.txt
     #   datasets
     #   evaluate
-    #   gguf
     #   huggingface-hub
     #   lightly
     #   lightning

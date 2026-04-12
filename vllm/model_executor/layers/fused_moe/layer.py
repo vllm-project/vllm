@@ -1113,9 +1113,11 @@ class FusedMoE(CustomOp):
         # dimension intermediate_size_per_partition is used.
         SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
 
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
+        needs_custom_weight_materialization = getattr(
+            param, "needs_custom_weight_materialization", False
+        )
+        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
+        if needs_custom_weight_type:
             param.weight_type = loaded_weight.item()
             param.data.copy_(loaded_weight)
             return True if return_success else None
@@ -1165,8 +1167,9 @@ class FusedMoE(CustomOp):
         if full_load:
             shard_dim += 1
 
-        # Materialize GGUF UninitializedParameter accounting merged weights
-        if is_gguf_weight and isinstance(param, UninitializedParameter):
+        if needs_custom_weight_materialization and isinstance(
+            param, UninitializedParameter
+        ):
             # To materialize a tensor, we must have full shape including
             # number of experts, making this portion to require `full_load`.
             assert full_load

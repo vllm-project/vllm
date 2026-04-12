@@ -533,9 +533,10 @@ class OpenPanguEmbeddedAttention(nn.Module):
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
-        is_gguf = quant_config and quant_config.get_name() == "gguf"
-        if is_gguf and config.model_type == "PanguEmbedded":
-            is_neox_style = False
+        if quant_config is not None:
+            override = quant_config.override_is_neox_style(config.model_type)
+            if override is not None:
+                is_neox_style = override
 
         rope_parameters = config.rope_parameters or {}
         if rope_parameters is not None and rope_parameters.get(
@@ -732,14 +733,16 @@ class OpenPanguSinkAttention(nn.Module):
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
-        # Special case for GGUF
-        is_gguf_weight = getattr(param, "is_gguf_weight", False)
-        is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if is_gguf_weight_type:
+        needs_custom_weight_materialization = getattr(
+            param, "needs_custom_weight_materialization", False
+        )
+        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
+        if needs_custom_weight_type:
             param.weight_type = loaded_weight.item()
 
-        # Materialize GGUF UninitializedParameter
-        if is_gguf_weight and isinstance(param, nn.UninitializedParameter):
+        if needs_custom_weight_materialization and isinstance(
+            param, nn.UninitializedParameter
+        ):
             final_shape = list(loaded_weight.shape)
             if output_dim is not None:
                 assert final_shape[output_dim] % self.tp_size == 0

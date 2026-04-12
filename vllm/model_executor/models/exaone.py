@@ -162,8 +162,10 @@ class ExaoneAttention(nn.Module):
         )
 
         is_neox_style = True
-        if quant_config is not None and quant_config.get_name() == "gguf":
-            is_neox_style = False
+        if quant_config is not None:
+            override = quant_config.override_is_neox_style(config.model_type)
+            if override is not None:
+                is_neox_style = override
 
         self.rotary_emb = get_rope(
             self.head_dim,

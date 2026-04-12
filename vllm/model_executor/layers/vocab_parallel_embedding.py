@@ -418,8 +418,7 @@ class VocabParallelEmbedding(PluggableLayer):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
-        # If the parameter is a gguf weight, then load it directly.
-        if getattr(param, "is_gguf_weight_type", None):
+        if getattr(param, "needs_custom_weight_type", None):
             param.data.copy_(loaded_weight)
             param.weight_type = loaded_weight.item()
             return
@@ -549,8 +548,7 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
         """Tie the weights with word embeddings."""
-        # GGUF quantized embed_tokens.
-        if self.quant_config and self.quant_config.get_name() == "gguf":
+        if self.quant_config and self.quant_config.should_keep_tied_lm_head():
             return embed_tokens
         else:
             self.weight = embed_tokens.weight

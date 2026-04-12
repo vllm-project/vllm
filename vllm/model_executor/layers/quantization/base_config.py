@@ -120,6 +120,10 @@ class QuantizationConfig(ABC):
         """
         return None
 
+    @classmethod
+    def requires_hf_quant_config(cls) -> bool:
+        return True
+
     @staticmethod
     def get_from_keys(config: dict[str, Any], keys: list[str]) -> Any:
         """Get a value from the model's quantization config."""
@@ -155,6 +159,28 @@ class QuantizationConfig(ABC):
 
     def get_cache_scale(self, name: str) -> str | None:
         return None
+
+    def override_is_neox_style(self, model_type: str) -> bool | None:
+        return None
+
+    def should_keep_tied_lm_head(self) -> bool:
+        return False
+
+    def transform_loaded_weight(
+        self,
+        name: str,
+        loaded_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return loaded_weight
+
+    def remap_loaded_parameter(
+        self,
+        name: str,
+        param: torch.Tensor,
+        loaded_weight: torch.Tensor,
+        params_dict: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        return param
 
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"

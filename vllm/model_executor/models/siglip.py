@@ -968,20 +968,9 @@ def maybe_swap_ffn_param(
     params_dict: dict[str, torch.Tensor],
     quant_config: QuantizationConfig,
 ) -> torch.Tensor:
-    if not (quant_config and quant_config.get_name() == "gguf") or ".fc" not in name:
+    if quant_config is None or ".fc" not in name:
         return param
-    # Some GGUF models have fc1 and fc2 weights swapped
-    tp_size = get_tensor_model_parallel_world_size()
-    output_dim = getattr(param, "output_dim", 0)
-    output_size = param.size(output_dim) * tp_size
-    weight_out_size = loaded_weight.size(output_dim)
-    if ".fc1." in name and output_size != weight_out_size:
-        new_name = name.replace(".fc1.", ".fc2.")
-        param = params_dict[new_name]
-    elif ".fc2." in name and output_size != weight_out_size:
-        new_name = name.replace(".fc2.", ".fc1.")
-        param = params_dict[new_name]
-    return param
+    return quant_config.remap_loaded_parameter(name, param, loaded_weight, params_dict)
 
 
 # Adapted from: https://github.com/huggingface/transformers/blob/v4.54.1/src/transformers/models/siglip/modeling_siglip.py#L200
