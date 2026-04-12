@@ -211,6 +211,8 @@ class LoggingStatLogger(StatLoggerBase):
         return
 
     def log(self):
+        num_preemptions = self.num_preemptions
+        num_corrupted_reqs = self.num_corrupted_reqs
         self._update_stats()
         self.aggregate_scheduler_stats()
         # Avoid log noise on an idle production system
@@ -229,9 +231,9 @@ class LoggingStatLogger(StatLoggerBase):
             self.last_scheduler_stats.num_waiting_reqs,
         ]
 
-        if self.num_preemptions > 0:
+        if num_preemptions > 0:
             log_parts.append("Preemptions: %d")
-            log_args.append(self.num_preemptions)
+            log_args.append(num_preemptions)
 
         log_parts.extend(
             [
@@ -248,7 +250,7 @@ class LoggingStatLogger(StatLoggerBase):
 
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             log_parts.append("Corrupted: %d reqs")
-            log_args.append(self.num_corrupted_reqs)
+            log_args.append(num_corrupted_reqs)
         if not self.connector_prefix_caching_metrics.empty:
             log_parts.append("External prefix cache hit rate: %.1f%%")
             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
