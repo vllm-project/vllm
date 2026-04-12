@@ -247,15 +247,15 @@ class ParakeetExtractor:
             total_tokens += int(n_tokens.item())
         return max(1, total_tokens)
 
-    def split_audio_into_clips(self, audio: np.ndarray) -> list[np.ndarray]:
+    def split_audio_into_clips(self, audio: torch.Tensor) -> list[torch.Tensor]:
         assert audio.ndim == 1
         audio_len = int(audio.shape[0])
         clip_sizes = self._clip_sizes(audio_len)
         target_len = sum(clip_sizes)
         if audio_len < target_len:
-            audio = np.pad(audio, (0, target_len - audio_len))
+            audio = torch.nn.functional.pad(audio, (0, target_len - audio_len))
 
-        clips = list[np.ndarray]()
+        clips = list[torch.Tensor]()
         offset = 0
         for clip_size in clip_sizes:
             clips.append(audio[offset : offset + clip_size])
@@ -269,14 +269,6 @@ class ParakeetExtractor:
         return_tensors: str | TensorType = "pt",
         device: str = "cpu",
     ) -> BatchFeature:
-        audio_clips = list[np.ndarray]()
-        audio_num_clips = list[int]()
-        for audio in raw_speech:
-            clips = self.split_audio_into_clips(audio)
-            audio_clips.extend(clips)
-            audio_num_clips.append(len(clips))
-        raw_speech = audio_clips
-
         raw_speech = [
             torch.as_tensor(speech, device=device, dtype=torch.float32)
             for speech in raw_speech
@@ -290,6 +282,14 @@ class ParakeetExtractor:
                     self.__class__.__name__,
                 )
                 raw_speech[i] = speech.mean(-1)
+
+        audio_clips = list[torch.Tensor]()
+        audio_num_clips = list[int]()
+        for audio in raw_speech:
+            clips = self.split_audio_into_clips(audio)
+            audio_clips.extend(clips)
+            audio_num_clips.append(len(clips))
+        raw_speech = audio_clips
 
         audio_lengths = torch.tensor(
             [len(speech) for speech in raw_speech], dtype=torch.long, device=device
