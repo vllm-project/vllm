@@ -218,21 +218,14 @@ def _get_addrinfos_for_bind(
     host: str | None = None,
     port: int = 0,
 ) -> list[tuple]:
-    """Return deduplicated (family, socktype, proto, canonname, sockaddr)
-    tuples suitable for bind(), one per address family, IPv4 first."""
-    flags = socket.AI_ADDRCONFIG | socket.AI_PASSIVE
+    """Return (family, socktype, proto, canonname, sockaddr)
+    tuples suitable for bind(), IPv4 first."""
+    flags = socket.AI_PASSIVE
     infos = socket.getaddrinfo(
         host, port, socket.AF_UNSPEC, socket.SOCK_STREAM, 0, flags
     )
-    seen: set[socket.AddressFamily] = set()
-    result: list[tuple] = []
-    for info in infos:
-        family = info[0]
-        if family not in seen:
-            seen.add(family)
-            result.append(info)
-    result.sort(key=lambda x: (x[0] != socket.AF_INET,))
-    return result
+    infos.sort(key=lambda x: (x[0] != socket.AF_INET,))
+    return infos
 
 
 def try_bind_socket(
@@ -240,6 +233,7 @@ def try_bind_socket(
     port: int = 0,
     *,
     reuse_addr: bool = True,
+    reuse_port: bool = False,
     listen: bool = False,
 ) -> socket.socket:
     """Bind a TCP socket on the first available address family."""
@@ -250,6 +244,9 @@ def try_bind_socket(
         try:
             if reuse_addr:
                 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if reuse_port:
+                with contextlib.suppress(AttributeError, OSError):
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
             if family == socket.AF_INET6:
                 s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
             s.bind(sockaddr)

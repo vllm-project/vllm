@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import contextlib
 import importlib
 import inspect
 import multiprocessing
@@ -497,11 +496,7 @@ async def init_render_app_state(
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
-    sock = try_bind_socket(addr[0] or None, addr[1], reuse_addr=True)
-    # Also set SO_REUSEPORT when available
-    with contextlib.suppress(AttributeError, OSError):
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    return sock
+    return try_bind_socket(addr[0] or None, addr[1], reuse_addr=True, reuse_port=True)
 
 
 def create_server_unix_socket(path: str) -> socket.socket:
