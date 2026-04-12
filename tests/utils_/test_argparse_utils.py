@@ -81,6 +81,22 @@ def test_with_bool_flag(parser):
     assert args.enable_feature is True
 
 
+def test_help_keyword_does_not_leak_between_parse_calls():
+    parser = FlexibleArgumentParser(prog="test")
+    parser.add_argument("--foo-bar", help="foo help")
+    parser.add_argument("--baz-qux", help="baz help")
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help=foo"])
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+
+    help_text = parser.format_help()
+    assert "--foo-bar" in help_text
+    assert "--baz-qux" in help_text
+
+
 def test_invalid_choice(parser):
     with pytest.raises(SystemExit):
         parser.parse_args(["--image_input_type", "invalid_choice"])

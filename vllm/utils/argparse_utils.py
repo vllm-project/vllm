@@ -57,14 +57,13 @@ class FlexibleArgumentParser(ArgumentParser):
         '   --json-arg \'{"key4": ["value3", "value4", "value5"]}\'\n'
         "   --json-arg.key4+ value3 --json-arg.key4+='value4,value5'\n\n"
     )
-    _search_keyword: str | None = None
-
     def __init__(self, *args, **kwargs):
         # Set the default "formatter_class" to SortedHelpFormatter
         if "formatter_class" not in kwargs:
             kwargs["formatter_class"] = SortedHelpFormatter
         # Pop kwarg "add_json_tip" to control whether to add the JSON tip
         self.add_json_tip = kwargs.pop("add_json_tip", True)
+        self._search_keyword: str | None = None
         super().__init__(*args, **kwargs)
 
     if sys.version_info < (3, 13):
@@ -182,6 +181,8 @@ class FlexibleArgumentParser(ArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
+        self._search_keyword = None
+
         if args and args[0] == "serve":
             # Check for --model in command line arguments first
             try:
@@ -243,7 +244,7 @@ class FlexibleArgumentParser(ArgumentParser):
         processed_args = list[str]()
         for i, arg in enumerate(args):
             if arg.startswith("--help="):
-                FlexibleArgumentParser._search_keyword = arg.split("=", 1)[-1].lower()
+                self._search_keyword = arg.split("=", 1)[-1].lower()
                 processed_args.append("--help")
             elif arg.startswith("--"):
                 if "=" in arg:
