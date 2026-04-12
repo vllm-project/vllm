@@ -46,10 +46,10 @@ Execute the following commands to build and install vLLM from source.
     Please build the following dependencies, `torchvision`, `pyarrow` from source before building vLLM.
 
 ```bash
-    sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
+    sed -i '/^torch/d' requirements/build/cuda.txt    # remove torch from requirements/build/cuda.txt since we use nightly builds
     uv pip install -v \
         --torch-backend auto \
-        -r requirements/build.txt \
+        -r requirements/build/cuda.txt \
         -r requirements/cpu.txt \
     VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
         uv pip install dist/*.whl
@@ -57,10 +57,10 @@ Execute the following commands to build and install vLLM from source.
 
 ??? console "pip"
     ```bash
-        sed -i '/^torch/d' requirements/build.txt    # remove torch from requirements/build.txt since we use nightly builds
+        sed -i '/^torch/d' requirements/build/cuda.txt    # remove torch from requirements/build/cuda.txt since we use nightly builds
         pip install -v \
             --extra-index-url https://download.pytorch.org/whl/nightly/cpu \
-            -r requirements/build.txt \
+            -r requirements/build/cuda.txt \
             -r requirements/cpu.txt \
         VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel && \
             pip install dist/*.whl

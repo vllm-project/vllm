@@ -40,6 +40,7 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "nemotron_h_mtp",
     "exaone_moe_mtp",
+    "exaone4_5_mtp",
     "qwen3_next_mtp",
     "qwen3_5_mtp",
     "longcat_flash_mtp",
@@ -327,7 +328,13 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
             )
-
+        if "exaone4_5" in hf_config.model_type:
+            hf_config.model_type = "exaone4_5_mtp"
+        if hf_config.model_type == "exaone4_5_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["Exaone4_5_MTP"]}
+            )
         if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
             is_moe = hf_config.model_type == "qwen3_5_moe"
             hf_config.model_type = "qwen3_5_mtp"
@@ -818,6 +825,7 @@ class SpeculativeConfig:
             "kimi_k2",
             "kimi_k25",
             "minimax_m2",
+            "gemma4",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states", "dflash")
