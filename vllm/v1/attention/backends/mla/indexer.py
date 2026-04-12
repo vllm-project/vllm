@@ -257,6 +257,7 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
+    supports_update_for_drafting = True
     reorder_batch_threshold: int = 1
     natively_supported_next_n: list[int] = [1, 2]
     # TODO (matt): integrate kernel with next_n = 4 support
@@ -584,5 +585,62 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
+
+        return attn_metadata
+
+    def update_for_drafting(
+        self,
+        attn_metadata: DeepseekV32IndexerMetadata,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> DeepseekV32IndexerMetadata:
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+        num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
+            split_decodes_and_prefills(
+                common_attn_metadata,
+                decode_threshold=self.reorder_batch_threshold,
+            )
+        )
+
+        if num_prefills > 0 or num_decode_tokens != num_decodes:
+            return self.build_for_drafting(common_attn_metadata, draft_index)
+
+        max_seq_len = common_attn_metadata.max_seq_len
+        seq_lens = common_attn_metadata.seq_lens[:num_decodes]
+
+        attn_metadata.seq_lens = common_attn_metadata.seq_lens
+        attn_metadata.num_reqs = num_reqs
+        attn_metadata.max_query_len = common_attn_metadata.max_query_len
+        attn_metadata.max_seq_len = max_seq_len
+        attn_metadata.num_actual_tokens = num_tokens
+        attn_metadata.query_start_loc = common_attn_metadata.query_start_loc
+        attn_metadata.slot_mapping = common_attn_metadata.slot_mapping
+        attn_metadata.num_decodes = num_decodes
+        attn_metadata.num_decode_tokens = num_decode_tokens
+        attn_metadata.num_prefills = num_prefills
+        attn_metadata.num_prefill_tokens = num_prefill_tokens
+        attn_metadata.prefill = None
+
+        decode = attn_metadata.decode
+        if decode is None:
+            return self.build_for_drafting(common_attn_metadata, draft_index)
+
+        decode.block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
+        decode.seq_lens = seq_lens
+        self.decode_lens_buffer[:num_decode_tokens] = 1
+        decode.decode_lens = self.decode_lens_buffer[:num_decode_tokens]
+        decode.requires_padding = False
+        decode.use_large_context_topk = (
+            num_decodes <= 128 and max_seq_len > 8192
+        )
+        decode.offsets = None
+
+        if current_platform.is_cuda() and has_deep_gemm():
+            decode.schedule_metadata = get_paged_mqa_logits_metadata(
+                seq_lens,
+                self.kv_cache_spec.block_size,
+                self.num_sms,
+            )
 
         return attn_metadata
