@@ -12,17 +12,23 @@ import math
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 _FP8_E4B15: int | None = None
 
 
 def _use_fp8_e4b15(device: int = 0) -> int:
-    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
+    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0.
+    On non-CUDA platforms (e.g. XPU), always returns 0 (use e4nv format).
+    """
     global _FP8_E4B15
     if _FP8_E4B15 is None:
-        cap = torch.cuda.get_device_capability(device)
-        _FP8_E4B15 = 1 if cap < (8, 9) else 0
+        if current_platform.is_cuda_alike():
+            cap = torch.cuda.get_device_capability(device)
+            _FP8_E4B15 = 1 if cap < (8, 9) else 0
+        else:
+            _FP8_E4B15 = 0
     return _FP8_E4B15
 
 
