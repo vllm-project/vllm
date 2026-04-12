@@ -523,10 +523,12 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        request: ResponsesRequest | None = None,
     ):
         self._messages = messages
         self.finish_reason: str | None = None
         self.available_tools = available_tools
+        self.request = request
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
