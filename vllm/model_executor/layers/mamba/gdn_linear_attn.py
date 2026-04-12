@@ -56,7 +56,12 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.qwen3_next import Qwen3NextConfig
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -568,7 +573,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
             b,
             a,
             core_attn_out,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # ============================================================
@@ -702,19 +707,33 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         num_v_heads = self.num_v_heads // self.tp_size
         _, state_dtype = self.get_state_dtype()
 
-        # All kernels use BT = chunk_size (FLA_CHUNK_SIZE4), so a single pass with
-        # T = chunk_size is sufficient to populate every autotuner cache.
+        # All kernels use BT = chunk_size, so a single pass with T = chunk_size
+        # is sufficient to populate every autotuner cache. Mirror the real
+        # prefill path here: build q/k/v/g/beta via fused_post_conv_prep and
+        # then run chunk_gated_delta_rule with in-kernel L2 norm disabled.
         T = FLA_CHUNK_SIZE
-        q = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
-        k = torch.randn(1, T, num_k_heads, self.head_k_dim, device=device, dtype=dtype)
-        v = torch.randn(1, T, num_v_heads, self.head_v_dim, device=device, dtype=dtype)
-        # NOTE: g and beta must have the same dtypes as during
-        # inference, so we construct them with the same function
-        # (fused_gdn_gating). dummy_a and dummy_b are throwaway
-        # inputs required by that function.
+        dummy_mixed_qkv = torch.randn(
+            T, mixed_qkv.shape[-1], device=device, dtype=dtype
+        )
         dummy_a = torch.randn(T, num_v_heads, device=device, dtype=dtype)
         dummy_b = torch.randn(T, num_v_heads, device=device, dtype=dtype)
-        g, beta = fused_gdn_gating(self.A_log, dummy_a, dummy_b, self.dt_bias)
+        q, k, v, g, beta = fused_post_conv_prep(
+            conv_output=dummy_mixed_qkv,
+            a=dummy_a,
+            b=dummy_b,
+            A_log=self.A_log,
+            dt_bias=self.dt_bias,
+            num_k_heads=num_k_heads,
+            head_k_dim=self.head_k_dim,
+            head_v_dim=self.head_v_dim,
+            apply_l2norm=True,
+            output_g_exp=False,
+        )
+        q = q.unsqueeze(0)
+        k = k.unsqueeze(0)
+        v = v.unsqueeze(0)
+        g = g.unsqueeze(0)
+        beta = beta.unsqueeze(0)
         state = torch.zeros(
             1,
             num_v_heads,
@@ -735,7 +754,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 initial_state=state,
                 output_final_state=True,
                 cu_seqlens=cu_seqlens,
-                use_qk_l2norm_in_kernel=True,
+                use_qk_l2norm_in_kernel=False,
             )
         except Exception:
             logger.warning(
@@ -753,7 +772,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
                 self.prefix,
             )
         finally:
-            del q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
+            del dummy_mixed_qkv, q, k, v, dummy_a, dummy_b, g, beta, state, cu_seqlens
 
         torch.accelerator.empty_cache()
 
@@ -1070,13 +1089,14 @@ def gdn_attention_core(
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     """
     Custom op for the core attention computation.
     Only handles the convolution + recurrent attention part.
     Input/output projections are handled outside this op.
     """
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self._forward_core(
@@ -1092,7 +1112,7 @@ def gdn_attention_core_fake(
     b: torch.Tensor,
     a: torch.Tensor,
     core_attn_out: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     """Fake implementation for torch.compile."""
     return

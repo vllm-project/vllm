@@ -1,4 +1,4 @@
--r common.txt
+-r ../common.txt
 
 # testing
 pytest
@@ -78,7 +78,7 @@ datasets>=3.3.0,<=3.6.0
 openpyxl # required for perf comparison excel report
 plotly # required for perf comparison html report
 
-# ROCm-specific extras (not in CUDA test.in)
+# ROCm-specific extras (not in CUDA cuda.in)
 rapidfuzz
 torchgeo==0.7.0
 multiprocess==0.70.16

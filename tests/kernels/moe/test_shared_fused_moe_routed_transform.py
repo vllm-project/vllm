@@ -15,7 +15,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_torch_equal_or_newer
+from vllm.utils.torch_utils import is_torch_equal_or_newer, set_random_seed
 
 
 class SimpleLinear(nn.Module):
@@ -144,8 +144,7 @@ def test_routed_input_transform_inside_vs_outside(
 
         rocm_aiter_ops.refresh_env_variables()
 
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
+    set_random_seed(42)
 
     num_experts = 8
     top_k = 2
