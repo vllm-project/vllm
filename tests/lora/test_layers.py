@@ -1411,6 +1411,27 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         f"for DeepSeek fused_qkv_a_proj, got {type(selected_deepseek_layer).__name__}"
     )
 
+    fully_sharded_lora_config = LoRAConfig(
+        max_loras=8,
+        max_lora_rank=16,
+        lora_dtype=torch.float16,
+        fully_sharded_loras=True,
+    )
+    selected_fully_sharded_deepseek_layer = from_layer(
+        deepseek_fused_layer,
+        max_loras=8,
+        lora_config=fully_sharded_lora_config,
+        packed_modules_list=packed_modules_two,
+    )
+    assert isinstance(
+        selected_fully_sharded_deepseek_layer,
+        DeepSeekV2FusedQkvAProjLinearWithLoRA,
+    ), (
+        "from_layer should keep the dedicated DeepSeek wrapper for "
+        "fused_qkv_a_proj when the base layer is effectively unsharded, got "
+        f"{type(selected_fully_sharded_deepseek_layer).__name__}"
+    )
+
     # Case 6: Generic subclass of MergedColumnParallelLinear with 2 packed
     # modules should still use the generic merged wrapper.
     class CustomMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -1505,8 +1526,9 @@ def test_get_and_maybe_dequant_weights_accepts_lora_wrappers(dist_init):
 @torch.inference_mode()
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("fully_sharded", [False, True])
 def test_deepseek_fused_qkv_a_proj_lora_preserves_base_forward(
-    default_vllm_config, dist_init, device, stage
+    default_vllm_config, dist_init, device, stage, fully_sharded
 ):
     if current_platform.is_cuda_alike():
         torch.accelerator.set_device_index(device)
@@ -1514,7 +1536,12 @@ def test_deepseek_fused_qkv_a_proj_lora_preserves_base_forward(
     torch.set_default_device(device)
     dtype = torch.float16 if current_platform.is_cuda_alike() else torch.float32
     max_loras = 8
-    lora_config = LoRAConfig(max_loras=max_loras, max_lora_rank=8, lora_dtype=dtype)
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=8,
+        lora_dtype=dtype,
+        fully_sharded_loras=fully_sharded,
+    )
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 

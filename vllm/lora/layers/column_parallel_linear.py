@@ -323,7 +323,6 @@ class DeepSeekV2FusedQkvAProjLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         return output
 
     @classmethod
-    @_not_fully_sharded_can_replace
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
@@ -337,6 +336,10 @@ class DeepSeekV2FusedQkvAProjLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
                 for layer_cls in type(source_layer).mro()
             )
             and len(packed_modules_list) == 2
+            and (
+                not lora_config.fully_sharded_loras
+                or getattr(source_layer, "tp_size", 1) == 1
+            )
         )
 
 

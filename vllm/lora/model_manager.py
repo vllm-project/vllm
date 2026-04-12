@@ -582,6 +582,38 @@ class LoRAModelManager:
                 model.loras[module_name] = lora
         return model
 
+    def get_dummy_lora_warmup_rank(self, default_rank: int) -> int:
+        """Return a dummy LoRA rank compatible with wrapped modules.
+
+        Dummy LoRAs keep warmup memory low by using a small rank. Fully
+        sharded MoE wrappers additionally require the dummy rank to be divisible
+        by tensor parallel size because they shard W13 along the rank axis.
+        """
+        if not self.lora_config.fully_sharded_loras:
+            return default_rank
+
+        required_multiple = 1
+        for module in self.modules.values():
+            if not getattr(module, "fully_sharded", False):
+                continue
+            required_multiple = math.lcm(required_multiple, module.tp_size)
+
+        if required_multiple == 1 or default_rank % required_multiple == 0:
+            return default_rank
+
+        adjusted_rank = (
+            (default_rank + required_multiple - 1) // required_multiple
+        ) * required_multiple
+        if adjusted_rank > self.lora_config.max_lora_rank:
+            raise ValueError(
+                "Unable to choose a dummy LoRA warmup rank compatible with "
+                "fully sharded MoE modules: "
+                f"default_rank={default_rank}, "
+                f"required_multiple={required_multiple}, "
+                f"max_lora_rank={self.lora_config.max_lora_rank}"
+            )
+        return adjusted_rank
+
     def _match_target_modules(self, module_name: str) -> bool:
         """Check if a module should have LoRA applied.
 

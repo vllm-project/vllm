@@ -185,6 +185,35 @@ def test_skip_unsupported_matched_modules(default_vllm_config, dist_init, dummy_
     assert "unsupported.dense1" not in manager.modules
 
 
+def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():
+    manager = LoRAModelManager.__new__(LoRAModelManager)
+    manager.lora_config = LoRAConfig(
+        max_lora_rank=64,
+        max_cpu_loras=1,
+        max_loras=1,
+        lora_dtype=DEFAULT_DTYPE,
+        fully_sharded_loras=True,
+    )
+
+    class DummyModule:
+        def __init__(self, tp_size: int, fully_sharded: bool):
+            self.tp_size = tp_size
+            self.fully_sharded = fully_sharded
+
+    manager.modules = {
+        "model.layers.0.self_attn.q_proj": DummyModule(
+            tp_size=32,
+            fully_sharded=True,
+        ),
+        "model.layers.0.mlp.experts": DummyModule(
+            tp_size=32,
+            fully_sharded=True,
+        ),
+    }
+
+    assert manager.get_dummy_lora_warmup_rank(8) == 32
+
+
 @pytest.mark.parametrize("device", DEVICES)
 def test_lora_model_manager(default_vllm_config, dist_init, dummy_model, device):
     model = dummy_model
