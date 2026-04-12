@@ -9,6 +9,7 @@ import torch
 
 from vllm.v1.worker.gpu import eplb_utils as eplb
 from vllm.v1.worker.gpu import model_runner as mrv2
+from vllm.v1.worker.gpu.routed_experts_utils import RoutedExpertsCaptureHelper
 
 
 class FakeMemoryProfiler:
@@ -185,3 +186,74 @@ def test_v2_sample_tokens_runs_eplb_on_non_last_pp_rank(monkeypatch):
 
     assert mrv2.GPUModelRunner.sample_tokens(runner, None) is None
     assert events == ["postprocess", "eplb"]
+
+
+def test_v2_sample_tokens_saves_routed_experts(monkeypatch):
+    saved_indices = []
+
+    class DummyAsyncOutput:
+        def __init__(self, **kwargs: Any):
+            self.kwargs = kwargs
+
+        def get_output(self):
+            return self.kwargs["model_runner_output"]
+
+    runner = _make_runner(
+        is_last_pp_rank=True,
+        use_pp=False,
+        use_async_scheduling=False,
+        main_stream="main",
+        output_copy_stream="copy",
+        output_copy_event="event",
+    )
+    runner.routed_experts = RoutedExpertsCaptureHelper()
+    runner.routed_experts._initialized = True
+    runner.routed_experts._slot_mapping = torch.tensor(
+        [3, 5], dtype=torch.int32
+    ).numpy()
+    runner.execute_model_state = mrv2.ExecuteModelState(
+        input_batch=SimpleNamespace(
+            req_ids=["req-0"],
+            req_id_to_index={"req-0": 0},
+            idx_mapping_np=torch.tensor([0], dtype=torch.int32).numpy(),
+            idx_mapping=torch.tensor([0], dtype=torch.int32),
+            num_reqs=1,
+        ),
+        attn_metadata=None,
+        slot_mappings_by_layer=None,
+        hidden_states=torch.zeros((1, 4)),
+        aux_hidden_states=None,
+        kv_connector_output=None,
+        num_tokens_across_dp=None,
+    )
+    runner.sample = lambda *args, **kwargs: (
+        SimpleNamespace(sampled_token_ids=torch.tensor([[42]], dtype=torch.long)),
+        torch.tensor([1], dtype=torch.int32),
+        torch.tensor([0], dtype=torch.int32),
+    )
+    runner.postprocess = lambda *args, **kwargs: None
+    runner.prompt_logprobs_worker = SimpleNamespace(
+        compute_prompt_logprobs=lambda *args, **kwargs: {}
+    )
+    runner.model = SimpleNamespace(compute_logits=lambda x: x)
+    runner.req_states = SimpleNamespace(
+        all_token_ids=SimpleNamespace(gpu=None),
+        num_computed_tokens=SimpleNamespace(gpu=None),
+        prompt_len=SimpleNamespace(np=None),
+        prefill_len=SimpleNamespace(np=None),
+        num_computed_prefill_tokens=None,
+    )
+    runner.eplb.step = lambda *args, **kwargs: None
+
+    monkeypatch.setattr(
+        mrv2.RoutedExpertsCaptureHelper,
+        "save",
+        lambda self: saved_indices.append(self._slot_mapping.copy()),
+    )
+    monkeypatch.setattr(mrv2, "AsyncOutput", DummyAsyncOutput)
+
+    output = mrv2.GPUModelRunner.sample_tokens(runner, None)
+
+    assert output.req_ids == ["req-0"]
+    assert len(saved_indices) == 1
+    assert (saved_indices[0] == runner.routed_experts._slot_mapping).all()
