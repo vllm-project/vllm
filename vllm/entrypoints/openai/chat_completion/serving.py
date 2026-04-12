@@ -1147,10 +1147,31 @@ class OpenAIServingChat(OpenAIServing):
 
                             # check to see if there's anything left to stream
                             remaining_call = expected_call.replace(actual_call, "", 1)
-                            # set that as a delta message
-                            delta_message = self._create_remaining_args_delta(
-                                delta_message, remaining_call, index
-                            )
+                            # Guard: when the entire tool call arrives in
+                            # one delta, latest_delta_len == len(streamed)
+                            # so actual_call is empty after subtraction.
+                            # str.replace("", "", 1) is a no-op that
+                            # returns the full expected_call, which would
+                            # re-send args the parser already emitted.
+                            if (
+                                remaining_call == expected_call
+                                and actual_call is not None
+                                and actual_call not in expected_call
+                            ) or (not actual_call and latest_delta_len > 0):
+                                remaining_call = ""
+
+                            # Only replace delta_message when there are
+                            # actually remaining args to flush.  When
+                            # remaining is empty the parser's delta
+                            # already contains the correct arguments —
+                            # overwriting it would blank them out.
+                            if remaining_call:
+                                delta_message = (
+                                    self._create_remaining_args_delta(
+                                        delta_message, remaining_call,
+                                        index,
+                                    )
+                                )
 
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the

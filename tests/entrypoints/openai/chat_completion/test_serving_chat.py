@@ -2079,3 +2079,265 @@ class TestCreateRemainingArgsDelta:
         assert tc.type == "function"
         assert tc.function.name is None
         assert tc.function.arguments == '{"data": "value"}'
+
+
+class TestRemainingCallComputation:
+    """Tests for the remaining_call computation in the finish-reason path.
+
+    When a streaming tool call finishes, serving.py computes what arguments
+    the parser already streamed vs. what the parser's final state expects,
+    and flushes any un-streamed remainder.  The computation is:
+
+        actual_call = streamed_args_for_tool[index]
+        if latest_delta_len > 0:
+            actual_call = actual_call[:-latest_delta_len]
+        remaining_call = expected_call.replace(actual_call, "", 1)
+
+    Bugs in this logic can cause arguments to be sent twice (garbled JSON)
+    or blanked out entirely.
+    """
+
+    @staticmethod
+    def _compute_remaining(
+        expected_call: str,
+        streamed_so_far: str,
+        latest_delta_len: int,
+    ) -> str:
+        """Replicate the remaining_call computation from serving.py."""
+        actual_call = streamed_so_far
+        if latest_delta_len > 0:
+            actual_call = actual_call[:-latest_delta_len]
+
+        remaining_call = expected_call.replace(actual_call, "", 1)
+
+        # The guard from our fix:
+        if (
+            remaining_call == expected_call
+            and actual_call is not None
+            and actual_call not in expected_call
+        ) or (not actual_call and latest_delta_len > 0):
+            remaining_call = ""
+        return remaining_call
+
+    def test_normal_incremental_streaming(self):
+        """Normal case: args streamed incrementally, small remainder left.
+
+        Parser streamed '{"location": "Par' so far, final expected is
+        '{"location": "Paris"}'. The finish delta carries 'is"}'.
+        remaining should be the un-sent portion after subtracting
+        the latest delta.
+        """
+        expected = '{"location": "Paris"}'
+        streamed = '{"location": "Paris"}'
+        latest_delta_len = 4  # 'is"}'
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        # actual_call = streamed[:-4] = '{"location": "Par'
+        # remaining = expected.replace('{"location": "Par', "", 1) = 'is"}'
+        assert remaining == 'is"}'
+
+    def test_all_args_in_one_delta(self):
+        """Bug case: entire args arrive in a single delta.
+
+        When a tool call is compact (e.g. Gemma4's format), the parser
+        emits ALL arguments in the finish delta.  latest_delta_len equals
+        the full args length, making actual_call empty.  Without the
+        guard, replace("", "", 1) is a no-op → remaining equals the full
+        expected → args get sent TWICE → garbled JSON on the client.
+        """
+        expected = '{"pattern": "credit"}'
+        streamed = '{"pattern": "credit"}'
+        latest_delta_len = 21  # == len(expected), entire args in one delta
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        # actual_call = streamed[:-21] = ""
+        # Without guard: remaining = expected.replace("","",1) = expected (BUG)
+        # With guard: remaining = ""
+        assert remaining == "", (
+            f"Expected empty remaining when all args arrived in one delta, "
+            f"got {remaining!r}"
+        )
+
+    def test_all_args_in_one_delta_complex(self):
+        """Same bug with multi-parameter arguments."""
+        expected = '{"city": "San Francisco", "unit": "celsius"}'
+        streamed = expected
+        latest_delta_len = len(expected)
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        assert remaining == ""
+
+    def test_nothing_streamed_yet(self):
+        """Edge case: finish arrives but nothing was streamed.
+
+        This happens when the parser detected a tool call but never
+        emitted any argument deltas.  All args should be flushed.
+        """
+        expected = '{"query": "test"}'
+        streamed = ""
+        latest_delta_len = 0
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        assert remaining == expected
+
+    def test_partial_stream_no_latest_delta(self):
+        """Parser streamed some args previously, finish has no new delta.
+
+        This is the normal "catch up" case where the parser streamed
+        partial args in earlier deltas, and the finish delta has no
+        new arguments (latest_delta_len=0).
+        """
+        expected = '{"a": 1, "b": 2}'
+        streamed = '{"a": 1'
+        latest_delta_len = 0
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        assert remaining == ', "b": 2}'
+
+    def test_skip_overwrite_when_remaining_empty(self):
+        """Verify that _create_remaining_args_delta is NOT called when
+        remaining is empty, preserving the parser's original delta.
+
+        This is the integration-level version of test_all_args_in_one_delta:
+        when remaining_call is "", the original delta_message (which
+        already carries the correct arguments) must not be overwritten.
+        """
+        from vllm.entrypoints.openai.chat_completion.serving import (
+            OpenAIServingChat,
+        )
+        from vllm.entrypoints.openai.engine.protocol import (
+            DeltaFunctionCall,
+            DeltaMessage,
+            DeltaToolCall,
+        )
+
+        # Simulate the parser's delta: all args in one shot
+        parser_delta = DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=0,
+                    id="call_abc",
+                    type="function",
+                    function=DeltaFunctionCall(
+                        name="grep",
+                        arguments='{"pattern": "credit"}',
+                    ),
+                )
+            ]
+        )
+
+        expected = '{"pattern": "credit"}'
+        streamed = expected
+        latest_delta_len = len(expected)
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        assert remaining == ""
+
+        # When remaining is empty, serving.py should NOT call
+        # _create_remaining_args_delta.  If it did, the result would
+        # have arguments="" which blanks out the parser's args.
+        if remaining:
+            final_delta = OpenAIServingChat._create_remaining_args_delta(
+                parser_delta, remaining, 0
+            )
+        else:
+            final_delta = parser_delta
+
+        # The original arguments must survive
+        assert final_delta.tool_calls[0].function.arguments == '{"pattern": "credit"}'
+        assert final_delta.tool_calls[0].id == "call_abc"
+        assert final_delta.tool_calls[0].function.name == "grep"
+
+    def test_multiple_tool_calls_second_all_at_once(self):
+        """Multiple tool calls: first streamed normally, second all-at-once.
+
+        The remaining_call logic uses index=len(prev_tool_call_arr)-1,
+        which points to the last (second) tool call.  The second call's
+        args arrive in one delta, so the same single-delta bug applies.
+        """
+        # Simulate: first tool call already complete, second arrives now
+        # index would be 1 (second tool call)
+        expected = '{"file": "test.py"}'
+        streamed = expected  # all streamed in one shot
+        latest_delta_len = len(expected)
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        assert remaining == ""
+
+    def test_replace_ambiguity_repeated_substring(self):
+        """actual_call appears multiple times in expected.
+
+        replace(..., 1) only removes the first occurrence, which is
+        the correct prefix.  This must produce the right suffix.
+        """
+        # expected has "a" appearing in both key and value
+        expected = '{"a": "a", "b": 2}'
+        streamed = '{"a": "a", "b": 2}'
+        latest_delta_len = 7  # ', "b": 2}' minus closing would be partial
+
+        # actual_call = streamed[:-7] = '{"a": "a", '
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        # remaining = expected.replace('{"a": "a", ', "", 1) = '"b": 2}'
+        assert remaining == '"b": 2}'
+
+    def test_latest_delta_zero_all_previously_streamed(self):
+        """Finish delta has arguments="" (latest_delta_len=0).
+
+        All args were streamed in prior deltas.  actual_call equals the
+        full streamed string.  remaining should be empty because
+        expected.replace(expected, "", 1) = "".
+        """
+        expected = '{"city": "Tokyo"}'
+        streamed = expected
+        latest_delta_len = 0
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        # actual_call = streamed (no subtraction)
+        # remaining = expected.replace(expected, "", 1) = ""
+        assert remaining == ""
+
+    def test_mismatch_actual_not_in_expected(self):
+        """actual_call doesn't appear in expected (parser/state mismatch).
+
+        replace() is a no-op → remaining == expected.  Guard catches
+        this and zeros out remaining to avoid sending garbage.
+        """
+        expected = '{"correct": "value"}'
+        streamed = '{"wrong": "data"}'
+        latest_delta_len = 5  # some partial
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        # actual_call = '{"wrong": "d'  — not in expected
+        # replace is no-op → remaining = expected
+        # guard: remaining == expected and actual not in expected → ""
+        assert remaining == ""
+
+    def test_negative_slice_edge_case(self):
+        """latest_delta_len > len(streamed) — defensive edge case.
+
+        Python's negative slice with magnitude > length returns empty
+        string, which is the same as the all-in-one-delta case.
+        """
+        expected = '{"x": 1}'
+        streamed = '{"x": 1}'
+        latest_delta_len = 100  # way larger than streamed
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        # actual_call = streamed[:-100] = "" (Python returns empty for over-sized negative slice)
+        # guard fires: not actual_call and latest_delta_len > 0
+        assert remaining == ""
+
+    def test_only_closing_chars_remaining(self):
+        """Parser streamed all but closing characters.
+
+        This is the normal incremental case where the parser withholds
+        trailing '}' during streaming and the finish flushes it.
+        """
+        expected = '{"name": "Alice"}'
+        streamed = '{"name": "Alice"}'
+        latest_delta_len = 2  # '"}' in the finish delta
+
+        remaining = self._compute_remaining(expected, streamed, latest_delta_len)
+        # actual_call = '{"name": "Alice'
+        # remaining = expected.replace('{"name": "Alice', "", 1) = '"}'
+        assert remaining == '"}'
