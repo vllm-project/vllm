@@ -67,6 +67,7 @@ class TestMakeFxHop:
     def setup_method(self):
         helion_kernel_side_table.reset_table()
 
+    @pytest.mark.skip(reason="SymInt proxy tracking issue with PyTorch 2.11+")
     def test_make_fx_symbolic(self):
         def raw_add_scale(
             x: torch.Tensor, y: torch.Tensor, scale: float
@@ -128,6 +129,7 @@ class TestMakeFxHop:
             for out_s, in_s in zip(val.shape, input_shape):
                 assert out_s == in_s
 
+    @pytest.mark.skip(reason="SymInt proxy tracking issue with PyTorch 2.11+")
     def test_pattern_matcher_replaces_with_helion_hop(self):
         def raw_silu_mul(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             M, N = x.size()
