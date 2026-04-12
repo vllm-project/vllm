@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import aiohttp
 import asyncio
+import os
 import threading
 import time
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING, Any
@@ -354,6 +355,8 @@ class MooncakeConnector(KVConnectorBase_V1):
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
+    _DEFAULT_HANDLE_REQUEST_MAX_WORKERS = max(4, min(32, (os.cpu_count() or 1) * 4))
+
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
 
@@ -383,6 +386,8 @@ class MooncakeConnectorScheduler:
         # Reqs to remove from processed set because they're not to send after
         # remote prefill or aborted.
         self._reqs_not_processed: set[TransferId] = set()
+        self._handle_request_executor: ThreadPoolExecutor | None = None
+        self._handle_request_futures: set[Future[None]] = set()
         if self.is_kv_producer and self.use_layerwise:
             self.remote_ready_req = dict() # {transfer_id: (block_ids)}
             self.remote_new_agent = dict() # {engine_id : agent_meta}
@@ -401,13 +406,70 @@ class MooncakeConnectorScheduler:
             self.remote_engine_ids = set()
             self.xfermetadata_decoder = msgspec.msgpack.Decoder(MooncakeLayerwiseXferMetadata)
         if self.is_kv_consumer and self.use_layerwise:
-            self.receiver_loop = asyncio.get_event_loop()
-            self._receiver_listener_t = threading.Thread(
-                target=_async_loop, args=(self.receiver_loop,), daemon=True
+            max_workers = (
+                self.vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "handle_request_max_workers",
+                    self._DEFAULT_HANDLE_REQUEST_MAX_WORKERS,
+                )
             )
-            self._receiver_listener_t.start()
+            self._handle_request_executor = ThreadPoolExecutor(
+                max_workers=max_workers,
+                thread_name_prefix="vllm-mooncake-handle-request",
+            )
         self.remote_engine_addr = dict()
-        
+    
+    def __del__(self):
+        self.shutdown()
+
+    def shutdown(self):
+        executor = getattr(self, "_handle_request_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False)
+            self._handle_request_executor = None
+        pending_futures = getattr(self, "_handle_request_futures", None)
+        if pending_futures is not None:
+            pending_futures.clear()
+
+    def _run_handle_request_task(
+        self,
+        request_id: str,
+        remote_bootstrap_addr: str,
+        params: dict[str, Any],
+        block_ids: list[int],
+    ) -> None:
+        asyncio.run(
+            self.handle_request(request_id, remote_bootstrap_addr, params, block_ids)
+        )
+
+    def _log_handle_request_result(self, future: Future[None]) -> None:
+        try:
+            future.result()
+        except Exception:
+            logger.exception("Mooncake handle_request task failed.")
+
+    def _submit_handle_request(
+        self,
+        request_id: str,
+        remote_bootstrap_addr: str,
+        params: dict[str, Any],
+        block_ids: list[int],
+    ) -> None:
+        if self._handle_request_executor is None:
+            raise RuntimeError(
+                "Mooncake handle_request executor is not initialized for "
+                "layerwise kv_consumer scheduler."
+            )
+
+        future = self._handle_request_executor.submit(
+            self._run_handle_request_task,
+            request_id,
+            remote_bootstrap_addr,
+            dict(params),
+            list(block_ids),
+        )
+        self._handle_request_futures.add(future)
+        future.add_done_callback(self._handle_request_futures.discard)
+        future.add_done_callback(self._log_handle_request_result)
 
     async def _mooncake_enginecore_listener(self, ready_event: threading.Event):
         """
@@ -630,15 +692,12 @@ class MooncakeConnectorScheduler:
                 # asyncio.create_task(
                 #     self.handle_request(request.request_id, remote_bootstrap_addr, params)  # 如果remote_bootstrap_addr对应的engine_id是第一次遇到，就query；并发送transfer_info
                 # )
-                asyncio.run_coroutine_threadsafe(
-                    self.handle_request(request.request_id, remote_bootstrap_addr, params, local_block_ids),
-                    self.receiver_loop
+                self._submit_handle_request(
+                    request.request_id,
+                    remote_bootstrap_addr,
+                    params,
+                    local_block_ids,
                 )
-                threading.Thread(
-                    target=self.handle_request,
-                    args=(request.request_id, remote_bootstrap_addr, params, local_block_ids),
-                    daemon=True
-                ).start()
 
         elif params.get("do_remote_decode"):
             assert not self.is_kv_consumer
