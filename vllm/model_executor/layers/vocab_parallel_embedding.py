@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter, UninitializedParameter
+from torch.nn.parameter import Parameter
 
 from vllm.distributed import (
     divide,
@@ -418,16 +418,6 @@ class VocabParallelEmbedding(PluggableLayer):
         output_dim = getattr(param, "output_dim", None)
         packed_dim = getattr(param, "packed_dim", None)
 
-        if getattr(param, "needs_custom_weight_type", None):
-            param.data.copy_(loaded_weight)
-            param.weight_type = loaded_weight.item()
-            return
-        elif isinstance(param, UninitializedParameter):
-            shape = list(loaded_weight.shape)
-            if output_dim is not None:
-                shape[output_dim] = self.num_embeddings_per_partition
-            param.materialize(tuple(shape), dtype=loaded_weight.dtype)
-
         # If parameter does not have output dim, then it should
         # be copied onto all gpus (e.g. g_idx for act_order gptq).
         if output_dim is None:
@@ -548,11 +538,8 @@ class ParallelLMHead(VocabParallelEmbedding):
 
     def tie_weights(self, embed_tokens: VocabParallelEmbedding):
         """Tie the weights with word embeddings."""
-        if self.quant_config and self.quant_config.should_keep_tied_lm_head():
-            return embed_tokens
-        else:
-            self.weight = embed_tokens.weight
-            return self
+        self.weight = embed_tokens.weight
+        return self
 
     def forward(self, input_):
         del input_
