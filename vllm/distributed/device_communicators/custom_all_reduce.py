@@ -150,12 +150,23 @@ class CustomAllreduce:
         assert current_platform.is_cuda_alike()
         fully_connected = current_platform.is_fully_connected(physical_device_ids)
         if world_size > 2 and not fully_connected:
-            logger.warning(
-                "Custom allreduce is disabled because it's not supported on"
-                " more than two PCIe-only GPUs. To silence this warning, "
-                "specify disable_custom_all_reduce=True explicitly."
+            import os
+            if os.environ.get("VLLM_ENABLE_PCIE_ALLREDUCE", "0") != "1":
+                logger.warning(
+                    "Custom allreduce is disabled for >2 PCIe-only GPUs. "
+                    "Set VLLM_ENABLE_PCIE_ALLREDUCE=1 to enable P2P custom "
+                    "allreduce on PCIe topology (requires P2P-capable driver, "
+                    "see PR #39040 for details)."
+                )
+                return
+            logger.info(
+                "PCIe custom allreduce enabled via VLLM_ENABLE_PCIE_ALLREDUCE=1"
             )
-            return
+            # Preserve the historical runtime contract used by the working
+            # GLM hotfix: once the operator is explicitly enabled on a PCIe
+            # topology, treat it as eligible for the same small-tensor custom
+            # allreduce path as a fully connected topology.
+            fully_connected = True
         # test P2P capability, this checks software/cudaruntime support
         # this is expensive to compute at the first time
         # then we cache the result
@@ -238,8 +249,9 @@ class CustomAllreduce:
             return False
         if not is_weak_contiguous(inp):
             return False
-        # for 4 or more non NVLink-capable GPUs, custom allreduce provides
-        # little performance improvement over NCCL.
+        # Keep the runtime guard aligned with the initialization contract
+        # above. For >2 PCIe GPUs we only use custom allreduce when the
+        # topology is explicitly opted in and treated as fully connected.
         if self.world_size == 2 or self.fully_connected:
             return inp_size < self.max_size
         return False
