@@ -14,6 +14,8 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
 from vllm.platforms import current_platform
+import vllm.envs as envs
+from unittest.mock import patch
 
 DTYPES = [torch.float16, torch.bfloat16]
 QUANT_DTYPES = [current_platform.fp8_dtype(), torch.int8]
@@ -59,6 +61,7 @@ def ref_silu_and_mul_per_block_quant(
 @pytest.mark.parametrize("is_scale_transposed", IS_SCALE_TRANSPOSED)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device_idx", CUDA_DEVICES)
+@pytest.mark.parametrize("use_triton", [False, True])
 @torch.inference_mode()
 def test_silu_and_mul_per_block_quant(
     default_vllm_config,
@@ -71,6 +74,7 @@ def test_silu_and_mul_per_block_quant(
     is_scale_transposed: bool,
     seed: int,
     device_idx: str,
+    use_triton: bool,
 ) -> None:
     """Test SiLU+Mul+Block Quantization kernel correctness."""
     torch.accelerator.set_device_index(device_idx)
@@ -84,7 +88,12 @@ def test_silu_and_mul_per_block_quant(
     if has_scale_ub:
         pytest.skip("Scale upper bound not yet supported")
 
-    scale = 1 / hidden_size
+    # Triton implementation currently only supports FP8
+    if use_triton and quant_dtype == torch.int8:
+        pytest.skip("Triton kernel does not yet support int8")
+
+    with patch("vllm.envs.VLLM_USE_TRITON_ACT_QUANT", use_triton):
+        scale = 1 / hidden_size
     x = torch.randn(num_tokens, hidden_size * 2, dtype=dtype, device=device) * scale
 
     # Reference implementation
@@ -122,10 +131,16 @@ def test_silu_and_mul_per_block_quant(
         scales = torch.empty(num_groups, num_tokens, device=device, dtype=torch.float32)
     else:
         scales = torch.empty(num_tokens, num_groups, device=device, dtype=torch.float32)
-    opcheck(
-        torch.ops._C.silu_and_mul_per_block_quant,
-        (output, x, scales, group_size, None, is_scale_transposed),
-    )
+    if use_triton:
+        opcheck(
+            torch.ops.vllm.silu_and_mul_per_block_quant_triton,
+            (x, group_size, quant_dtype, None, is_scale_transposed),
+        )
+    else:
+        opcheck(
+            torch.ops._C.silu_and_mul_per_block_quant,
+            (output, x, scales, group_size, None, is_scale_transposed),
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.float16])

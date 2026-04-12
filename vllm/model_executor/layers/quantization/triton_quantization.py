@@ -72,11 +72,13 @@ def silu_and_mul_per_block_quant_triton(
     )
 
     if is_scale_transposed:
+        # Create a (num_groups, num_tokens) tensor and transpose it
+        # to get a (num_tokens, num_groups) view with transposed strides.
         scales = torch.empty(
             (num_groups, num_tokens), device=input.device, dtype=torch.float32
-        )
-        scales_stride_m = scales.stride(1)
-        scales_stride_g = scales.stride(0)
+        ).t()
+        scales_stride_m = scales.stride(0)
+        scales_stride_g = scales.stride(1)
     else:
         scales = torch.empty(
             (num_tokens, num_groups), device=input.device, dtype=torch.float32
