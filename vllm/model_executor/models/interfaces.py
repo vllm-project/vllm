@@ -1068,6 +1068,10 @@ def supports_realtime(
 ) -> TypeIs[type[SupportsRealtime]] | TypeIs[SupportsRealtime]:
     return getattr(model, "supports_realtime", False)
 
+def supports_realtime_video(
+    model: type[object] | object,
+) -> bool:
+    return getattr(model, "supports_realtime_video", False)
 
 @runtime_checkable
 class SupportsTranscription(Protocol):

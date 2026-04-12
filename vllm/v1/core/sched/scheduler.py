@@ -1036,6 +1036,7 @@ class Scheduler(SchedulerInterface):
         session.update_block_hashes()
         session.num_prompt_tokens = len(session.prompt_token_ids)
         session.arrival_time = update.arrival_time
+        session.max_tokens = update.max_tokens
         session.sampling_params = update.sampling_params
         if session.status == RequestStatus.WAITING_FOR_STREAMING_REQ:
             self.num_waiting_for_streaming_input -= 1

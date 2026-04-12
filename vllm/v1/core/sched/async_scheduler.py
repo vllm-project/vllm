@@ -49,9 +49,18 @@ class AsyncScheduler(Scheduler):
         )
 
         # Update the number of output placeholders.
-        request.num_output_placeholders -= len(new_token_ids)
-        assert request.num_output_placeholders >= 0
-
+        # request.num_output_placeholders -= len(new_token_ids)
+        # assert request.num_output_placeholders >= 0
+        excess = request.num_output_placeholders - len(new_token_ids)
+        if excess < 0:
+            logger.warning(
+                "num_output_placeholders underflow for request %s "
+                "(placeholder=%d, new_tokens=%d). Clamping to 0.",
+                request.request_id,
+                request.num_output_placeholders,
+                len(new_token_ids),
+            )
+        request.num_output_placeholders = max(0, excess)
         # Cache the new tokens. Preempted requests should be skipped.
         if status_before_update == RequestStatus.RUNNING:
             self.kv_cache_manager.cache_blocks(

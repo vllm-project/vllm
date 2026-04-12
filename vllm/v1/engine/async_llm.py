@@ -6,7 +6,7 @@ import socket
 import time
 import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
-from copy import copy
+from copy import copy, deepcopy
 from typing import Any
 
 import torch
@@ -463,6 +463,11 @@ class AsyncLLM(EngineClient):
                         self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
+                    sp_temp = deepcopy(sp)
+                    if input_chunk.prompt['has_text']:
+                        sp_temp.max_tokens = sp.max_tokens
+                    else:
+                        sp_temp.max_tokens = 1
                     # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
                         request_id=internal_req_id,

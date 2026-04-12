@@ -1588,6 +1588,7 @@ class Qwen3VLForConditionalGeneration(
     SupportsEagle3,
     SupportsMultiModalPruning,
 ):
+    supports_realtime_video = True
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",

@@ -240,6 +240,13 @@ def build_app(
         )
 
         register_realtime_api_router(app)
+    
+    if "realtime_video" in supported_tasks:
+        from vllm.entrypoints.openai.video_realtime.api_router import (
+            attach_router as register_video_realtime_api_router,
+        )
+
+        register_video_realtime_api_router(app)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import register_pooling_api_routers
@@ -283,7 +290,7 @@ def build_app(
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
 
-    if "realtime" in supported_tasks:
+    if "realtime" in supported_tasks or "realtime_video" in supported_tasks:
         # Add WebSocket metrics middleware
         from vllm.entrypoints.openai.realtime.metrics import (
             WebSocketMetricsMiddleware,
@@ -414,6 +421,14 @@ async def init_app_state(
         from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
 
         init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
+
+    if "realtime_video" in supported_tasks:
+        from vllm.entrypoints.openai.video_realtime.api_router import (
+            init_realtime_video_state,
+        )
+
+        init_realtime_video_state(engine_client, state, args, 
+                                  request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import init_pooling_state
