@@ -324,6 +324,7 @@ async def test_function_calling_with_streaming_forced_tool_choice(
 
     tool_call_item = None
     completed_event = None
+    arguments_done_event = None
     text_deltas = []
     async for event in stream_response:
         if (
@@ -335,6 +336,8 @@ async def test_function_calling_with_streaming_forced_tool_choice(
             text_deltas.append(event.delta)
         elif event.type == "response.function_call_arguments.delta" and tool_call_item:
             tool_call_item.arguments += event.delta
+        elif event.type == "response.function_call_arguments.done":
+            arguments_done_event = event
         elif (
             event.type == "response.output_item.done"
             and event.item.type == "function_call"
@@ -344,6 +347,9 @@ async def test_function_calling_with_streaming_forced_tool_choice(
     assert tool_call_item is not None
     assert tool_call_item.type == "function_call"
     assert tool_call_item.name == "get_weather"
+    assert arguments_done_event is not None
+    assert tool_call_item.arguments == arguments_done_event.arguments
+    assert arguments_done_event.name == "get_weather"
     assert completed_event is not None
     assert tool_call_item.arguments == completed_event.item.arguments
     assert tool_call_item.name == completed_event.item.name
