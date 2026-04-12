@@ -280,23 +280,24 @@ def test_allocate_canonical_kv_caches():
     assert kv_caches["full.0"].data_ptr() == kv_caches["sw.0"].data_ptr()
     assert kv_caches["full.1"].data_ptr() == kv_caches["sw.2"].data_ptr()
 
-    # -- block tensors: one per position (num_blocks is leading dim)
-    assert len(canonical.tensors) == 2
-    for bt in canonical.tensors:
-        assert bt.tensor.shape == (NUM_BLOCKS, 2, BLOCK_SIZE, NUM_KV_HEADS, HEAD_SIZE)
+    # -- single cross-layers tensor: (num_blocks, cross_layer_page_size) int8
+    assert len(canonical.tensors) == 1
+    bt = canonical.tensors[0]
+    per_position_page = 2 * BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE * DTYPE.itemsize
+    group_size = len(config.kv_cache_tensors)
+    cross_layer_page = per_position_page * group_size
+    assert bt.tensor.shape == (NUM_BLOCKS, cross_layer_page)
+    assert bt.tensor.dtype == torch.int8
+    assert bt.page_size_bytes == cross_layer_page
 
-    # contiguity: position 1 starts right after position 0 for block 0
-    page_bytes = 2 * BLOCK_SIZE * NUM_KV_HEADS * HEAD_SIZE * DTYPE.itemsize
-    ptrs = [bt.tensor.data_ptr() for bt in canonical.tensors]
-    assert ptrs[1] - ptrs[0] == page_bytes
+    # each row is contiguous and covers all positions for one block
+    assert bt.tensor.is_contiguous()
 
     # -- group_data_refs: 3 groups, each with 2 layers
     assert len(canonical.group_data_refs) == 3
-    for refs in canonical.group_data_refs:
-        assert len(refs) == 2
-        assert [r.tensor_idx for r in refs] == [0, 1]
-
     full_page = config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     for refs in canonical.group_data_refs:
+        assert len(refs) == 2
+        assert [r.tensor_idx for r in refs] == [0, 0]
         for ref in refs:
             assert ref.page_size_bytes == full_page

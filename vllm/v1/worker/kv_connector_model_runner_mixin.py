@@ -443,24 +443,27 @@ class KVConnectorModelRunnerMixin:
                 layer_to_group_idx[layer_name] = gid
 
         kv_caches: dict[str, torch.Tensor] = {}
-        block_tensors: list[KVCacheBlockTensor] = []
         group_data_refs: list[list[KVCacheBlockDataRef]] = [
             [] for _ in kv_cache_config.kv_cache_groups
         ]
 
-        kernel_block_size = kernel_block_sizes[0]
+        # Single cross-layers canonical tensor: (num_blocks, page_size_bytes)
+        # as raw int8, where page_size_bytes covers all positions.
+        cross_layer_page_size = page_size * group_size
+        cross_layers_tensor = contiguous_buffer_bytes.view(
+            num_blocks, cross_layer_page_size
+        )
 
         for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             # Per-layer reshape: compute shape from each layer's own
             # spec and backend, then view the flat buffer accordingly.
-            typed_buffer = None
-            kv_cache_stride_order: tuple[int, ...] | None = None
             for layer_name in kv_cache_tensor.shared_by:
                 gid = layer_to_group_idx[layer_name]
                 spec = kv_cache_config.kv_cache_groups[gid].kv_cache_spec
                 assert isinstance(spec, AttentionSpec)
 
                 attn_backend = attn_groups[gid][0].backend
+                kernel_block_size = kernel_block_sizes[gid]
                 num_blocks_per_kv_block = spec.block_size // kernel_block_size
                 kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
@@ -494,27 +497,21 @@ class KVConnectorModelRunnerMixin:
                 )
                 kv_caches[layer_name] = typed_buffer.permute(*inv_order)[i]
 
-            # canonical view: num_blocks is the leading physical dim
-            assert typed_buffer is not None
-            assert kv_cache_stride_order is not None
-            group_dim = kv_cache_stride_order.index(0)
-            block_tensor = typed_buffer.select(group_dim, i)
-            tensor_idx = len(block_tensors)
-            page_bytes = block_tensor[0].numel() * block_tensor.element_size()
-            block_tensors.append(
-                KVCacheBlockTensor(tensor=block_tensor, page_size_bytes=page_bytes)
-            )
-
             for layer_name in kv_cache_tensor.shared_by:
                 layer_gid = layer_to_group_idx[layer_name]
                 group_data_refs[layer_gid].append(
                     KVCacheBlockDataRef(
-                        tensor_idx=tensor_idx,
-                        page_size_bytes=page_bytes,
+                        tensor_idx=0,
+                        page_size_bytes=page_size,
                     )
                 )
 
         return kv_caches, CanonicalKVCaches(
-            tensors=block_tensors,
+            tensors=[
+                KVCacheBlockTensor(
+                    tensor=cross_layers_tensor,
+                    page_size_bytes=cross_layer_page_size,
+                )
+            ],
             group_data_refs=group_data_refs,
         )
