@@ -25,7 +25,6 @@ from vllm.config.quantization import OnlineQuantizationConfigArgs
 from vllm.config.scheduler import RunnerType
 from vllm.config.utils import config, getattr_iter
 from vllm.logger import init_logger
-from vllm.model_format import get_model_format_handler
 from vllm.platforms import current_platform
 from vllm.tasks import PoolingTask, ScoreType, SupportedTask
 from vllm.transformers_utils.config import (
@@ -498,9 +497,6 @@ class ModelConfig:
             hf_overrides_fn=hf_overrides_fn,
             token=self.hf_token,
         )
-        if handler := get_model_format_handler(self.model):
-            hf_config = handler.patch_model_hf_config(self.model, hf_config)
-
         self.hf_config = hf_config
         if dict_overrides:
             self._apply_dict_overrides(hf_config, dict_overrides)
@@ -658,10 +654,6 @@ class ModelConfig:
                     "disable the cache with --mm-processor-cache-gb 0."
                 )
 
-        # Multimodal GGUF models must use original repo for mm processing
-        if handler := get_model_format_handler(self.model):
-            handler.validate_model_config(self)
-
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
             # can be correctly capped to sliding window size
@@ -814,10 +806,7 @@ class ModelConfig:
             self.tokenizer = object_storage_tokenizer.dir
 
     def _get_encoder_config(self) -> dict[str, Any] | None:
-        model = self.model
-        if handler := get_model_format_handler(model):
-            model = handler.resolve_sentence_transformer_source(model, self.revision)
-        return get_sentence_transformer_tokenizer_config(model, self.revision)
+        return get_sentence_transformer_tokenizer_config(self.model, self.revision)
 
     def _get_default_runner_type(
         self,

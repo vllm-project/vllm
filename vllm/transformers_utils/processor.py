@@ -24,7 +24,6 @@ from transformers.video_utils import VideoInput
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.model_format import get_model_format_handler
 from vllm.transformers_utils import processors
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.transformers_utils.utils import convert_model_repo_to_path
@@ -341,15 +340,9 @@ def cached_processor_from_config(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    if handler := get_model_format_handler(model_config.model):
-        model, revision = handler.resolve_processor_source(model_config, "processor")
-    else:
-        model = model_config.model
-        revision = model_config.revision
-
     return cached_get_processor_without_dynamic_kwargs(
-        model,
-        revision=revision,
+        model_config.model,
+        revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
@@ -450,16 +443,9 @@ def cached_image_processor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
 ):
-    if handler := get_model_format_handler(model_config.model):
-        model, revision = handler.resolve_processor_source(
-            model_config, "image_processor"
-        )
-    else:
-        model = model_config.model
-        revision = model_config.revision
     return cached_get_image_processor(
-        model,
-        revision=revision,
+        model_config.model,
+        revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, AutoImageProcessor, **kwargs),
     )

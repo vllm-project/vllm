@@ -93,7 +93,6 @@ from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
 from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
-from vllm.model_format import get_model_format_handler
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
 from vllm.ray.lazy_utils import is_in_ray_actor, is_ray_initialized
@@ -1417,9 +1416,6 @@ class EngineArgs:
 
     def create_model_config(self) -> ModelConfig:
         load_general_plugins()
-
-        if handler := get_model_format_handler(self.model):
-            handler.update_engine_args(self)
 
         if not envs.VLLM_ENABLE_V1_MULTIPROCESSING:
             logger.warning(

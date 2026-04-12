@@ -25,10 +25,6 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_format import (
-    get_model_format_handler,
-    prepare_hf_model_reference,
-)
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
@@ -571,17 +567,15 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     kwargs["local_files_only"] = huggingface_hub.constants.HF_HUB_OFFLINE
-    _, resolved_model, resolved_kwargs = prepare_hf_model_reference(
-        model,
-        revision=revision,
-        **kwargs,
-    )
-    config_dict, _ = PretrainedConfig.get_config_dict(
-        resolved_model,
-        revision=revision,
-        token=hf_token,
-        **without_trust_remote_code(resolved_kwargs),
-    )
+    try:
+        config_dict, _ = PretrainedConfig.get_config_dict(
+            model,
+            revision=revision,
+            token=hf_token,
+            **without_trust_remote_code(kwargs),
+        )
+    except OSError:
+        config_dict = {}
     speculators_config = config_dict.get("speculators_config")
 
     if speculators_config is None:
@@ -615,20 +609,8 @@ def get_config(
     hf_overrides_fn: Callable[[PretrainedConfig], PretrainedConfig] | None = None,
     **kwargs,
 ) -> PretrainedConfig:
-    original_model = model
-    handler, model, kwargs = prepare_hf_model_reference(
-        model,
-        revision=revision,
-        **kwargs,
-    )
-
     if config_format == "auto":
         try:
-            use_hf_parser_without_config = (
-                handler.should_use_hf_config_parser(original_model, model)
-                if handler is not None
-                else False
-            )
             # First check for Mistral to avoid defaulting to
             # Transformers implementation.
             if is_mistral_model_repo(
@@ -637,22 +619,9 @@ def get_config(
                 model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
             ):
                 config_format = "mistral"
-            elif use_hf_parser_without_config or file_or_path_exists(
-                model, HF_CONFIG_NAME, revision=revision
-            ):
+            elif file_or_path_exists(model, HF_CONFIG_NAME, revision=revision):
                 config_format = "hf"
             else:
-                if (
-                    handler is not None
-                    and (
-                        err_msg := handler.get_missing_hf_config_error(
-                            original_model, model
-                        )
-                    )
-                    is not None
-                ):
-                    logger.error(err_msg)
-                    raise ValueError(err_msg)
                 raise ValueError(
                     "Could not detect config format for no config file found. "
                     "With config_format 'auto', ensure your model has either "
@@ -672,7 +641,7 @@ def get_config(
                 "'config.json'.\n"
                 "   - For Mistral models: ensure the presence of a "
                 "'params.json'.\n"
-            ).format(model=original_model)
+            ).format(model=model)
 
             raise ValueError(error_message) from e
 
@@ -685,8 +654,6 @@ def get_config(
         hf_overrides=hf_overrides_kw or hf_overrides_fn,
         **kwargs,
     )
-    if handler is not None:
-        config = handler.patch_parsed_hf_config(original_model, config_dict, config)
 
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:
@@ -779,9 +746,6 @@ def get_pooling_config(
         A dictionary containing the pooling type and whether
             normalization is used, or None if no pooling configuration is found.
     """
-    if handler := get_model_format_handler(model):
-        model = handler.resolve_sentence_transformer_source(model, revision)
-
     modules_file_name = "modules.json"
 
     modules_dict = None
@@ -869,9 +833,6 @@ def get_sentence_transformer_tokenizer_config(
     - dict: A dictionary containing the configuration parameters
     for the Sentence Transformer BERT model.
     """
-    if handler := get_model_format_handler(model):
-        model = handler.resolve_sentence_transformer_source(model, revision)
-
     sentence_transformer_config_files = [
         "sentence_bert_config.json",
         "sentence_roberta_config.json",
@@ -1000,8 +961,6 @@ def get_hf_image_processor_config(
     # ModelScope does not provide an interface for image_processor
     if envs.VLLM_USE_MODELSCOPE:
         return dict()
-    if handler := get_model_format_handler(model):
-        model = handler.resolve_image_processor_source(model, revision)
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
     )
@@ -1031,10 +990,6 @@ def try_get_generation_config(
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
-    if handler := get_model_format_handler(model):
-        if handler.should_skip_generation_config(model):
-            return None
-
     try:
         return GenerationConfig.from_pretrained(
             model,
