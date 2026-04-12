@@ -182,6 +182,8 @@ async def test_metrics_counts(
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
+    "vllm:approximate_uncached_tokens_waiting",
+    "vllm:num_tokens_waiting",
     "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",
@@ -299,13 +301,15 @@ async def test_abort_metrics_reset(
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     prompt_ids = tokenizer.encode(_PROMPT)
 
-    running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
+    running_requests, waiting_requests, waiting_tokens, num_tokens_waiting, kv_cache_usage = _get_running_metrics_from_api(
         server,
     )
 
     # Expect no running requests or kvcache usage
     assert running_requests == 0
     assert waiting_requests == 0
+    assert waiting_tokens == 0
+    assert num_tokens_waiting == 0
     assert kv_cache_usage == 0.0
 
     # Start some long-running requests that we can abort
@@ -337,12 +341,14 @@ async def test_abort_metrics_reset(
         pytest.fail("Requests never appeared as running in metrics")
 
     # Check that we have running requests
-    running_requests, waiting_requests, kv_cache_usage = _get_running_metrics_from_api(
+    running_requests, waiting_requests, waiting_tokens, num_tokens_waiting, kv_cache_usage = _get_running_metrics_from_api(
         server,
     )
 
     # Expect running requests and kvcache usage
     assert running_requests > 0
+    assert waiting_tokens >= 0
+    assert num_tokens_waiting >= 0
     assert kv_cache_usage > 0
 
     # Cancel all tasks to abort the requests
@@ -359,7 +365,7 @@ async def test_abort_metrics_reset(
     )
 
     # Verify running and waiting requests counts and KV cache usage are zero
-    running_requests_after, waiting_requests_after, kv_cache_usage_after = (
+    running_requests_after, waiting_requests_after, waiting_tokens_after, num_tokens_waiting_after, kv_cache_usage_after = (
         _get_running_metrics_from_api(server)
     )
 
@@ -368,6 +374,12 @@ async def test_abort_metrics_reset(
     )
     assert waiting_requests_after == 0, (
         f"Expected 0 waiting requests after abort, got {waiting_requests_after}"
+    )
+    assert waiting_tokens_after == 0, (
+        f"Expected 0 waiting tokens after abort, got {waiting_tokens_after}"
+    )
+    assert num_tokens_waiting_after == 0, (
+        f"Expected 0 raw waiting tokens after abort, got {num_tokens_waiting_after}"
     )
     assert kv_cache_usage_after == 0, (
         f"Expected 0% KV cache usage after abort, got {kv_cache_usage_after}"
@@ -387,13 +399,13 @@ async def _poll_until(
 
 
 def _get_running_metrics_from_api(server: RemoteOpenAIServer):
-    """Return (running_count, waiting_count, kv_cache_usage)"""
+    """Return (running_count, waiting_count, waiting_tokens, num_tokens_waiting, kv_cache_usage)"""
 
     response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
     # Verify running and waiting requests counts and KV cache usage are zero
-    running_requests, waiting_requests, kv_cache_usage = None, None, None
+    running_requests, waiting_requests, waiting_tokens, num_tokens_waiting, kv_cache_usage = None, None, None, None, None
 
     kv_cache_usage_metric = "vllm:kv_cache_usage_perc"
 
@@ -408,6 +420,16 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
                 if sample.name == "vllm:num_requests_waiting":
                     waiting_requests = sample.value
                     break
+        elif family.name == "vllm:approximate_uncached_tokens_waiting":
+            for sample in family.samples:
+                if sample.name == "vllm:approximate_uncached_tokens_waiting":
+                    waiting_tokens = sample.value
+                    break
+        elif family.name == "vllm:num_tokens_waiting":
+            for sample in family.samples:
+                if sample.name == "vllm:num_tokens_waiting":
+                    num_tokens_waiting = sample.value
+                    break
         elif family.name == kv_cache_usage_metric:
             for sample in family.samples:
                 if sample.name == kv_cache_usage_metric:
@@ -416,9 +438,11 @@ def _get_running_metrics_from_api(server: RemoteOpenAIServer):
 
     assert running_requests is not None
     assert waiting_requests is not None
+    assert waiting_tokens is not None
+    assert num_tokens_waiting is not None
     assert kv_cache_usage is not None
 
-    return running_requests, waiting_requests, kv_cache_usage
+    return running_requests, waiting_requests, waiting_tokens, num_tokens_waiting, kv_cache_usage
 
 
 def test_metrics_exist_run_batch():
