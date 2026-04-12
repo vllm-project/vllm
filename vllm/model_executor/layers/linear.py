@@ -5,7 +5,7 @@ import itertools
 from abc import abstractmethod
 
 import torch
-from torch.nn.parameter import Parameter, UninitializedParameter
+from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm.distributed import (
@@ -358,20 +358,6 @@ class ReplicatedLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        # If the weight on disk does not have a shape, give it one
-        # (such scales for AutoFp8).
-        needs_custom_weight_materialization = getattr(
-            param, "needs_custom_weight_materialization", False
-        )
-        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
-        if needs_custom_weight_type:
-            param.weight_type = loaded_weight.item()
-
-        if needs_custom_weight_materialization and isinstance(
-            param, UninitializedParameter
-        ):
-            param.materialize(loaded_weight.shape, dtype=loaded_weight.dtype)
-
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
@@ -535,22 +521,6 @@ class ColumnParallelLinear(LinearBase):
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
 
-        needs_custom_weight_materialization = getattr(
-            param, "needs_custom_weight_materialization", False
-        )
-        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
-        if needs_custom_weight_type:
-            param.weight_type = loaded_weight.item()
-
-        if needs_custom_weight_materialization and isinstance(
-            param, UninitializedParameter
-        ):
-            final_shape = list(loaded_weight.shape)
-            if output_dim is not None:
-                assert final_shape[output_dim] % self.tp_size == 0
-                final_shape[output_dim] = final_shape[output_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
-
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
             shard_size = param_data.shape[output_dim]
@@ -695,38 +665,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
         self.validate_shard_id(loaded_shard_id)
-        needs_custom_weight_materialization = getattr(
-            param, "needs_custom_weight_materialization", False
-        )
-        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
-        if isinstance(loaded_shard_id, tuple) and (
-            needs_custom_weight_materialization or needs_custom_weight_type
-        ):
-            raise NotImplementedError(
-                "Shard id with multiple indices is not supported for this "
-                "format-specific weight loader."
-            )
-        if needs_custom_weight_type:
-            if loaded_shard_id is not None:
-                param.data[loaded_shard_id].copy_(loaded_weight)
-                param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
-            else:
-                param.shard_weight_type = {
-                    i: loaded_weight.item() for i, _ in enumerate(self.output_sizes)
-                }
-            return
-
-        if needs_custom_weight_materialization:
-            output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
-
-            if loaded_shard_id is not None:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-                param.shard_id.append(loaded_shard_id)
-                param.shard_id_map[loaded_shard_id] = len(param.data_container)
-                param.data_container.append(loaded_weight)
-                return
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -1172,30 +1110,6 @@ class QKVParallelLinear(ColumnParallelLinear):
         loaded_shard_id: str | None = None,
     ):
         self.validate_shard_id(loaded_shard_id)
-        needs_custom_weight_materialization = getattr(
-            param, "needs_custom_weight_materialization", False
-        )
-        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
-        if needs_custom_weight_type:
-            idx_map = {"q": 0, "k": 1, "v": 2}
-            if loaded_shard_id is not None:
-                param.data[idx_map[loaded_shard_id]].copy_(loaded_weight)
-                param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
-            else:
-                param.shard_weight_type = {k: loaded_weight.item() for k in idx_map}
-            return
-
-        if needs_custom_weight_materialization:
-            output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
-
-            if loaded_shard_id is not None:
-                loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-                param.shard_id.append(loaded_shard_id)
-                param.shard_id_map[loaded_shard_id] = len(param.data_container)
-                param.data_container.append(loaded_weight)
-                return
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -1483,21 +1397,6 @@ class RowParallelLinear(LinearBase):
         # bitsandbytes loads the weights of the specific portion
         # no need to narrow
         is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-        needs_custom_weight_materialization = getattr(
-            param, "needs_custom_weight_materialization", False
-        )
-        needs_custom_weight_type = getattr(param, "needs_custom_weight_type", False)
-        if needs_custom_weight_type:
-            param.weight_type = loaded_weight.item()
-
-        if needs_custom_weight_materialization and isinstance(
-            param, UninitializedParameter
-        ):
-            weight_shape = list(loaded_weight.shape)
-            if input_dim:
-                weight_shape[input_dim] = weight_shape[input_dim] // self.tp_size
-            param.materialize(tuple(weight_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
         if input_dim is not None and not is_sharded_weight:
