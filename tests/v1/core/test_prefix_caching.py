@@ -1970,6 +1970,7 @@ def test_null_parent_block_hash():
     block_size = 1
     num_cached_blocks = 2
     num_full_blocks = 4
+    kv_cache_group_id = 0
 
     pool = BlockPool(
         num_gpu_blocks=8,
@@ -2002,7 +2003,7 @@ def test_null_parent_block_hash():
         num_cached_blocks=num_cached_blocks,
         num_full_blocks=num_full_blocks,
         block_size=block_size,
-        kv_cache_group_id=0,
+        kv_cache_group_id=kv_cache_group_id,
     )
 
     events = pool.take_events()
@@ -2021,6 +2022,7 @@ def test_null_parent_block_hash():
         for h in req.block_hashes[num_cached_blocks:num_full_blocks]
     ]
     assert event.block_hashes == expected_new_hashes
+    assert event.group_idx == kv_cache_group_id
 
     # Ensure we didn't accidentally assign a hash to the null block.
     assert pool.null_block.block_hash is None
@@ -2085,6 +2087,153 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
     assert block_stored_event.lora_id is None  # Should be None when no LoRA request
     assert len(block_stored_event.block_hashes) == blocks_to_cache
     assert block_stored_event.block_size == block_size
+
+
+@pytest.mark.parametrize("group_id", [0, 1, 2])
+def test_block_stored_event_group_idx(group_id: int):
+    """Test BlockStored events emitted by cache_full_blocks carry the correct
+    group_idx."""
+    block_size = 4
+    num_tokens = block_size * 2
+
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_grp_idx",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=group_id,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].group_idx == group_id
+
+
+def test_block_stored_event_group_idx_multiple_groups():
+    """
+    Test BlockStored events for separate HMA groups that each carry the
+    correct group_idx.
+
+    Simulates the HMA scenario where full-attention blocks (group 0) and
+    sliding-window blocks (group 1) are cached independently and must be
+    distinguishable by consumers doing HMA-aware prefix-cache routing.
+    """
+    block_size = 4
+    num_tokens = block_size * 2
+
+    # null block + 4 usable (2 per group)
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_multi_grp",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    # Cache blocks for group 0 (full-attention)
+    blocks_grp0 = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks_grp0,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    # Cache blocks for group 1 (sliding-window)
+    blocks_grp1 = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks_grp1,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=1,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 2
+    assert isinstance(events[0], BlockStored)
+    assert events[0].group_idx == 0
+    assert isinstance(events[1], BlockStored)
+    assert events[1].group_idx == 1
+
+
+@pytest.mark.parametrize("group_id", [0, 1, 2])
+def test_block_removed_event_group_idx(group_id: int):
+    """
+    Test BlockRemoved events emitted on eviction carry the group_idx extracted
+    from the evicted block's BlockHashWithGroupId via get_group_id().
+    """
+    block_size = 4
+    num_tokens = block_size * 2
+
+    # null block + 4 usable; allocate all 4, cache 2, free all, re-allocate
+    # all 4 so the 2 cached blocks are forced through _maybe_evict_cached_block.
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_evict_grp",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    # Allocate all usable blocks and cache the first two for the target group.
+    all_blocks = pool.get_new_blocks(4)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=all_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=group_id,
+    )
+
+    # Drain the BlockStored events so only eviction events remain later.
+    pool.take_events()
+
+    # Return all blocks to the free queue so they become eviction candidates.
+    pool.free_blocks(all_blocks)
+
+    # Re-allocate all blocks; the two with hashes trigger BlockRemoved events.
+    pool.get_new_blocks(4)
+
+    events = pool.take_events()
+    removed_events = [e for e in events if isinstance(e, BlockRemoved)]
+
+    assert len(removed_events) == 2
+    for event in removed_events:
+        assert event.group_idx == group_id
 
 
 def test_eagle_enabled_removes_last_block():

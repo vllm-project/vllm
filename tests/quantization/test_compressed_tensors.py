@@ -28,6 +28,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW4A16Fp4,
     CompressedTensorsW8A8Fp8,
     CompressedTensorsW8A8Int8,
+    CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
     CompressedTensorsWNA16,
 )
@@ -632,3 +633,38 @@ def test_get_quant_method_returns_none_for_unmatched_parallel_lm_head():
     assert method is None, (
         f"Expected None for unmatched ParallelLMHead, got {type(method).__name__}"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(75),
+    reason="MXFP8 requires Turing (sm_75+) or newer.",
+)
+def test_compressed_tensors_mxfp8_moe_setup(vllm_runner):
+    """Verify MXFP8 scheme, dtypes, and generation for a MoE model."""
+    model_path = "AliEdalati97/Qwen3-30B-A3B-MXFP8"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 4},
+    ) as llm:
+
+        def check_model(model):
+            from vllm.model_executor.layers.fused_moe import FusedMoE
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_mxfp8 import (  # noqa: E501
+                CompressedTensorsW8A8Mxfp8MoEMethod,
+            )
+
+            layer = model.model.layers[0]
+
+            qkv = layer.self_attn.qkv_proj
+            assert isinstance(qkv.quant_method, CompressedTensorsLinearMethod)
+            assert isinstance(qkv.scheme, CompressedTensorsW8A8Mxfp8)
+
+            experts = layer.mlp.experts
+            assert isinstance(experts, FusedMoE)
+            assert isinstance(experts.quant_method, CompressedTensorsW8A8Mxfp8MoEMethod)
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy("Hello my name is", max_tokens=4)
+        assert output
