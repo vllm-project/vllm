@@ -4,7 +4,7 @@
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import load_chat_template, parse_chat_messages
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.renderers.hf import (
     _get_hf_base_chat_template_params,
@@ -74,6 +74,47 @@ TEST_MESSAGES = [
     {"role": "user", "content": "What is the capital of"},
 ]
 ASSISTANT_MESSAGE_TO_CONTINUE = {"role": "assistant", "content": "The capital of"}
+TOOL_PARAMETERS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+    },
+    "required": ["name"],
+}
+
+GLM_TOOL_RESPONSE_TEMPLATE = """{% for m in messages -%}
+{%- if m.role == 'user' -%}
+<|user|>
+{%- if m.content is iterable and m.content is not string and m.content is not mapping -%}
+{%- for item in m.content -%}
+{%- if item is mapping and item.type == 'text' -%}{{ item.text }}{%- endif -%}
+{%- endfor -%}
+{%- else -%}
+{{ m.content }}
+{%- endif -%}
+{%- elif m.role == 'assistant' -%}
+<|assistant|>
+{%- if m.tool_calls -%}
+{%- for tc in m.tool_calls -%}
+{%- if tc.function -%}
+{%- set tc = tc.function -%}
+{%- endif -%}
+<tool_call>{{ tc.name }}{% for k, v in tc.arguments.items() %}<arg_key>{{ k }}</arg_key><arg_value>{{ v }}</arg_value>{% endfor %}</tool_call>
+{%- endfor -%}
+{%- endif -%}
+{%- elif m.role == 'tool' -%}
+<|observation|>
+{%- if m.content is string -%}
+<tool_response>{{ m.content }}</tool_response>
+{%- else -%}
+<tool_response><tools>
+{%- for tr in m.content -%}
+{{ tr.name }}
+{%- endfor -%}
+</tools></tool_response>
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}"""
 
 
 def test_load_chat_template():
@@ -531,6 +572,104 @@ def test_resolve_content_format_examples(template_path, expected_format):
     )
 
     assert resolved_format == expected_format
+
+
+def test_resolve_content_format_glm_tool_response_template():
+    model = "Qwen/Qwen2-VL-2B-Instruct"  # Dummy
+    model_config = ModelConfig(
+        model,
+        tokenizer=model,
+        trust_remote_code=True,
+    )
+
+    dummy_tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    dummy_tokenizer.chat_template = None
+
+    resolved_format = resolve_chat_template_content_format(
+        GLM_TOOL_RESPONSE_TEMPLATE,
+        None,
+        "auto",
+        dummy_tokenizer,
+        model_config=model_config,
+    )
+
+    assert resolved_format == "string"
+
+
+def test_glm_tool_response_template_preserves_tool_message_content():
+    model = "Qwen/Qwen2-VL-2B-Instruct"  # Dummy
+    model_config = ModelConfig(
+        model,
+        tokenizer=model,
+        trust_remote_code=True,
+    )
+
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    tokenizer.chat_template = None
+
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather for a city.",
+                "parameters": TOOL_PARAMETERS_SCHEMA,
+            },
+        }
+    ]
+    messages = [
+        {"role": "user", "content": "What is the weather in Vancouver?"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_123",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"name":"Vancouver"}',
+                    },
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_123",
+            "content": "15°C, partly cloudy",
+        },
+    ]
+
+    content_format = resolve_chat_template_content_format(
+        GLM_TOOL_RESPONSE_TEMPLATE,
+        tools,
+        "auto",
+        tokenizer,
+        model_config=model_config,
+    )
+    conversation, _, _ = parse_chat_messages(
+        messages,
+        model_config,
+        content_format=content_format,
+    )
+
+    rendered = safe_apply_chat_template(
+        model_config,
+        tokenizer,
+        conversation,
+        tools=tools,
+        chat_template=GLM_TOOL_RESPONSE_TEMPLATE,
+        tokenize=False,
+    )
+
+    assert "<tool_response>15°C, partly cloudy</tool_response>" in rendered
+    assert "<tool_response><tools>" not in rendered
 
 
 @pytest.mark.parametrize(

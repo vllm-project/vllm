@@ -273,7 +273,26 @@ def _detect_content_format(
         logger.exception("Error when parsing AST of Jinja template")
         return default
     else:
+        # Some GLM-family templates iterate over `message.content` for normal
+        # messages, but still require raw string tool responses. Classifying
+        # those templates as OpenAI-style content makes tool messages render as
+        # structured content items and drops the actual tool output.
+        if _looks_like_glm_tool_response_template(chat_template):
+            return "string"
         return "openai"
+
+
+@lru_cache(maxsize=32)
+def _looks_like_glm_tool_response_template(chat_template: str) -> bool:
+    return (
+        "<tool_response>" in chat_template
+        and "<|observation|>" in chat_template
+        and "content is string" in chat_template
+        and (
+            "role == 'tool'" in chat_template
+            or 'role == "tool"' in chat_template
+        )
+    )
 
 
 def _resolve_chat_template_content_format(
