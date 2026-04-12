@@ -16,7 +16,7 @@ import vllm.envs as envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.network_utils import get_open_ports_list
+from vllm.utils.network_utils import get_open_ports_list, try_bind_socket
 
 if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
@@ -538,9 +538,11 @@ class ParallelConfig:
 
         key = "dp_master_port"
         if self.data_parallel_rank == 0:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.bind((self.data_parallel_master_ip, 0))
-            s.listen()
+            s = try_bind_socket(
+                self.data_parallel_master_ip,
+                0,
+                listen=True,
+            )
             port = s.getsockname()[1]
             store.set(key, str(port).encode())
             return port, s
