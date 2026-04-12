@@ -914,6 +914,7 @@ class FlashAttentionImpl(AttentionImpl):
 
         # TPA GQA: DCP ranks share the same heads, no AllGather needed.
         context_q = query if tpa_gqa_mode else get_dcp_group().all_gather(query, dim=1)
+        context_num_heads = context_q.shape[1]
 
         n = context_q.shape[0]
         (dcp_context_out,) = current_workspace_manager().get_simultaneous(
@@ -945,6 +946,13 @@ class FlashAttentionImpl(AttentionImpl):
             v_descale=v_descale,
             num_splits=attn_metadata.max_num_splits,
         )
+        # FA3 may return the base buffer (not the sliced view), so
+        # ensure context output matches the actual Q head count.
+        if context_attn_out.shape[1] != context_num_heads:
+            context_attn_out = context_attn_out[:, :context_num_heads]
+        if context_lse.shape[0] != context_num_heads:
+            context_lse = context_lse[:context_num_heads]
+
         # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
         context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
