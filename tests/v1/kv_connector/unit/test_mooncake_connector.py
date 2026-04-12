@@ -653,6 +653,37 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         ]
 
 
+def test_worker_syncs_block_size_with_kernel_backends():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.threading.Thread"
+        ) as mock_thread,
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.get_current_attn_backends",
+            return_value=[MagicMock()],
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.select_common_block_size",
+            return_value=8,
+        ),
+    ):
+        connector = MooncakeConnector(vllm_config, KVConnectorRole.WORKER)
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+
+        assert worker.block_size == 8
+        assert worker._block_size[worker.engine_id] == 8
+
+
 @pytest.mark.asyncio
 @patch(
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
