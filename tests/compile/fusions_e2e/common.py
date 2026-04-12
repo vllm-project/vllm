@@ -1,14 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
 import itertools
 from collections.abc import Callable, Iterable
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import pytest
 import regex as re
 
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        QuantKey,
+    )
 
 
 class Matches(NamedTuple):
@@ -30,6 +37,9 @@ class ModelFusionInfo(NamedTuple):
     """Given number of hidden layers, produces the matches object"""
     model_kwargs: dict[str, Any] = {}
     hf_overrides: Callable[[int], dict] = lambda n: {"num_hidden_layers": n}
+    quant_key: QuantKey | None = None
+    """The QuantKey describing the model's output quantization, or None for
+    non-quantized models.  Used to decide which fusions are applicable."""
 
 
 class AttentionBackendCase(NamedTuple):

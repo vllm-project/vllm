@@ -36,7 +36,7 @@ from .models import (
 
 
 @pytest.mark.parametrize(
-    "model_name, matches_fn, model_kwargs, hf_overrides, use_deepgemm",
+    "model_name, matches_fn, model_kwargs, hf_overrides, quant_key, use_deepgemm",
     [
         (*llama3_8b_fp8, False),
         (*qwen3_a3b_fp8, False),
@@ -73,6 +73,7 @@ def test_tp1_fp8_fusions(
     matches_fn: Callable[[int], Matches],
     model_kwargs: dict,
     hf_overrides: Callable[[int], dict],
+    quant_key,
     attn_backend: AttentionBackendCase,
     n_layers: int,
     custom_ops: str,
@@ -95,13 +96,15 @@ def test_tp1_fp8_fusions(
 
     matches = matches_fn(n_layers)
 
-    block_fp8 = "qwen" in model_name.lower() or "deepseek" in model_name.lower()
-    if block_fp8 and "-quant_fp8" in custom_ops:
+    is_per_group_fp8 = (
+        quant_key is not None and quant_key.scale.group_shape.is_per_group()
+    )
+    if is_per_group_fp8 and "-quant_fp8" in custom_ops:
         # This is why config forces +quant_fp8 by default
         pytest.skip("native QuantFP8 matching not supported for group quant")
 
     # Per-group FP8 attn fusion is only supported on Triton backend
-    if block_fp8 and attn_backend.backend != AttentionBackendEnum.TRITON_ATTN:
+    if is_per_group_fp8 and attn_backend.backend != AttentionBackendEnum.TRITON_ATTN:
         matches = matches._replace(attn_quant_fusion=0)
 
     # Reduce size of model and skip weight loading time

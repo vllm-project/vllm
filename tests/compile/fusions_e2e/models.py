@@ -3,6 +3,10 @@
 import pytest
 
 from vllm._aiter_ops import is_aiter_found_and_supported
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8StaticTensorSym,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -87,6 +91,7 @@ llama3_8b_fp8 = ModelFusionInfo(
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 4,
     ),
+    quant_key=kFp8StaticTensorSym,
 )
 
 llama3_8b_fp4 = ModelFusionInfo(
@@ -115,6 +120,7 @@ llama4_scout_fp8 = ModelFusionInfo(
         sequence_parallel=n_layers * 2,
         async_tp=n_layers * 2 - 1,
     ),
+    quant_key=kFp8StaticTensorSym,
 )
 
 llama4_scout_fp4 = ModelFusionInfo(
@@ -148,6 +154,7 @@ qwen3_a3b_fp8 = ModelFusionInfo(
         sequence_parallel=n_layers * 2 + 1,
         async_tp=n_layers * 2,
     ),
+    quant_key=kFp8Dynamic128Sym,
 )
 
 deepseek_coder_v2_lite_fp8 = ModelFusionInfo(
@@ -160,6 +167,7 @@ deepseek_coder_v2_lite_fp8 = ModelFusionInfo(
         attn_quant_fusion=n_layers,
         ar_rms_fusion=n_layers * 2 + 1,
     ),
+    quant_key=kFp8StaticTensorSym,
 )
 
 deepseek_v3_fp8 = ModelFusionInfo(
@@ -181,6 +189,7 @@ deepseek_v3_fp8 = ModelFusionInfo(
         # sequence_parallel= n_layers * 2 + 1,
         # async_tp=n_layers * 2,
     ),
+    quant_key=kFp8Dynamic128Sym,
 )
 
 deepseek_v32_fp4 = ModelFusionInfo(
