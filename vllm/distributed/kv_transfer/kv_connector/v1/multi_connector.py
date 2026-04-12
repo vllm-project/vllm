@@ -248,7 +248,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
 
     def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
         for c in self._connectors:
+<<<<<<< HEAD
             c.bind_gpu_block_pool(gpu_block_pool)
+=======
+            if hasattr(c, "bind_gpu_block_pool"):
+                c.bind_gpu_block_pool(gpu_block_pool)
+>>>>>>> 98289668c1 (fix (simple_cpu_backend): allow multi-connector to pass bind_gpu_block_pool() to all connectors)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the
