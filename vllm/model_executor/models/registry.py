@@ -273,6 +273,7 @@ _LATE_INTERACTION_MODELS = {
     "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
     "ColBERTLfm2Model": ("colbert", "ColBERTLfm2Model"),
+    "JinaForRanking": ("jina", "JinaForRanking"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
@@ -380,6 +381,10 @@ _MULTIMODAL_MODELS = {
         "FireRedASR2ForConditionalGeneration",
     ),
     "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),
+    "FireRedLIDForConditionalGeneration": (
+        "fireredlid",
+        "FireRedLIDForConditionalGeneration",
+    ),
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
