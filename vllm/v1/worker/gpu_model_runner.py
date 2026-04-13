@@ -1132,6 +1132,8 @@ class GPUModelRunner(
         The SamplingMetadata is updated and copied to the GPU if there is a
         new/resumed/paused/finished request in the batch.
         """
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            return
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -1187,6 +1189,12 @@ class GPUModelRunner(
             ngram_gpu_new_reqs: list[CachedRequestState] = []
 
         reqs_to_add: list[CachedRequestState] = []
+        # Track re-added requests on non-last ranks that need token_ids_cpu
+        # fix-up after add_request.  On non-last ranks, output_token_ids
+        # does NOT include accepted draft tokens, so add_request() places
+        # tokens at wrong positions.  We save (new_token_ids, num_computed)
+        # here and fix up token_ids_cpu right after add_request.
+        fix_tokens_map: dict[str, tuple[list[int], int]] = {}
         deferred_spec_decode_corrections = []
 
         # Add new requests to the cached states.
@@ -1389,6 +1397,13 @@ class GPUModelRunner(
                     resumed_token_ids = req_data.all_token_ids[req_id]
                     req_state.output_token_ids = resumed_token_ids[-num_output_tokens:]
 
+                # On non-last ranks with PP + spec decode, output_token_ids
+                # doesn't include accepted draft tokens.  Save the fix-up
+                # data so we can correct token_ids_cpu after add_request.
+                if not is_last_rank and new_token_ids:
+                    fix_tokens_map[req_id] = (
+                        list(new_token_ids), num_computed_tokens)
+
                 reqs_to_add.append(req_state)
                 # Track resumed requests for ngram_gpu full tensor copy
                 if is_ngram_gpu:
@@ -1437,7 +1452,26 @@ class GPUModelRunner(
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
             self.input_batch.add_request(request)
-            self.input_batch.update_req_spec_token_ids(request, scheduled_spec_tokens)
+            req_id = request.req_id
+            req_index = self.input_batch.req_id_to_index[req_id]
+
+            # Fix token_ids_cpu for re-added requests on non-last PP ranks.
+            # add_request() copies output_token_ids to token_ids_cpu, but on
+            # non-last ranks output_token_ids does NOT include accepted draft
+            # tokens, causing tokens to land at wrong positions.  Overwrite
+            # the new tokens at the correct position (num_computed_tokens)
+            # and adjust num_tokens_no_spec before placing spec tokens.
+            fix_data = fix_tokens_map.get(req_id)
+            if fix_data is not None:
+                new_toks, n_computed = fix_data
+                start = n_computed
+                end = start + len(new_toks)
+                self.input_batch.token_ids_cpu[req_index, start:end] = new_toks
+                self.input_batch.num_tokens_no_spec[req_index] = end
+
+            # Place spec tokens at the (now-correct) num_tokens_no_spec offset.
+            self.input_batch.update_req_spec_token_ids(
+                request, scheduled_spec_tokens)
 
         # Condense the batched states if there are gaps left by removed requests
         self.input_batch.condense()
@@ -4568,10 +4602,33 @@ class GPUModelRunner(
         self.kv_connector_output = None
 
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
+            # Get draft token ids if available
+            output_spec_token_ids = None
+            if self._draft_token_ids is not None:
+                # Use synchronous copy to avoid NPU async stream/event
+                # synchronization issues. _get_draft_token_ids_cpu relies on
+                # event.synchronize() which may not properly wait for the
+                # async copy on NPU, resulting in stale data.
+                if torch.is_tensor(self._draft_token_ids):
+                    num_reqs = self._draft_token_ids.shape[0]
+                    draft_ids_list = self._draft_token_ids[:num_reqs].cpu().tolist()
+                    draft_req_ids = self._draft_token_req_ids
+                else:
+                    draft_ids_list = self._draft_token_ids
+                    draft_req_ids = self.input_batch.req_ids
+                if draft_ids_list and draft_req_ids:
+                    draft_by_req_id = dict(
+                        zip(draft_req_ids, draft_ids_list))
+                    output_spec_token_ids = [
+                        draft_by_req_id.get(req_id, [])
+                        for req_id in req_ids_output_copy
+                    ]
+
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
                 req_id_to_index=req_id_to_index_output_copy,
                 sampled_token_ids=valid_sampled_token_ids,
+                spec_token_ids=output_spec_token_ids,
                 logprobs=logprobs_lists,
                 prompt_logprobs_dict=prompt_logprobs_dict,
                 kv_connector_output=kv_connector_output,
@@ -6861,7 +6918,7 @@ class GPUModelRunner(
         if self.speculative_config and (
             self.speculative_config.use_eagle()
             or self.speculative_config.uses_extract_hidden_states()
-        ):
+        ) and get_pp_group().is_last_rank:
             assert isinstance(
                 self.drafter,
                 EagleProposer

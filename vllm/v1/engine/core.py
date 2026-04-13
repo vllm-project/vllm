@@ -1270,7 +1270,7 @@ class EngineCoreProc(EngineCore):
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
         # Post-step hook.
-        self.post_step(model_executed)
+        #self.post_step(model_executed)
 
         # If no model execution happened but there is still scheduler work
         # (e.g. WAITING_FOR_REMOTE_KVS or delayed KV connector frees), yield

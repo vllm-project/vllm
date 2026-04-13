@@ -101,7 +101,8 @@ class Scheduler(SchedulerInterface):
         self.prev_step_scheduled_req_ids: set[str] = set()
 
         # Scheduling constraints.
-        self.max_num_running_reqs = self.scheduler_config.max_num_seqs
+        self.max_num_running_reqs = self.scheduler_config.max_num_seqs * self.vllm_config.parallel_config.pipeline_parallel_size
+        self.max_num_per_batch = self.scheduler_config.max_num_seqs
         self.max_num_scheduled_tokens = (
             self.scheduler_config.max_num_scheduled_tokens
             if self.scheduler_config.max_num_scheduled_tokens is not None
@@ -377,7 +378,9 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
-
+            current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+            if current_batch_size == self.max_num_per_batch:
+                break
             if (
                 request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
@@ -438,7 +441,7 @@ class Scheduler(SchedulerInterface):
                     request, num_new_tokens
                 )
 
-            if num_new_tokens == 0:
+            if num_new_tokens <= 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
                 # 1. No new tokens to schedule. This may happen when
@@ -564,7 +567,8 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                current_batch_size = len(scheduled_new_reqs) + len(scheduled_resumed_reqs) + len(scheduled_running_reqs)
+                if len(self.running) == self.max_num_running_reqs or current_batch_size == self.max_num_per_batch:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -681,7 +685,11 @@ class Scheduler(SchedulerInterface):
                     # We use `request.num_tokens` instead of
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
-                    num_new_tokens = request.num_tokens - num_computed_tokens
+                    if self.is_mtp_kv_consumer:
+                        num_new_tokens = (request.num_tokens_with_spec -
+                                          num_computed_tokens)
+                    else:
+                        num_new_tokens = request.num_tokens - num_computed_tokens
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -822,6 +830,20 @@ class Scheduler(SchedulerInterface):
                     request.num_computed_tokens = num_computed_tokens
                     self._inflight_prefills.add(request)
                     continue
+
+                # Speculative decode related.
+                if request.spec_token_ids:
+                    num_scheduled_spec_tokens = (num_new_tokens +
+                                                 num_computed_tokens -
+                                                 request.num_tokens)
+                    if num_scheduled_spec_tokens > 0:
+                        # Trim spec_token_ids list to num_scheduled_spec_tokens.
+                        del request.spec_token_ids[num_scheduled_spec_tokens:]
+                        scheduled_spec_decode_tokens[request.request_id] = (
+                            request.spec_token_ids)
+                    else:
+                        # Prefill request: spec tokens not applicable yet.
+                        request.spec_token_ids = []
 
                 self.running.append(request)
                 if self.log_stats:
@@ -1332,6 +1354,7 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
+        spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -1540,6 +1563,26 @@ class Scheduler(SchedulerInterface):
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
+
+            # NOTE: Use `new_token_ids` (from this output) instead of
+            # `request.is_prefill_chunk` (from current schedule step) to
+            # decide whether this was a decode step. In batch_queue mode
+            # (PP>1), update_from_output processes output from step T-N,
+            # but is_prefill_chunk reflects step T's state — using it
+            # causes stale spec_token_ids to be set on prefill chunks.
+            if spec_token_ids:
+                if not new_token_ids:
+                    # Non-final prefill chunk: no tokens generated,
+                    # clear any stale spec_token_ids.
+                    if request.spec_token_ids:
+                        request.spec_token_ids = []
+                else:
+                    if self.structured_output_manager.should_advance(request):
+                        metadata = request.structured_output_request
+                        request.spec_token_ids = metadata.grammar.validate_tokens(
+                            spec_token_ids[req_index])
+                    else:
+                        request.spec_token_ids = spec_token_ids[req_index]
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
