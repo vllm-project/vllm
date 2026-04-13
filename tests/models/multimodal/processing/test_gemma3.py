@@ -150,8 +150,11 @@ class TestGemma3nAudioTensorLogic:
 
 
 @pytest.mark.parametrize("model_id", [GEMMA3_MODEL_ID])
+@pytest.mark.parametrize("mm_processor_kwargs", [{}])
 def test_get_image_size_with_most_features(
-    image_assets: ImageTestAssets, model_id: str
+    image_assets: ImageTestAssets,
+    model_id: str,
+    mm_processor_kwargs: dict[str, object],
 ):
     ctx = build_model_context(
         model_id,
@@ -160,15 +163,14 @@ def test_get_image_size_with_most_features(
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
 
-    hf_processor_mm_kwargs: dict[str, object] = {}
-    hf_processor = processor.info.get_hf_processor(**hf_processor_mm_kwargs)
+    hf_processor = processor.info.get_hf_processor(**mm_processor_kwargs)
 
     max_image_size = processor.info.get_image_size_with_most_features()
     max_tokens = processor.info.get_num_image_tokens(
         image_width=max_image_size.width,
         image_height=max_image_size.height,
         processor=hf_processor,
-        mm_kwargs=hf_processor_mm_kwargs,
+        mm_kwargs=mm_processor_kwargs,
     )
 
     prompt = "<start_of_image>"
@@ -176,10 +178,10 @@ def test_get_image_size_with_most_features(
 
     for asset in image_assets:
         mm_data = {"image": [asset.pil_image]}
-        processed_inputs = processor.apply(
+        processed_inputs = processor(
             prompt,
             mm_items=processor.info.parse_mm_data(mm_data),
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            hf_processor_mm_kwargs=mm_processor_kwargs,
         )
         mm_kwargs_data = processed_inputs["mm_kwargs"].get_data()
         num_patches_tensor = mm_kwargs_data["num_patches"]

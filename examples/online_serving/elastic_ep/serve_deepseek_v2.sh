@@ -64,7 +64,7 @@ vllm serve "$MODEL_NAME" \
     --enforce-eager \
     --enable-expert-parallel \
     --enable-eplb \
-    --all2all-backend pplx \
+    --all2all-backend allgather_reducescatter \
     --num-redundant-experts "$REDUNDANT_EXPERTS" \
     --trust-remote-code \
     --host "$HOST" \

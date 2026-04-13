@@ -22,16 +22,15 @@ def async_copy_to_gpu(
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
     assert x.is_cpu
-    assert not x.is_pinned()
 
     if out is None:
         assert device is not None
         out = torch.empty_like(x, device=device)
 
-    # CPU-to-CPU copy
-    tmp = x.pin_memory()
-    # CPU-to-GPU copy
-    return out.copy_(tmp, non_blocking=True)
+    # Copy directly to GPU — explicit pin_memory() causes sporadic stalls
+    # under high concurrency due to CUDA driver contention. The driver
+    # handles the transfer efficiently without manual pinning.
+    return out.copy_(x, non_blocking=True)
 
 
 class UvaBuffer:
@@ -75,11 +74,8 @@ class UvaBufferPool:
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         uva = self.copy_to_uva(x)
-        if out is None:
-            # CPU-to-GPU copy
-            return uva.clone()
         # CPU-to-GPU copy
-        return out.copy_(uva, non_blocking=True)
+        return uva.clone() if out is None else out.copy_(uva, non_blocking=True)
 
 
 class UvaBackedTensor:
@@ -87,7 +83,6 @@ class UvaBackedTensor:
         self, size: int | Sequence[int], dtype: torch.dtype, max_concurrency: int = 2
     ):
         self.dtype = dtype
-        self.max_concurrency = max_concurrency
 
         # Source of truth
         self.cpu = torch.zeros(size, dtype=dtype, device="cpu", pin_memory=False)

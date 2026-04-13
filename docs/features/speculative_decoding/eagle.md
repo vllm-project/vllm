@@ -44,7 +44,7 @@ llm = LLM(
         "model": "RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
         "draft_tensor_parallel_size": 2,
         "num_speculative_tokens": 2,
-        "method": "eagle",
+        "method": "eagle3",
     },
 )
 

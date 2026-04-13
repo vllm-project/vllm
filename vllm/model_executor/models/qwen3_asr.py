@@ -33,10 +33,11 @@ from transformers.models.whisper import WhisperFeatureExtractor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -59,8 +60,6 @@ from vllm.model_executor.models.whisper import ISO639_1_SUPPORTED_LANGS
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     AudioItem,
-    ModalityData,
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -146,14 +145,11 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
-        feature_extractor = self.info.get_feature_extractor(
-            **(mm_processor_kwargs or {})
-        )
+        feature_extractor = self.info.get_feature_extractor()
 
         target_audio_length = (
             min(
@@ -163,7 +159,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
@@ -271,7 +267,21 @@ class Qwen3ASRForConditionalGeneration(
     SupportsPP,
     SupportsMRoPE,
     SupportsTranscription,
+    SupportsLoRA,
 ):
+    # LoRA support
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
     supported_languages = ISO639_1_SUPPORTED_LANGS
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -392,13 +402,11 @@ class Qwen3ASRForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.language_model.embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -519,6 +527,17 @@ class Qwen3ASRForConditionalGeneration(
             language_model="language_model",
             tower_model=["audio_tower."],
         )
+
+    def get_num_mm_encoder_tokens(self, num_audio_tokens: int) -> int:
+        """Return the number of tokens processed by the audio tower encoder.
+
+        Required for LoRA support on the tower module.
+        """
+        # For Qwen3-ASR, the audio tower produces one embedding per audio
+        # placeholder token inserted into the prompt (no additional
+        # merge/downsample step like vision towers). Therefore, the encoder
+        # token budget is identity.
+        return num_audio_tokens
 
     @classmethod
     def get_speech_to_text_config(

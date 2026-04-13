@@ -23,6 +23,8 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 
+DEVICE_TYPE = current_platform.device_type
+
 
 # Helper MLP for testing
 class SimpleMLP(nn.Module):
@@ -176,10 +178,14 @@ class TestCudagraphDispatcher:
         assert rt_mode == CUDAGraphMode.NONE
         assert key == BatchDescriptor(num_tokens=15)
 
-        # 4. disable_full should have a fall back mode (e.g., cascade attention)
+        # 4. invalid_modes={FULL} should have a fall back mode
+        #    (e.g., cascade attention)
         desc_full_exact = BatchDescriptor(num_tokens=8, uniform=False)
         rt_mode, key = dispatcher.dispatch(
-            num_tokens=8, uniform_decode=False, has_lora=False, disable_full=True
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            invalid_modes={CUDAGraphMode.FULL},
         )
 
         if "PIECEWISE" in cudagraph_mode_str:  # string contains check
@@ -187,6 +193,16 @@ class TestCudagraphDispatcher:
             assert key == replace(desc_full_exact, num_reqs=None, uniform=False)
         else:
             assert rt_mode == CUDAGraphMode.NONE
+
+        # 5. valid_modes={NONE} always returns NONE even when keys exist
+        rt_mode, key = dispatcher.dispatch(
+            num_tokens=8,
+            uniform_decode=False,
+            has_lora=False,
+            valid_modes={CUDAGraphMode.NONE},
+        )
+        assert rt_mode == CUDAGraphMode.NONE
+        assert key == BatchDescriptor(num_tokens=8)
 
     @pytest.mark.parametrize(
         "cudagraph_mode_str,compilation_mode,expected_modes",
@@ -255,9 +271,9 @@ class TestCudagraphDispatcher:
 class TestCUDAGraphWrapper:
     def setup_method(self):
         self.vllm_config = _create_vllm_config(CompilationConfig())
-        self.model = SimpleMLP().to("cuda")
-        self.persistent_input_buffer = torch.zeros(1, 10, device="cuda")
-        self.input_tensor = torch.randn(1, 10, device="cuda")
+        self.model = SimpleMLP().to(DEVICE_TYPE)
+        self.persistent_input_buffer = torch.zeros(1, 10, device=DEVICE_TYPE)
+        self.input_tensor = torch.randn(1, 10, device=DEVICE_TYPE)
 
     def test_capture_and_replay(self):
         wrapper = CUDAGraphWrapper(
@@ -414,10 +430,10 @@ class TestCudagraphIntegration:
 
     @create_new_process_for_each_test("spawn")
     def test_capture_replay_bypass_logic(self):
-        model = SimpleMLP().to("cuda")
+        model = SimpleMLP().to(DEVICE_TYPE)
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
         max_bs = 16
-        persistent_input_buffer = torch.zeros(max_bs, 10, device="cuda")
+        persistent_input_buffer = torch.zeros(max_bs, 10, device=DEVICE_TYPE)
         input_1 = persistent_input_buffer[:1]
         input_2 = persistent_input_buffer[:2]
         input_3 = persistent_input_buffer[:3]
@@ -472,17 +488,17 @@ class TestCudagraphIntegration:
     @create_new_process_for_each_test("spawn")
     def test_nested_wrappers(self):
         """Tests a scenario with a PIECEWISE wrapper inside a FULL one."""
-        model = SimpleMLP().to("cuda")
+        model = SimpleMLP().to(DEVICE_TYPE)
         full_wrapper = CUDAGraphWrapper(model, self.vllm_config, CUDAGraphMode.FULL)
-        input_1 = torch.randn(1, 10, device="cuda")
+        input_1 = torch.randn(1, 10, device=DEVICE_TYPE)
 
         # Setup: Inner model is wrapped with PIECEWISE, outer with FULL
-        inner_model = SimpleMLP().to("cuda")
+        inner_model = SimpleMLP().to(DEVICE_TYPE)
         piecewise_wrapper = CUDAGraphWrapper(
             inner_model, self.vllm_config, CUDAGraphMode.PIECEWISE
         )
         inner_model.forward = MagicMock(wraps=inner_model.forward)
-        outer_model = SimpleMLP().to("cuda")
+        outer_model = SimpleMLP().to(DEVICE_TYPE)
         # When outer model is called, it calls the piecewise_wrapper
         outer_model.forward = MagicMock(
             wraps=outer_model.forward, side_effect=piecewise_wrapper

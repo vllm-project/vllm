@@ -22,12 +22,13 @@ from vllm.model_executor.layers.fused_moe.layer import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
-    FusedMoEPermuteExpertsUnpermute,
-    FusedMoEPrepareAndFinalize,
+    FusedMoEExpertsModular,
+    FusedMoEPrepareAndFinalizeModular,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -61,9 +62,10 @@ __all__ = [
     "MoEActivation",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
-    "FusedMoEPermuteExpertsUnpermute",
+    "FusedMoEExpertsModular",
     "FusedMoEActivationFormat",
-    "FusedMoEPrepareAndFinalize",
+    "FusedMoEPrepareAndFinalizeModular",
+    "GateLinear",
     "RoutingMethodType",
     "SharedFusedMoE",
     "ZeroExpertFusedMoE",
@@ -75,16 +77,18 @@ __all__ = [
 
 if HAS_TRITON:
     # import to register the custom ops
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
-        BatchedDeepGemmExperts,
-    )
     from vllm.model_executor.layers.fused_moe.cutlass_moe import (
         CutlassBatchedExpertsFp8,
         CutlassExpertsFp8,
         CutlassExpertsW4A8Fp8,
         cutlass_moe_w4a8_fp8,
     )
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
+        BatchedDeepGemmExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmExperts,
+    )
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )

@@ -6,12 +6,14 @@ import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
 from unittest.mock import patch
 
+import pydantic
 import pytest
 from pydantic import ValidationError
 
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    KernelConfig,
     ModelConfig,
     ParallelConfig,
     PoolerConfig,
@@ -21,6 +23,7 @@ from vllm.config import (
     update_config,
 )
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
@@ -853,7 +856,7 @@ def test_vllm_config_defaults_are_none():
 
 
 @pytest.mark.parametrize(
-    ("model_id", "compiliation_config", "optimization_level"),
+    ("model_id", "compilation_config", "optimization_level"),
     [
         (
             None,
@@ -895,7 +898,7 @@ def test_vllm_config_defaults_are_none():
         ("RedHatAI/DeepSeek-V2.5-1210-FP8", CompilationConfig(), OptimizationLevel.O3),
     ],
 )
-def test_vllm_config_defaults(model_id, compiliation_config, optimization_level):
+def test_vllm_config_defaults(model_id, compilation_config, optimization_level):
     """Test that optimization-level defaults are correctly applied."""
 
     model_config = None
@@ -903,12 +906,12 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
         model_config = ModelConfig(model_id)
         vllm_config = VllmConfig(
             model_config=model_config,
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     else:
         vllm_config = VllmConfig(
-            compilation_config=compiliation_config,
+            compilation_config=compilation_config,
             optimization_level=optimization_level,
         )
     # Use the global optimization level defaults
@@ -926,12 +929,17 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
     # Verify other compilation_config defaults
     compilation_config_dict = default_config["compilation_config"]
     for k, v in compilation_config_dict.items():
-        if k != "pass_config":
-            actual = getattr(vllm_config.compilation_config, k)
-            expected = v(vllm_config) if callable(v) else v
-            assert actual == expected, (
-                f"compilation_config.{k}: expected {expected}, got {actual}"
-            )
+        if k == "pass_config":
+            continue
+        actual = getattr(vllm_config.compilation_config, k)
+        expected = v(vllm_config) if callable(v) else v
+        # On platforms without static graph support, __post_init__ forces
+        # cudagraph_mode to NONE; expect that instead of the level default.
+        if k == "cudagraph_mode" and not current_platform.support_static_graph_mode():
+            expected = CUDAGraphMode.NONE
+        assert actual == expected, (
+            f"compilation_config.{k}: expected {expected}, got {actual}"
+        )
 
 
 def test_vllm_config_callable_defaults():
@@ -969,6 +977,10 @@ def test_vllm_config_callable_defaults():
     assert enable_if_sequential(config_quantized) is True
 
 
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Explicit overrides may be force-overwritten without static graph support.",
+)
 def test_vllm_config_explicit_overrides():
     """Test that explicit property overrides work correctly with callable defaults.
 
@@ -1068,6 +1080,39 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
 
 
+def test_fusion_pass_op_priority():
+    """This test checks that custom op enablement & IR op priority
+    correctly control default fusions"""
+
+    # Default config, O2, rms_norm+quant fusion disabled
+    cfg1 = VllmConfig()
+    assert not cfg1.compilation_config.pass_config.fuse_norm_quant
+
+    # rms_norm manually enabled, O1, rms_norm+quant fusion enabled
+    cfg2 = VllmConfig(
+        optimization_level=OptimizationLevel.O1,
+        compilation_config=CompilationConfig(
+            custom_ops=["+rms_norm"],
+        ),
+    )
+    assert cfg2.compilation_config.pass_config.fuse_norm_quant
+
+    # using custom kernel for RMSNorm via IR:
+    # Note that vLLM IR only supports the non-residual rms_norm for now;
+    # soon this will be resolved.
+    cfg3 = VllmConfig(
+        kernel_config=KernelConfig(
+            ir_op_priority=IrOpPriorityConfig(rms_norm=["vllm_c"])
+        )
+    )
+    assert cfg3.compilation_config.pass_config.fuse_norm_quant
+
+    # block-fp8 model should enable quant_fp8 automatically
+    cfg4 = VllmConfig(model_config=ModelConfig("Qwen/Qwen3-4B-FP8"))
+    assert "+quant_fp8" in cfg4.compilation_config.custom_ops
+    assert cfg4.compilation_config.pass_config.fuse_norm_quant
+
+
 def test_scheduler_config_init():
     with pytest.raises(ValidationError):
         # Positional InitVars missing
@@ -1122,6 +1167,28 @@ def test_needs_dp_coordination(
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
 
 
+def test_renderer_num_workers_with_mm_cache():
+    """Disallow renderer_num_workers > 1 when mm processor cache is enabled,
+    since neither cache type is thread-safe."""
+    mm_model = "Qwen/Qwen2-VL-2B-Instruct"
+
+    # Should raise: multi-worker + cache enabled (default cache_gb=4)
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=4)
+
+    # Should raise: multi-worker + explicit cache size
+    with pytest.raises(ValueError, match="renderer-num-workers"):
+        ModelConfig(mm_model, renderer_num_workers=2, mm_processor_cache_gb=1.0)
+
+    # Should pass: multi-worker + cache disabled
+    config = ModelConfig(mm_model, renderer_num_workers=4, mm_processor_cache_gb=0)
+    assert config.renderer_num_workers == 4
+
+    # Should pass: single worker + cache enabled (default)
+    config = ModelConfig(mm_model, renderer_num_workers=1)
+    assert config.renderer_num_workers == 1
+
+
 def test_eagle_draft_model_config():
     """Test that EagleDraft model config is correctly set."""
     target_model_config = ModelConfig(
@@ -1140,3 +1207,35 @@ def test_eagle_draft_model_config():
     assert draft_model_config.hf_text_config.model_type == "eagle"
     assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
     assert draft_model_config.architecture == "EagleLlamaForCausalLM"
+
+
+def test_ir_op_priority_default():
+    """Test that IR op priority defaults are set correctly."""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    # Assert default is applied to ops
+    priority_config = IrOpPriorityConfig.with_default(["vllm_c", "native"])
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+
+    # Assert single ops override the default
+    assert IrOpPriorityConfig.with_default(
+        ["vllm_c", "native"], rms_norm=["oink", "native"]
+    ) == IrOpPriorityConfig(rms_norm=["oink", "native"])
+
+
+def test_ir_op_priority_str():
+    """Test that passing a comma-delimited string works"""
+    from vllm.config.kernel import IrOpPriorityConfig
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c")
+    assert priority_config.rms_norm == ["vllm_c"]
+
+    priority_config = IrOpPriorityConfig(rms_norm="vllm_c,native")
+    assert priority_config.rms_norm == ["vllm_c", "native"]
+
+    priority_config = IrOpPriorityConfig(rms_norm=" native, vllm_c ")
+    assert priority_config.rms_norm == ["native", "vllm_c"]
+
+    with pytest.raises(pydantic.ValidationError):
+        # must be list of only strings
+        priority_config = IrOpPriorityConfig(rms_norm=["vllm_c", 4, "native"])

@@ -6,24 +6,19 @@
 # Copyright (c) Alibaba Cloud.
 """Inference-only Qwen-VL model compatible with HuggingFace weights."""
 
-import copy
 import math
-import unicodedata
-from collections.abc import Callable, Collection, Mapping, Sequence, Set
-from functools import lru_cache, partial
+from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from typing import Annotated, Literal, TypeAlias
 
 import regex as re
 import torch
 from torch import nn
-from torchvision import transforms
-from torchvision.transforms import InterpolationMode
-from transformers import BatchFeature, PretrainedConfig, PreTrainedTokenizer, TensorType
-from transformers.image_utils import ImageInput
-from transformers.tokenization_utils_base import TextInput
+from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
@@ -36,7 +31,6 @@ from vllm.model_executor.layers.resampler import Resampler2, get_abs_pos
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -50,6 +44,10 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.processors.qwen_vl import (
+    QwenVLImageProcessorFast,
+    QwenVLProcessor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -436,156 +434,21 @@ class QwenVLModel(QWenModel):
         )
 
 
-@lru_cache(maxsize=1)
-def _get_tokenizer_without_image_pad(
-    tokenizer: PreTrainedTokenizer,
-) -> PreTrainedTokenizer:
-    """
-    The logic of adding image pad tokens should only be applied in
-    [`QwenVLProcessor`][vllm.model_executor.models.qwen_vl.QwenVLProcessor],
-    so they are patched out here.
-
-    The definition of the wrapped tokenizer can be found here:
-    https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py
-    """
-    new_tokenizer = copy.deepcopy(tokenizer)
-
-    class TokenizerWithoutImagePad(tokenizer.__class__):  # type: ignore
-        def tokenize(
-            self,
-            text: str,
-            allowed_special: Set[str] | str = "all",
-            disallowed_special: Collection[str] | str = (),
-            **kwargs,
-        ) -> list[bytes | str]:
-            text = unicodedata.normalize("NFC", text)
-
-            return [
-                self.decoder[t]
-                for t in self.tokenizer.encode(
-                    text,
-                    allowed_special=allowed_special,
-                    disallowed_special=disallowed_special,
-                )
-            ]
-
-        def _decode(
-            self,
-            token_ids: int | list[int],
-            skip_special_tokens: bool = False,
-            errors: str | None = None,
-            **kwargs,
-        ) -> str:
-            if isinstance(token_ids, int):
-                token_ids = [token_ids]
-
-            return self.tokenizer.decode(
-                token_ids,
-                errors=errors or self.errors,
-            )
-
-    TokenizerWithoutImagePad.__name__ = f"{tokenizer.__class__.__name__}WithoutImagePad"
-
-    new_tokenizer.__class__ = TokenizerWithoutImagePad
-    return new_tokenizer
-
-
-class QwenVLProcessor:
-    """
-    This model doesn't define its own HF processor,
-    so we implement our own one here.
-
-    We call the wrapped tokenizer to automatically insert image pad tokens:
-    https://huggingface.co/Qwen/Qwen-VL/blob/main/tokenization_qwen.py#L245
-
-    The image processor is defined here:
-    https://huggingface.co/Qwen/Qwen-VL/blob/main/visual.py#L354
-    """
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        tokenizer: PreTrainedTokenizer,
-    ) -> None:
-        super().__init__()
-
-        self.config = config
-        self.tokenizer = tokenizer
-
-        vision_config = config.visual
-        image_size = vision_config["image_size"]
-
-        self.image_transform = transforms.Compose(
-            [
-                transforms.Resize(
-                    (image_size, image_size),
-                    interpolation=InterpolationMode.BICUBIC,
-                ),
-                transforms.ToTensor(),
-                transforms.Normalize(
-                    mean=(0.48145466, 0.4578275, 0.40821073),
-                    std=(0.26862954, 0.26130258, 0.27577711),
-                ),
-            ]
-        )
-
-    @property
-    def image_start_tag(self) -> str:
-        return self.tokenizer.image_start_tag  # type: ignore
-
-    @property
-    def image_end_tag(self) -> str:
-        return self.tokenizer.image_end_tag  # type: ignore
-
-    @property
-    def image_pad_tag(self) -> str:
-        return self.tokenizer.image_pad_tag  # type: ignore
-
-    def __call__(
-        self,
-        text: TextInput | list[TextInput] | None = None,
-        images: ImageInput | list[ImageInput] | None = None,
-        return_tensors: str | TensorType | None = None,
-    ) -> BatchFeature:
-        if text is None:
-            text = []
-        if not isinstance(text, list):
-            text = [text]
-        if images is None:
-            images = []
-        if not isinstance(images, list):
-            images = [images]
-
-        text_inputs = self.tokenizer(text)
-
-        if len(images) == 0:
-            image_inputs = {}
-        else:
-            pixel_values = [self.image_transform(image) for image in images]
-            image_inputs = {"pixel_values": torch.stack(pixel_values)}
-
-        return BatchFeature(
-            {
-                **text_inputs,
-                **image_inputs,
-            },
-            tensor_type=return_tensors,
-        )
-
-
 class QwenVLProcessingInfo(BaseProcessingInfo):
-    def get_tokenizer(self) -> PreTrainedTokenizer:
-        tokenizer = self.ctx.get_tokenizer()
-        assert isinstance(tokenizer, PreTrainedTokenizer)
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+        vision_config = config.visual
 
-        return _get_tokenizer_without_image_pad(tokenizer)
+        image_size = vision_config["image_size"]
+        kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
+        kwargs.setdefault("size", {"width": image_size, "height": image_size})
+
+        return QwenVLImageProcessorFast(**kwargs)
 
     def get_hf_processor(self, **kwargs: object) -> QwenVLProcessor:
-        return self.ctx.init_processor(
-            QwenVLProcessor,
-            config=self.get_hf_config(),
+        return QwenVLProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            image_processor=self.get_image_processor(**kwargs),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -617,8 +480,7 @@ class QwenVLDummyInputsBuilder(BaseDummyInputsBuilder[QwenVLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.visual
@@ -626,7 +488,7 @@ class QwenVLDummyInputsBuilder(BaseDummyInputsBuilder[QwenVLProcessingInfo]):
         target_width = target_height = vision_config["image_size"]
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

@@ -42,7 +42,8 @@ class StructuredOutputManager:
 
         # When in external_launcher mode, async grammar compilation causes deadlocks
         # due to external_launcher mode having a scheduler for each TP rank.
-        # Async grammar compilation causes the WAITING_FOR_FSM → WAITING transition to
+        # Async grammar compilation causes the
+        # WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR → WAITING transition to
         # happen at different times on different TP ranks,
         # breaking the determinism assumption that external_launcher relies on.
         self._use_async_grammar_compilation = (
@@ -324,8 +325,11 @@ class StructuredOutputManager:
         # Check if reasoning ends in *this* step
         delta_from = request.num_computed_tokens - request.num_output_placeholders
         all_token_ids = request.all_token_ids
+        start = (
+            delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
+        )
         if self.reasoner.is_reasoning_end_streaming(
-            all_token_ids, all_token_ids[delta_from:]
+            all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass

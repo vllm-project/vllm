@@ -4,19 +4,26 @@
 pynvml. However, it should not initialize cuda context.
 """
 
+from __future__ import annotations
+
 import os
 from collections.abc import Callable
-from functools import cache, wraps
+from datetime import timedelta
+from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
+from torch.distributed import PrefixStore, ProcessGroup
+from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+import vllm._C_stable_libtorch  # noqa
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -24,6 +31,7 @@ from .interface import DeviceCapability, Platform, PlatformEnum
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
+    from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 else:
     VllmConfig = None
@@ -41,26 +49,65 @@ pynvml = import_pynvml()
 torch.backends.cuda.enable_cudnn_sdp(False)
 
 
+@lru_cache(maxsize=8)
+def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
+    """Get number of CUDA devices, caching based on the value of CUDA_VISIBLE_DEVICES
+    at the time of call.
+
+    This should be used instead of torch.accelerator.device_count() unless
+    CUDA_VISIBLE_DEVICES has already been set to the desired value.
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released."""
+    # Note: cuda_visible_devices is not used, but we keep it as an argument for
+    # LRU Cache purposes.
+
+    # Code below is based on
+    # https://github.com/pytorch/pytorch/blob/
+    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
+    # torch/cuda/__init__.py#L831C1-L831C17
+    import torch.cuda
+
+    if not torch.cuda._is_compiled():
+        return 0
+    raw_count = torch.cuda._device_count_nvml()
+    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
+    return r
+
+
 @cache
 def _get_backend_priorities(
     use_mla: bool,
     device_capability: DeviceCapability,
     num_heads: int | None = None,
+    kv_cache_dtype: CacheDType | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
     if use_mla:
         if device_capability.major == 10:
-            # Prefer FlashInfer at low head counts (FlashMLA uses padding)
-            if num_heads is not None and num_heads <= 16:
+            # Sparse MLA backend priorities
+            # See https://github.com/vllm-project/vllm/issues/35807 for
+            # benchmark results
+            if kv_cache_dtype is not None and is_quantized_kv_cache(kv_cache_dtype):
+                # Prefer FlashInfer for fp8 kv cache
                 sparse_backends = [
                     AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
                     AttentionBackendEnum.FLASHMLA_SPARSE,
                 ]
             else:
-                sparse_backends = [
-                    AttentionBackendEnum.FLASHMLA_SPARSE,
-                    AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
-                ]
+                # BF16 KV Cache
+                # Prefer FlashInfer at low head counts (FlashMLA uses padding)
+                if num_heads is not None and num_heads <= 16:
+                    sparse_backends = [
+                        AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                        AttentionBackendEnum.FLASHMLA_SPARSE,
+                    ]
+                else:
+                    sparse_backends = [
+                        AttentionBackendEnum.FLASHMLA_SPARSE,
+                        AttentionBackendEnum.FLASHINFER_MLA_SPARSE,
+                    ]
+
             return [
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.CUTLASS_MLA,
@@ -142,6 +189,10 @@ class CudaPlatformBase(Platform):
         _ = torch.zeros(1, device=device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
+
+    @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         raise NotImplementedError
 
@@ -162,27 +213,12 @@ class CudaPlatformBase(Platform):
         pass
 
     @classmethod
-    def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
-
-        cache_config = vllm_config.cache_config
-        user_specified_block_size = cache_config.block_size is not None
-        if not user_specified_block_size:
-            cache_config.block_size = 16
-
-        # Ensure block_size is compatible with the attention backend.
-        # Note: model_config may be None during testing.
-        # Skip hybrid (attention+mamba) models — their block_size is
-        # managed by HybridAttentionMambaModelConfig
-        if model_config is not None and not model_config.is_hybrid:
-            cls._update_block_size_for_backend(
-                vllm_config,
-                user_specified_block_size,
-            )
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
@@ -199,150 +235,6 @@ class CudaPlatformBase(Platform):
             scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
-    def _update_block_size_for_backend(
-        cls,
-        vllm_config: "VllmConfig",
-        user_specified_block_size: bool,
-    ) -> None:
-        """Ensure block_size is compatible with the attention backend.
-
-        If the user specified --block-size, the selector validates/filters
-        backends by that block size (raising on incompatibility). Otherwise,
-        the backend is selected unconstrained and block_size is set to the
-        backend's preferred value.
-        """
-        from vllm.config.vllm import set_current_vllm_config
-        from vllm.v1.attention.selector import AttentionSelectorConfig
-
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-
-        device_capability = cls.get_device_capability()
-        if device_capability is None:
-            return
-
-        use_mla = model_config.use_mla
-        attn_selector_config = AttentionSelectorConfig(
-            head_size=model_config.get_head_size(),
-            dtype=model_config.dtype,  # type: ignore[arg-type]
-            kv_cache_dtype=cache_config.cache_dtype,
-            block_size=cache_config.block_size if user_specified_block_size else None,
-            use_mla=use_mla,
-            has_sink=False,
-            use_sparse=use_mla and hasattr(model_config.hf_config, "index_topk"),
-            use_mm_prefix=model_config.is_mm_prefix_lm,
-        )
-
-        user_specified_backend = vllm_config.attention_config.backend
-        num_heads = model_config.get_num_attention_heads(
-            vllm_config.parallel_config,
-        )
-        with set_current_vllm_config(vllm_config):
-            chosen_backend = cls.select_attention_backend(
-                selected_backend=user_specified_backend,
-                attn_selector_config=attn_selector_config,
-                device_capability=device_capability,
-                # Don't raise here — we produce better errors below.
-                raise_on_invalid=False,
-                num_heads=num_heads,
-            )
-
-            # If the user's --block-size forced a non-optimal backend,
-            # warn them. Only relevant when the user didn't also specify
-            # --attention-backend (in which case the choice is explicit).
-            if (
-                chosen_backend is not None
-                and user_specified_block_size
-                and user_specified_backend is None
-            ):
-                optimal = cls.select_attention_backend(
-                    selected_backend=None,
-                    attn_selector_config=attn_selector_config._replace(
-                        block_size=None,
-                    ),
-                    device_capability=device_capability,
-                    raise_on_invalid=False,
-                    num_heads=num_heads,
-                )
-                if optimal is not None and optimal != chosen_backend:
-                    logger.warning(
-                        "--block-size %d is not supported by the preferred "
-                        "%s backend. Using %s instead, which may result "
-                        "in reduced performance. Consider removing "
-                        "--block-size to auto-select the optimal "
-                        "block size.",
-                        cache_config.block_size,
-                        optimal.name,
-                        chosen_backend.name,
-                    )
-
-            if chosen_backend is not None:
-                if user_specified_block_size:
-                    # User's block_size is compatible with the chosen
-                    # backend.
-                    return
-                # User didn't specify --block-size, so auto-select the
-                # preferred block size for the chosen backend.
-                try:
-                    backend_class = chosen_backend.get_class()
-                except ImportError:
-                    return  # Will fail later with a better error
-                preferred = backend_class.get_preferred_block_size(
-                    cache_config.block_size,
-                )
-                if cache_config.block_size != preferred:
-                    logger.info(
-                        "Setting kv cache block size to %d for %s backend.",
-                        preferred,
-                        chosen_backend.name,
-                    )
-                    cache_config.block_size = preferred
-                return
-
-            # No valid backend found. If the user didn't constrain the
-            # selection, defer the error to get_attn_backend_cls where
-            # the full config (including per-layer settings) is
-            # available.
-            if not user_specified_block_size:
-                return
-
-            if user_specified_backend is not None:
-                # User specified --block-size and --attention-backend
-                # and they are incompatible.
-                try:
-                    backend_class = user_specified_backend.get_class()
-                    supported = backend_class.get_supported_kernel_block_sizes()
-                except ImportError:
-                    supported = None
-                raise ValueError(
-                    f"User-specified --block-size "
-                    f"{cache_config.block_size} is incompatible with "
-                    f"the specified --attention-backend "
-                    f"{user_specified_backend.name} (supported kernel "
-                    f"block sizes: {supported}). Either remove "
-                    f"--block-size to auto-select, or choose a "
-                    f"compatible value."
-                )
-            else:
-                # User specified --block-size but no backend supports
-                # it.
-                _, invalid_reasons = cls.get_valid_backends(
-                    device_capability=device_capability,
-                    attn_selector_config=attn_selector_config,
-                    num_heads=num_heads,
-                )
-                reasons_str = ", ".join(
-                    f"{b.name}: [{', '.join(r)}]" for b, r in invalid_reasons.items()
-                )
-                raise ValueError(
-                    f"No valid attention backend found for "
-                    f"--block-size {cache_config.block_size}. "
-                    f"Reasons: {{{reasons_str}}}. Either remove "
-                    f"--block-size to auto-select, or choose a "
-                    f"compatible value."
-                )
-
-    @classmethod
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
@@ -354,19 +246,20 @@ class CudaPlatformBase(Platform):
     def get_valid_backends(
         cls,
         device_capability: DeviceCapability,
-        attn_selector_config: "AttentionSelectorConfig",
+        attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
     ) -> tuple[
-        list[tuple["AttentionBackendEnum", int]],
-        dict["AttentionBackendEnum", list[str]],
+        list[tuple[AttentionBackendEnum, int]],
+        dict[AttentionBackendEnum, tuple[int, list[str]]],
     ]:
         valid_backends_priorities = []
-        invalid_reasons = {}
+        invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
 
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             device_capability,
             num_heads,
+            attn_selector_config.kv_cache_dtype,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -378,148 +271,131 @@ class CudaPlatformBase(Platform):
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
             if invalid_reasons_i:
-                invalid_reasons[backend] = invalid_reasons_i
+                invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
                 valid_backends_priorities.append((backend, priority))
 
         return valid_backends_priorities, invalid_reasons
 
     @classmethod
-    def select_attention_backend(
-        cls,
-        selected_backend: "AttentionBackendEnum | None",
-        attn_selector_config: "AttentionSelectorConfig",
-        device_capability: "DeviceCapability",
-        raise_on_invalid: bool = True,
-        num_heads: int | None = None,
-    ) -> "AttentionBackendEnum | None":
-        """Select the best attention backend for the given configuration.
-
-        Args:
-            selected_backend: User-specified backend, or None for auto-selection
-            attn_selector_config: Configuration for attention selection
-            device_capability: Device capability info
-            raise_on_invalid: If True, raise ValueError when no valid backend
-            num_heads: Number of attention heads per GPU, used for backend
-                priority ordering on Blackwell GPUs
-
-        Returns:
-            The selected backend enum, or None if no valid backend found
-            and raise_on_invalid is False
-        """
-        # First try checking just the selected backend, if there is one.
-        if selected_backend is not None:
-            try:
-                backend_class = selected_backend.get_class()
-                validation_errors = backend_class.validate_configuration(
-                    device_capability=device_capability,
-                    **attn_selector_config._asdict(),
-                )
-            except ImportError:
-                validation_errors = ["ImportError"]
-            if validation_errors:
-                if raise_on_invalid:
-                    raise ValueError(
-                        f"Selected backend {selected_backend} is not valid for "
-                        f"this configuration. Reason: {validation_errors}"
-                    )
-                return None
-            return selected_backend
-
-        # No selected backend, so find the best valid one.
-        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
-            device_capability=device_capability,
-            attn_selector_config=attn_selector_config,
-            num_heads=num_heads,
-        )
-
-        if len(valid_backends_priorities) == 0:
-            if raise_on_invalid:
-                reasons_str = (
-                    "{"
-                    + ", ".join(
-                        f"{backend.name}: [{', '.join(reasons)}]"
-                        for backend, reasons in invalid_reasons.items()
-                    )
-                    + "}"
-                )
-                config_str = attn_selector_config.__repr__()
-                raise ValueError(
-                    f"No valid attention backend found for {cls.device_name} "
-                    f"with {config_str}. Reasons: {reasons_str}."
-                )
-            return None
-
-        # Select the one with the highest priority (lowest index).
-        sorted_backends = sorted(valid_backends_priorities, key=lambda x: x[1])
-        return sorted_backends[0][0]
-
-    @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "AttentionBackendEnum | None",
-        attn_selector_config: "AttentionSelectorConfig",
+        selected_backend: AttentionBackendEnum | None,
+        attn_selector_config: AttentionSelectorConfig,
         num_heads: int | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
-        chosen_backend = cls.select_attention_backend(
-            selected_backend=selected_backend,
+        # First try checking just the selected backend, if there is one.
+        if selected_backend is not None:
+            try:
+                backend_class = selected_backend.get_class()
+                invalid_reasons = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if invalid_reasons:
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {invalid_reasons}"
+                )
+            else:
+                logger.info("Using %s backend.", selected_backend)
+                return selected_backend.get_path()
+
+        # No selected backend or the selected backend is invalid,
+        # so we try finding a valid backend.
+        valid_backends_priorities, all_invalid_reasons = cls.get_valid_backends(
+            device_capability=device_capability,
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
-            device_capability=device_capability,
-            raise_on_invalid=True,
         )
-        assert chosen_backend is not None  # raise_on_invalid=True guarantees this
-
-        # Log the selection
-        if selected_backend is not None:
-            logger.info("Using %s backend.", chosen_backend)
-        else:
-            # Get all valid backends for logging
-            valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
-                device_capability=device_capability,
-                attn_selector_config=attn_selector_config,
-                num_heads=num_heads,
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, (_, reasons) in all_invalid_reasons.items()
             )
-            reasons_str = (
-                "{"
-                + ", ".join(
-                    f"{backend.name}: [{', '.join(reasons)}]"
-                    for backend, reasons in invalid_reasons.items()
+            + "}"
+        )
+        config_str = attn_selector_config.__repr__()
+        logger.debug_once(
+            f"Some attention backends are not valid for {cls.device_name} with "
+            f"{config_str}. Reasons: {reasons_str}."
+        )
+        if len(valid_backends_priorities) == 0:
+            raise ValueError(
+                f"No valid attention backend found for {cls.device_name} "
+                f"with {config_str}. Reasons: {reasons_str}."
+            )
+
+        # We have found some valid backends. Select the one with the
+        # highest priority.
+        sorted_indices = sorted(
+            range(len(valid_backends_priorities)),
+            key=lambda i: valid_backends_priorities[i][1],
+        )
+        selected_index = sorted_indices[0]
+        selected_backend = valid_backends_priorities[selected_index][0]
+        selected_priority = valid_backends_priorities[selected_index][1]
+
+        # If the user specified --block-size (but not --attention-backend),
+        # check whether that constraint precluded any higher-priority backends.
+        if attn_selector_config.block_size is not None:
+            excluded = [
+                backend
+                for backend, (priority, reasons) in all_invalid_reasons.items()
+                if priority < selected_priority
+                and reasons == ["block_size not supported"]
+            ]
+            if excluded:
+                names = ", ".join(b.name for b in excluded)
+                logger.warning(
+                    "--block-size %d precluded higher-priority backend(s) "
+                    "%s. Using %s instead, which may result in reduced "
+                    "performance. Consider removing --block-size to "
+                    "auto-select the optimal block size.",
+                    attn_selector_config.block_size,
+                    names,
+                    selected_backend.name,
                 )
-                + "}"
-            )
-            config_str = attn_selector_config.__repr__()
-            logger.debug_once(
-                f"Some attention backends are not valid for {cls.device_name} with "
-                f"{config_str}. Reasons: {reasons_str}."
-            )
-            logger.info_once(
-                "Using %s attention backend out of potential backends: %s",
-                chosen_backend.name,
-                tuple(b[0].name for b in valid_backends_priorities),
-                scope="local",
-            )
 
-        return chosen_backend.get_path()
+        logger.info_once(
+            "Using %s attention backend out of potential backends: %s.",
+            selected_backend.name,
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
+            scope="local",
+        )
+
+        return selected_backend.get_path()
 
     @classmethod
-    def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
-        return [
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TRITON_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-        ]
+    def get_supported_vit_attn_backends(cls) -> list[AttentionBackendEnum]:
+        if cls.has_device_capability(80):
+            return [
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.FLASHINFER,
+            ]
+        else:
+            return [
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.TORCH_SDPA,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLASHINFER,
+            ]
 
     @classmethod
     def get_vit_attn_backend(
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: "AttentionBackendEnum | None" = None,
-    ) -> "AttentionBackendEnum":
+        backend: AttentionBackendEnum | None = None,
+    ) -> AttentionBackendEnum:
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
                 f"Backend {backend} is not supported for vit attention. "
@@ -531,7 +407,7 @@ class CudaPlatformBase(Platform):
         cc = cls.get_device_capability()
         for vit_attn_backend in cls.get_supported_vit_attn_backends():
             if vit_attn_backend == AttentionBackendEnum.TORCH_SDPA:
-                continue
+                return vit_attn_backend
             try:
                 backend_class = vit_attn_backend.get_class()
                 is_backend_supported = backend_class.supports_head_size(
@@ -544,7 +420,8 @@ class CudaPlatformBase(Platform):
                     )
                 if is_backend_supported:
                     logger.info_once(
-                        f"Using backend {vit_attn_backend} for vit attention"
+                        f"Using backend {vit_attn_backend} for vit attention",
+                        scope="local",
                     )
                     return vit_attn_backend
             except ImportError:
@@ -579,8 +456,39 @@ class CudaPlatformBase(Platform):
         return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
 
     @classmethod
+    def stateless_init_device_torch_dist_pg(
+        cls,
+        backend: str,
+        prefix_store: PrefixStore,
+        group_rank: int,
+        group_size: int,
+        timeout: timedelta,
+    ) -> ProcessGroup:
+        assert is_nccl_available()
+        pg: ProcessGroup = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
+        from torch.distributed.distributed_c10d import ProcessGroupNCCL
+
+        backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
+
+        backend_class = ProcessGroupNCCL(
+            prefix_store, group_rank, group_size, backend_options
+        )
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
+        pg._set_default_backend(backend_type)
+        backend_class._set_sequence_number_for_group()
+
+        pg._register_backend(device, backend_type, backend_class)
+        return pg
+
+    @classmethod
     def device_count(cls) -> int:
-        return cuda_device_count_stateless()
+        return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
 
     @classmethod
     def check_if_supports_dtype(cls, dtype: torch.dtype):
@@ -634,6 +542,39 @@ class CudaPlatformBase(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def support_deep_gemm(cls) -> bool:
+        """Currently, only Hopper and Blackwell GPUs are supported."""
+        return cls.is_device_capability(90) or cls.is_device_capability_family(100)
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        return torch.cuda.get_device_properties(device_id).multi_processor_count
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
+
+    @classmethod
+    def get_default_ir_op_priority(cls, vllm_config: VllmConfig) -> IrOpPriorityConfig:
+        from vllm.config.compilation import CompilationMode
+        from vllm.config.kernel import IrOpPriorityConfig
+
+        # Native used by default when compiling,
+        # use vllm_c kernels where available when no codegen
+        cc = vllm_config.compilation_config
+        using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
+        default = ["native"] if using_inductor else ["vllm_c", "native"]
+
+        # Use oink if enabled for rms_norm
+        # TODO(Laurawly/luka): remove this env var,
+        #  users can just use IR op priority directly
+        rms_norm = default
+        if envs.VLLM_USE_OINK_OPS:
+            rms_norm = ["oink"] + default
+
+        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
 
 
 # NVML utils
@@ -718,6 +659,133 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        """Get the NUMA node ID for a GPU device."""
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
+        try:
+            numa_node = pynvml.nvmlDeviceGetNumaNodeId(handle)
+            if cls._numa_node_has_cpus(numa_node):
+                return numa_node
+            # On non-CDMM Grace-Blackwell systems (e.g. GB200), each GPU's HBM
+            # is a separate NUMA node with no CPUs.  Fall through to
+            # CPU-affinity-based detection to find the nearest CPU node.
+            logger.debug(
+                "NUMA node %d for GPU %d has no CPUs (non-CDMM topology), "
+                "falling back to CPU-affinity-based detection",
+                numa_node,
+                device_id,
+            )
+        except Exception:
+            pass
+
+        try:
+            cpu_ids = cls._get_device_cpu_affinity(handle)
+            if cpu_ids:
+                numa_node = cls._get_numa_node_for_cpu(cpu_ids[0])
+                if numa_node is not None:
+                    logger.debug(
+                        "Determined NUMA node %d for GPU %d via CPU affinity",
+                        numa_node,
+                        device_id,
+                    )
+                    return numa_node
+        except Exception as e:
+            logger.warning("Failed to get NUMA node for GPU %d: %s", device_id, e)
+
+        return None
+
+    @classmethod
+    def _numa_node_has_cpus(cls, node_id: int) -> bool:
+        """Check whether a NUMA node has any CPUs assigned to it."""
+        from pathlib import Path
+
+        cpulist_file = Path(f"/sys/devices/system/node/node{node_id}/cpulist")
+        try:
+            return cpulist_file.read_text().strip() != ""
+        except (OSError, ValueError):
+            return False
+
+    @classmethod
+    def _get_device_cpu_affinity(cls, handle) -> list[int]:
+        """Get the list of CPU IDs associated with a GPU via NVML."""
+        cpu_count = os.cpu_count()
+        if cpu_count is None:
+            return []
+
+        cpu_set_size = (cpu_count + 63) // 64
+        cpu_affinity_mask = pynvml.nvmlDeviceGetCpuAffinity(handle, cpu_set_size)
+
+        cpu_ids = []
+        for i, mask in enumerate(cpu_affinity_mask):
+            for bit in range(64):
+                cpu_id = i * 64 + bit
+                if cpu_id >= cpu_count:
+                    break
+                if mask & (1 << bit):
+                    cpu_ids.append(cpu_id)
+        return cpu_ids
+
+    @classmethod
+    def _get_numa_node_for_cpu(cls, cpu_id: int) -> int | None:
+        """Determine which NUMA node a CPU belongs to."""
+        from pathlib import Path
+
+        node_path = Path("/sys/devices/system/node")
+        if not node_path.exists():
+            return None
+
+        for node_dir in node_path.iterdir():
+            if not node_dir.name.startswith("node"):
+                continue
+            try:
+                node_id = int(node_dir.name[4:])
+                cpulist_file = node_dir / "cpulist"
+                if cpulist_file.exists():
+                    cpulist = cpulist_file.read_text().strip()
+                    if cls._cpu_in_cpulist(cpu_id, cpulist):
+                        return node_id
+            except (ValueError, OSError):
+                continue
+        return None
+
+    @classmethod
+    def _cpu_in_cpulist(cls, cpu_id: int, cpulist: str) -> bool:
+        """Check if a CPU ID is in a cpulist string such as '0-3,8-11'."""
+        for part in cpulist.split(","):
+            part = part.strip()
+            if "-" in part:
+                start, end = part.split("-", 1)
+                if int(start) <= cpu_id <= int(end):
+                    return True
+            elif part.isdigit() and int(part) == cpu_id:
+                return True
+        return False
+
+    @classmethod
+    @with_nvml_context
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        """Get NUMA nodes for all visible GPU devices."""
+        try:
+            numa_nodes = []
+            for device_id in range(cls.device_count()):
+                numa_node = cls.get_device_numa_node(device_id)
+                if numa_node is None:
+                    logger.warning(
+                        "Could not detect NUMA node for GPU %d, "
+                        "disabling automatic NUMA binding",
+                        device_id,
+                    )
+                    return None
+                numa_nodes.append(numa_node)
+            return numa_nodes
+        except Exception as e:
+            logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
+            return None
+
+    @classmethod
+    @with_nvml_context
     def log_warnings(cls):
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
@@ -757,6 +825,14 @@ class NonNvmlCudaPlatform(CudaPlatformBase):
             " not found. Assuming no NVLink available."
         )
         return False
+
+    @classmethod
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        return None
+
+    @classmethod
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        return None
 
 
 # Autodetect either NVML-enabled or non-NVML platform

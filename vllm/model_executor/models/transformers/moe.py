@@ -94,6 +94,8 @@ def transformers_moe_forward(
     self = forward_context.no_compile_layers[layer_name]
     self._topk_ids = topk_ids
     # Clone hidden_states because it will be mutated in-place in FusedMoE
+    # TODO(bnell): figure out a way to avoid calling runner directly.
+    # it is a hack that the weight are being passed via logits.
     return self.runner.forward(hidden_states.clone(), topk_weights)
 
 
@@ -156,6 +158,17 @@ class MoEMixin(MixtureOfExperts):
         Params for weights, fp8 weight scales, fp8 activation scales
         (param_name, weight_name, expert_id, shard_id)
         """
+        # Models saved with fused experts. These are checkpoints released:
+        # - After Transformers v5
+        # - Before Transformers v5, but re-saved with save_original_format=False
+        # In the fused experts case, we repurpose the expert_id as shard_idx for
+        # deconcatenating w1 and w3 in FusedMoE.load_weights.
+        expert_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+        # Models saved with ModuleList experts
         ckpt_names = [
             # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
             ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
@@ -164,7 +177,6 @@ class MoEMixin(MixtureOfExperts):
         ]
         num_experts = self.model_config.get_num_experts()
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
-        expert_mapping = []
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
                 FusedMoE.make_expert_params_mapping(
