@@ -24,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
 from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
+from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
+    OCP_MX_Scheme,
+)
 
 logger = init_logger(__name__)
 
@@ -65,9 +68,28 @@ class OCP_MXQuantizationEmulationTritonExperts(TritonExperts):
 
         self.quantization_emulation = True
 
+        if self.ocp_mx_scheme in {
+            OCP_MX_Scheme.w_mxfp4_a_mxfp4,
+        }:
+            # Weight has to be dequantized for mxfp4 emulation.
+            self._quant_dtype = "mxfp4"
+        elif self.ocp_mx_scheme in [
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e3m2,
+            OCP_MX_Scheme.w_mxfp4_a_mxfp6_e2m3,
+            OCP_MX_Scheme.w_mxfp6_e3m2_a_mxfp6_e3m2,
+            OCP_MX_Scheme.w_mxfp6_e2m3_a_mxfp6_e2m3,
+        ]:
+            self._quant_dtype = "mxfp6"
+        elif self.ocp_mx_scheme in [
+            OCP_MX_Scheme.w_mxfp4_a_fp8,
+            OCP_MX_Scheme.w_mxfp6_e3m2_a_fp8,
+        ]:
+            # TODO: double check this one
+            self._quant_dtype = "mxfp8"
+
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
-        return self.ocp_mx_scheme
+        return self._quant_dtype
 
     @property
     def expects_unquantized_inputs(self) -> bool:
