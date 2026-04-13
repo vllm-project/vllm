@@ -364,6 +364,90 @@ class SpecDecodeBaseProposer:
                 positions = positions[0]
             self.positions[:num_tokens] = positions
 
+    def _get_positions_for_copy_expand_eagle_inputs_kernel(
+        self,
+        target_positions: torch.Tensor,
+        cad: CommonAttentionMetadata,
+        batch_size: int,
+        total_num_input_tokens: int,
+    ) -> torch.Tensor:
+        """1D positions passed to ``copy_and_expand_eagle_inputs_kernel``."""
+        kernel_positions = target_positions
+        if self.vllm_config.model_config.uses_mrope:
+            if not self.uses_mrope:
+                extend_lens = (
+                    cad.query_start_loc[1 : batch_size + 1]
+                    - cad.query_start_loc[:batch_size]
+                )
+                num_computed = cad.seq_lens[:batch_size] - extend_lens
+                seq_pos = torch.zeros(
+                    total_num_input_tokens,
+                    dtype=target_positions[0].dtype,
+                    device=self.device,
+                )
+                seq_pos.scatter_(
+                    0,
+                    cad.query_start_loc[:batch_size].long(),
+                    num_computed.to(target_positions[0].dtype),
+                )
+                kernel_positions = seq_pos
+            else:
+                kernel_positions = target_positions[0]
+        elif (
+            self.vllm_config.model_config.uses_xdrope_dim > 0
+            and self.draft_uses_xdrope_dim == 0
+        ):
+            kernel_positions = target_positions[0]
+        return kernel_positions
+
+    def _populate_mrope_positions_after_copy_expand_inputs(
+        self,
+        cad: CommonAttentionMetadata,
+        batch_size: int,
+        total_num_input_tokens: int,
+        total_num_output_tokens: int,
+        target_positions: torch.Tensor,
+        query_end_loc: torch.Tensor,
+        token_indices_to_sample: torch.Tensor,
+    ) -> None:
+        """Fill draft ``mrope_positions`` after ``copy_and_expand_eagle_inputs_kernel``.
+
+        When the target uses M-RoPE, copies per-token dims from ``target_positions``
+        and sets speculative slots to (last valid time) + 1; otherwise copies 1D
+        ``self.positions`` from the kernel output.
+        """
+        if not self.uses_mrope:
+            return
+        if self.vllm_config.model_config.uses_mrope:
+            extend_lens_batch = (
+                cad.query_start_loc[1 : batch_size + 1]
+                - cad.query_start_loc[:batch_size]
+            )
+            req_ranks = torch.repeat_interleave(
+                torch.arange(batch_size, dtype=torch.long, device=self.device),
+                extend_lens_batch.long(),
+                output_size=total_num_input_tokens,
+            )
+            out_indices_for_input = (
+                torch.arange(
+                    total_num_input_tokens,
+                    dtype=torch.long,
+                    device=self.device,
+                )
+                + req_ranks
+            )
+            self.mrope_positions[:, out_indices_for_input] = target_positions[
+                :, :total_num_input_tokens
+            ]
+            last_valid_times = target_positions[0, query_end_loc]
+            self.mrope_positions[:, token_indices_to_sample] = (
+                last_valid_times.unsqueeze(0) + 1
+            )
+        else:
+            self.mrope_positions[:, :total_num_output_tokens] = self.positions[
+                :total_num_output_tokens
+            ]
+
     def _get_slot_mapping(
         self,
         num_tokens: int,
@@ -719,38 +803,11 @@ class SpecDecodeBaseProposer:
             query_end_loc = cad.query_start_loc[1:] - 1
             if num_rejected_tokens_gpu is not None:
                 query_end_loc = query_end_loc - num_rejected_tokens_gpu
+            
             # Determine positions to pass to the kernel.
-            kernel_positions = target_positions
-            if self.vllm_config.model_config.uses_mrope:
-                if not self.uses_mrope:
-                    # Cross-modal: target (M-RoPE) compresses image token
-                    # positions, so reconstruct 1D sequential positions for
-                    # the draft model.
-                    extend_lens = (
-                        cad.query_start_loc[1 : batch_size + 1]
-                        - cad.query_start_loc[:batch_size]
-                    )
-                    num_computed = cad.seq_lens[:batch_size] - extend_lens
-                    seq_pos = torch.zeros(
-                        total_num_input_tokens,
-                        dtype=target_positions[0].dtype,
-                        device=self.device,
-                    )
-                    seq_pos.scatter_(
-                        0,
-                        cad.query_start_loc[:batch_size].long(),
-                        num_computed.to(target_positions[0].dtype),
-                    )
-                    kernel_positions = seq_pos
-                else:
-                    # Both use M-RoPE: pass the time dimension.
-                    # Spec tokens are text tokens; all 3 M-RoPE dims are equal.
-                    kernel_positions = target_positions[0]
-            elif (
-                self.vllm_config.model_config.uses_xdrope_dim > 0
-                and self.draft_uses_xdrope_dim == 0
-            ):
-                kernel_positions = target_positions[0]
+            kernel_positions = self._get_positions_for_copy_expand_eagle_inputs_kernel(
+                target_positions, cad, batch_size, total_num_input_tokens
+            )
 
             copy_and_expand_eagle_inputs_kernel[grid](
                 # (Padded) Inputs from the target model
@@ -789,39 +846,15 @@ class SpecDecodeBaseProposer:
                 )
 
             # Populate mrope_positions for draft models that use M-RoPE.
-            if self.uses_mrope:
-                if self.vllm_config.model_config.uses_mrope:
-                    extend_lens_batch = (
-                        cad.query_start_loc[1 : batch_size + 1]
-                        - cad.query_start_loc[:batch_size]
-                    )
-                    req_ranks = torch.repeat_interleave(
-                        torch.arange(batch_size, dtype=torch.long, device=self.device),
-                        extend_lens_batch.long(),
-                        output_size=total_num_input_tokens,
-                    )
-                    out_indices_for_input = (
-                        torch.arange(
-                            total_num_input_tokens,
-                            dtype=torch.long,
-                            device=self.device,
-                        )
-                        + req_ranks
-                    )
-                    self.mrope_positions[:, out_indices_for_input] = target_positions[
-                        :, :total_num_input_tokens
-                    ]
-                    # Bonus tokens are new text tokens: all 3 M-RoPE dims equal
-                    # to (last valid input token's time dim) + 1.
-                    last_valid_times = target_positions[0, query_end_loc]
-                    self.mrope_positions[:, token_indices_to_sample] = (
-                        last_valid_times.unsqueeze(0) + 1
-                    )
-                    # Rejected slots remain 0 (already zero-initialised).
-                else:
-                    self.mrope_positions[:, :total_num_output_tokens] = self.positions[
-                        :total_num_output_tokens
-                    ]
+            self._populate_mrope_positions_after_copy_expand_inputs(
+                cad,
+                batch_size,
+                total_num_input_tokens,
+                total_num_output_tokens,
+                target_positions,
+                query_end_loc,
+                token_indices_to_sample,
+            )
 
             # 2.
             # Recompute the slot mapping based on the new positions and
