@@ -39,6 +39,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.worker.gpu.attn_utils import get_contiguous_strides
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import AttentionGroup, select_common_block_size
@@ -1053,6 +1054,16 @@ def test_reshape_kv_cache_tensors_handles_padded_attention_pages():
     assert torch.all(
         raw_half[elems_per_page + logical_elems_per_page : 2 * elems_per_page] == 0.0
     )
+
+
+def test_get_contiguous_strides_matches_torch():
+    shapes = [
+        (2, 2, 16, 1, 8),
+        (7, 2, 16, 8, 40),
+        (3, 4, 5),
+    ]
+    for shape in shapes:
+        assert get_contiguous_strides(shape) == torch.empty(shape).stride()
 
 
 def test_hybrid_block_table_initialization():

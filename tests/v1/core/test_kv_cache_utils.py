@@ -2245,3 +2245,33 @@ def test_unify_kv_cache_spec_page_size_rejects_non_attention_padding():
                 "mamba": mamba_spec,
             }
         )
+
+
+def test_int4_page_size_bytes_aligns_inline_scale_payload():
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+    block_size = 16
+    num_kv_heads = 1
+    head_size = 66
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=torch.float16,
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+    )
+
+    # Packed INT4 payload uses ceil(head_size / 2) bytes and then aligns the
+    # inline scale carve-out to fp16 boundaries. The page budget adds the
+    # 3 fp16 scale groups on top of that aligned payload.
+    assert spec.real_page_size_bytes == 2 * block_size * num_kv_heads * 34
+    assert spec.page_size_bytes == 2 * block_size * num_kv_heads * (34 + 6)
+
+    shape = TritonAttentionBackend.get_kv_cache_shape(
+        num_blocks=1,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        cache_dtype_str="int4_per_token_head",
+    )
+    assert shape == (1, 2, block_size, num_kv_heads, 40)

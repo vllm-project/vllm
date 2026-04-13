@@ -43,6 +43,7 @@ from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
+    get_kv_cache_head_size_bytes,
     get_kv_quant_mode,
     get_per_token_head_scale_count,
     get_per_token_head_scale_dtype,
@@ -329,7 +330,9 @@ class TritonAttentionBackend(AttentionBackend):
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_dtype = get_per_token_head_scale_dtype(kv_quant_mode)
             assert scale_dtype is not None
-            packed_head_size = kv_quant_mode.packed_head_size(head_size)
+            packed_head_size = get_kv_cache_head_size_bytes(
+                head_size, cache_dtype, kv_quant_mode
+            ) // get_dtype_size(cache_dtype)
             scale_pad = (
                 get_per_token_head_scale_count(head_size, kv_quant_mode)
                 * get_dtype_size(scale_dtype)
@@ -454,6 +457,19 @@ class TritonAttentionImpl(AttentionImpl):
         block_stride, kv_half_stride, slot_stride, head_stride, hs_stride = (
             kv_cache.stride()
         )
+        stride_names = {
+            "block": block_stride,
+            "kv_half": kv_half_stride,
+            "slot": slot_stride,
+            "head": head_stride,
+            "scale_offset": hs * hs_stride,
+        }
+        for name, stride in stride_names.items():
+            byte_stride = stride * dtype_sz
+            assert byte_stride % scale_dtype_sz == 0, (
+                f"{name} byte stride must align with {scale_dtype}, got "
+                f"{byte_stride} bytes"
+            )
         full_block_scale = block_stride * dtype_sz // scale_dtype_sz
         v_base_scale = kv_half_stride * dtype_sz // scale_dtype_sz
         slot_scale = slot_stride * dtype_sz // scale_dtype_sz

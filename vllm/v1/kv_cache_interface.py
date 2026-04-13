@@ -16,7 +16,7 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import get_dtype_size
 
 logger = init_logger(__name__)
@@ -103,7 +103,12 @@ def get_kv_cache_head_size_bytes(
     head_size: int, dtype: torch.dtype, kv_quant_mode: KVQuantMode
 ) -> int:
     if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
-        return kv_quant_mode.packed_head_size(head_size)
+        scale_dtype = get_per_token_head_scale_dtype(kv_quant_mode)
+        assert scale_dtype is not None
+        return round_up(
+            kv_quant_mode.packed_head_size(head_size),
+            get_dtype_size(scale_dtype),
+        )
     return head_size * get_dtype_size(dtype)
 
 

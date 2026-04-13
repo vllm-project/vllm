@@ -30,6 +30,15 @@ class AttentionCGSupportInfo:
     min_cg_attn_backend: str | None = None
 
 
+def get_contiguous_strides(shape: Sequence[int]) -> tuple[int, ...]:
+    stride = 1
+    strides: list[int] = []
+    for dim in reversed(shape):
+        strides.append(stride)
+        stride *= dim
+    return tuple(reversed(strides))
+
+
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
@@ -194,7 +203,7 @@ def _reshape_kv_cache(
                 )
                 logical_elems_per_page = logical_numel // num_blocks
                 assert logical_elems_per_page <= elems_per_page
-                contiguous_strides = torch.empty(kv_cache_shape).stride()
+                contiguous_strides = get_contiguous_strides(kv_cache_shape)
                 raw_tensor = torch.as_strided(
                     raw_tensor,
                     size=kv_cache_shape,

@@ -546,6 +546,10 @@ def triton_reshape_and_cache_flash_int4_per_token_head(
     slot_mapping: torch.Tensor,  # [num_tokens]
 ):
     """Quantize key/value to packed int4 with Gaussian-friendly levels."""
+    assert key_cache.stride(-1) == 1, "INT4 key cache head dimension must be contiguous"
+    assert value_cache.stride(-1) == 1, (
+        "INT4 value cache head dimension must be contiguous"
+    )
     num_tokens, num_kv_heads, head_size = key.shape
     head_size_v = value.shape[2]
     packed_head_size_padded = triton.next_power_of_2(

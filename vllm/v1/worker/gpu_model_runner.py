@@ -186,6 +186,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.attn_utils import get_contiguous_strides
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -6590,7 +6591,7 @@ class GPUModelRunner(
                         )
                         logical_elems_per_page = logical_numel // num_blocks
                         assert logical_elems_per_page <= elems_per_page
-                        contiguous_strides = torch.empty(kv_cache_shape).stride()
+                        contiguous_strides = get_contiguous_strides(kv_cache_shape)
                         raw_tensor = torch.as_strided(
                             raw_tensor,
                             size=kv_cache_shape,
