@@ -328,6 +328,12 @@ class AggregatedLoggingStatLogger(LoggingStatLogger, AggregateStatLoggerBase):
             self.last_scheduler_stats.num_running_reqs += (
                 last_scheduler_stats.num_running_reqs
             )
+            self.last_scheduler_stats.num_prefilling_reqs += (
+                last_scheduler_stats.num_prefilling_reqs
+            )
+            self.last_scheduler_stats.num_decoding_reqs += (
+                last_scheduler_stats.num_decoding_reqs
+            )
             self.last_scheduler_stats.kv_cache_usage += (
                 last_scheduler_stats.kv_cache_usage
             )
@@ -451,6 +457,26 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_scheduler_waiting = create_metric_per_engine(
             gauge_scheduler_waiting, per_engine_labelvalues
+        )
+
+        gauge_scheduler_prefilling = self._gauge_cls(
+            name="vllm:num_requests_prefilling",
+            documentation="Number of requests currently in prefill phase.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_scheduler_prefilling = create_metric_per_engine(
+            gauge_scheduler_prefilling, per_engine_labelvalues
+        )
+
+        gauge_scheduler_decoding = self._gauge_cls(
+            name="vllm:num_requests_decoding",
+            documentation="Number of requests currently in decode phase.",
+            multiprocess_mode="mostrecent",
+            labelnames=labelnames,
+        )
+        self.gauge_scheduler_decoding = create_metric_per_engine(
+            gauge_scheduler_decoding, per_engine_labelvalues
         )
 
         gauge_engine_sleep_state = self._gauge_cls(
@@ -1032,6 +1058,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
             self.gauge_scheduler_waiting[engine_idx].set(
                 scheduler_stats.num_waiting_reqs
+            )
+            self.gauge_scheduler_prefilling[engine_idx].set(
+                scheduler_stats.num_prefilling_reqs
+            )
+            self.gauge_scheduler_decoding[engine_idx].set(
+                scheduler_stats.num_decoding_reqs
             )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 

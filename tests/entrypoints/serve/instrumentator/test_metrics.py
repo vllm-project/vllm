@@ -182,6 +182,8 @@ async def test_metrics_counts(
 EXPECTED_METRICS_V1 = [
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
+    "vllm:num_requests_prefilling",
+    "vllm:num_requests_decoding",
     "vllm:kv_cache_usage_perc",
     "vllm:prefix_cache_queries",
     "vllm:prefix_cache_hits",

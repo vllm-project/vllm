@@ -1953,9 +1953,14 @@ class Scheduler(SchedulerInterface):
         connector_stats_payload = (
             kv_connector_stats.data if kv_connector_stats else None
         )
+        num_prefilling_reqs = sum(
+            1 for req in self.running if req.num_computed_tokens < req.num_prompt_tokens
+        )
         return SchedulerStats(
             num_running_reqs=len(self.running),
             num_waiting_reqs=len(self.waiting) + len(self.skipped_waiting),
+            num_prefilling_reqs=num_prefilling_reqs,
+            num_decoding_reqs=len(self.running) - num_prefilling_reqs,
             kv_cache_usage=self.kv_cache_manager.usage,
             encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,
