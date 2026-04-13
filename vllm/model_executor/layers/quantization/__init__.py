@@ -31,7 +31,6 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "mxfp8",
-    "petit_nvfp4",
     "cpu_awq",
     "online",
     # Below are values of the OnlineQuantScheme enum, specified as strings to
@@ -48,7 +47,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
     "fp_quant",
     "experts_int8",
-    "petit_nvfp4",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -138,7 +136,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .mxfp4 import Mxfp4Config
     from .mxfp8 import Mxfp8Config
     from .online.base import OnlineQuantizationConfig
-    from .petit import PetitNvFp4Config
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
@@ -164,7 +161,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "mxfp8": Mxfp8Config,
-        "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
         "online": OnlineQuantizationConfig,
     }
