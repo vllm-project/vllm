@@ -138,8 +138,10 @@ def _validate_fused_moe_batch_invariant_nvfp4_inputs(
     assert w13_weight_scale.is_contiguous(), "w13_weight_scale must be contiguous"
     assert w2_weight.is_contiguous(), "w2_weight must be contiguous"
     assert w2_weight_scale.is_contiguous(), "w2_weight_scale must be contiguous"
-    if expert_map is not None:
-        assert expert_map.is_contiguous(), "expert_map must be contiguous"
+    assert expert_map is None, (
+        "Batch-invariant NVFP4 MoE does not support expert_map. "
+        "This kernel requires local expert IDs and ep_size == 1."
+    )
 
     for name, tensor in (
         ("a1_gscale", a1_gscale),
@@ -160,19 +162,6 @@ def _validate_fused_moe_batch_invariant_nvfp4_inputs(
             f"NVFP4 MoE tensor '{name}' must have {num_experts} elements, "
             f"got {tensor.numel()}."
         )
-
-
-def _nvfp4_moe_map_experts(
-    topk_ids: torch.Tensor, expert_map: torch.Tensor
-) -> torch.Tensor:
-    flat_ids = topk_ids.reshape(-1).to(torch.long)
-    if expert_map.numel() == 0:
-        return torch.full(topk_ids.shape, -1, dtype=torch.int32, device=topk_ids.device)
-    valid = (flat_ids >= 0) & (flat_ids < expert_map.numel())
-    clamped = flat_ids.clamp(min=0, max=max(0, expert_map.numel() - 1))
-    remapped = expert_map.to(torch.long).index_select(0, clamped)
-    mapped = torch.where(valid, remapped, -1)
-    return mapped.reshape(topk_ids.shape).to(dtype=torch.int32)
 
 
 # ---------------------------------------------------------------------------
@@ -708,8 +697,6 @@ def fused_moe_batch_invariant_nvfp4(
         return output
 
     routed_topk_ids = topk_ids
-    if expert_map is not None:
-        routed_topk_ids = _nvfp4_moe_map_experts(topk_ids, expert_map)
     # Out-of-range IDs are treated as invalid routes.
     valid_routes = (routed_topk_ids >= 0) & (routed_topk_ids < num_experts)
     routed_topk_ids = torch.where(valid_routes, routed_topk_ids, -1)
