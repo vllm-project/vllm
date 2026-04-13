@@ -180,7 +180,8 @@ def preprocess_mamba(
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
         prev_state_idx = mamba_state_idx.get(req_id)
-        if prev_state_idx is None:
+        is_new_or_resumed = prev_state_idx is None
+        if is_new_or_resumed:
             # new / resumed request, no previous state
             # if num_computed_tokens is 0, prev_state_idx will be -1
             prev_state_idx = (req_state.num_computed_tokens - 1) // block_size
@@ -203,6 +204,28 @@ def preprocess_mamba(
         # And use block 1 to save the running state.
         curr_state_idx = num_blocks - 1 - num_speculative_blocks
         mamba_state_idx[req_id] = curr_state_idx
+
+        if is_new_or_resumed and req_state.num_computed_tokens > 0:
+            # Prefix cache hit: verify the source block has valid state.
+            mamba_gid = mamba_group_ids[0]
+            src_phys = req_state.block_ids[mamba_gid][prev_state_idx]
+            layer_name = kv_cache_config.kv_cache_groups[
+                mamba_gid].layer_names[0]
+            ssm_cache = forward_context[layer_name].kv_cache[-1]
+            src_state = ssm_cache[src_phys]
+            if src_state.count_nonzero() == 0:
+                import logging
+                logging.getLogger(__name__).warning(
+                    "MAMBA STATE BUG: req %s prefix cache hit "
+                    "(%d computed tokens) but ssm_state at "
+                    "block[%d] (phys=%d) is ALL ZEROS. "
+                    "The cached mamba state was lost.",
+                    req_id,
+                    req_state.num_computed_tokens,
+                    prev_state_idx,
+                    src_phys,
+                )
+
         if prev_state_idx != -1 and prev_state_idx != curr_state_idx:
             collect_mamba_copy_meta(
                 copy_bufs,
