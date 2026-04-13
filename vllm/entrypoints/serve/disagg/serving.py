@@ -262,9 +262,7 @@ class ServingTokens(OpenAIServing):
             if output.routed_experts is not None:
                 buf = io.BytesIO()
                 np.save(buf, output.routed_experts)
-                routed_experts_b64 = base64.b64encode(
-                    buf.getvalue()
-                ).decode("ascii")
+                routed_experts_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
             choice_data = GenerateResponseChoice(
                 index=output.index,
