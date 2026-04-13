@@ -13,10 +13,12 @@ from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
 
-_TRANSFORMERS_VERSION = Version(version("transformers"))
-_SKIP_REASON = (
-    "MiniCPMV custom processor uses tokenizer.im_start_id which is not "
-    "available on TokenizersBackend in transformers v5.0+"
+pytestmark = pytest.mark.skipif(
+    Version("5.0") <= Version(version("transformers")),
+    reason=(
+        "MiniCPMV custom processor uses tokenizer.im_start_id which is not "
+        "available on TokenizersBackend in transformers v5.0+"
+    ),
 )
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
@@ -66,10 +68,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
-@pytest.mark.skipif(
-    Version("5.0") <= _TRANSFORMERS_VERSION,
-    reason=_SKIP_REASON,
-)
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -91,10 +89,6 @@ def test_minicpmv_lora(minicpmv_lora_files):
 
 
 @pytest.mark.skipif(
-    Version("5.0") <= _TRANSFORMERS_VERSION,
-    reason=_SKIP_REASON,
-)
-@pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
 @multi_gpu_test(num_gpus=4)
@@ -114,10 +108,6 @@ def test_minicpmv_tp4_wo_fully_sharded_loras(minicpmv_lora_files):
         assert EXPECTED_OUTPUT[i].startswith(output_tp[i])
 
 
-@pytest.mark.skipif(
-    Version("5.0") <= _TRANSFORMERS_VERSION,
-    reason=_SKIP_REASON,
-)
 @pytest.mark.skipif(
     current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
 )
