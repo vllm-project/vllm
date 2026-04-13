@@ -304,10 +304,20 @@ class LMCacheMPRequestMetadata:
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
+        #
+        # Why computed_blocks includes num_lmcache_hit_blocks:
+        #
+        # Include lmcache-hit blocks so that the upper bound
+        # matches num_stored_blocks (which already covers
+        # them). Hit blocks are NOT re-stored.
+        computed_blocks = (
+            tracker.num_scheduled_tokens // vllm_block_size
+            + tracker.num_lmcache_hit_blocks
+        )
         min_available_blocks = min(
             len(tracker.block_hashes),
             len(tracker.allocated_block_ids),
-            tracker.num_scheduled_tokens // vllm_block_size,
+            computed_blocks,
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
@@ -1010,8 +1020,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if request_id not in cached_reqs.resumed_req_ids:
                 request_tracker.append_block_ids(new_block_ids)
 
-            # Update new scheduled tokens
-            num_new_tokens = cached_reqs.num_computed_tokens[idx]
+            # Use the incremental num_scheduled_tokens to
+            # stay consistent with _process_new_requests.
+            num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
