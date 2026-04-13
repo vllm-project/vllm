@@ -190,9 +190,9 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
 
 # DeepEP build stage
 FROM base AS build_deep
-ARG ROCSHMEM_BRANCH="ba0bf0f3"
+ARG ROCSHMEM_BRANCH="04f13a60d1"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG DEEPEP_BRANCH="e84464ec"
+ARG DEEPEP_BRANCH="0ae6f25e"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
 ENV ROCSHMEM_DIR=/opt/rocshmem
@@ -202,20 +202,15 @@ RUN git clone ${ROCSHMEM_REPO} \
  && git checkout ${ROCSHMEM_BRANCH} \
  && mkdir -p projects/rocshmem/build \
  && cd projects/rocshmem/build \
- && cmake .. \
-    -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
-    -DROCM_PATH=/opt/rocm \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DUSE_EXTERNAL_MPI=OFF \
- && make -j \
- && make install
+ && INSTALL_PREFIX=${ROCSHMEM_DIR} \
+    ../scripts/build_configs/all_backends -DUSE_EXTERNAL_MPI=OFF
 
 # Build DeepEP wheel.
 # DeepEP looks for rocshmem at ROCSHMEM_DIR.
 RUN git clone ${DEEPEP_REPO} \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
- && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
+ && python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
@@ -337,6 +332,13 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
 # reinstall it after removing compilers. The bind-mounted /install contents
 # above are not available once that RUN step completes.
 COPY --from=export_vllm /*.whl /opt/vllm-wheels/
+
+# Update rdma-core to support latest rocshmem
+RUN git clone --branch v62.0 --depth 1 https://github.com/linux-rdma/rdma-core.git /tmp/rdma-core && \
+    cd /tmp/rdma-core && \
+    mkdir -p build && cd build && \
+    cmake -GNinja -DCMAKE_INSTALL_PREFIX=/usr -DNO_MAN_PAGES=1 .. && \
+    ninja &&     ninja install &&     ldconfig &&     rm -rf /tmp/rdma-core
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
