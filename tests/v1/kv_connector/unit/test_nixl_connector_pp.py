@@ -239,3 +239,92 @@ class TestSideChannelPortPP:
         # With PP2+TP4, there are 8 workers but only 1 scheduler.
         # The side_channel_port formula (base + dp_index) is correct for PP.
         assert True  # architecture documentation test
+
+
+# ===========================================================================
+# Tests: TpKVTopology.get_all_pp_tp_targets (Wave 2.2)
+# ===========================================================================
+
+class TestTpKVTopologyPP:
+    """
+    TpKVTopology needs a new method get_all_pp_tp_targets that returns
+    global worker indices across ALL PP stages for a given local D rank.
+
+    Current get_target_remote_ranks(remote_tp_size=4):
+      D_rank 0,1 -> [0]  (only PP0_TP0, PP1 never reached)
+
+    Required get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2):
+      D_rank 0,1 -> [0, 4]  (PP0_TP0 AND PP1_TP0)
+      D_rank 2,3 -> [1, 5]
+      D_rank 4,5 -> [2, 6]
+      D_rank 6,7 -> [3, 7]
+
+    Formula: for each tp_rank in get_target_remote_ranks(tp_size):
+               [tp_rank + pp_rank * tp_size for pp_rank in range(pp_size)]
+    """
+
+    def _make_topology(self, d_tp_rank: int, d_tp_size: int, engine_id="prefill"):
+        from vllm.distributed.kv_transfer.kv_connector.utils import TpKVTopology
+        from unittest.mock import MagicMock
+
+        mock_backend = MagicMock()
+        mock_backend.get_kv_cache_shape.return_value = (1, 16, 4, 1, 1)
+        mock_backend.get_kv_cache_stride_order.side_effect = NotImplementedError
+
+        return TpKVTopology(
+            tp_rank=d_tp_rank,
+            engine_id=engine_id,
+            remote_tp_size={engine_id: d_tp_size},
+            remote_block_size={engine_id: 16},
+            is_mla=True,
+            total_num_kv_heads=4,
+            attn_backends=[mock_backend],
+            tensor_shape=None,
+        )
+
+    def test_pp1_identical_to_existing_method(self):
+        """PP=1: get_all_pp_tp_targets must equal get_target_remote_ranks (backward compat)."""
+        topo = self._make_topology(d_tp_rank=0, d_tp_size=8)
+        existing = topo.get_target_remote_ranks(remote_tp_size=4)
+        pp1_result = topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=1)
+        assert pp1_result == existing
+
+    # --- [FAILS_NOW] ---
+
+    def test_d_rank0_pp2_tp4_connects_to_0_and_4(self):
+        """[FAILS_NOW] D_rank=0, D_TP=8, remote PP2+TP4 -> global [0, 4]."""
+        topo = self._make_topology(d_tp_rank=0, d_tp_size=8)
+        result = topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2)
+        assert result == [0, 4], f"Got {result}"
+
+    def test_d_rank1_pp2_tp4_connects_to_0_and_4(self):
+        """[FAILS_NOW] D_rank=1, D_TP=8, remote PP2+TP4 -> global [0, 4]."""
+        topo = self._make_topology(d_tp_rank=1, d_tp_size=8)
+        result = topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2)
+        assert result == [0, 4]
+
+    def test_d_rank2_pp2_tp4_connects_to_1_and_5(self):
+        """[FAILS_NOW] D_rank=2, D_TP=8 -> [1, 5]."""
+        topo = self._make_topology(d_tp_rank=2, d_tp_size=8)
+        result = topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2)
+        assert result == [1, 5]
+
+    def test_d_rank7_pp2_tp4_connects_to_3_and_7(self):
+        """[FAILS_NOW] D_rank=7, D_TP=8 -> [3, 7]."""
+        topo = self._make_topology(d_tp_rank=7, d_tp_size=8)
+        result = topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2)
+        assert result == [3, 7]
+
+    def test_all_8_d_ranks_cover_all_8_global_indices(self):
+        """[FAILS_NOW] All 8 D ranks together must cover all 8 global indices 0-7."""
+        covered: set[int] = set()
+        for d_rank in range(8):
+            topo = self._make_topology(d_tp_rank=d_rank, d_tp_size=8)
+            covered.update(topo.get_all_pp_tp_targets(remote_tp_size=4, remote_pp_size=2))
+        assert covered == set(range(8)), f"Missing global indices: {set(range(8)) - covered}"
+
+    def test_pp4_tp2_d_rank0_connects_to_4_agents(self):
+        """[FAILS_NOW] D_rank=0, D_TP=8, PP4+TP2 -> [0, 2, 4, 6] (one per PP stage)."""
+        topo = self._make_topology(d_tp_rank=0, d_tp_size=8)
+        result = topo.get_all_pp_tp_targets(remote_tp_size=2, remote_pp_size=4)
+        assert result == [0, 2, 4, 6], f"Got {result}"
