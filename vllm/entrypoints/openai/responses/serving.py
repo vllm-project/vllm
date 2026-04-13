@@ -1466,17 +1466,26 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     first_delta_sent = True
 
+                # check delta message and previous delta message are
+                # same as content or reasoning content
                 if (
                     previous_delta_messages
                     and previous_delta_messages[-1].reasoning is not None
                     and delta_message.content is not None
                 ):
+                    # from reasoning to normal content, send done
+                    # event for reasoning
                     reason_content = "".join(
                         pm.reasoning
                         for pm in previous_delta_messages
                         if pm.reasoning is not None
                     )
 
+                    # Delta message could have both reasoning and content.
+                    # Include current delta's reasoning in the finalization
+                    # since it may carry the tail end of reasoning text (e.g.
+                    # when reasoning end and content start arrive in the same
+                    # delta).
                     if delta_message.reasoning is not None:
                         yield _increment_sequence_number_and_return(
                             ResponseReasoningTextDeltaEvent(
@@ -1566,8 +1575,13 @@ class OpenAIServingResponses(OpenAIServing):
                             ),
                         )
                     )
+                    # Reset previous delta messages. This keeps the next
+                    # output item from reusing text or tool-call argument
+                    # fragments from the previous item.
                     previous_delta_messages = []
 
+                # From reasoning to tool call, finalize the reasoning item
+                # before opening the function-call item.
                 if (
                     previous_delta_messages
                     and previous_delta_messages[-1].reasoning is not None
@@ -1644,9 +1658,14 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     )
                     current_content_index = 0
+                    # Reset previous delta messages. This keeps the next
+                    # output item from reusing text or tool-call argument
+                    # fragments from the previous item.
                     previous_delta_messages = []
                     tool_call_item_started = True
 
+                # From normal content to tool call, finalize the output_text
+                # item before opening the function-call item.
                 if (
                     previous_delta_messages
                     and previous_delta_messages[-1].content is not None
@@ -1718,6 +1737,9 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                     )
                     current_content_index = 0
+                    # Reset previous delta messages. This keeps the next
+                    # output item from reusing text or tool-call argument
+                    # fragments from the previous item.
                     previous_delta_messages = []
                     tool_call_item_started = True
 
@@ -1728,6 +1750,8 @@ class OpenAIServingResponses(OpenAIServing):
                         and tool_call.index is not None
                         and tool_call.index != current_tool_call_index
                     ):
+                        # From one tool call to another, finalize the previous
+                        # function-call item before opening the next one.
                         parts = []
                         for pm in previous_delta_messages:
                             if pm.tool_calls:
@@ -1766,6 +1790,9 @@ class OpenAIServingResponses(OpenAIServing):
                                 item=function_call_item,
                             )
                         )
+                        # Reset previous delta messages. This keeps the next
+                        # output item from reusing text or tool-call argument
+                        # fragments from the previous item.
                         previous_delta_messages = []
                         current_output_index += 1
                         current_item_id = random_uuid()

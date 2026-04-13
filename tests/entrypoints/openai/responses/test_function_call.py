@@ -362,6 +362,93 @@ async def test_function_calling_with_streaming_forced_tool_choice(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "tool_choice",
+    [
+        "required",
+        {"type": "function", "name": "get_weather"},
+    ],
+)
+async def test_function_calling_with_streaming_forced_tool_choice_types(
+    client: openai.AsyncOpenAI, model_name: str, tool_choice
+):
+    # This links the "done" type with the "start" type so every "done" type
+    # should have a corresponding "start" type and every open block should be
+    # closed by the end of the stream.
+    pairs_of_event_types = {
+        "response.completed": "response.created",
+        "response.output_item.done": "response.output_item.added",
+        "response.output_text.done": "response.output_text.delta",
+        "response.content_part.done": "response.content_part.added",
+        "response.reasoning_text.done": "response.reasoning_text.delta",
+        "response.reasoning_part.done": "response.reasoning_part.added",
+        "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
+    }
+    forced_tools = [
+        {
+            "type": "function",
+            "name": "get_weather",
+            "description": "Get current temperature for provided location in celsius.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                },
+                "required": ["location"],
+                "additionalProperties": False,
+            },
+            "strict": True,
+        }
+    ]
+    stream_response = await client.responses.create(
+        model=model_name,
+        input="Call the get_weather function for Berlin and do not answer directly.",
+        tools=forced_tools,
+        tool_choice=tool_choice,
+        stream=True,
+    )
+
+    saw_function_call = False
+    saw_function_call_arguments_delta = False
+    text_deltas = []
+    stack_of_event_types = []
+    async for event in stream_response:
+        if event.type == "response.output_item.added":
+            if event.item.type == "function_call":
+                saw_function_call = True
+            stack_of_event_types.append(event.type)
+        elif event.type == "response.created":
+            stack_of_event_types.append(event.type)
+        elif event.type == "response.completed":
+            assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+            stack_of_event_types.pop()
+        elif event.type == "response.output_text.delta":
+            text_deltas.append(event.delta)
+            if stack_of_event_types[-1] != event.type:
+                stack_of_event_types.append(event.type)
+        elif event.type == "response.function_call_arguments.delta":
+            saw_function_call_arguments_delta = True
+            if stack_of_event_types[-1] != event.type:
+                stack_of_event_types.append(event.type)
+        elif event.type.endswith("added"):
+            stack_of_event_types.append(event.type)
+        elif event.type.endswith("delta"):
+            if stack_of_event_types[-1] == event.type:
+                continue
+            stack_of_event_types.append(event.type)
+        elif event.type.endswith("done"):
+            assert stack_of_event_types[-1] == pairs_of_event_types[event.type]
+            stack_of_event_types.pop()
+
+    assert saw_function_call
+    assert saw_function_call_arguments_delta
+    # Forced tool choice should not leak tool-call JSON via output_text delta.
+    assert "".join(text_deltas).strip() == ""
+    assert len(stack_of_event_types) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_function_calling_with_streaming_types(
     client: openai.AsyncOpenAI, model_name: str
 ):

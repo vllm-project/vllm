@@ -356,45 +356,6 @@ class OpenAIServingChat(OpenAIServing):
             return self.response_role
         return request.messages[-1]["role"]
 
-    @staticmethod
-    def _bracket_level(s: str, opening="{", closing="}") -> int:
-        """
-        Calculate the current level of nested brackets in a given string.
-        """
-        level = 0
-        for char in s:
-            if char == opening:
-                level += 1
-            elif char == closing:
-                level -= 1
-        return level
-
-    @staticmethod
-    def _filter_delta_text(delta_text: str, previous_text: str) -> tuple[str, bool]:
-        # remove last '},' of the tool definition stemming from the
-        # "name"/"parameters" outer object or closing ']' of the tool list
-        # count occurrences of opening and closing curly braces and
-        # once level 0 is reached stop outputting text
-        # if 0 is reached while parsing the delta_text we know the current
-        # tool will finish in this current iteration
-        bracket_level = OpenAIServingChat._bracket_level(previous_text)
-        updated_delta, passed_zero = "", False
-        for c in delta_text:
-            if c == "{":
-                bracket_level += 1
-                passed_zero = bracket_level == 0
-            elif c == "}":
-                bracket_level -= 1
-                passed_zero = bracket_level == 0
-
-            if bracket_level != 0:
-                updated_delta += c
-            else:
-                # if a comma is reached at level 0 we can stop
-                if c == ",":
-                    break
-        return updated_delta, passed_zero
-
     def extract_tool_call_required_streaming(
         self,
         previous_text: str,

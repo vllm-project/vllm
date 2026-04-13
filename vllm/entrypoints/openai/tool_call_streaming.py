@@ -27,7 +27,9 @@ else:
 
 
 def _bracket_level(s: str, opening: str = "{", closing: str = "}") -> int:
-    """Calculate the current level of nested brackets in a string."""
+    """
+    Calculate the current level of nested brackets in a given string.
+    """
     level = 0
     for char in s:
         if char == opening:
@@ -41,7 +43,12 @@ def filter_delta_text(
     delta_text: str,
     previous_text: str,
 ) -> tuple[str, bool]:
-    """Trim trailing tool-list delimiters from required-tool streaming text."""
+    # remove last '},' of the tool definition stemming from the
+    # "name"/"parameters" outer object or closing ']' of the tool list
+    # count occurrences of opening and closing curly braces and
+    # once level 0 is reached stop outputting text
+    # if 0 is reached while parsing the delta_text we know the current
+    # tool will finish in this current iteration
     bracket_level = _bracket_level(previous_text)
     updated_delta = ""
     passed_zero = False
@@ -56,6 +63,7 @@ def filter_delta_text(
         if bracket_level != 0:
             updated_delta += char
         else:
+            # if a comma is reached at level 0 we can stop
             if char == ",":
                 break
     return updated_delta, passed_zero
@@ -117,6 +125,7 @@ def extract_required_tool_call_streaming(
 ) -> tuple[DeltaMessage | None, bool, bool]:
     """Incrementally parse required-tool JSON output into DeltaMessage."""
     if current_text is None or current_text == "":
+        # if the current text is empty, we cannot parse it
         return None, function_name_returned, False
 
     try:
@@ -126,12 +135,17 @@ def extract_required_tool_call_streaming(
         partial_json_parser.core.exceptions.MalformedJSON,
         json.JSONDecodeError,
     ):
+        # not enough tokens to parse into JSON yet
         obj = None
 
+    # check if the current text is a valid array
+    # containing a partial tool calling object
+    # if not repeat
     if obj is None or not isinstance(obj, list) or not len(obj) > 0:
         return None, False, False
 
     _, finishes_previous_tool = filter_delta_text(delta_text, previous_text)
+    # take the last tool call from the generated list
     current_tool_call = obj[-1]
     current_tool_call_index = len(obj) - 1
 
@@ -141,6 +155,9 @@ def extract_required_tool_call_streaming(
         and current_tool_call_index >= tool_call_idx
     ):
         if finishes_previous_tool:
+            # A new tool object may start in the same iteration that finishes
+            # the previous one. In that case, keep streaming argument text for
+            # the previous tool before resetting the function-name state.
             filtered_delta_text, _ = filter_delta_text(delta_text, previous_text)
             if filtered_delta_text == "":
                 return None, False, False
@@ -165,10 +182,14 @@ def extract_required_tool_call_streaming(
         return None, False, False
 
     if not function_name_returned:
+        # get partly generated arguments from the latest tool call
         param_match = re.search(r'.*"parameters":\s*(.*)', current_text, re.DOTALL)
         arguments = param_match.group(1) if param_match else ""
         arguments, _ = filter_delta_text(arguments, previous_text)
 
+        # if this iteration finishes a previous tool call but a
+        # new incomplete tool is already generated, take the
+        # previous from the list
         if finishes_previous_tool and "parameters" not in current_tool_call:
             current_tool_call = obj[-2]
 
@@ -199,6 +220,8 @@ def extract_required_tool_call_streaming(
         tool_calls=[
             DeltaToolCall(
                 function=DeltaFunctionCall(
+                    # OpenAI API returns None
+                    # instead of name every time
                     name=None,
                     arguments=filtered_delta_text,
                 ),
