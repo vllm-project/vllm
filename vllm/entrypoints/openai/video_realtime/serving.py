@@ -8,11 +8,11 @@ from collections.abc import AsyncGenerator, Callable
 
 import numpy as np
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.inputs.data import StreamingInput, TextPrompt
+from vllm.inputs import TextPrompt
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -51,13 +51,11 @@ class OpenAIServingRealtimeVideo(OpenAIServing):
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
-        log_error_stack: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
-            log_error_stack=log_error_stack,
         )
         self.task_type = "realtime_video"
         logger.info(

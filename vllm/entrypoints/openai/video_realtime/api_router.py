@@ -86,7 +86,6 @@ def init_realtime_video_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            log_error_stack=args.log_error_stack,
         )
         if "realtime_video" in supported_tasks
         else None

@@ -464,9 +464,9 @@ class AsyncLLM(EngineClient):
                     else:
                         sp = sampling_params
                     sp_temp = sp.clone()
-                    if input_chunk.prompt.get("has_text", True):
+                    if input_chunk.prompt.get("has_text") is True:
                         sp_temp.max_tokens = sp.max_tokens
-                    else:
+                    elif input_chunk.prompt.get("has_text") is False:
                         sp_temp.max_tokens = 1
                     # TODO(nick): Avoid re-validating reused sampling parameters
                     req = self.input_processor.process_inputs(
