@@ -24,6 +24,30 @@ _FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
+# Try sgl_kernel fused FP8 quant (scale + quant in one kernel)
+_SGL_FP8_QUANT_AVAILABLE = False
+try:
+    from sgl_kernel import sgl_per_token_quant_fp8 as _sgl_per_token_quant_fp8
+    _SGL_FP8_QUANT_AVAILABLE = True
+
+    # Register as custom op so torch.compile keeps it as opaque node (no graph break)
+    @torch.library.custom_op("vllm::sgl_fused_fp8_quant", mutates_args=())
+    def _sgl_fused_fp8_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        x_2d = x.view(-1, x.shape[-1])
+        out_q = torch.empty_like(x_2d, dtype=_FP8_DTYPE)
+        out_s = torch.empty(x_2d.shape[0], 1, device=x.device, dtype=torch.float32)
+        _sgl_per_token_quant_fp8(x_2d, out_q, out_s)
+        return out_q.view(x.shape), out_s
+
+    @_sgl_fused_fp8_quant.register_fake
+    def _sgl_fused_fp8_quant_fake(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        out_q = torch.empty_like(x, dtype=_FP8_DTYPE)
+        out_s = torch.empty(*x.shape[:-1], 1, device=x.device, dtype=torch.float32)
+        return out_q, out_s
+
+except ImportError:
+    pass
+
 
 # --8<-- [start:quant_fp8]
 @CustomOp.register("quant_fp8")
@@ -193,6 +217,16 @@ class QuantFP8(CustomOp):
             and self.group_shape == GroupShape.PER_TOKEN
             and scale_ub.numel() == 1
         )
+
+        # Use sgl_kernel fused FP8 quant for dynamic per-token (avoids
+        # torch.compile splitting scale compute + quant into two kernels)
+        if (
+            _SGL_FP8_QUANT_AVAILABLE
+            and scale is None
+            and self.group_shape == GroupShape.PER_TOKEN
+            and scale_ub is None
+        ):
+            return torch.ops.vllm.sgl_fused_fp8_quant(x)
 
         if scale is None:
             if self.group_shape == GroupShape.PER_TOKEN:
