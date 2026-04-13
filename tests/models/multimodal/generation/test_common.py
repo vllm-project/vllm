@@ -404,14 +404,14 @@ VLM_TEST_SETTINGS = {
     "gemma4": VLMTestInfo(
         models=["google/gemma-4-E2B-it"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<bos><start_of_turn>user\n{img_prompt}<end_of_turn>\n<start_of_turn>model\n",  # noqa: E501
+        prompt_formatter=lambda img_prompt: f"<bos><|turn>user\n{img_prompt}<turn|>\n<|turn>model\n",  # noqa: E501
         single_image_prompts=IMAGE_ASSETS.prompts(
             {
-                "stop_sign": "What's the content in the center of the image?",
-                "cherry_blossom": "What is the season?",
+                "stop_sign": "<|image|>What's the content in the center of the image?",  # noqa: E501
+                "cherry_blossom": "<|image|>What is the season?",
             }
         ),
-        multi_image_prompt="Describe the two images in detail.",
+        multi_image_prompt="<|image|><|image|>Describe the two images in detail.",  # noqa: E501
         max_model_len=4096,
         max_num_seqs=2,
         auto_cls=AutoModelForImageTextToText,
