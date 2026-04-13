@@ -283,8 +283,8 @@ def flashinfer_cutedsl_moe_masked(
         # padding rows can leak into real token scales via warp-level
         # reduction).
         arange = torch.arange(m, device=masked_m.device)
-        pad_mask = arange.unsqueeze(0) >= masked_m.unsqueeze(1)
-        hidden_states[pad_mask] = 0
+        pad_mask = (arange.unsqueeze(0) >= masked_m.unsqueeze(1)).unsqueeze(-1)
+        hidden_states.masked_fill_(pad_mask, 0)
 
         aq, aq_sf = scaled_fp4_grouped_quantize(
             hidden_states,
@@ -342,8 +342,8 @@ def flashinfer_cutedsl_moe_masked(
     # can leak into real token scales via warp-level reduction).
     workspace_for_quant = workspace.permute(2, 0, 1)
     arange = torch.arange(m, device=masked_m.device)
-    pad_mask = arange.unsqueeze(0) >= masked_m.unsqueeze(1)
-    workspace_for_quant[pad_mask] = 0
+    pad_mask = (arange.unsqueeze(0) >= masked_m.unsqueeze(1)).unsqueeze(-1)
+    workspace_for_quant.masked_fill_(pad_mask, 0)
 
     # SILU and quantization
     diq, diq_sf = silu_and_mul_scaled_nvfp4_experts_quantize(
