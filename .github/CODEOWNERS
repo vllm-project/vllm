@@ -3,7 +3,7 @@
 
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng @vadiklyutiy
-/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery
+/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
@@ -120,16 +120,16 @@ mkdocs.yaml @hmellor
 /tools/pre_commit @hmellor
 
 # CPU
-/vllm/v1/worker/cpu* @bigPYJ1151
+/vllm/v1/worker/cpu* @bigPYJ1151 @xuechendi
 /csrc/cpu @bigPYJ1151
-/vllm/platforms/cpu.py @bigPYJ1151
+/vllm/platforms/cpu.py @bigPYJ1151 @xuechendi
 /cmake/cpu_extension.cmake @bigPYJ1151
-/docker/Dockerfile.cpu @bigPYJ1151
+/docker/Dockerfile.cpu @bigPYJ1151 @xuechendi
 
 # Intel GPU
-/vllm/v1/worker/xpu* @jikunshang
-/vllm/platforms/xpu.py @jikunshang
-/docker/Dockerfile.xpu @jikunshang
+/vllm/v1/worker/xpu* @jikunshang @xuechendi
+/vllm/platforms/xpu.py @jikunshang @xuechendi
+/docker/Dockerfile.xpu @jikunshang @xuechendi
 
 # Nemotron-specific files
 /vllm/model_executor/models/*nemotron* @tomeras91
