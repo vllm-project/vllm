@@ -155,23 +155,23 @@ def matmul_nvfp4_kernel_persistent(
         pid_m, pid_n = _compute_pid(
             tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS
         )
-        start_m = pid_m * BLOCK_SIZE_M
-        start_n = pid_n * BLOCK_SIZE_N
+        start_m = _maybe_widen(pid_m, A_LARGE) * BLOCK_SIZE_M
+        start_n = _maybe_widen(pid_n, B_LARGE) * BLOCK_SIZE_N
 
         # Scale offsets use block-aligned indices (scale tensors are pre-padded
         # to multiples of 128 rows and SCALE_K_TILE columns, so no masking).
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
         for ki in range(k_tiles):
-            k_start_bytes = _maybe_widen(ki * K_BYTES, A_LARGE or B_LARGE)
-            a_m_start = _maybe_widen(start_m, A_LARGE)
-            b_n_start = _maybe_widen(start_n, B_LARGE)
+            k_start_bytes = _maybe_widen(ki, A_LARGE or B_LARGE) * K_BYTES
+            a_m_start = start_m
+            b_n_start = start_n
 
             a = a_desc.load([a_m_start, k_start_bytes])
             b = b_desc.load([b_n_start, k_start_bytes]).T
 
-            scale_tile_k = _maybe_widen(ki * SCALE_K_TILES, A_LARGE or B_LARGE)
-            scale_tile_m = _maybe_widen(start_m // 128, A_LARGE)
-            scale_tile_n = _maybe_widen(start_n // 128, B_LARGE)
+            scale_tile_k = _maybe_widen(ki, A_LARGE or B_LARGE) * SCALE_K_TILES
+            scale_tile_m = _maybe_widen(pid_m, A_LARGE)
+            scale_tile_n = _maybe_widen(pid_n, B_LARGE)
 
             a_scale_raw = a_scale_desc.load([0, scale_tile_m, scale_tile_k, 0, 0])
             b_scale_raw = b_scale_desc.load([0, scale_tile_n, scale_tile_k, 0, 0])
