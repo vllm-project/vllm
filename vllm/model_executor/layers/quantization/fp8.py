@@ -374,9 +374,9 @@ class Fp8LinearMethod(LinearMethodBase):
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
+            weight_shape=layer.weight.shape,
             module_name=self.__class__.__name__,
         )
 
@@ -527,9 +527,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
-            weight_shape=layer.weight.shape,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
+            weight_shape=layer.weight.shape,
             module_name=self.__class__.__name__,
         )
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
