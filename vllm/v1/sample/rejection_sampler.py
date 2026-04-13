@@ -264,9 +264,13 @@ class RejectionSampler(nn.Module):
 
         output_token_ids = sampling_metadata.output_token_ids
         if any_penalties_or_bad_words:
+            spec_token_ids = self._clip_spec_token_ids(
+                sampling_metadata.spec_token_ids,
+                metadata.num_draft_tokens,
+            )
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
-                sampling_metadata.spec_token_ids,
+                spec_token_ids,
             )
 
         # Calculate indices of target logits.
@@ -345,6 +349,20 @@ class RejectionSampler(nn.Module):
             for i in range(len(spec) - 1):
                 result.append([*result[-1], spec[i]])
         return result
+
+    @staticmethod
+    def _clip_spec_token_ids(
+        spec_token_ids: list[list[int]] | None,
+        num_draft_tokens: Sequence[int],
+    ) -> list[list[int]] | None:
+        if spec_token_ids is None:
+            return None
+
+        assert len(spec_token_ids) == len(num_draft_tokens)
+        return [
+            spec_ids[:num_draft_tokens_i]
+            for spec_ids, num_draft_tokens_i in zip(spec_token_ids, num_draft_tokens)
+        ]
 
 
 def rejection_sample(
