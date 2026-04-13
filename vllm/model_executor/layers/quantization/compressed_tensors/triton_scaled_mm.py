@@ -144,23 +144,19 @@ def _get_tile_config(M: int, N: int) -> tuple[int, int, int]:
     is_small_N = N < 8192
     next_power_of_2_M = max(32, triton.next_power_of_2(M))
 
-    # RDNA3-specific heuristic (only on ROCm + gfx11)
     if current_platform.is_rocm():
-        from vllm.platforms.rocm import on_gfx11
+        from vllm.platforms.rocm import on_gfx1100
 
-        if on_gfx11():
-            if next_power_of_2_M <= 32:
-                return (32, 64, 128) if is_small_N else (16, 256, 64)
+        if on_gfx1100():
+            if M <= 16:
+                return (16, 256, 64)
+            elif next_power_of_2_M <= 32:
+                return (32, 256, 64)
             elif next_power_of_2_M <= 64:
-                return (64, 128, 128) if is_small_N else (64, 128, 64)
-            elif next_power_of_2_M <= 128:
-                return (128, 64, 128)
-            elif next_power_of_2_M <= 512:
-                return (128, 64, 128) if is_small_N else (256, 64, 32)
+                return (64, 128, 64)
             else:
-                return (256, 64, 32)
+                return (128, 128, 32)
 
-    # Default
     if next_power_of_2_M <= 32:
         return (64, 64, 256) if is_small_N else (64, 128, 256)
     elif next_power_of_2_M <= 64:
