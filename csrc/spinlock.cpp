@@ -58,7 +58,7 @@ static PyObject* method_spinlock(PyObject* self, PyObject* args,
   Py_buffer buffer;
   PyObject* callback;
   double timeout = 0.;
-(
+
   spinlock_state_t* state = (spinlock_state_t*)PyModule_GetState(self);
   if (state == NULL) {
     PyErr_SetString(PyExc_TypeError, "Failed to retrieve module state!");
