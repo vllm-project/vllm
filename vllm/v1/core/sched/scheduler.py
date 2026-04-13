@@ -250,6 +250,11 @@ class Scheduler(SchedulerInterface):
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self.is_mtp_kv_consumer = (
+            self.vllm_config.speculative_config is not None
+            and self.vllm_config.kv_transfer_config is not None
+            and self.vllm_config.kv_transfer_config.is_kv_consumer
+        )
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
         # cadence (`next_decode_eligible_step`).
         self.current_step = 0

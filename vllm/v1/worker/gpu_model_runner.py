@@ -4617,8 +4617,7 @@ class GPUModelRunner(
                     draft_ids_list = self._draft_token_ids
                     draft_req_ids = self.input_batch.req_ids
                 if draft_ids_list and draft_req_ids:
-                    draft_by_req_id = dict(
-                        zip(draft_req_ids, draft_ids_list))
+                    draft_by_req_id = dict(zip(draft_req_ids, draft_ids_list))
                     output_spec_token_ids = [
                         draft_by_req_id.get(req_id, [])
                         for req_id in req_ids_output_copy
