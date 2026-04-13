@@ -21,6 +21,15 @@ Usage:
   # Default camera (device 0), every frame
   python openai_realtime_camera_client.py
 
+  # Every 10th frame (e.g. ~3 fps for 30fps camera)
+  python openai_realtime_camera_client.py --frame-interval 10
+
+  # Custom prompt and camera
+  python openai_realtime_camera_client.py --prompt "Describe what you see." --camera-id 0
+
+  # Limit queue size (drop old when full)
+  python openai_realtime_camera_client.py --queue-size 32 --frame-interval 5
+
   # Set output resolution (exact size, may stretch image)
   python openai_realtime_camera_client.py --output-resolution 640x480
 
@@ -71,6 +80,8 @@ try:
 except ImportError:
     cv2 = None
 
+os.environ["NO_PROXY"] = "127.0.0.1,localhost"
+os.environ["no_proxy"] = "127.0.0.1,localhost"
 # Shared state
 frame_queue: collections.deque | None = None
 is_capturing = False
@@ -251,6 +262,7 @@ async def run_realtime_camera(
     batch_size: int,
     queue_size: int,
     quality: int,
+    target_fps: float = 5.0,
     prompt_queue: queue.Queue | None = None,
     trigger_queue: queue.Queue | None = None,
     update_display_frame: bool = False,
@@ -264,9 +276,8 @@ async def run_realtime_camera(
     Use 'generation.trigger' to ask questions and get responses.
 
     Parameters:
-        batch_size: Upper limit on frames per commit. Actual frames sent is
-            min(batch_size, available_server_capacity, frames_in_queue).
-            Server capacity is controlled by its max_queue_size (typically 3-4).
+        batch_size: Frames per commit.
+        target_fps: Delay between batches = 1/target_fps seconds (default=5.0).
     """
     global frame_queue, is_capturing
 
@@ -297,7 +308,8 @@ async def run_realtime_camera(
 
     print(
         f"Camera {camera_id}: frame_interval={frame_interval}, "
-        f"batch_size={batch_size}, queue_size={queue_size} (drop oldest when full)"
+        f"batch_size={batch_size}, queue_size={queue_size} (drop oldest when full), "
+        f"target_fps={target_fps}"
     )
     print("Mode: Silent by default. Use 'Trigger' button to ask questions.")
     print("Press Ctrl+C to stop.\n")
@@ -383,20 +395,16 @@ async def run_realtime_camera(
 
                     prompt_task = asyncio.create_task(prompt_sender())
 
-                queue_depth = 0
-                max_queue_size = initial_water.get("max_queue_size", 3)
-                received_done_count = 0
+                batch_id = 0
+                frame_interval_sec = 1.0 / target_fps
                 err: str | None = None
-                waiting_for_response = False  # Track if we're waiting for a trigger response
 
                 try:
                     while err is None and is_capturing:
-                        # Calculate how many frames we can actually send
-                        available_server_capacity = max_queue_size - queue_depth
-                        frames_in_queue = len(frame_queue)
-                        frames_to_send = min(batch_size, available_server_capacity, frames_in_queue)
+                        # Get frames to send (simple: just take what's available up to batch_size)
+                        frames_to_send = min(batch_size, len(frame_queue))
 
-                        # Collect frames from queue (only what we plan to send)
+                        # Collect frames from queue
                         batch: list[str] = []
                         for _ in range(frames_to_send):
                             try:
@@ -404,14 +412,8 @@ async def run_realtime_camera(
                             except IndexError:
                                 break
 
-                        # Send when we have frames (>=2 for model compatibility) and server has capacity
-                        # Note: Qwen2-VL/Qwen3-VL require at least 2 frames per batch
-                        should_send = (
-                            len(batch) >= 2
-                            and queue_depth < max_queue_size
-                        )
-
-                        if should_send:
+                        # Send frames if we have any
+                        if batch:
                             for b64 in batch:
                                 await ws.send(
                                     json.dumps(
@@ -422,84 +424,58 @@ async def run_realtime_camera(
                                         }
                                     )
                                 )
-                            # For live camera, we never send final=True until we stop
+                            # Commit this batch
                             await ws.send(
                                 json.dumps({"type": "input_video_buffer.commit", "final": False})
                             )
-                            queue_depth += 1
-                            continue  # Sent successfully, try to send more
+                            batch_id += 1
 
-                        # If we collected frames but couldn't send, put them back
-                        if batch:
-                            for b64 in reversed(batch):
-                                frame_queue.appendleft(b64)
+                        # Collect any available responses with timeout
+                        try:
+                            while True:
+                                async with asyncio.timeout(1):
+                                    msg_bytes = await ws.recv()
+                                    response = json.loads(msg_bytes)
+                                    t = response.get("type")
+                                    if t == "completion.delta":
+                                        delta = response.get("delta", "")
+                                        if update_display_frame:
+                                            _append_response(delta)
+                                        else:
+                                            print(delta, end="", flush=True)
+                                    elif t == "completion.done":
+                                        text = response.get("text", "")
+                                        if text:
+                                            if update_display_frame:
+                                                _append_response(f"\n\n[Response] {text}")
+                                                if response.get("usage"):
+                                                    _append_response(f"\nUsage: {response['usage']}")
+                                            else:
+                                                print(f"\n\n[Response] {text}")
+                                                if response.get("usage"):
+                                                    print(f"Usage: {response['usage']}")
+                                    elif t == "session.stop":
+                                        is_stopping = True
+                                        is_capturing = False
+                                        if update_display_frame:
+                                            _append_response("\n[Session stopped by server]\n")
+                                        else:
+                                            print("\n[Session stopped by server]", flush=True)
+                                        break
+                                    elif t == "error":
+                                        err = response.get("error", response.get("message", str(response)))
+                                        err_str = f"\nError: {err}"
+                                        if response.get("code"):
+                                            err_str += f"\nCode: {response['code']}"
+                                        if update_display_frame:
+                                            _append_response(err_str)
+                                        else:
+                                            print(err_str, flush=True)
+                        except asyncio.TimeoutError:
+                            pass
 
-                        # When queue is empty and not waiting for response, sleep briefly
-                        if len(frame_queue) == 0 and not waiting_for_response:
-                            await asyncio.sleep(0.01)
-                            continue
-
-                        # Receive message
-                        if prompt_queue is not None:
-                            try:
-                                msg_bytes = await asyncio.wait_for(ws.recv(), timeout=1)
-                            except asyncio.TimeoutError:
-                                continue
-                        else:
-                            # Always use timeout to allow graceful stopping in non-Gradio mode too
-                            try:
-                                msg_bytes = await asyncio.wait_for(ws.recv(), timeout=1)
-                            except asyncio.TimeoutError:
-                                continue
-                        response = json.loads(msg_bytes)
-                        t = response.get("type")
-                        if t == "completion.delta":
-                            waiting_for_response = True
-                            delta = response.get("delta", "")
-                            if update_display_frame:
-                                _append_response(delta)
-                            else:
-                                print(delta, end="", flush=True)
-                        elif t == "completion.done":
-                            waiting_for_response = False
-                            text = response.get("text", "")
-                            only_show_non_empty = True  # Only show non-empty responses (triggered)
-                            if text or not only_show_non_empty:
-                                if update_display_frame:
-                                    _append_response(f"\n\n[Response] {text}")
-                                    if response.get("usage"):
-                                        _append_response(f"\nUsage: {response['usage']}")
-                                else:
-                                    print(f"\n\n[Response] {text}")
-                                    if response.get("usage"):
-                                        print(f"Usage: {response['usage']}")
-                            received_done_count += 1
-                            buf = response.get("input_video_buffer")
-                            if buf is not None:
-                                queue_depth = buf.get("queue_depth", queue_depth)
-                                max_queue_size = buf.get("max_queue_size", max_queue_size)
-                        elif t == "input_video_buffer.water_level":
-                            queue_depth = response.get("queue_depth", queue_depth)
-                            max_queue_size = response.get("max_queue_size", max_queue_size)
-                        elif t == "session.stop":
-                            is_stopping = True
-                            is_capturing = False
-                            if update_display_frame:
-                                _append_response("\n[Session stopped by server]\n")
-                            else:
-                                print("\n[Session stopped by server]", flush=True)
-                            break
-                        elif t == "error":
-                            err = response.get("error", response.get("message", str(response)))
-                            err_str = f"\nError: {err}"
-                            if response.get("code"):
-                                err_str += f"\nCode: {response['code']}"
-                            if update_display_frame:
-                                _append_response(err_str)
-                            else:
-                                print(err_str, flush=True)
-                        else:
-                            print(f"[Received type={t!r}] {response}", flush=True)
+                        # Fixed interval timing control
+                        await asyncio.sleep(frame_interval_sec)
 
                     # If we exited loop normally (not due to error), send final commit to server
                     if is_stopping:
@@ -554,6 +530,7 @@ def websocket_handler(
     batch_size: int,
     queue_size: int,
     quality: int,
+    target_fps: float,
     trigger_queue: queue.Queue | None = None,
     output_resolution: str | None = None,
     max_size: int | None = None,
@@ -574,6 +551,7 @@ def websocket_handler(
                 batch_size,
                 queue_size,
                 quality,
+                target_fps=target_fps,
                 prompt_queue=_prompt_queue,
                 trigger_queue=trigger_queue,
                 update_display_frame=True,
@@ -633,6 +611,7 @@ def start_camera_service(
     batch_size: int,
     queue_size: int,
     quality: int,
+    target_fps: float,
     output_resolution: str | None = None,
     max_size: int = 0,
     keep_aspect_ratio: bool = False,
@@ -655,6 +634,7 @@ def start_camera_service(
             int(batch_size) if batch_size else 16,
             int(queue_size) if queue_size else 64,
             int(quality) if quality else 85,
+            float(target_fps) if target_fps else 5.0,
             _trigger_queue,
             output_resolution.strip() if output_resolution else None,
             max_size if max_size > 0 else None,
@@ -692,6 +672,7 @@ def create_gradio_demo(
     batch_size: int = 16,
     queue_size: int = 64,
     quality: int = 85,
+    target_fps: float = 5.0,
     output_resolution: str | None = None,
     max_size: int = 0,
     keep_aspect_ratio: bool = False,
@@ -778,6 +759,11 @@ def create_gradio_demo(
                     value=quality,
                     precision=0,
                 )
+                target_fps_in = gr.Number(
+                    label="Target FPS",
+                    value=target_fps,
+                    precision=1,
+                )
                 # Resolution settings
                 gr.Markdown("### Resolution Settings")
                 resolution_in = gr.Textbox(
@@ -836,6 +822,7 @@ def create_gradio_demo(
                 batch_size_in,
                 queue_size_in,
                 quality_in,
+                target_fps_in,
                 resolution_in,
                 max_size_in,
                 keep_aspect_in,
@@ -896,19 +883,13 @@ def main():
         "--batch-size",
         type=int,
         default=16,
-        help=(
-            "Frames per batch; one commit per batch. "
-            "Send rhythm is controlled by server water level (backpressure)."
-        ),
+        help="Frames per batch; one commit per batch. Default: 16.",
     )
     parser.add_argument(
         "--queue-size",
         type=int,
         default=64,
-        help=(
-            "Max frames in client queue. When full, oldest frames are "
-            "dropped to make room for newer ones. Default: 64."
-        ),
+        help="Max frames in client queue. When full, oldest frames are dropped to make room for newer ones. Default: 64.",
     )
     parser.add_argument(
         "--quality",
@@ -917,31 +898,27 @@ def main():
         help="JPEG encoding quality (1-100). Default: 85.",
     )
     parser.add_argument(
+        "--target-fps",
+        type=float,
+        default=5.0,
+        help="Target frames per second for sending batches. Default: 5.0.",
+    )
+    parser.add_argument(
         "--output-resolution",
         type=str,
         default=None,
-        help=(
-            "Output image resolution (exact size), format WIDTHxHEIGHT "
-            "(e.g., 640x480, 1280x720). May stretch image. Default: use "
-            "camera original resolution."
-        ),
+        help="Output image resolution (exact size), format WIDTHxHEIGHT (e.g., 640x480, 1280x720). May stretch image. Default: use camera original resolution.",
     )
     parser.add_argument(
         "--max-size",
         type=int,
         default=0,
-        help=(
-            "Maximum dimension for resize (0=disabled). Keeps aspect ratio. "
-            "Larger of width/height will be scaled to this value. Default: 0."
-        ),
+        help="Maximum dimension for resize (0=disabled). Keeps aspect ratio. Larger of width/height will be scaled to this value. Default: 0.",
     )
     parser.add_argument(
         "--keep-aspect-ratio",
         action="store_true",
-        help=(
-            "When using --output-resolution, fit image within target "
-            "resolution while maintaining aspect ratio."
-        ),
+        help="When using --output-resolution, fit image within target resolution while maintaining aspect ratio.",
     )
     parser.add_argument(
         "--gradio",
@@ -960,10 +937,7 @@ def main():
 
     if args.gradio:
         if gr is None:
-            raise RuntimeError(
-                "gradio is required for --gradio. "
-                "Install with: pip install gradio"
-            )
+            raise RuntimeError("gradio is required for --gradio. Install with: pip install gradio")
         global _prompt_queue
         _prompt_queue = queue.Queue()
         demo = create_gradio_demo(
@@ -976,6 +950,7 @@ def main():
             batch_size=args.batch_size,
             queue_size=args.queue_size,
             quality=args.quality,
+            target_fps=args.target_fps,
             output_resolution=args.output_resolution,
             max_size=args.max_size,
             keep_aspect_ratio=args.keep_aspect_ratio,
@@ -995,6 +970,7 @@ def main():
                 args.batch_size,
                 args.queue_size,
                 args.quality,
+                target_fps=args.target_fps,
                 output_resolution=args.output_resolution,
                 max_size=args.max_size if args.max_size > 0 else None,
                 keep_aspect_ratio=args.keep_aspect_ratio,

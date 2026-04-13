@@ -463,8 +463,8 @@ class AsyncLLM(EngineClient):
                         self._validate_streaming_input_sampling_params(sp)
                     else:
                         sp = sampling_params
-                    sp_temp = deepcopy(sp)
-                    if input_chunk.prompt['has_text']:
+                    sp_temp = sp.clone()
+                    if input_chunk.prompt.get("has_text", True):
                         sp_temp.max_tokens = sp.max_tokens
                     else:
                         sp_temp.max_tokens = 1

@@ -111,8 +111,9 @@ class RealtimeVideoConnection:
         await self.websocket.accept()
         logger.debug("WebSocket (video) connection accepted: %s", self.connection_id)
         self._is_connected = True
-        await self._send(SessionCreated())
-
+        await self._send(
+            SessionCreated()
+        )
         try:
             while True:
                 message = await self.websocket.receive_text()
@@ -172,16 +173,11 @@ class RealtimeVideoConnection:
                 )
                 return
             commit_evt = InputVideoBufferCommit(**event)
-            # Enqueue one batch: current buffer as list of frames, 
-            # or empty list for text-only turn.
-            # Use await put() so we block when queue is full (backpressure to client).
             if self._frame_buffer:
                 await self._video_batch_queue.put(list(self._frame_buffer))
-                frame_count = len(self._frame_buffer)
-                frame_indices = list(
-                    range(self.last_frame_idx, self.last_frame_idx + frame_count)
+                await self._frame_idx_queue.put(
+                    list(range(self.last_frame_idx,self.last_frame_idx+len(self._frame_buffer)))
                 )
-                await self._frame_idx_queue.put(frame_indices)
                 self.last_frame_idx += len(self._frame_buffer)
                 self._frame_buffer = []
             else:
@@ -213,21 +209,14 @@ class RealtimeVideoConnection:
         self.generation_task = asyncio.create_task(self._run_generation_loop())
 
     async def _run_generation_loop(self):
-        """One generate per batch: 
-        stream_video_realtime yields one StreamingInput per batch;
-        we run one engine.generate() per yield for real-time understanding."""
-
         full_text = ""
-        total_prompt_tokens = 0
-        total_output_tokens = 0
-        total_tokens = 0
+        prompt_token_ids_len = 0
+        completion_tokens_len = 0
         try:
             from vllm.sampling_params import RequestOutputKind, SamplingParams
+            # main loop
             while True:
-                full_text = ""
-                total_prompt_tokens = 0
-                total_output_tokens = 0
-                total_tokens = 0
+                completion_tokens_len = 0
                 request_id = f"rt-video-{self.connection_id}-{uuid4()}"
                 stream_gen = self.serving.stream_video_realtime(
                     self._video_batch_queue,
@@ -236,7 +225,7 @@ class RealtimeVideoConnection:
                 )
 
                 max_tokens = 512
-
+                
                 sampling_params = SamplingParams.from_optional(
                     temperature=0.0,
                     max_tokens=max_tokens,
@@ -248,25 +237,20 @@ class RealtimeVideoConnection:
                     sampling_params=sampling_params,
                     request_id=request_id,
                 )
-                max_model_len = self.serving.engine_client.model_config.max_model_len
+
                 async for output in result_gen:
                     if output.outputs and len(output.outputs) > 0:
                         if output.prompt_token_ids:
-                            num_prompt_tokens = len(output.prompt_token_ids)
-                        else:
-                            num_prompt_tokens = 0
-                        total_prompt_tokens += num_prompt_tokens
-                        logger.info('input prompt token: %d', num_prompt_tokens) 
+                            prompt_token_ids_len = len(output.prompt_token_ids)
                         delta = output.outputs[0].text
                         full_text += delta
                         await self._send(CompletionDelta(delta=delta))
-                        num_output_tokens = len(output.outputs[0].token_ids)
-                        logger.info('output tokens: %d', num_output_tokens)
-                        total_output_tokens += num_output_tokens
-                        total_tokens = total_prompt_tokens + total_output_tokens
-                        if total_tokens > max_model_len//2:
-                            logger.info('starting truncation from connection side')
-                            break  
+                        output_tokens_len = len(output.outputs[0].token_ids)
+                        completion_tokens_len += output_tokens_len
+                        total_tokens = prompt_token_ids_len+completion_tokens_len
+                        if total_tokens > self.serving.engine_client.model_config.max_model_len//2:
+                            print('starting truncation')
+                            break # this serves as the actual session change
 
                     if not self._is_connected:
                         break
@@ -274,8 +258,6 @@ class RealtimeVideoConnection:
                     break
             
             usage = UsageInfo(
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_output_tokens,
                 total_tokens=total_tokens
             )
 
