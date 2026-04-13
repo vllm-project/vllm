@@ -580,8 +580,10 @@ __global__ void fused_kernel(
 
             write_cache_neox<Converter, head_dim, IS_FP8>(
                 k_cache_void, cache_head_offset, k_lo, k_hi, k_scale, lane);
-            store_head_neox<Converter, head_dim>(
-                k_in + kv_head * head_dim, k_lo, k_hi, lane);
+            // TODO: re-enable if a backend needs post-RoPE K in the
+            // original tensor (currently all backends read K from cache).
+            // store_head_neox<Converter, head_dim>(
+            //     k_in + kv_head * head_dim, k_lo, k_hi, lane);
           }
 
         } else {
@@ -643,8 +645,10 @@ __global__ void fused_kernel(
 
             write_cache_gptj<Converter, head_dim, IS_FP8>(
                 k_cache_void, cache_head_offset, thr_off, elements, k_scale);
-            store_head_gptj<Converter, head_dim>(
-                k_in + kv_head * head_dim, thr_off, elements);
+            // TODO: re-enable if a backend needs post-RoPE K in the
+            // original tensor (currently all backends read K from cache).
+            // store_head_gptj<Converter, head_dim>(
+            //     k_in + kv_head * head_dim, thr_off, elements);
           }
 
         } else {
