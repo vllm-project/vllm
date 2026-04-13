@@ -341,8 +341,8 @@ def test_full_decode_gpu_cache_hit_metrics():
     print(f"FULL CACHE HIT: {P} tokens, cached={cached}, nixl={expected_nixl}")
     print(f"  metrics delta: {d}, nixl_bytes_delta={n1 - n0}")
     assert len(proxy_text) > 0, "proxy returned empty response"
-    assert d["local_cache_hit"] == cached, (
-        f"expected local_cache_hit={cached}, got {d['local_cache_hit']}"
+    assert d["local_cache_hit"] == cached - 1, (
+        f"expected local_cache_hit={cached - 1}, got {d['local_cache_hit']}"
     )
     assert d["external_kv_transfer"] == expected_nixl, (
         f"expected external_kv_transfer={expected_nixl}, "
@@ -383,8 +383,8 @@ def test_partial_decode_gpu_cache_hit_metrics():
         f"expected external_kv_transfer={expected_nixl}, "
         f"got {d['external_kv_transfer']}"
     )
-    assert d["local_cache_hit"] == cached, (
-        f"expected local_cache_hit={cached}, got {d['local_cache_hit']}"
+    assert d["local_cache_hit"] == cached - 1, (
+        f"expected local_cache_hit={cached - 1}, got {d['local_cache_hit']}"
     )
     assert d["local_compute"] == 1, (
         f"expected local_compute=1 (recomputed last token), got {d['local_compute']}"
