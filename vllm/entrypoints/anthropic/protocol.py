@@ -5,7 +5,7 @@
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AnthropicError(BaseModel):
@@ -112,6 +112,12 @@ class AnthropicMessagesRequest(BaseModel):
     top_k: int | None = None
     top_p: float | None = None
 
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+
     @field_validator("model")
     @classmethod
     def validate_model(cls, v):
@@ -180,6 +186,11 @@ class AnthropicMessagesResponse(BaseModel):
     ) = None
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
+
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
 
     def model_post_init(self, __context):
         if not self.id:

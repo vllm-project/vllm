@@ -44,6 +44,13 @@ def cleanup_fixture(should_do_global_cleanup_after_test: bool):
 
 
 @pytest.fixture
+def maybe_enable_lora_dual_stream(monkeypatch: pytest.MonkeyPatch):
+    if current_platform.is_cuda():
+        monkeypatch.setenv("VLLM_LORA_ENABLE_DUAL_STREAM", "1")
+    yield
+
+
+@pytest.fixture
 def dist_init():
     from tests.utils import ensure_current_vllm_config
 
@@ -292,6 +299,16 @@ def llama32_lora_files(llama32_lora_huggingface_id):
 @pytest.fixture(scope="session")
 def whisper_lora_files():
     return snapshot_download(repo_id="chengyili2005/whisper-small-mandarin-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_text_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-text-only-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
 
 
 @pytest.fixture

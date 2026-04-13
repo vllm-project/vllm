@@ -11,6 +11,7 @@ from transformers import PreTrainedTokenizerBase
 
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -138,7 +139,7 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
             (max_num_seqs, (self.vocab_size + 31) // 32),
             -1,
             dtype=torch.int32,
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=is_pin_memory_available(),
         )
 
     def destroy(self):
