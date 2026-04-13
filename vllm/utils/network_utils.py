@@ -335,6 +335,9 @@ def normalize_last_endpoint(
         The actual address with OS-assigned port (e.g. "tcp://host:59251").
     """
     actual_endpoint = sock.last_endpoint.decode("utf-8")
+    # Guard against non-TCP paths (IPC, inproc) — no port to parse.
+    if not actual_endpoint.startswith("tcp://"):
+        return actual_endpoint
     _, _, port_str = split_zmq_path(actual_endpoint)
     orig_scheme, orig_host, _ = split_zmq_path(original_path)
     return make_zmq_path(orig_scheme, orig_host, int(port_str))
