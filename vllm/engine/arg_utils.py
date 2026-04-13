@@ -419,6 +419,8 @@ class EngineArgs:
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
+    nic_bind: bool = ParallelConfig.nic_bind
+    nic_bind_devices: list[str] | None = ParallelConfig.nic_bind_devices
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -870,6 +872,10 @@ class EngineArgs:
         )
         parallel_group.add_argument(
             "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
+        )
+        parallel_group.add_argument("--nic-bind", **parallel_kwargs["nic_bind"])
+        parallel_group.add_argument(
+            "--nic-bind-devices", **parallel_kwargs["nic_bind_devices"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1839,6 +1845,8 @@ class EngineArgs:
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
+            nic_bind=self.nic_bind,
+            nic_bind_devices=self.nic_bind_devices,
         )
 
         speculative_config = self.create_speculative_config(

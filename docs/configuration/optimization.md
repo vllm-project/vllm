@@ -214,6 +214,79 @@ For the current CPU backend setup and tuning guidance, see:
 The GPU-only `--numa-bind`, `--numa-bind-nodes`, and `--numa-bind-cpus` options
 do not configure CPU worker affinity.
 
+### NIC Binding for Multi-NIC RDMA Servers
+
+On multi-GPU servers with multiple RDMA NICs (e.g., ConnectX adapters), each GPU
+is typically closest to a specific NIC through the PCIe topology. When a worker
+communicates via an NIC on a different NUMA node or PCIe switch, traffic must
+cross an extra hop, increasing latency and reducing throughput.
+
+`--nic-bind` sets `NCCL_IB_HCA` and `UCX_NET_DEVICES` per worker so each
+process uses only the RDMA NIC(s) nearest to its assigned GPU. The user provides
+device specs in `NCCL_IB_HCA` syntax and vLLM passes the value through to NCCL
+unchanged. For UCX, vLLM expands the pattern against InfiniBand devices visible
+in `/sys/class/infiniband/` to produce an explicit device list, since UCX does
+not support NCCL's pattern matching.
+
+`--nic-bind-devices` takes one NCCL_IB_HCA device spec per visible GPU, in the
+same order as the GPU indices. Each spec supports NCCL matching syntax:
+
+| Syntax | Meaning | Example |
+| -------- | --------- | --------- |
+| `name` | Prefix match | `mlx5` matches `mlx5_0`, `mlx5_1`, … |
+| `=name` | Exact match | `=mlx5_0` matches only `mlx5_0` |
+| `^name` | Exclude (prefix) | `^mlx5_1` excludes `mlx5_1*` |
+| `^=name` | Exclude (exact) | `^=mlx5_1` excludes only `mlx5_1` |
+| `name:port` | Specific port | `mlx5_0:1` matches port 1 only |
+
+Multiple devices per worker are comma-separated within a single spec, for
+example `mlx5_0:1,mlx5_1:1` for rail-optimized configurations.
+
+```bash
+# Auto-detect NIC-to-GPU affinity via NUMA topology
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 4 \
+  --nic-bind
+
+# Explicit per-GPU NIC binding
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 4 \
+  --nic-bind \
+  --nic-bind-devices mlx5_0:1 mlx5_1:1 mlx5_2:1 mlx5_3:1
+
+# Multiple NICs per worker (rail-optimized)
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 2 \
+  --nic-bind \
+  --nic-bind-devices mlx5_0:1,mlx5_1:1 mlx5_2:1,mlx5_3:1
+
+# Combined with NUMA binding
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --tensor-parallel-size 4 \
+  --numa-bind \
+  --nic-bind
+```
+
+Notes:
+
+- NIC binding applies to both GPU and CPU workers. For GPU workers it binds
+  RDMA communication; for CPU workers it binds UCX transport used by features
+  such as NixlConnector.
+- Automatic detection requires InfiniBand sysfs entries
+  (`/sys/class/infiniband/`) and GPU NUMA node detection (NVML). If detection
+  fails, pass `--nic-bind-devices` explicitly.
+- `--nic-bind` only controls RDMA device selection (`NCCL_IB_HCA`,
+  `UCX_NET_DEVICES`). It does **not** set TCP/IP socket interfaces
+  (`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`) because those are used for
+  low-bandwidth side-channel or fallback communication where per-worker
+  differentiation provides negligible benefit. If you need to control socket
+  interfaces, set them globally via environment variables.
+- When using the Ray executor, NIC device expansion runs on the head node. For
+  heterogeneous clusters where nodes have different NIC configurations, use
+  explicit exact-match device specs (`=mlx5_0:1`) rather than prefix patterns.
+- In containerized environments, ensure the InfiniBand sysfs directory is
+  visible inside the container (usually the case when RDMA is enabled).
+
 ### Batch-level DP for Multi-Modal Encoders
 
 By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,

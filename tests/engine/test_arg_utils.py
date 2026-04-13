@@ -548,6 +548,26 @@ def test_numa_bind_args():
     assert engine_args.numa_bind_cpus == ["0-3", "4-7", "8-11", "12-15"]
 
 
+def test_nic_bind_args():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--nic-bind",
+            "--nic-bind-devices",
+            "=mlx5_0:1",
+            "=mlx5_1:1",
+            "mlx5_2:1,mlx5_3:1",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.nic_bind is True
+    assert engine_args.nic_bind_devices == [
+        "=mlx5_0:1",
+        "=mlx5_1:1",
+        "mlx5_2:1,mlx5_3:1",
+    ]
+
+
 def test_ir_op_priority():
     from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
 

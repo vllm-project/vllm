@@ -282,6 +282,20 @@ class ParallelConfig:
     Each entry must use `numactl --physcpubind` CPU-list syntax, for example
     `"0-3"` or `"0,2,4-7"`.
     """
+    nic_bind: bool = False
+    """Enable per-worker NIC binding via NCCL_IB_HCA and UCX_NET_DEVICES."""
+    nic_bind_devices: list[str] | None = None
+    """RDMA device binding spec per visible GPU/worker.
+
+    One entry per visible GPU, in ``NCCL_IB_HCA`` syntax.  For example
+    ``["mlx5_0:1", "mlx5_1:1", "mlx5_2:1", "mlx5_3:1"]``.  Each entry
+    may use NCCL matching rules: prefix match (``mlx5``), exact match
+    (``=mlx5_0:1``), exclusion (``^mlx5_1``), and comma-separated
+    multi-device (``mlx5_0:1,mlx5_1:1``).  The value is passed through
+    to ``NCCL_IB_HCA`` unchanged; for ``UCX_NET_DEVICES`` vLLM expands
+    it against the IB devices visible in sysfs.  If unset and
+    ``nic_bind=True``, auto-detects via NUMA topology.
+    """
 
     distributed_timeout_seconds: int | None = None
     """Timeout in seconds for distributed operations (e.g., init_process_group).
@@ -405,6 +419,20 @@ class ParallelConfig:
                     )
         return value
 
+    @field_validator("nic_bind_devices")
+    @classmethod
+    def _validate_nic_bind_devices(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if not value:
+            raise ValueError("nic_bind_devices must not be empty.")
+
+        from vllm.utils.nic_utils import validate_nccl_hca_syntax
+
+        for device_spec in value:
+            validate_nccl_hca_syntax(device_spec)
+        return value
+
     @model_validator(mode="after")
     def _validate_parallel_config(self) -> Self:
         if self._api_process_rank >= self._api_process_count:
@@ -439,6 +467,9 @@ class ParallelConfig:
             raise ValueError(
                 "numa_bind_nodes and numa_bind_cpus require numa_bind=True."
             )
+
+        if not self.nic_bind and self.nic_bind_devices is not None:
+            raise ValueError("nic_bind_devices requires nic_bind=True.")
 
         if self.enable_eplb:
             if not current_platform.is_cuda_alike():

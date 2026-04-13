@@ -16,6 +16,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import nic_utils
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_open_port,
@@ -389,6 +390,9 @@ class RayExecutorV2(MultiprocExecutor):
                     map(str, node_gpus[node_id])
                 ),
             }
+            nic_env = nic_utils.get_nic_env_vars(self.vllm_config, local_rank)
+            if nic_env:
+                worker_env_vars.update(nic_env)
             self.ray_worker_handles[i].local_rank = local_rank
             init_worker_refs.append(
                 self.ray_worker_handles[i].actor.initialize_worker.remote(
