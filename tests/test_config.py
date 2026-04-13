@@ -4,12 +4,14 @@
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pydantic
 import pytest
 from pydantic import ValidationError
 
+import vllm.config.vllm as vllm_config_module
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
@@ -43,6 +45,81 @@ def test_compile_config_repr_succeeds():
     val = repr(config)
     assert "VllmConfig" in val
     assert "inductor_passes" in val
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_populates_missing_architectures_from_causal_lm_mapping(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures == ["MistralForCausalLM"]
+    assert hf_config.architectures is None
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_preserves_explicit_architectures_override(monkeypatch):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(model_type="mistral", architectures=None)
+
+    updated = VllmConfig.with_hf_config(
+        cfg,
+        hf_config,
+        architectures=["Ministral3ForCausalLM"],
+    )
+
+    assert updated.model_config.hf_config.architectures == ["Ministral3ForCausalLM"]
+
+
+@pytest.mark.skip_global_cleanup
+def test_with_hf_config_leaves_unknown_model_type_without_architectures(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        vllm_config_module,
+        "replace",
+        lambda self, **kwargs: SimpleNamespace(**kwargs),
+    )
+    cfg = SimpleNamespace(
+        model_config=SimpleNamespace(
+            is_multimodal_model=False,
+            hf_config=SimpleNamespace(),
+            get_model_arch_config=lambda: "arch-config",
+        )
+    )
+    hf_config = SimpleNamespace(
+        model_type="not_a_real_model",
+        architectures=None,
+    )
+
+    updated = VllmConfig.with_hf_config(cfg, hf_config)
+
+    assert updated.model_config.hf_config.architectures is None
 
 
 def test_async_scheduling_with_pipeline_parallelism_is_allowed():
