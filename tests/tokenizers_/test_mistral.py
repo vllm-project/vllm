@@ -3,8 +3,10 @@
 
 from typing import Any
 
+import llguidance
 import pytest
 from mistral_common.exceptions import InvalidMessageStructureException
+from mistral_common.guidance.grammar_factory import GrammarFactory
 from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
 
 from vllm.tokenizers.mistral import (
@@ -2407,3 +2409,29 @@ class TestMistralTokenizer:
         assert actual_tokens == expected_tokens
 
         assert mistral_tokenizer.convert_ids_to_tokens([]) == []
+
+    def test_grammar_factory(self, mistral_tokenizer: MistralTokenizer) -> None:
+        # works in this case cause Mistral 7B is < v11 and SPM
+        if not mistral_tokenizer.is_tekken:
+            with pytest.raises(AttributeError):
+                mistral_tokenizer.grammar_factory  # noqa: B018
+            return
+        factory = mistral_tokenizer.grammar_factory
+        assert isinstance(factory, GrammarFactory)
+
+        # Test caching
+        factory_2 = mistral_tokenizer.grammar_factory
+        assert factory is factory_2
+
+    def test_llg_tokenizer(self, mistral_tokenizer: MistralTokenizer) -> None:
+        if not mistral_tokenizer.is_tekken:
+            with pytest.raises(ValueError):
+                mistral_tokenizer.llg_tokenizer  # noqa: B018
+            return
+
+        llg_tokenizer = mistral_tokenizer.llg_tokenizer
+        assert isinstance(llg_tokenizer, llguidance.LLTokenizer)
+
+        # Test caching
+        llg_tokenizer_2 = mistral_tokenizer.llg_tokenizer
+        assert llg_tokenizer is llg_tokenizer_2

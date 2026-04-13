@@ -305,6 +305,42 @@ def align_fp8_moe_weights_for_fi(
     return padded_w13, padded_w2, padded_intermediate
 
 
+def _shuffle_deepseek_fp8_moe_weights(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Preprocess DeepSeek FP8 block-scale weights for the FlashInfer TRT-LLM
+    kernel using the shuffle + BlockMajorK layout variant.
+
+    Returns 4D weight tensors in BlockMajorK layout
+    (E, K/block_k, Mn, block_k)
+    """
+    from flashinfer import shuffle_matrix_a
+    from flashinfer.fused_moe import convert_to_block_layout
+
+    epilogue_tile_m = 64
+    block_k = 128
+    num_experts = w13.shape[0]
+
+    M13, K13 = w13.shape[1], w13.shape[2]
+    M2, K2 = w2.shape[1], w2.shape[2]
+    w13_out = torch.empty(
+        num_experts, K13 // block_k, M13, block_k, dtype=torch.uint8, device=w13.device
+    )
+    w2_out = torch.empty(
+        num_experts, K2 // block_k, M2, block_k, dtype=torch.uint8, device=w2.device
+    )
+
+    for i in range(num_experts):
+        t13 = shuffle_matrix_a(w13[i].view(torch.uint8), epilogue_tile_m)
+        w13_out[i] = convert_to_block_layout(t13, block_k)
+
+        t2 = shuffle_matrix_a(w2[i].view(torch.uint8), epilogue_tile_m)
+        w2_out[i] = convert_to_block_layout(t2, block_k)
+
+    return w13_out.view(torch.float8_e4m3fn), w2_out.view(torch.float8_e4m3fn)
+
+
 def _shuffle_mxfp8_moe_weights(
     w13: torch.Tensor,
     w2: torch.Tensor,
@@ -405,6 +441,7 @@ def prepare_fp8_moe_layer_for_fi(
         hasattr(layer, "weight_block_size") and layer.weight_block_size is not None
     )
     is_mxfp8 = block_quant and w13_scale.dtype == torch.uint8
+    is_deepseek_fp8 = block_quant and not is_mxfp8
     is_gated = layer.activation.is_gated
 
     # MXFP8 TRT-LLM requires W31 swap + reorder + shuffle.
@@ -439,7 +476,6 @@ def prepare_fp8_moe_layer_for_fi(
             layer.moe_config.is_act_and_mul,
             min_alignment,
         )
-        layer.intermediate_size_per_partition = new_intermediate
         layer.moe_config.intermediate_size_per_partition = new_intermediate
 
     # FI kernels require W31 layout rather than W13.
@@ -447,6 +483,10 @@ def prepare_fp8_moe_layer_for_fi(
         w13 = swap_w13_to_w31(w13)
         if block_quant:
             w13_scale = swap_w13_to_w31(w13_scale)
+
+    # DeepSeekFp8 TRT-LLM: shuffle weights into BlockMajorK layout.
+    if is_deepseek_fp8 and is_trtllm:
+        w13, w2 = _shuffle_deepseek_fp8_moe_weights(w13, w2)
 
     # FI TRT-LLM FP8 per-tensor MoE kernel requires weight shuffle
     # and registration of alpha scales.

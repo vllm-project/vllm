@@ -73,20 +73,6 @@ async def test_chat_render_multi_turn(client):
     assert len(data["token_ids"]) > 0
 
 
-@pytest.mark.asyncio
-async def test_chat_render_invalid_model(client):
-    response = await client.post(
-        "/v1/chat/completions/render",
-        json={
-            "model": "nonexistent-model",
-            "messages": [{"role": "user", "content": "Hello"}],
-        },
-    )
-
-    assert response.status_code == 404
-    assert "error" in response.json()
-
-
 # -- Completion Render --
 
 

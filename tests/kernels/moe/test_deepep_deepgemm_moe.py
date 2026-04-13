@@ -37,20 +37,22 @@ from .parallel_utils import ProcessGroupInfo, parallel_launch
 from .utils import make_dummy_moe_config, make_test_weights
 
 if has_deep_ep():
-    from vllm.model_executor.layers.fused_moe.deepep_ht_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ht import (
         DeepEPHTPrepareAndFinalize,
     )
-    from vllm.model_executor.layers.fused_moe.deepep_ll_prepare_finalize import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.deepep_ll import (
         DeepEPLLPrepareAndFinalize,
     )
 
     from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm():
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmExperts,
+    )
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep(),

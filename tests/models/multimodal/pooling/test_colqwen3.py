@@ -18,7 +18,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionContentPartImageParam,
     ChatCompletionContentPartTextParam,
 )
-from vllm.entrypoints.pooling.score.utils import ScoreMultiModalParam
+from vllm.entrypoints.pooling.scoring.typing import ScoreMultiModalParam
 
 from ....conftest import VllmRunner
 
@@ -125,7 +125,7 @@ def _run_late_interaction_test(
     dtype: str,
 ) -> None:
     """Verify MaxSim scoring matches manual computation."""
-    from vllm.entrypoints.pooling.score.utils import compute_maxsim_score
+    from vllm.entrypoints.pooling.scoring.utils import compute_maxsim_score
 
     with vllm_runner(
         model,
