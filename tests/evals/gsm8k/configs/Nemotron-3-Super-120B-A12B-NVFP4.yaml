@@ -1,0 +1,11 @@
+model_name: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4"
+accuracy_threshold: 0.93
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 2
+  --enable-expert-parallel
+  --speculative-config '{"method":"mtp","num_speculative_tokens":5}'

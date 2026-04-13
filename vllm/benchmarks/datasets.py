@@ -35,9 +35,9 @@ from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
+from vllm.inputs import MultiModalDataDict
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
-from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.audio import get_audio_duration
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike

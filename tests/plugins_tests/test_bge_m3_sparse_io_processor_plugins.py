@@ -102,7 +102,7 @@ async def test_bge_m3_sparse_plugin_online(
     """Test BGE-M3 sparse plugin in online mode via API."""
     request_payload = {
         "model": model_config["model_name"],
-        "task": "token_classify",
+        "task": "plugin",
         "data": {"input": model_config["test_input"], "return_tokens": return_tokens},
     }
 
@@ -166,7 +166,7 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
-        pooler_output = llm.encode(prompt, pooling_task="token_classify")
+        pooler_output = llm.encode(prompt, pooling_task="plugin")
 
     outputs = pooler_output[0]
 
@@ -213,7 +213,7 @@ def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
-        pooler_output = llm.encode(prompts, pooling_task="token_classify")
+        pooler_output = llm.encode(prompts, pooling_task="plugin")
 
     outputs = pooler_output[0]
 
