@@ -559,6 +559,16 @@ class VllmConfig:
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
             hf_config.architectures = architectures
+        elif hf_config.architectures is None:
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+            )
+
+            if hf_config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+                hf_config = copy.deepcopy(hf_config)
+                hf_config.architectures = [
+                    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[hf_config.model_type]
+                ]
 
         model_config = copy.deepcopy(self.model_config)
 
@@ -764,6 +774,16 @@ class VllmConfig:
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
+                self.model_config is not None
+                and self.model_config.runner_type == "pooling"
+            ):
+                # The current implementation of asynchronous scheduling negatively
+                # impacts performance of pooling models, so we disable by default.
+                logger.debug(
+                    "Disabling asynchronous scheduling by default for pooling model."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
@@ -1228,9 +1248,6 @@ class VllmConfig:
         # warning message here and will log it later.
         if not current_platform.support_hybrid_kv_cache():
             # Hybrid KV cache manager is not supported on non-GPU platforms.
-            need_disable_hybrid_kv_cache_manager = True
-        if self.kv_events_config is not None:
-            # Hybrid KV cache manager is not compatible with KV events.
             need_disable_hybrid_kv_cache_manager = True
         if (
             self.model_config is not None
