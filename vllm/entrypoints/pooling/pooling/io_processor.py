@@ -4,12 +4,12 @@ from collections.abc import Sequence
 from typing import Any
 
 from vllm import PoolingParams, PoolingRequestOutput
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.plugins.io_processors import get_io_processor
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 
+from ..base.io_processor import PoolingIOProcessor
 from ..typing import OfflineInputsContext, OfflineOutputsContext, PoolingServeContext
 from .protocol import IOProcessorRequest, IOProcessorResponse
 

@@ -16,21 +16,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,
 )
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.embed.protocol import (
-    CohereEmbedContent,
-    CohereEmbedInput,
-    CohereEmbedRequest,
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-)
-from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingIOProcessorMixin
-from vllm.entrypoints.pooling.typing import (
-    OfflineInputsContext,
-    PoolingChatLikeRequest,
-    PoolingCompletionLikeRequest,
-    PoolingServeContext,
-)
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
@@ -38,6 +23,22 @@ from vllm.renderers import merge_kwargs
 from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
+
+from ..base.io_processor import PoolingIOProcessor
+from ..scoring.io_processor import JinaRankingIOProcessorMixin
+from ..typing import (
+    OfflineInputsContext,
+    PoolingChatLikeRequest,
+    PoolingCompletionLikeRequest,
+    PoolingServeContext,
+)
+from .protocol import (
+    CohereEmbedContent,
+    CohereEmbedInput,
+    CohereEmbedRequest,
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
+)
 
 logger = init_logger(__name__)
 

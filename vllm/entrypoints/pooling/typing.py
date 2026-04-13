@@ -9,29 +9,30 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
-from vllm.entrypoints.pooling.classify.protocol import (
+from vllm.inputs import DataPrompt, EngineInput
+from vllm.lora.request import LoRARequest
+
+from .classify.protocol import (
     ClassificationChatRequest,
     ClassificationCompletionRequest,
     ClassificationResponse,
 )
-from vllm.entrypoints.pooling.embed.protocol import (
+from .embed.protocol import (
     CohereEmbedRequest,
     EmbeddingBytesResponse,
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
     EmbeddingResponse,
 )
-from vllm.entrypoints.pooling.pooling.protocol import (
+from .pooling.protocol import (
     IOProcessorRequest,
     PoolingBytesResponse,
     PoolingChatRequest,
     PoolingCompletionRequest,
     PoolingResponse,
 )
-from vllm.entrypoints.pooling.scoring.protocol import ScoringRequest, ScoringResponse
-from vllm.entrypoints.pooling.scoring.typing import ScoringData
-from vllm.inputs import DataPrompt, EngineInput
-from vllm.lora.request import LoRARequest
+from .scoring.protocol import ScoringRequest, ScoringResponse
+from .scoring.typing import ScoringData
 
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest

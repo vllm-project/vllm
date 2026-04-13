@@ -13,19 +13,20 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
 )
 from vllm.entrypoints.openai.engine.serving import RendererChatRequest, RendererRequest
-from vllm.entrypoints.pooling.scoring.typing import ScoringData
-from vllm.entrypoints.pooling.typing import (
+from vllm.inputs import EngineInput, SingletonPrompt
+from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
+from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
+from vllm.tool_parsers import ToolParser
+from vllm.utils.mistral import is_mistral_tokenizer
+
+from ..scoring.typing import ScoringData
+from ..typing import (
     OfflineInputsContext,
     OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingServeContext,
 )
-from vllm.inputs import EngineInput, SingletonPrompt
-from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
-from vllm.tool_parsers import ToolParser
-from vllm.utils.mistral import is_mistral_tokenizer
 
 
 class PoolingIOProcessor:
