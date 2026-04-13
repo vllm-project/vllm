@@ -26,7 +26,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs import NemotronHConfig
+from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 from .interfaces import SupportsPP
 from .nemotron_h import (
@@ -395,13 +395,16 @@ class NemotronHMTP(nn.Module, SupportsPP):
         ]
 
         expert_params_mapping = []
-        if hasattr(self.config, "n_routed_experts") and self.config.n_routed_experts:
+        num_experts = getattr(self.config, "n_routed_experts", None)
+        if getattr(self.config, "model_type", None) == "nemotron_h_puzzle":
+            num_experts = self.config.mtp_n_routed_experts
+        if num_experts is not None:
             expert_params_mapping = FusedMoE.make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="",  # Empty - non-gated MoE
-                num_experts=self.config.n_routed_experts,
+                num_experts=num_experts,
                 num_redundant_experts=self.num_redundant_experts,
             )
 

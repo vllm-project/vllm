@@ -307,7 +307,7 @@ def bench_run(
     def replay_graph(graph, num_repeats):
         for _ in range(num_repeats):
             graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     cutlass_stream = torch.cuda.Stream()
     cutlass_graph = torch.cuda.CUDAGraph()
@@ -330,7 +330,7 @@ def bench_run(
             e=num_experts,
             device=device,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     triton_stream = torch.cuda.Stream()
     triton_graph = torch.cuda.CUDAGraph()
@@ -345,7 +345,7 @@ def bench_run(
             w2_fp8scale,
             a_fp8_scale,
         )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     min_run_time = 5
     num_warmup = 5

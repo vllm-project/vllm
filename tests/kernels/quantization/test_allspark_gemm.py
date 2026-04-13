@@ -122,7 +122,7 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
     )
 
     output_ref = torch.matmul(input, w_ref)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04

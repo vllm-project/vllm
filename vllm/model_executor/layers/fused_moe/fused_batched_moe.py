@@ -712,9 +712,6 @@ class NaiveBatchedExperts(mk.FusedMoEExpertsModular):
             "This method should not be called."
         )
 
-    def supports_chunking(self) -> bool:
-        return False
-
     def supports_expert_map(self) -> bool:
         return False
 
@@ -912,7 +909,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -956,9 +953,6 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def supports_expert_map(self) -> bool:
         return False
@@ -1023,6 +1017,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             torch.float16,
             torch.bfloat16,
             torch.float8_e4m3fn,
+            torch.float8_e4m3fnuz,
         ]
         assert expert_tokens_meta is not None
 
@@ -1052,7 +1047,7 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             compute_type = tl.float16
         elif hidden_states.dtype == torch.float32:
             compute_type = tl.float32
-        elif hidden_states.dtype == torch.float8_e4m3fn:
+        elif hidden_states.dtype == current_platform.fp8_dtype():
             compute_type = tl.bfloat16
         else:
             raise ValueError(f"Unsupported compute_type: {hidden_states.dtype}")

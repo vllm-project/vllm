@@ -103,7 +103,7 @@ def main(
         max_logits = torch.empty_like(exp_sums)
 
     def run_cuda_benchmark(num_iters: int, profile: bool = False) -> float:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
@@ -173,7 +173,7 @@ def main(
                     )
             else:
                 raise ValueError(f"Invalid version: {version}")
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         end_time = time.perf_counter()
         if profile:

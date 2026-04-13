@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from transformers import PretrainedConfig
+from transformers import CONFIG_MAPPING, PretrainedConfig
 
 # NOTE: Temporary shim for FunAudioChat checkpoints.
 # These checkpoints use `model_type="funaudiochat"`, which is not currently
@@ -92,28 +92,24 @@ class FunAudioChatConfig(PretrainedConfig):
         self.audio_token_index = audio_token_index
         self.ignore_index = ignore_index
 
-        if isinstance(audio_config, dict):
-            audio_config.setdefault(
-                "model_type", FunAudioChatAudioEncoderConfig.model_type
-            )
-            audio_config = FunAudioChatAudioEncoderConfig(**audio_config)
-        elif audio_config is None:
-            audio_config = FunAudioChatAudioEncoderConfig()
-        self.audio_config = audio_config
+        if audio_config is None:
+            self.audio_config = FunAudioChatAudioEncoderConfig()
+        elif isinstance(audio_config, dict):
+            default_model_type = FunAudioChatAudioEncoderConfig.model_type
+            audio_config.setdefault("model_type", default_model_type)
+            self.audio_config = FunAudioChatAudioEncoderConfig(**audio_config)
+        else:
+            self.audio_config = audio_config
 
-        if isinstance(text_config, dict):
+        if text_config is None:
+            self.text_config = CONFIG_MAPPING["qwen2"]()
+        elif isinstance(text_config, dict):
             # Default to qwen2 for backwards compatibility; FunAudioChat uses
             # qwen3 in practice for recent checkpoints.
             text_config.setdefault("model_type", "qwen2")
-            import transformers
-
-            text_cls = transformers.CONFIG_MAPPING[text_config["model_type"]]
-            text_config = text_cls(**text_config)
-        elif text_config is None:
-            import transformers
-
-            text_config = transformers.CONFIG_MAPPING["qwen2"]()
-        self.text_config = text_config
+            self.text_config = CONFIG_MAPPING[text_config["model_type"]](**text_config)
+        else:
+            self.text_config = text_config
 
         self.hidden_size = (
             int(self.text_config.hidden_size)

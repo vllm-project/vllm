@@ -19,6 +19,7 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
+from vllm.platforms.interface import DeviceCapability
 from vllm.platforms.rocm import RocmPlatform
 from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -82,6 +83,20 @@ def test_mha_attn_platform(default_vllm_config, device: str):
         ):
             attn = MMEncoderAttention(16, 72, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.TRITON_ATTN
+
+        # Test Turing (pre-Ampere, sm_75): FlashAttention requires sm>=80,
+        # and Triton no longer supports MMA on Turing, so we expect that
+        # TORCH_SDPA is used for MMEncoderAttention.
+        with (
+            patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
+            patch.object(
+                CudaPlatform,
+                "get_device_capability",
+                return_value=DeviceCapability(major=7, minor=5),
+            ),
+        ):
+            attn = MMEncoderAttention(16, 64, scale=1)
+            assert attn.attn_backend == AttentionBackendEnum.TORCH_SDPA
 
 
 def ref_attention(
@@ -282,11 +297,10 @@ def test_mha_attn_varlen_forward_flashinfer(
         hidden_size = num_heads * head_size
         tp_size = 1
 
-        sequence_lengths_np = MMEncoderAttention.maybe_compute_sequence_lengths(
-            AttentionBackendEnum.FLASHINFER, cu_seqlens_np
-        )
-        sequence_lengths = torch.from_numpy(sequence_lengths_np).to(
-            device, dtype=torch.int32, non_blocking=True
+        sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+            AttentionBackendEnum.FLASHINFER,
+            cu_seqlens_np,
+            device,
         )
 
         max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
@@ -294,14 +308,12 @@ def test_mha_attn_varlen_forward_flashinfer(
         )
         max_seqlen = torch.tensor(max_seqlen_val, device=device, dtype=torch.int32)
 
-        cu_seqlens_np = MMEncoderAttention.maybe_recompute_cu_seqlens(
+        cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
             AttentionBackendEnum.FLASHINFER,
             cu_seqlens_np,
             hidden_size,
             tp_size,
-        )
-        cu_seqlens = torch.from_numpy(cu_seqlens_np).to(
-            device, dtype=torch.int32, non_blocking=True
+            device,
         )
 
         scale = 1.0 / head_size**0.5

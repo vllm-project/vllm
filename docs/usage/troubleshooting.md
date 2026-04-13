@@ -91,11 +91,11 @@ If GPU/CPU communication cannot be established, you can use the following Python
     import torch
     import torch.distributed as dist
     dist.init_process_group(backend="nccl")
-    local_rank = dist.get_rank() % torch.cuda.device_count()
-    torch.cuda.set_device(local_rank)
+    local_rank = dist.get_rank() % torch.accelerator.device_count()
+    torch.accelerator.set_device_index(local_rank)
     data = torch.FloatTensor([1,] * 128).to("cuda")
     dist.all_reduce(data, op=dist.ReduceOp.SUM)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     value = data.mean().item()
     world_size = dist.get_world_size()
     assert value == world_size, f"Expected {world_size}, got {value}"
@@ -337,7 +337,7 @@ import vllm
 import torch
 
 print(f"CUDA available: {torch.cuda.is_available()}")
-print(f"CUDA device count: {torch.cuda.device_count()}")
+print(f"CUDA device count: {torch.accelerator.device_count()}")
 EOF
 ```
 

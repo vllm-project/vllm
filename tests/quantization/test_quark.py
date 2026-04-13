@@ -22,6 +22,9 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
     QuarkW8A8Fp8,
     QuarkW8A8Int8,
 )
+from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
+    QuarkW8A8Int8MoEMethod,
+)
 from vllm.platforms import current_platform
 
 from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
@@ -126,6 +129,34 @@ def test_quark_int8_w_per_tensor_a_per_tensor(vllm_runner, tp):
         assert output
 
 
+@pytest.mark.parametrize("tp", [1])
+def test_quark_int8_w8a8_moe(vllm_runner, tp):
+    """Test W8A8 INT8 MoE quantization with a tiny Qwen3 MoE model."""
+    model_path = "nameistoken/tiny-qwen3-moe-w8a8-int8-quark"
+    with vllm_runner(
+        model_path,
+        enforce_eager=True,
+        tensor_parallel_size=tp,
+        gpu_memory_utilization=0.1,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            # MoE experts should use QuarkW8A8Int8MoEMethod
+            moe = layer.mlp.experts
+            assert isinstance(moe.quant_method, QuarkW8A8Int8MoEMethod), (
+                f"Expected QuarkW8A8Int8MoEMethod, got {type(moe.quant_method)}"
+            )
+            # Non-MoE linear layers should use QuarkW8A8Int8
+            qkv_proj = layer.self_attn.qkv_proj
+            assert isinstance(qkv_proj.scheme, QuarkW8A8Int8)
+
+        llm.apply_model(check_model)
+
+        output = llm.generate_greedy("Hello", max_tokens=4)
+        assert output
+
+
 def test_quark_fp8_parity(vllm_runner):
     quark_model_id = "amd-quark/llama-tiny-fp8-quark-quant-method"
     fp8_model_id = "amd-quark/llama-tiny-fp8-quant-method"
@@ -210,10 +241,9 @@ WIKITEXT_ACCURACY_CONFIGS = [
 @pytest.mark.parametrize("config", WIKITEXT_ACCURACY_CONFIGS)
 @pytest.mark.parametrize("tp_size", [1, 2])
 def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
-    if torch.cuda.device_count() < tp_size:
-        pytest.skip(
-            f"This test requires >={tp_size} gpus, got only {torch.cuda.device_count()}"
-        )
+    device_count = torch.accelerator.device_count()
+    if device_count < tp_size:
+        pytest.skip(f"This test requires >={tp_size} gpus, got only {device_count}")
 
     task = "wikitext"
     rtol = 0.1
@@ -246,10 +276,9 @@ def test_ocp_mx_wikitext_correctness(config: AccuracyTestConfig, tp_size: int):
     reason="Read access to huggingface.co/amd is required for this test.",
 )
 def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
-    if torch.cuda.device_count() < 8:
-        pytest.skip(
-            f"This test requires >=8 gpus, got only {torch.cuda.device_count()}"
-        )
+    device_count = torch.accelerator.device_count()
+    if device_count < 8:
+        pytest.skip(f"This test requires >=8 gpus, got only {device_count}")
 
     task = "gsm8k"
     rtol = 0.03
