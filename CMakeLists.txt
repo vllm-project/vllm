@@ -292,7 +292,6 @@ set(VLLM_EXT_SRC
   "csrc/layernorm_kernels.cu"
   "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/fused_qk_norm_rope_cache_quant.cu"
-  "csrc/fused_qk_norm_rope_cache_quant_v2.cu"
   "csrc/layernorm_quant_kernels.cu"
   "csrc/sampler.cu"
   "csrc/topk.cu"

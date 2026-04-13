@@ -4,9 +4,8 @@
 Benchmark for the fused QK RMSNorm + RoPE + KV Cache + FP8-Quant CUDA kernel.
 
 Measures (kernel-only, no GEMM):
-  1. v3 (warp-per-head): register-based, warp shuffle RMSNorm, vectorized I/O
-  2. v2 (naive fusion):  block-per-token, smem RMSNorm, sequential heads
-  3. Baseline: existing vLLM CUDA kernels chained (2 launches)
+  1. Fused kernel: register-based, warp shuffle RMSNorm, vectorized I/O
+  2. Baseline: existing vLLM CUDA kernels chained (2 launches)
        fused_qk_norm_rope → reshape_and_cache_flash
 
 Run (requires vllm to be installed):
@@ -153,34 +152,16 @@ def bench_one(
     v_buf = torch.empty_like(k_buf)
 
     # ==================================================================
-    #  v3 (warp-per-head): separate Q/K/V in-place
+    #  Fused kernel: warp-per-head, register-based
     # ==================================================================
-    def run_v3_only():
+    def run_fused():
         qkv_copy = qkv_static.clone()
-        q_v3, k_v3, v_v3 = qkv_copy.split([q_size, kv_size, kv_size], dim=-1)
-        q_v3 = q_v3.view(num_tokens, num_heads_q, head_dim)
-        k_v3 = k_v3.view(num_tokens, num_heads_kv, head_dim)
-        v_v3 = v_v3.view(num_tokens, num_heads_kv, head_dim)
+        q, k, v = qkv_copy.split([q_size, kv_size, kv_size], dim=-1)
+        q = q.view(num_tokens, num_heads_q, head_dim)
+        k = k.view(num_tokens, num_heads_kv, head_dim)
+        v = v.view(num_tokens, num_heads_kv, head_dim)
         torch.ops._C.fused_qk_norm_rope_cache_quant(
-            q_v3, k_v3, v_v3, k_cache, v_cache,
-            q_weight, k_weight, cos_sin_cache,
-            positions, slot_mapping,
-            k_scale, v_scale, epsilon,
-            num_heads_q, num_heads_kv, head_dim, block_size,
-            True, is_fp8,
-        )
-
-    # ==================================================================
-    #  v2 (naive fusion): block-per-token, smem reduce
-    # ==================================================================
-    def run_v2_only():
-        qkv_copy = qkv_static.clone()
-        q_v2, k_v2, v_v2 = qkv_copy.split([q_size, kv_size, kv_size], dim=-1)
-        q_v2 = q_v2.view(num_tokens, num_heads_q, head_dim)
-        k_v2 = k_v2.view(num_tokens, num_heads_kv, head_dim)
-        v_v2 = v_v2.view(num_tokens, num_heads_kv, head_dim)
-        torch.ops._C.fused_qk_norm_rope_cache_quant_v2(
-            q_v2, k_v2, v_v2, k_cache, v_cache,
+            q, k, v, k_cache, v_cache,
             q_weight, k_weight, cos_sin_cache,
             positions, slot_mapping,
             k_scale, v_scale, epsilon,
@@ -194,7 +175,7 @@ def bench_one(
     # ==================================================================
     qkv_static = torch.mm(hidden_states, w_qkv)
 
-    def run_baseline_only():
+    def run_baseline():
         qkv_copy = qkv_static.clone()
         baseline_cuda_ops(
             qkv_copy, q_weight, k_weight, cos_sin_cache, positions,
@@ -230,11 +211,10 @@ def bench_one(
         return sum(trimmed) / len(trimmed)  # ms
 
     # Run benchmarks
-    t_v3 = timed(run_v3_only, warmup, repeat)
-    t_v2 = timed(run_v2_only, warmup, repeat)
-    t_baseline = timed(run_baseline_only, warmup, repeat)
+    t_fused = timed(run_fused, warmup, repeat)
+    t_baseline = timed(run_baseline, warmup, repeat)
 
-    return t_v3, t_v2, t_baseline
+    return t_fused, t_baseline
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -243,27 +223,19 @@ def bench_one(
 
 _HEADER = (
     f"{'Batch':>6} | "
-    f"{'v3 warp/hd':>12} | "
-    f"{'v2 naive':>12} | "
+    f"{'Fused':>12} | "
     f"{'Baseline':>12} | "
-    f"{'v3/Base':>10} | "
-    f"{'v3/v2':>10} | "
-    f"{'v2/Base':>10}"
+    f"{'Speedup':>10}"
 )
 
 
-def _print_row(bs, t_v3, t_v2, t_base):
-    v3_vs_base = t_base / t_v3 if t_v3 > 0 else float("inf")
-    v3_vs_v2 = t_v2 / t_v3 if t_v3 > 0 else float("inf")
-    v2_vs_base = t_base / t_v2 if t_v2 > 0 else float("inf")
+def _print_row(bs, t_fused, t_base):
+    speedup = t_base / t_fused if t_fused > 0 else float("inf")
     print(
         f"{bs:>6} | "
-        f"{t_v3 * 1000:>10.1f}us | "
-        f"{t_v2 * 1000:>10.1f}us | "
+        f"{t_fused * 1000:>10.1f}us | "
         f"{t_base * 1000:>10.1f}us | "
-        f"{v3_vs_base:>9.2f}x | "
-        f"{v3_vs_v2:>9.2f}x | "
-        f"{v2_vs_base:>9.2f}x"
+        f"{speedup:>9.2f}x"
     )
 
 
@@ -289,16 +261,16 @@ if __name__ == "__main__":
     batch_sizes = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
 
     for config_name, hidden_size, nq, nkv, hd in configs:
-        print("=" * 90)
+        print("=" * 70)
         print(f"  {config_name}:  hidden={hidden_size}  "
               f"Q_heads={nq}  KV_heads={nkv}  head_dim={hd}")
-        print("=" * 90)
+        print("=" * 70)
         print(_HEADER)
-        print("-" * 90)
+        print("-" * 70)
 
         for bs in batch_sizes:
             try:
-                t_v3, t_v2, t_base = bench_one(
+                t_fused, t_base = bench_one(
                     num_tokens=bs,
                     hidden_size=hidden_size,
                     num_heads_q=nq,
@@ -307,7 +279,7 @@ if __name__ == "__main__":
                     dtype=torch.bfloat16,
                     is_fp8=False,
                 )
-                _print_row(bs, t_v3, t_v2, t_base)
+                _print_row(bs, t_fused, t_base)
             except Exception as e:
                 print(f"{bs:>6} | ERROR: {e}")
 
@@ -315,15 +287,15 @@ if __name__ == "__main__":
 
     # ── FP8 KV cache benchmark ──
     if cap >= (8, 9):
-        print("=" * 90)
+        print("=" * 70)
         print("  FP8 KV Cache (Qwen3-8B config)")
-        print("=" * 90)
+        print("=" * 70)
         print(_HEADER)
-        print("-" * 90)
+        print("-" * 70)
 
         for bs in batch_sizes:
             try:
-                t_v3, t_v2, t_base = bench_one(
+                t_fused, t_base = bench_one(
                     num_tokens=bs,
                     hidden_size=4096,
                     num_heads_q=32,
@@ -334,7 +306,7 @@ if __name__ == "__main__":
                     k_scale=1.0,
                     v_scale=1.0,
                 )
-                _print_row(bs, t_v3, t_v2, t_base)
+                _print_row(bs, t_fused, t_base)
             except Exception as e:
                 print(f"{bs:>6} | ERROR: {e}")
 

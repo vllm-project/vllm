@@ -189,16 +189,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("fused_qk_norm_rope_cache_quant", torch::kCUDA,
            &fused_qk_norm_rope_cache_quant);
 
-  // Fused QK RMSNorm + RoPE + KV cache write + FP8 quant (v2: naive fusion baseline)
-  ops.def(
-      "fused_qk_norm_rope_cache_quant_v2(Tensor! query, Tensor! key,"
-      " Tensor value, Tensor! k_cache, Tensor! v_cache, Tensor q_weight,"
-      " Tensor k_weight, Tensor cos_sin_cache, Tensor positions, Tensor slot_mapping,"
-      " float k_scale, float v_scale, float epsilon,"
-      " int num_heads_q, int num_heads_kv, int head_dim,"
-      " int block_size, bool is_neox, bool is_fp8) -> Tensor");
-  ops.impl("fused_qk_norm_rope_cache_quant_v2", torch::kCUDA,
-           &fused_qk_norm_rope_cache_quant_v2);
 
   // Apply repetition penalties to logits in-place
   ops.def(
