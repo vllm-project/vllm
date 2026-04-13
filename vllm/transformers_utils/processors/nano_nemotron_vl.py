@@ -991,12 +991,6 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 audio_index += 1
         text = ["".join(parts)]
         audio_inputs = extractor(audios)
-        audio_inputs = {
-            "input_audio_features": audio_inputs.input_features,
-            "feature_attention_mask": audio_inputs.attention_mask,
-            "audio_num_clips": audio_inputs.audio_num_clips,
-        }
-
         return text, audio_inputs
 
     def __call__(

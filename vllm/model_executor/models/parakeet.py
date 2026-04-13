@@ -6,6 +6,7 @@ Modules below used for the audio encoder component in: models/nano_nemotron_vl.p
 
 from collections.abc import Iterable
 from functools import cache
+from typing import Any
 
 import numpy as np
 import torch
@@ -13,8 +14,6 @@ import torch.nn as nn
 from transformers import ParakeetEncoder as HFParakeetEncoder
 from transformers import PretrainedConfig
 from transformers.audio_utils import mel_filter_bank
-from transformers.feature_extraction_utils import BatchFeature
-from transformers.utils import TensorType
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
@@ -116,14 +115,12 @@ LOG_ZERO_GUARD_VALUE = 2**-24
 class ParakeetExtractor:
     def __init__(self, config: PretrainedConfig) -> None:
         self.config = ExtractorConfig.from_hf_config(config)
-        self.feature_size = self.config.feature_size
-        self.sampling_rate = self.config.sampling_rate
-        self.padding_value = self.config.padding_value
+        """`config` is named *exactly* for `._get_subsampling_output_length` below"""
         self._clip_target_samples = int(
-            round(self.config.clip_duration_s * self.sampling_rate)
+            round(self.config.clip_duration_s * self.config.sampling_rate)
         )
         self._tail_min_samples = int(
-            round(self.config.clip_min_duration_s * self.sampling_rate)
+            round(self.config.clip_min_duration_s * self.config.sampling_rate)
         )
 
     @staticmethod
@@ -150,18 +147,19 @@ class ParakeetExtractor:
     def _torch_extract_fbank_features(self, waveform: torch.Tensor, device: str):
         # spectrogram
         device = str(torch.device(device))
-        window = self._get_window(self.config.win_length, device)
+        cfg = self.config
+        window = self._get_window(cfg.win_length, device)
         stft = torch.stft(
             waveform,
             self.config.n_fft,
-            hop_length=self.config.hop_length,
-            win_length=self.config.win_length,
+            hop_length=cfg.hop_length,
+            win_length=cfg.win_length,
             window=window,
             return_complex=True,
             pad_mode="constant",
         )
         mel_filters = self._get_mel_filters(
-            self.feature_size, self.sampling_rate, self.config.n_fft, device
+            cfg.feature_size, cfg.sampling_rate, cfg.n_fft, device
         )
         return self._apply_mel_filters(stft, mel_filters)
 
@@ -219,7 +217,7 @@ class ParakeetExtractor:
     ) -> torch.Tensor:
         output = torch.full(
             (len(raw_speech), max_len),
-            self.padding_value,
+            self.config.padding_value,
             device=device,
             dtype=torch.float32,
         )
@@ -266,9 +264,8 @@ class ParakeetExtractor:
         self,
         raw_speech: list[np.ndarray],
         *,
-        return_tensors: str | TensorType = "pt",
         device: str = "cpu",
-    ) -> BatchFeature:
+    ) -> dict[str, Any]:
         raw_speech = [
             torch.as_tensor(speech, device=device, dtype=torch.float32)
             for speech in raw_speech
@@ -303,15 +300,11 @@ class ParakeetExtractor:
             input_features, audio_lengths
         )
 
-        outputs = BatchFeature(
-            data={
-                "input_features": input_features,
-                "attention_mask": attention_mask,
-                "audio_num_clips": audio_num_clips,
-            },
-            tensor_type=return_tensors,
-        )
-        return outputs
+        return {
+            "input_audio_features": input_features,
+            "feature_attention_mask": attention_mask,
+            "audio_num_clips": audio_num_clips,
+        }
 
     @staticmethod
     def audio_length(raw_config: PretrainedConfig, audio_tokens: int) -> int:
