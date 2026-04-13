@@ -153,9 +153,14 @@ static PyObject* method_monitorx(PyObject* self, PyObject* args,
     // Fallback: Busy poll
     else {
 #endif
+      // Give other threads a chance to be scheduled
       Py_BEGIN_ALLOW_THREADS
-          // Give other threads a chance to be scheduled
-          Py_END_ALLOW_THREADS
+#if defined(__i386__) || defined(__x86_64__)
+      __builtin_ia32_pause();
+#elif defined(__aarch64__)
+      __asm__ volatile("yield" ::: "memory");
+#endif
+      Py_END_ALLOW_THREADS
 #if defined(__i386__) || defined(__x86_64__)
     }
 #endif
