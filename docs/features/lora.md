@@ -403,3 +403,74 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+
+### LoRA Weight Merge (Experimental)
+
+The `--enable-lora-weight-merge` flag enables an optimization for single-adapter LoRA serving. When active, vLLM merges the LoRA adapter weights directly into the base model weights, bypassing the Punica/SGMV kernels entirely. This allows the non-LoRA CUDA graph to be used at decode time, reducing per-token overhead.
+
+This feature is fully compatible with continuous batching. When the batch contains only requests for a single LoRA adapter, automerge is active and the fast non-LoRA CUDA graph is used. When the batch changes — for example, a base-model request arrives, a second adapter is requested, or the batch becomes mixed — automerge automatically falls back to the standard LoRA path for that step. Once the batch returns to single-adapter-only, automerge re-engages. This transition is seamless and does not affect correctness.
+
+```bash
+vllm serve model --enable-lora --enable-lora-weight-merge \
+    --lora-modules my-adapter=path/to/adapter
+```
+
+How it works:
+
+- On first use, base weights are cloned as "golden copies" (configurable storage location)
+- When a single adapter is active, merged weights (`golden + B @ A`) replace the base weights
+- When the adapter changes or is removed, base weights are restored (exact with cpu/gpu golden mode, approximate with off mode)
+
+The `--lora-weight-merge-golden-device` flag controls where golden copies are stored:
+
+- `cpu` (default): host RAM — no extra GPU memory, restore requires a fast CPU-to-GPU copy
+- `gpu`: same GPU device — fastest restore, but uses extra GPU memory for LoRA target module weights
+- `off`: no golden copies — uses subtract-to-restore (`W -= delta`), zero extra memory but may accumulate minor floating-point drift over many cycles with BF16/FP16
+
+```bash
+# CPU golden copies (default, recommended)
+vllm serve model --enable-lora --enable-lora-weight-merge
+
+# GPU golden copies (fastest restore, more GPU memory)
+vllm serve model --enable-lora --enable-lora-weight-merge \
+    --lora-weight-merge-golden-device gpu
+
+# No golden copies (minimal memory, slight drift risk)
+vllm serve model --enable-lora --enable-lora-weight-merge \
+    --lora-weight-merge-golden-device off
+```
+
+Automatic fallback to the standard LoRA path occurs when:
+
+- Multiple distinct LoRA adapters are active in the same batch
+- A batch contains both base-model and LoRA requests (mixed batch)
+- The base model uses an unsupported dtype (FP8, INT8, etc.)
+- CUDA graph capture or warmup is in progress
+
+Fallback is per-step: automerge restores the base weights, vLLM runs the standard LoRA CUDA graph with Punica kernels for that step, and automerge re-merges when the batch returns to single-adapter. There is no need to restart the server or reconfigure anything.
+
+This is most effective for single-adapter deployments on BF16/FP16/FP32 models where decode latency matters.
+
+#### Performance characteristics
+
+Adapter switch cost depends on the golden device mode and model size:
+
+| Model | Golden Device | Swap Overhead | Golden Cache Size |
+|-------|:---:|:---:|:---:|
+| 0.6B | CPU | 230 ms | 840 MB RAM |
+| 0.6B | GPU | 19 ms | 840 MB GPU |
+| 0.6B | Off | 29 ms | 0 |
+| 8B | CPU | 3.2 s | 13.2 GB RAM |
+| 8B | GPU | 53 ms | 13.2 GB GPU |
+| 8B | Off | 72 ms | 0 |
+
+The per-token savings (TPOT reduction) depend on how much overhead the LoRA kernels add. On Qwen3-8B with a single H200:
+
+- Standard LoRA TPOT: ~7.1 ms/token
+- AutoMerge TPOT: ~5.2 ms/token (28% faster)
+
+Breakeven (tokens needed to recoup swap cost): ~26 tokens with GPU golden on 8B, ~1600 tokens with CPU golden on 8B. For single-adapter serving without switching, automerge pays for itself after the first request.
+
+#### BF16 drift (`off` mode)
+
+The `off` mode uses subtract-to-restore (`W -= delta`) which can accumulate floating-point rounding errors over repeated merge/unmerge cycles. In practice, the drift is small enough that greedy decoding output remains identical after 10-20 cycles on tested models (Qwen3-0.6B: 20 cycles, Qwen3-8B: 10 cycles). For safety-critical applications, use `cpu` or `gpu` mode which guarantee zero drift.
