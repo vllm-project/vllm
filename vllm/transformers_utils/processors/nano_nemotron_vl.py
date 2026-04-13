@@ -356,15 +356,6 @@ class DynamicResolutionImageTiler:
                 feature_sizes.append(param.num_embeddings)
         return images, feature_sizes
 
-    feature_size_cache: dict[Image.Image, int] = {}
-
-    @classmethod
-    def get_cached_feature_size(cls, image: Image.Image) -> int:
-        feature_size = cls.feature_size_cache[id(image)]
-        # hard assert that we only use the feature size once
-        del cls.feature_size_cache[id(image)]
-        return feature_size
-
     @dataclass
     class DynamicResolutionParams:
         media: Image.Image
@@ -519,7 +510,6 @@ class DynamicResolutionImageTiler:
                 param, token_count = self.process_media(media, tokens_for_media)
                 params.append(param)
                 token_counts.append(token_count)
-                self.feature_size_cache[id(param.media)] = param.num_embeddings
 
             # Step 2: Check if total tokens is within budget
             total_tokens = sum(token_counts)
@@ -781,6 +771,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
+        use_audio_in_video: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -791,6 +782,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         # add extra video token for video processing
         self.video_token = video_token
         self.video_pruning_rate = video_pruning_rate
+        self.use_audio_in_video = use_audio_in_video
 
         # Video params live exclusively in vision_config
         vision_config = getattr(config, "vision_config", config)
@@ -857,13 +849,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
 
     @property
     def supports_video(self) -> bool:
-        return self.video_token_id is not None
+        return True
 
     @property
-    def video_token_id(self) -> int | None:
-        if self.video_token is None:
-            return None
-        return self.tokenizer.get_vocab().get(self.video_token, None)
+    def video_token_id(self) -> int:
+        assert self.video_token is not None
+        return self.tokenizer.get_vocab()[self.video_token]
 
     @property
     def image_token_id(self) -> int:
@@ -1055,6 +1046,13 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         text_inputs = self.tokenizer(text, add_special_tokens=False)
 
         combined_inputs = {**text_inputs, **video_inputs, **audio_inputs}
+        frames_indices = combined_inputs.get("frames_indices")
+        ragged_frames_indices = (
+            isinstance(frames_indices, list)
+            and len({len(frame_indices) for frame_indices in frames_indices}) > 1
+        )
+        if ragged_frames_indices:
+            combined_inputs.pop("frames_indices")
 
         if self.dynamic_tiler is None:
             batch = BatchFeature(
@@ -1066,6 +1064,12 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
             # allow images to be exempt from the BatchFeature validation:
             # We will .stack() them in _parse_and_validate_image_input
             batch.update(image_inputs)
+        if ragged_frames_indices:
+            assert isinstance(frames_indices, list)
+            batch["frames_indices"] = [
+                torch.as_tensor(frame_indices, dtype=torch.int64)
+                for frame_indices in frames_indices
+            ]
         return batch
 
     def get_image_repl(

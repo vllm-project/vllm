@@ -13,6 +13,7 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import _custom_ops as ops
+from vllm.config.model import ModelConfig
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
@@ -406,6 +407,8 @@ def test_fp8_reloading(
             "If this is your use case, consider using a restore function like #26327"
         )
 
+    # Set model config as model_config.dtype is required in Fp8LinearMethod.
+    default_vllm_config.model_config = ModelConfig()
     with torch.device("cuda:0"):
         config = Fp8Config(
             is_checkpoint_fp8_serialized=is_checkpoint_fp8_serialized,
@@ -466,3 +469,26 @@ def test_fp8_reloading(
         weight_loader(param, torch.zeros(shape))  # cannot use empty
 
     method.process_weights_after_loading(layer)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+def test_kv_cache_dtype_skip_layers(vllm_runner, monkeypatch):
+    """Test that kv_cache_dtype_skip_layers skips quantization for specified layers."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "facebook/opt-125m",
+        kv_cache_dtype="fp8",
+        kv_cache_dtype_skip_layers=["0", "2"],
+        enforce_eager=True,
+    ) as llm:
+
+        def check_layers(model):
+            for i, layer in enumerate(model.model.decoder.layers):
+                expected = "auto" if str(i) in ["0", "2"] else "fp8"
+                assert layer.self_attn.attn.kv_cache_dtype == expected
+
+        llm.apply_model(check_layers)

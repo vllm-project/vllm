@@ -52,7 +52,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_num_scheduled_tokens: int | None = Field(default=None)
+    max_num_scheduled_tokens: int | None = None
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
     This is usually equal to max_num_batched_tokens, but can be smaller in cases
@@ -106,11 +106,12 @@ class SchedulerConfig:
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
     policy: SchedulerPolicy = "fcfs"
-    """The scheduling policy to use:\n
-    - "fcfs" means first come first served, i.e. requests are handled in order
-    of arrival.\n
+    """The scheduling policy to use:
+
+    - "fcfs" means first come first served, i.e. requests are handled in order 
+      of arrival.
     - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties)."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -122,7 +123,7 @@ class SchedulerConfig:
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
-    scheduler_cls: str | type[object] | None = Field(default=None)
+    scheduler_cls: str | type[object] | None = None
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
@@ -141,7 +142,7 @@ class SchedulerConfig:
     checking the first chunk. Prevents over-admission and KV cache thrashing
     with chunked prefill."""
 
-    async_scheduling: bool | None = Field(default=None)
+    async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
