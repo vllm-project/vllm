@@ -1103,7 +1103,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             # For n_scales > 1 (e.g., ATTN_HEAD strategy), take max
             if tensor.numel() > 1:
                 return tensor.max().item()
-            return tensor.max().item()
+            return tensor.item()
 
         layer._k_scale_float = _to_scalar(layer.k_scale)
         layer._v_scale_float = _to_scalar(layer.v_scale)
