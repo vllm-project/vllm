@@ -19,7 +19,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.dp_utils import sync_cudagraph_and_dp_padding
+from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
@@ -95,15 +95,19 @@ class EagleSpeculator:
                 device=device,
             )
 
-        # currently we don't  support PIECEWISE for Eagle.
-        cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
+        self.cudagraph_manager: EagleCudaGraphManager | None = None
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
         if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
             cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
         else:
             cudagraph_mode = CUDAGraphMode.NONE
 
         self.cudagraph_manager = EagleCudaGraphManager(
-            vllm_config, device, cudagraph_mode, self.draft_tokens
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            self.draft_tokens,
         )
 
     def load_model(self, target_model: nn.Module) -> None:
@@ -130,7 +134,7 @@ class EagleSpeculator:
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        _, self.attn_groups = init_attn_backend(
+        _, self.attn_groups, _ = init_attn_backend(
             kv_cache_config,
             self.vllm_config,
             self.device,
@@ -239,9 +243,48 @@ class EagleSpeculator:
                         idx_mapping, query_start_loc, pos, num_tokens_padded
                     )
 
+    def _build_draft_attn_metadata(
+        self,
+        num_reqs: int,
+        num_reqs_padded: int,
+        num_tokens_padded: int,
+        max_query_len: int,
+    ) -> dict[str, Any] | None:
+        if not self.draft_attn_layer_names:
+            return None
+
+        query_start_loc_cpu = (
+            torch.arange(num_reqs_padded + 1, dtype=torch.int32, device="cpu").clamp_(
+                max=num_reqs
+            )
+            * max_query_len
+        )
+        block_tables = [
+            x[:num_reqs_padded] for x in self.block_tables.input_block_tables
+        ]
+        slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
+        attn_metadata = build_attn_metadata(
+            attn_groups=self.attn_groups,
+            num_reqs=num_reqs_padded,
+            num_tokens=num_tokens_padded,
+            query_start_loc_gpu=self.input_buffers.query_start_loc[
+                : num_reqs_padded + 1
+            ],
+            query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
+            seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+            max_seq_len=self.max_model_len,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            kv_cache_config=self.kv_cache_config,
+        )
+        return attn_metadata
+
     def capture_model(self) -> None:
+        assert self.cudagraph_manager is not None
         if self.num_speculative_steps == 1:
             return
+
         logger.info("Capturing model for Eagle speculator...")
         self.cudagraph_manager.capture(
             self.generate_draft,
@@ -279,6 +322,7 @@ class EagleSpeculator:
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
+        is_profile: bool = False,
     ) -> torch.Tensor:
         # NOTE(woosuk): To avoid CPU-GPU synchronization without CPU knowing the
         # number of rejected tokens, we maintain the size of eagle's input_ids and
@@ -319,7 +363,6 @@ class EagleSpeculator:
         logits = self.model.compute_logits(sample_hidden_states)
 
         num_reqs = input_batch.num_reqs
-        num_reqs_padded = input_batch.num_reqs_after_padding
         # NOTE(woosuk): For draft sampling, we only consider the temperature
         # and ignore the other sampling parameters such as top_k and top_p,
         # for simplicity and performance.
@@ -366,69 +409,53 @@ class EagleSpeculator:
             self.max_num_reqs,
         )
 
-        # Get batch descriptor and sync across DP ranks.
-        # Eagle uses FULL-only mode, dispatch with uniform_token_count=1 for decode
+        # Each request produces exactly 1 token per draft decode step,
+        # enabling FULL cudagraph.
+        decode_batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+            self.cudagraph_manager,
+            num_reqs,
+            num_reqs,
+            uniform_token_count=1,
+            dp_size=self.dp_size,
+            dp_rank=self.dp_rank,
+            need_eager=is_profile,
+        )
 
-        batch_desc = self.cudagraph_manager.dispatch(num_reqs, num_reqs, 1)
-        num_tokens_across_dp = None
-
-        if self.dp_size > 1:
-            batch_desc, num_tokens_across_dp = sync_cudagraph_and_dp_padding(
-                self.cudagraph_manager,
-                batch_desc,
-                num_reqs,
-                num_reqs,
-                1,  # uniform_token_count
-                self.dp_size,
-                self.dp_rank,
-            )
-
-        if not (dummy_run and skip_attn_for_dummy_run):
-            query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
-            slot_mappings = self.block_tables.compute_slot_mappings(
-                idx_mapping, query_start_loc, pos, batch_desc.num_tokens
-            )
-
-        if batch_desc.cg_mode == CUDAGraphMode.FULL:
-            return self.cudagraph_manager.run_fullgraph(batch_desc)[:num_reqs]
-
-        # Run eager or piecewise CUDA graph.
         attn_metadata_updated = None
         slot_mappings_updated = None
         if not (dummy_run and skip_attn_for_dummy_run):
-            query_start_loc_cpu = torch.arange(
-                num_reqs_padded + 1, dtype=torch.int32, device="cpu"
-            )
-            block_tables = [
-                x[:num_reqs_padded] for x in self.block_tables.input_block_tables
-            ]
-
-            # FIXME(woosuk): This is UNSAFE!!
-            attn_metadata_updated = build_attn_metadata(
-                attn_groups=self.attn_groups,
-                num_reqs=num_reqs_padded,
-                num_tokens=num_reqs_padded,
-                query_start_loc_gpu=query_start_loc,
-                query_start_loc_cpu=query_start_loc_cpu,
-                max_query_len=1,
-                seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
-                max_seq_len=self.max_model_len,
-                block_tables=block_tables,
-                slot_mappings=slot_mappings,
-                kv_cache_config=self.kv_cache_config,
+            # Build attention metadata and slot mappings for the draft
+            # decode steps. It is necessary to rebuild the attention
+            # metadata even when replaying the FULL cudagraph so that
+            # any attention metadata builder state is updated.
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                idx_mapping,
+                self.input_buffers.query_start_loc[: num_reqs + 1],
+                pos,
+                decode_batch_desc.num_tokens,
             )
             slot_mappings_updated = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
+            attn_metadata_updated = self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=decode_batch_desc.num_reqs or num_reqs,
+                num_tokens_padded=decode_batch_desc.num_tokens,
+                max_query_len=1,
+            )
 
-        self.generate_draft(
-            num_reqs,
-            batch_desc.num_tokens,
-            attn_metadata_updated,
-            slot_mappings_updated,
-            num_tokens_across_dp=num_tokens_across_dp,
-            cudagraph_runtime_mode=batch_desc.cg_mode,
-        )
+        if decode_batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert self.cudagraph_manager is not None
+            self.cudagraph_manager.run_fullgraph(decode_batch_desc)
+        else:
+            self.generate_draft(
+                num_reqs,
+                decode_batch_desc.num_tokens,
+                attn_metadata_updated,
+                slot_mappings_updated,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=decode_batch_desc.cg_mode,
+            )
         return self.draft_tokens[:num_reqs]
 
 

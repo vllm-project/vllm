@@ -37,6 +37,7 @@ from torch.distributed import ProcessGroup, all_reduce
 from vllm.config import ModelConfig, ParallelConfig
 from vllm.distributed.parallel_state import (
     get_ep_group,
+    get_eplb_group,
     get_node_count,
     in_the_same_node_as,
 )
@@ -46,6 +47,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 from .async_worker import start_async_worker
+from .eplb_communicator import EplbCommunicator, create_eplb_communicator
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     RecvMetadata,
@@ -225,6 +227,10 @@ class EplbModelState:
     """
     CUDA device index for the async EPLB worker thread.
     """
+    communicator: EplbCommunicator
+    """
+    The communicator for expert weight transfers.
+    """
     new_physical_to_logical_map: torch.Tensor | None = None
     """
     intermediate variable between `move_to_buffer` and `move_to_workspace`.
@@ -271,6 +277,13 @@ class EplbState:
         """
         Interval for expert rearrangement steps.
         This is a constant and is taken from the config.
+        """
+        self.should_record_tensor: torch.Tensor | None = None
+        """
+        Shared scalar bool tensor for all layers.  Every
+        :class:`EplbLayerState` holds a reference to the **same** object so
+        a single ``.fill_()`` updates all layers at once.  Allocated on the
+        first call to :meth:`_init_should_record_tensor`.
         """
         self.is_async: bool = False
         """
@@ -462,8 +475,14 @@ class EplbState:
             logical_to_physical_map,
             logical_replica_count,
         )
-
+        self._init_should_record_tensor(model)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
+
+        communicator = create_eplb_communicator(
+            group_coordinator=get_eplb_group(),
+            backend=self.parallel_config.eplb_config.communicator,
+            expert_weights=model.expert_weights[0],
+        )
 
         model_state = EplbModelState(
             physical_to_logical_map=physical_to_logical_map,
@@ -491,6 +510,7 @@ class EplbState:
                 recv_dst_rows=np.array([]),
             ),
             cuda_device_index=self.cuda_device_index,
+            communicator=communicator,
             new_physical_to_logical_map=None,
         )
         self.model_states[model_config.compute_hash()] = model_state
@@ -582,15 +602,18 @@ class EplbState:
 
         # Update the expert load sliding window
         if not is_dummy:
+            should_record = self._should_record_current_step(log_stats=log_stats)
             for eplb_model_state in self.model_states.values():
-                eplb_model_state.expert_load_window[self.expert_load_window_step] = (
-                    eplb_model_state.expert_load_pass.clone()
-                )
-                eplb_model_state.expert_load_pass.zero_()
+                if should_record:
+                    eplb_model_state.expert_load_window[
+                        self.expert_load_window_step
+                    ].copy_(eplb_model_state.expert_load_pass)
+                    eplb_model_state.expert_load_pass.zero_()
 
-            self.expert_load_window_step += 1
-            if self.expert_load_window_step >= self.expert_load_window_size:
-                self.expert_load_window_step = 0
+            if should_record:
+                self.expert_load_window_step += 1
+                if self.expert_load_window_step >= self.expert_load_window_size:
+                    self.expert_load_window_step = 0
 
         # Step the expert rearrangement step
         # Note that even if this is a dummy step, we still increment the
@@ -617,10 +640,65 @@ class EplbState:
                 eplb_model_state.rebalanced
                 for eplb_model_state in self.model_states.values()
             ):
-                # Still performing asynchronous rearrangement
+                # Still performing asynchronous rearrangement; update
+                # should_record (step > step_interval, so always True) and
+                # bail out before the step counter is reset.
+                self._update_layer_should_record(log_stats=log_stats)
                 return
             self.expert_rearrangement_step = 0
             self.rearrange()
+
+        self._update_layer_should_record(log_stats=log_stats)
+
+    def _should_record_current_step(self, log_stats: bool = False) -> bool:
+        """Return whether expert-load recording should be enabled this step.
+
+        Recording is enabled when we are close to either:
+        1) The next rearrangement step, so the sliding window is ready.
+        2) The next balancedness logging step, when log_stats is enabled.
+        """
+        steps_remaining = (
+            self.expert_rearrangement_step_interval - self.expert_rearrangement_step
+        )
+        should_record_for_rearrange = steps_remaining <= self.expert_load_window_size
+
+        if not log_stats:
+            return should_record_for_rearrange
+
+        log_interval = self.parallel_config.eplb_config.log_balancedness_interval
+        steps_until_next_log = (
+            log_interval - (self.expert_rearrangement_step % log_interval)
+        ) % log_interval
+        should_record_for_log = steps_until_next_log <= self.expert_load_window_size
+        return should_record_for_rearrange or should_record_for_log
+
+    def _update_layer_should_record(self, log_stats: bool = False) -> None:
+        """Update the shared ``should_record_tensor`` for all layers."""
+        if self.should_record_tensor is not None:
+            self.should_record_tensor.fill_(
+                self._should_record_current_step(log_stats=log_stats)
+            )
+
+    def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
+        """Allocate (once) and propagate the shared ``should_record_tensor``.
+
+        Must be called after :meth:`model.set_eplb_state` so that each
+        layer's ``eplb_state`` is already populated with the tensor views.
+        """
+        layer_states = [
+            layer.eplb_state
+            for layer in model.moe_layers
+            if hasattr(layer, "eplb_state")
+            and isinstance(layer.eplb_state, EplbLayerState)
+        ]
+
+        if self.should_record_tensor is None and layer_states:
+            self.should_record_tensor = torch.ones(
+                (), dtype=torch.bool, device=self.device
+            )
+
+        for ls in layer_states:
+            ls.should_record_tensor = self.should_record_tensor
 
     def rearrange(
         self,
@@ -735,6 +813,7 @@ class EplbState:
                     new_physical_to_logical_map,
                     eplb_model_state.model.expert_weights,
                     ep_group,
+                    eplb_model_state.communicator,
                     is_profile,
                     rank_mapping,
                 )
@@ -858,11 +937,8 @@ class EplbState:
                 new_indices=new_indices,
                 ep_rank=ep_group.rank(),
             )
-            # Record event after consuming buffer to signal async thread
-            # that it's safe to overwrite the intermediate buffer
-            consumed_event = torch.cuda.Event()
-            consumed_event.record()
-            model_state.buffer_consumed_event = consumed_event
+
+            transferred_layer = model_state.layer_to_transfer
 
             transferred_layer = model_state.layer_to_transfer
             assert model_state.new_physical_to_logical_map is not None
@@ -871,6 +947,13 @@ class EplbState:
                 new_physical_to_logical_map=model_state.new_physical_to_logical_map,
                 layer=transferred_layer,
             )
+
+            # Record event after consuming buffer to signal async thread
+            # that it's safe to overwrite the intermediate buffer
+            consumed_event = torch.cuda.Event()
+            consumed_event.record()
+            model_state.buffer_consumed_event = consumed_event
+
             # After the main thread consumes, advance layer_to_transfer
             model_state.layer_to_transfer += 1
             model_state.ep_buffer_ready = 0
@@ -993,6 +1076,17 @@ class EplbLayerState:
     expert_load_view: torch.Tensor | None = None
     logical_to_physical_map: torch.Tensor | None = None
     logical_replica_count: torch.Tensor | None = None
+    should_record_tensor: torch.Tensor | None = None
+    """
+    Shared scalar bool tensor controlling whether to accumulate expert load
+    metrics during this forward pass.  All layers reference the **same**
+    tensor object, which is owned and updated by :class:`EplbState`.
+
+    Set to ``False`` for the first ``step_interval - window_size`` steps of
+    each rearrangement period: those steps would be overwritten in the
+    sliding window before the next rearrangement, so recording them wastes
+    GPU work.
+    """
 
 
 def _node_count_with_rank_mapping(

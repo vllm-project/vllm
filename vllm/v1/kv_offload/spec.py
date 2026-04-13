@@ -93,7 +93,12 @@ class OffloadingSpec(ABC):
         )
 
         for block_size in self.gpu_block_size:
-            assert block_size % self.hash_block_size == 0
+            assert block_size % self.hash_block_size == 0, (
+                f"gpu_block_size={block_size} not divisible by "
+                f"hash_block_size={self.hash_block_size}. "
+                f"Hybrid models (e.g. Mamba+Attention) need "
+                f"--enable-prefix-caching to align block sizes."
+            )
 
         # offloaded_block_size / gpu_block_size
         self.block_size_factor: int = 1
