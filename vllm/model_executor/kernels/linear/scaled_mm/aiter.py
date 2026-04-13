@@ -174,7 +174,6 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         # Aiter's shuffled per-token Gemm performs better than torch only when its
         # tuned.
-        print(f"[DEBUG] N: {N}, K: {K}, dtype: {fp8_dtype}, is_tuned: {rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype)}")
         if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
