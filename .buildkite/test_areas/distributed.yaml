@@ -294,3 +294,23 @@ steps:
   commands:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
+
+- label: RayExecutorV2 (4 GPUs)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+  - vllm/v1/executor/ray_executor_v2.py
+  - vllm/v1/executor/abstract.py
+  - vllm/v1/executor/multiproc_executor.py
+  - tests/distributed/test_ray_v2_executor.py
+  - tests/distributed/test_ray_v2_executor_e2e.py
+  - tests/distributed/test_pipeline_parallel.py
+  - tests/basic_correctness/test_basic_correctness.py
+  commands:
+  - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s distributed/test_ray_v2_executor.py
+  - pytest -v -s distributed/test_ray_v2_executor_e2e.py
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
+  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"

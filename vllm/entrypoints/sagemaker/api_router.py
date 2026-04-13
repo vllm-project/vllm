@@ -14,8 +14,8 @@ from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling import enable_scoring_api
-from vllm.entrypoints.pooling.base.serving import PoolingServing
+from vllm.entrypoints.pooling.base.serving import PoolingServingBase
+from vllm.entrypoints.pooling.utils import enable_scoring_api
 from vllm.entrypoints.serve.instrumentator.basic import base
 from vllm.entrypoints.serve.instrumentator.health import health
 from vllm.tasks import POOLING_TASKS, SupportedTask
@@ -23,7 +23,7 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 # TODO: RequestType = TypeForm[BaseModel] when recognized by type checkers
 # (requires typing_extensions >= 4.13)
 RequestType = Any
-GetHandlerFn = Callable[[Request], OpenAIServing | PoolingServing | None]
+GetHandlerFn = Callable[[Request], OpenAIServing | PoolingServingBase | None]
 EndpointFn = Callable[[RequestType, Request], Awaitable[Any]]
 
 
@@ -76,15 +76,15 @@ def get_invocation_types(
         ]
 
     if enable_scoring_api(supported_tasks, model_config):
-        from vllm.entrypoints.pooling.score.api_router import do_rerank, rerank
-        from vllm.entrypoints.pooling.score.protocol import RerankRequest
+        from vllm.entrypoints.pooling.scoring.api_router import do_rerank, rerank
+        from vllm.entrypoints.pooling.scoring.protocol import RerankRequest
 
         INVOCATION_TYPES += [
             (RerankRequest, (rerank, do_rerank)),
         ]
 
-        from vllm.entrypoints.pooling.score.api_router import create_score, score
-        from vllm.entrypoints.pooling.score.protocol import ScoreRequest
+        from vllm.entrypoints.pooling.scoring.api_router import create_score, score
+        from vllm.entrypoints.pooling.scoring.protocol import ScoreRequest
 
         INVOCATION_TYPES += [
             (ScoreRequest, (score, create_score)),

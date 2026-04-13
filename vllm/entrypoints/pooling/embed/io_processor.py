@@ -37,7 +37,7 @@ logger = init_logger(__name__)
 
 
 class EmbedIOProcessor(PoolingIOProcessor):
-    name = "embedding"
+    name = "embed"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -549,3 +549,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             request = ctx.request
             if request.truncate == "NONE" and request.max_tokens is not None:
                 self._check_cohere_max_tokens(ctx.final_res_batch, request.max_tokens)
+
+
+class TokenEmbedIOProcessor(PoolingIOProcessor):
+    name = "token_embed"

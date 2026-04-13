@@ -1869,8 +1869,9 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
         # both the deepstack path and the final embedding merge.
         video_token_id = self.config.video_token_id
         audio_token_id = self.config.audio_token_id
-        is_video = is_multimodal & (input_ids == video_token_id)
-        is_audio = is_multimodal & (input_ids == audio_token_id)
+        input_ids_cpu = input_ids.cpu()
+        is_video = is_multimodal & (input_ids_cpu == video_token_id)
+        is_audio = is_multimodal & (input_ids_cpu == audio_token_id)
         num_video = is_video.sum().item()
         num_audio = is_audio.sum().item()
 

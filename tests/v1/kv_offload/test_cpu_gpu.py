@@ -6,6 +6,7 @@ import time
 import pytest
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import (
@@ -21,7 +22,8 @@ GPU_PAGE_SIZES = [512, 1024]
 BLOCK_SIZE_FACTORS = [1, 3]
 NUM_TENSORS = [4]
 SEEDS = [0]
-CUDA_DEVICES = ["cuda:0"]
+DEVICE_TYPE = current_platform.device_type
+DEVICES = [f"{DEVICE_TYPE}:0"]
 NUM_MAPPINGS = [3]
 
 
@@ -33,7 +35,7 @@ NUM_MAPPINGS = [3]
 @pytest.mark.parametrize("num_cpu_blocks", NUM_CPU_BLOCKS)
 @pytest.mark.parametrize("num_tensors", NUM_TENSORS)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("device", DEVICES)
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,

@@ -179,6 +179,33 @@ def run_chameleon(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Cheers
+def run_cheers(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "ai9stars/Cheers"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    prompts = [
+        (
+            f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n<|image_pad|>{question}<|im_end|>\n"
+            f"<|im_start|>assistant\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 def run_command_a_vision(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
 
@@ -1714,6 +1741,27 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Phi-4-reasoning-vision
+def run_phi4siglip(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "microsoft/Phi-4-reasoning-vision-15B"
+    prompts = [
+        f"<|user|>\n<image>\n{question}<|end|>\n<|assistant|>\n"
+        for question in questions
+    ]
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Pixtral HF-format
 def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2140,6 +2188,7 @@ model_example_map = {
     "aria": run_aria,
     "aya_vision": run_aya_vision,
     "bagel": run_bagel,
+    "cheers": run_cheers,
     "bee": run_bee,
     "blip-2": run_blip2,
     "chameleon": run_chameleon,
@@ -2194,6 +2243,7 @@ model_example_map = {
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
+    "phi4_siglip": run_phi4siglip,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,

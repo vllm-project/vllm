@@ -47,10 +47,12 @@ if has_deep_ep():
     from .parallel_utils import DeepEPHTArgs, DeepEPLLArgs, make_deepep_a2a
 
 if has_deep_gemm():
-    from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
+    from vllm.model_executor.layers.fused_moe.experts.batched_deep_gemm_moe import (
         BatchedDeepGemmExperts,
     )
-    from vllm.model_executor.layers.fused_moe.deep_gemm_moe import DeepGemmExperts
+    from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
+        DeepGemmExperts,
+    )
 
 requires_deep_ep = pytest.mark.skipif(
     not has_deep_ep(),

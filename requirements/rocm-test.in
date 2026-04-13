@@ -1,3 +1,5 @@
+-r common.txt
+
 # testing
 pytest
 tensorizer==2.10.1
@@ -29,7 +31,7 @@ tblib # for pickling test exceptions
 timm>=1.0.17 # required for internvl and gemma3n-mm test
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
-mistral_common[image,audio]>=1.10.0 # required for voxtral test
+mistral_common[image,audio]>=1.11.0 # required for voxtral test
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
 opencv-python-headless>=4.13.0 # required for video test

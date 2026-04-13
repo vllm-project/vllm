@@ -63,6 +63,20 @@ class FinishReason(enum.IntEnum):
         return FINISH_REASON_STRINGS[self.value]
 
 
+class EngineCoreReadyResponse(
+    msgspec.Struct,
+    array_like=True,  # type: ignore[call-arg]
+    omit_defaults=True,  # type: ignore[call-arg]
+):
+    """Sent from EngineCore to the frontend during the ready handshake.
+
+    Contains post-initialization config that may differ from the original
+    values (e.g. max_model_len after KV cache auto-fitting).
+    """
+
+    max_model_len: int | None = None
+
+
 class EngineCoreRequest(
     msgspec.Struct,
     array_like=True,  # type: ignore[call-arg]

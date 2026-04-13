@@ -2,7 +2,6 @@
 #include "cuda_utils.h"
 #include "ops.h"
 #include "core/registration.h"
-
 #include <torch/library.h>
 #include <torch/version.h>
 
@@ -73,7 +72,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor prefix_output,"
       "    Tensor prefix_lse,"
       "    Tensor suffix_output,"
-      "    Tensor suffix_lse) -> ()");
+      "    Tensor suffix_lse,"
+      "    int!? prefill_tokens_with_context,"
+      "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 #ifndef USE_ROCM
   ops.def(
@@ -109,12 +110,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
 
-#ifndef USE_ROCM
+  // Fused SiLU+Mul + per-block quantization
   ops.def(
-      "silu_and_mul_nvfp4_quant(Tensor! result, Tensor! result_block_scale, "
-      "Tensor input, Tensor input_global_scale) -> ()");
-  ops.impl("silu_and_mul_nvfp4_quant", torch::kCUDA, &silu_and_mul_nvfp4_quant);
-#endif
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
+           &silu_and_mul_per_block_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
@@ -191,10 +197,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   ops.def(
-      "large_context_topk(Tensor score, Tensor indices, Tensor lengths, "
-      "Tensor? "
-      "row_starts_opt) -> ()");
-  ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
+      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
+  ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
 
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -332,47 +337,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? qzeros_or_none, bool inplace) -> Tensor");
   // conditionally compiled so impl registrations are in source file
 
-  // CUTLASS w4a8 GEMM
-  ops.def(
-      "cutlass_w4a8_mm("
-      "   Tensor A,"
-      "   Tensor B,"
-      "   Tensor group_scales,"
-      "   int    group_size,"
-      "   Tensor channel_scales,"
-      "   Tensor token_scales,"
-      "   ScalarType? out_type,"
-      "   str?   maybe_schedule"
-      ") -> Tensor");
-  // pack scales
-  ops.def("cutlass_pack_scale_fp8(Tensor scales) -> Tensor");
-  // encode and reorder weight matrix
-  ops.def("cutlass_encode_and_reorder_int4b(Tensor B) -> Tensor");
-  // conditionally compiled so impl registration is in source file
-
-  // CUTLASS w4a8 grouped GEMM
-  ops.def(
-      "cutlass_w4a8_moe_mm("
-      "   Tensor! out_tensors,"
-      "   Tensor a_tensors,"
-      "   Tensor b_tensors,"
-      "   Tensor a_scales,"
-      "   Tensor b_scales,"
-      "   Tensor b_group_scales,"
-      "   int b_group_size,"
-      "   Tensor expert_offsets,"
-      "   Tensor problem_sizes,"
-      "   Tensor a_strides,"
-      "   Tensor b_strides,"
-      "   Tensor c_strides,"
-      "   Tensor group_scale_strides,"
-      "   str? maybe_schedule"
-      ") -> ()");
-  ops.def(
-      "cutlass_encode_and_reorder_int4b_grouped(Tensor b_tensors) -> (Tensor, "
-      "Tensor)");
-  // conditionally compiled so impl registration is in source file
-
 #endif
 
   // Dequantization for GGML.
@@ -409,20 +373,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("ggml_moe_get_block_size", &ggml_moe_get_block_size);
 
 #ifndef USE_ROCM
-  // CUTLASS nvfp4 block scaled GEMM
-  ops.def(
-      "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
-      "                      Tensor block_scale_a, Tensor block_scale_b,"
-      "                      Tensor alpha) -> ()");
-  ops.impl("cutlass_scaled_fp4_mm", torch::kCUDA, &cutlass_scaled_fp4_mm);
-
-  // cutlass nvfp4 block scaled group GEMM
-  ops.def(
-      "cutlass_fp4_group_mm(Tensor! out, Tensor a, Tensor b,"
-      " Tensor a_blockscale, Tensor b_blockscales, Tensor alphas,"
-      " Tensor problem_sizes, Tensor expert_offsets, Tensor sf_offsets) -> ()");
-  // conditionally compiled so impl registration is in source file
-
   // Expert-specialization mxfp8 blockscaled grouped quantization (SM100+).
   ops.def(
       "mxfp8_experts_quant("
@@ -455,44 +405,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> int");
   // conditionally compiled so impl in source file
 
-  // Compute NVFP4 block quantized tensor.
-  ops.def(
-      "scaled_fp4_quant(Tensor input,"
-      "                 Tensor input_scale, bool "
-      "is_sf_swizzled_layout) -> (Tensor, Tensor)");
-  ops.impl("scaled_fp4_quant", torch::kCUDA, &scaled_fp4_quant_func);
-
-  // Out variant
-  // TODO: Add {at::Tag::out_variant} tag and update all call sites
-  // to use the functional variant once vLLM upgrades PyTorch.
-  // See pytorch/pytorch#176117.
-  ops.def(
-      "scaled_fp4_quant.out(Tensor input,"
-      "                     Tensor input_scale, bool "
-      "is_sf_swizzled_layout, *, Tensor(a!) output, Tensor(b!) output_scale) "
-      "-> ()");
-  ops.impl("scaled_fp4_quant.out", torch::kCUDA, &scaled_fp4_quant_out);
-
-  // Compute NVFP4 experts quantization.
-  ops.def(
-      "scaled_fp4_experts_quant(Tensor! output, Tensor! output_scale,"
-      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts) -> ()");
-  ops.impl("scaled_fp4_experts_quant", torch::kCUDA, &scaled_fp4_experts_quant);
-
-  // Fused SiLU+Mul+NVFP4 experts quantization.
-  ops.def(
-      "silu_and_mul_scaled_fp4_experts_quant(Tensor! output, Tensor! "
-      "output_scale,"
-      "Tensor input, Tensor input_global_scale, Tensor input_offset_by_experts,"
-      "Tensor output_scale_offset_by_experts) -> ()");
-  ops.impl("silu_and_mul_scaled_fp4_experts_quant", torch::kCUDA,
-           &silu_and_mul_scaled_fp4_experts_quant);
-
-  // Check if cutlass_scaled_mm_fp4 is supported for CUDA devices
-  // of the given capability
-  ops.def("cutlass_scaled_mm_supports_fp4(int cuda_device_capability) -> bool");
-  ops.impl("cutlass_scaled_mm_supports_fp4", &cutlass_scaled_mm_supports_fp4);
 #endif
 
   // Quantized GEMM for GPTQ.
@@ -595,6 +507,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "swap_blocks(Tensor src, Tensor! dst,"
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
+
+  // Batch swap: submit all block copies in a single driver call.
+  cache_ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes) -> ()");
+  cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
 
   // Reshape the key and value tensors and cache them.
   cache_ops.def(

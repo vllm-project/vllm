@@ -13,6 +13,9 @@
 /vllm/model_executor/layers/rotary_embedding.py @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/layers/batch_invariant.py @yewentao256 
+/vllm/ir @ProExpertProg
+/vllm/kernels/ @ProExpertProg @tjtanaa
+/vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
@@ -74,6 +77,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
 /tests/evals @mgoin @vadiklyutiy
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
+/tests/kernels/ir @ProExpertProg @tjtanaa
 /tests/models @DarkLight1337 @ywang96
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety
