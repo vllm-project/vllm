@@ -58,10 +58,6 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     get_streamable_parser_for_assistant,
     parse_chat_output,
 )
-from vllm.entrypoints.openai.tool_call_streaming import (
-    extract_named_tool_call_streaming,
-    extract_required_tool_call_streaming,
-)
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs import EngineInput
@@ -75,6 +71,10 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_types import MistralToolCall
+from vllm.tool_parsers.streaming import (
+    extract_named_tool_call_streaming,
+    extract_required_tool_call_streaming,
+)
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tokenizer
 

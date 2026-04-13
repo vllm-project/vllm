@@ -12,9 +12,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.tool_call_streaming import (
-    extract_named_tool_call_streaming,
-)
+from vllm.tool_parsers.streaming import extract_named_tool_call_streaming
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 pytestmark = pytest.mark.cpu_test

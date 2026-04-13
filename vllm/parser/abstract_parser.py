@@ -34,14 +34,14 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
-from vllm.entrypoints.openai.tool_call_streaming import (
-    extract_named_tool_call_streaming,
-    extract_required_tool_call_streaming,
-)
 from vllm.logger import init_logger
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
+from vllm.tool_parsers.streaming import (
+    extract_named_tool_call_streaming,
+    extract_required_tool_call_streaming,
+)
 from vllm.tool_parsers.utils import Tool
 from vllm.utils import random_uuid
 
