@@ -18,6 +18,7 @@ from vllm.multimodal.image import rescale_image_size
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner
+from ....utils import large_gpu_mark
 from ...utils import check_logprobs_close
 
 
@@ -83,7 +84,50 @@ GEMMA3_CONFIG_PAN_AND_SCAN = GGUFMMTestConfig(
     mm_processor_kwargs={"do_pan_and_scan": True},
 )
 
-MODELS_TO_TEST = [GEMMA3_CONFIG, GEMMA3_CONFIG_PAN_AND_SCAN]
+# Qwen3.5 multimodal GGUF — natively multimodal (shared arch for text + vision)
+_QWEN35_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": (
+            "<|im_start|>user\n"
+            "<|vision_start|><|image_pad|><|vision_end|>"
+            "What's the content in the center of the image?"
+            "<|im_end|>\n<|im_start|>assistant\n"
+        ),
+        "cherry_blossom": (
+            "<|im_start|>user\n"
+            "<|vision_start|><|image_pad|><|vision_end|>"
+            "What is the season?"
+            "<|im_end|>\n<|im_start|>assistant\n"
+        ),
+    }
+)
+
+_QWEN35_IMAGE_NAMES = ["stop_sign", "cherry_blossom"]
+
+QWEN35_CONFIG = GGUFMMTestConfig(
+    original_model="Qwen/Qwen3.5-0.8B",
+    gguf_repo="unsloth/Qwen3.5-0.8B-GGUF",
+    gguf_backbone="Qwen3.5-0.8B-Q4_K_M.gguf",
+    gguf_mmproj="mmproj-BF16.gguf",
+    prompt=_QWEN35_PROMPTS,
+    image_names=_QWEN35_IMAGE_NAMES,
+    max_model_len=4096,
+)
+
+# Qwen3.5-MoE multimodal GGUF (large weights + HF baseline; skip on small GPUs)
+QWEN35_MOE_CONFIG = GGUFMMTestConfig(
+    original_model="Qwen/Qwen3.5-35B-A3B",
+    gguf_repo="unsloth/Qwen3.5-35B-A3B-GGUF",
+    gguf_backbone="Qwen3.5-35B-A3B-Q4_K_M.gguf",
+    gguf_mmproj="mmproj-BF16.gguf",
+    prompt=_QWEN35_PROMPTS,
+    image_names=_QWEN35_IMAGE_NAMES,
+    max_model_len=4096,
+    marks=[large_gpu_mark(min_gb=24)],
+)
+
+GEMMA3_MODELS_TO_TEST = [GEMMA3_CONFIG, GEMMA3_CONFIG_PAN_AND_SCAN]
+QWEN35_MODELS_TO_TEST = [QWEN35_CONFIG, QWEN35_MOE_CONFIG]
 
 
 def run_multimodal_gguf_test(
@@ -161,13 +205,40 @@ def run_multimodal_gguf_test(
     "model",
     [
         pytest.param(test_config, marks=test_config.marks)
-        for test_config in MODELS_TO_TEST
+        for test_config in GEMMA3_MODELS_TO_TEST
     ],
 )
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_gemma3_mm_gguf(
+    hf_runner: type[HfRunner],
+    vllm_runner: type[VllmRunner],
+    model: GGUFMMTestConfig,
+    dtype: str,
+    max_tokens: int,
+    num_logprobs: int,
+) -> None:
+    run_multimodal_gguf_test(
+        hf_runner, vllm_runner, model, dtype, max_tokens, num_logprobs
+    )
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gguf"),
+    reason="gguf is not supported on this GPU type.",
+)
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(test_config, marks=test_config.marks)
+        for test_config in QWEN35_MODELS_TO_TEST
+    ],
+)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("num_logprobs", [10])
+def test_qwen35_mm_gguf(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
     model: GGUFMMTestConfig,
