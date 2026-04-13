@@ -10,6 +10,7 @@ from .utils import (
     MESSAGES_ASKING_FOR_PARALLEL_TOOLS,
     MESSAGES_WITH_PARALLEL_TOOL_RESPONSE,
     SEARCH_TOOL,
+    SEED,
     WEATHER_TOOL,
     ServerConfig,
 )
@@ -39,6 +40,7 @@ async def test_parallel_tool_calls(
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
     )
 
     choice = chat_completion.choices[0]
@@ -76,6 +78,7 @@ async def test_parallel_tool_calls(
         max_completion_tokens=200,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         stream=True,
     )
 
@@ -166,6 +169,7 @@ async def test_parallel_tool_calls_with_results(
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
     )
 
     choice = chat_completion.choices[0]
@@ -184,6 +188,7 @@ async def test_parallel_tool_calls_with_results(
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         stream=True,
     )
 
@@ -229,6 +234,7 @@ async def test_parallel_tool_calls_false(client: openai.AsyncOpenAI):
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         parallel_tool_calls=False,
     )
 
@@ -247,6 +253,7 @@ async def test_parallel_tool_calls_false(client: openai.AsyncOpenAI):
         max_completion_tokens=200,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
+        seed=SEED,
         parallel_tool_calls=False,
         stream=True,
     )

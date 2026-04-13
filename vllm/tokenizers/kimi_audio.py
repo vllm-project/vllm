@@ -4,6 +4,7 @@
 
 import contextlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, overload
 
@@ -299,7 +300,9 @@ class KimiAudioTokenizer(TokenizerLike):
             tokens = self._maybe_truncate(tokens, max_length)
         return tokens
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self, ids: Sequence[int] | int, skip_special_tokens: bool = False
+    ) -> str:
         """Decode token IDs to text, optionally skipping special tokens."""
         if isinstance(ids, int):
             ids = [ids]
@@ -321,7 +324,7 @@ class KimiAudioTokenizer(TokenizerLike):
         return [self._token_to_id.get(token, self._unk_token_id) for token in tokens]
 
     def convert_ids_to_tokens(
-        self, ids: list[int], skip_special_tokens: bool = False
+        self, ids: Sequence[int], skip_special_tokens: bool = False
     ) -> list[str]:
         tokens = []
         for token_id in ids:

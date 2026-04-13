@@ -35,23 +35,6 @@ export PYTHONPATH=".."
 # Helper Functions
 ###############################################################################
 
-wait_for_clean_gpus() {
-  local timeout=${1:-300}
-  local start=$SECONDS
-  echo "--- Waiting for clean GPU state (timeout: ${timeout}s)"
-  while true; do
-    if grep -q clean /opt/amdgpu/etc/gpu_state; then
-      echo "GPUs state is \"clean\""
-      return
-    fi
-    if (( SECONDS - start >= timeout )); then
-      echo "Error: GPUs did not reach clean state within ${timeout}s" >&2
-      exit 1
-    fi
-    sleep 3
-  done
-}
-
 cleanup_docker() {
   # Get Docker's root directory
   docker_root=$(docker info -f '{{.DockerRootDir}}')
@@ -205,6 +188,13 @@ re_quote_pytest_markers() {
       esac
 
       if $is_boundary; then
+        # Strip surrounding double quotes if present (from upstream
+        # single-to-double conversion); without this, wrapping below
+        # would produce '"expr"' with literal double-quote characters.
+        if [[ "$marker_buf" == '"'*'"' ]]; then
+          marker_buf="${marker_buf#\"}"
+          marker_buf="${marker_buf%\"}"
+        fi
         # Flush the collected marker expression
         if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
           output+="'${marker_buf}' "
@@ -242,6 +232,11 @@ re_quote_pytest_markers() {
 
   # Flush any trailing marker expression (marker at end of command)
   if $collecting && [[ -n "$marker_buf" ]]; then
+    # Strip surrounding double quotes (see mid-stream flush comment)
+    if [[ "$marker_buf" == '"'*'"' ]]; then
+      marker_buf="${marker_buf#\"}"
+      marker_buf="${marker_buf%\"}"
+    fi
     if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
       output+="'${marker_buf}'"
     else
@@ -270,7 +265,7 @@ apply_rocm_test_overrides() {
 
   # --- LoRA: disable custom paged attention ---
   if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"VLLM_ROCM_CUSTOM_PAGED_ATTN=0 pytest -v -s lora"}
+    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
   fi
 
   # --- Kernel ignores ---
@@ -314,22 +309,24 @@ apply_rocm_test_overrides() {
   if [[ $cmds == *" kernels/moe"* ]]; then
     cmds="${cmds} \
     --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py \
-    --ignore=kernels/moe/test_triton_moe_ptpc_fp8.py"
+    --ignore=kernels/moe/test_cutlass_moe.py"
   fi
 
   # --- Entrypoint ignores ---
   if [[ $cmds == *" entrypoints/openai "* ]]; then
     cmds=${cmds//" entrypoints/openai "/" entrypoints/openai \
-    --ignore=entrypoints/openai/test_audio.py \
-    --ignore=entrypoints/openai/test_shutdown.py \
+    --ignore=entrypoints/openai/chat_completion/test_audio.py \
+    --ignore=entrypoints/openai/completion/test_shutdown.py \
     --ignore=entrypoints/openai/test_completion.py \
-    --ignore=entrypoints/openai/test_models.py \
-    --ignore=entrypoints/openai/test_lora_adapters.py \
+    --ignore=entrypoints/openai/models/test_models.py \
     --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
-    --ignore=entrypoints/openai/test_root_path.py \
-    --ignore=entrypoints/openai/test_tokenization.py \
-    --ignore=entrypoints/openai/test_prompt_validation.py "}
+    --ignore=entrypoints/openai/chat_completion/test_root_path.py \
+    --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
+  fi
+
+  if [[ $cmds == *" entrypoints/serve"* ]]; then
+    cmds="${cmds} \
+    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
   fi
 
   if [[ $cmds == *" entrypoints/llm "* ]]; then
@@ -351,18 +348,11 @@ apply_rocm_test_overrides() {
 ###############################################################################
 
 # --- GPU initialization ---
-echo "--- Confirming Clean Initial State"
-wait_for_clean_gpus
-
 echo "--- ROCm info"
 rocminfo
 
 # --- Docker housekeeping ---
 cleanup_docker
-
-echo "--- Resetting GPUs"
-echo "reset" > /opt/amdgpu/etc/gpu_state
-wait_for_clean_gpus
 
 # --- Pull test image ---
 echo "--- Pulling container"
@@ -482,6 +472,7 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
@@ -492,9 +483,12 @@ else
     -e HF_TOKEN \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
+    -e BUILDKITE_PARALLEL_JOB \
+    -e BUILDKITE_PARALLEL_JOB_COUNT \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "PYTORCH_ROCM_ARCH=" \
     --name "${container_name}" \
     "${image_name}" \
     /bin/bash -c "${commands}"

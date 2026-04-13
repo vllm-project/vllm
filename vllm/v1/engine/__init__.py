@@ -4,6 +4,7 @@
 import enum
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal
 
 import msgspec
@@ -61,6 +62,19 @@ class FinishReason(enum.IntEnum):
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
+
+
+@dataclass
+class EngineCoreReadyResponse:
+    """Sent from EngineCore to each frontend at the end of engine startup.
+
+    Contains post-initialization config that may differ from the original
+    values (e.g. max_model_len after KV cache auto-fitting).
+    """
+
+    max_model_len: int
+    num_gpu_blocks: int
+    dp_stats_address: str | None
 
 
 class EngineCoreRequest(
@@ -226,6 +240,8 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    # Sentinel to wake up input_queue.get() during shutdown.
+    WAKEUP = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -235,10 +251,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_data_parallel_master_ip: str
     new_data_parallel_master_port: int
     new_data_parallel_master_port_list: list[int]
-    new_stateless_world_group_port_list: list[list[int]]
-    new_stateless_dp_group_port_list: list[list[int]]
-    new_stateless_ep_group_port_list: list[list[int]]
-    new_stateless_eplb_group_port_list: list[list[int]]
+    coord_store_port: int
 
 
 class ReconfigureRankType(enum.IntEnum):

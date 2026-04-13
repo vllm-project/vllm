@@ -30,9 +30,9 @@ batch_specs:
   - "2q16k_32q1s4k"         # 2 very large prefill + 32 decode
 
   # Context extension + decode
-  - "2q1kkv2k_16q1s1k"       # 2 extend + 16 decode
-  - "4q2kkv4k_32q1s2k"       # 4 extend + 32 decode
-  - "2q1kkv8k_32q1s2k"       # 2 large extend + 32 decode
+  - "2q1ks2k_16q1s1k"       # 2 extend + 16 decode
+  - "4q2ks4k_32q1s2k"       # 4 extend + 32 decode
+  - "2q1ks8k_32q1s2k"       # 2 large extend + 32 decode
 
   # Explicitly chunked prefill
   - "q8k"           # 8k prefill with chunking hint

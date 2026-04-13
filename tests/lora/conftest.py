@@ -294,6 +294,16 @@ def whisper_lora_files():
     return snapshot_download(repo_id="chengyili2005/whisper-small-mandarin-lora")
 
 
+@pytest.fixture(scope="session")
+def qwen35_text_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-text-only-sql-lora")
+
+
+@pytest.fixture(scope="session")
+def qwen35_vl_lora_files():
+    return snapshot_download(repo_id="jeeejeee/qwen35-4b-all-linear-pokemon-lora")
+
+
 @pytest.fixture
 def reset_default_device():
     """

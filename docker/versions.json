@@ -2,16 +2,19 @@
   "_comment": "Auto-generated from Dockerfile ARGs. Do not edit manually. Run: python tools/generate_versions_json.py",
   "variable": {
     "CUDA_VERSION": {
-      "default": "12.9.1"
+      "default": "13.0.0"
     },
     "PYTHON_VERSION": {
       "default": "3.12"
     },
+    "UBUNTU_VERSION": {
+      "default": "22.04"
+    },
     "BUILD_BASE_IMAGE": {
-      "default": "nvidia/cuda:12.9.1-devel-ubuntu20.04"
+      "default": "nvidia/cuda:13.0.0-devel-ubuntu22.04"
     },
     "FINAL_BASE_IMAGE": {
-      "default": "nvidia/cuda:12.9.1-base-ubuntu22.04"
+      "default": "nvidia/cuda:13.0.0-base-ubuntu22.04"
     },
     "GET_PIP_URL": {
       "default": "https://bootstrap.pypa.io/get-pip.py"
@@ -49,9 +52,6 @@
     "vllm_target_device": {
       "default": "cuda"
     },
-    "DEEPGEMM_GIT_REF": {
-      "default": "477618cd51baffca09c4b0b87e97c03fe827ef03"
-    },
     "DEEPEP_COMMIT_HASH": {
       "default": "73b6ea4"
     },
@@ -65,7 +65,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.4"
+      "default": "0.6.7"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"
@@ -83,7 +83,7 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.3"
+      "default": ">=0.15.7"
     }
   }
 }

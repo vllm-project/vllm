@@ -3,6 +3,7 @@
 import argparse
 import contextlib
 import multiprocessing
+import threading
 import time
 import weakref
 from collections.abc import Callable, Sequence
@@ -10,6 +11,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
+from multiprocessing.queues import Queue
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -20,13 +22,14 @@ from typing import (
 )
 
 import torch
+import uvloop
 from torch.autograd.profiler import record_function
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_port, get_open_zmq_ipc_path, get_tcp_uri
-from vllm.utils.system_utils import kill_process_tree
+from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -165,19 +168,20 @@ class APIServerProcessManager:
 
     def __init__(
         self,
-        target_server_fn: Callable,
         listen_address: str,
         sock: Any,
         args: argparse.Namespace,
         num_servers: int,
         input_addresses: list[str],
         output_addresses: list[str],
+        target_server_fn: Callable | None = None,
         stats_update_address: str | None = None,
+        tensor_queue: Queue | None = None,
     ):
         """Initialize and start API server worker processes.
 
         Args:
-            target_server_fn: Function to call for each API server process
+            target_server_fn: Override function to call for each API server process
             listen_address: Address to listen for client connections
             sock: Socket for client connections
             args: Command line arguments
@@ -185,6 +189,7 @@ class APIServerProcessManager:
             input_addresses: Input addresses for each API server
             output_addresses: Output addresses for each API server
             stats_update_address: Optional stats update address
+            tensor_queue: Optional tensor IPC queue for sharing MM tensors
         """
         self.listen_address = listen_address
         self.sock = sock
@@ -205,9 +210,11 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if tensor_queue is not None:
+                client_config["tensor_queue"] = tensor_queue
 
             proc = spawn_context.Process(
-                target=target_server_fn,
+                target=target_server_fn or run_api_server_worker_proc,
                 name=f"ApiServer_{i}",
                 args=(listen_address, sock, args, client_config),
             )
@@ -220,8 +227,29 @@ class APIServerProcessManager:
         # The extra processes are managed by their owners
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
 
-    def close(self) -> None:
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown API server processes with configurable timeout"""
+        if self._finalizer.detach() is not None:
+            shutdown(self.processes, timeout=timeout)
+
+
+def run_api_server_worker_proc(
+    listen_address, sock, args, client_config=None, **uvicorn_kwargs
+) -> None:
+    """Entrypoint for individual API server worker processes."""
+
+    from vllm.entrypoints.openai.api_server import run_server_worker
+
+    client_config = client_config or {}
+    server_index = client_config.get("client_index", 0)
+
+    # Set process title and add process-specific prefix to stdout and stderr.
+    set_process_title("APIServer", str(server_index))
+    decorate_logs()
+
+    uvloop.run(
+        run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
+    )
 
 
 def wait_for_completion_or_failure(
@@ -242,8 +270,6 @@ def wait_for_completion_or_failure(
         coordinator: The coordinator for data parallel.
     """
 
-    from vllm.v1.engine.utils import CoreEngineActorManager, CoreEngineProcManager
-
     try:
         logger.info("Waiting for API servers to complete ...")
         # Create a mapping of sentinels to their corresponding processes
@@ -255,58 +281,70 @@ def wait_for_completion_or_failure(
         if coordinator:
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
-        actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
-            actor_run_refs = engine_manager.get_run_refs()
+        if engine_manager:
+            core_shutdown_recv, core_shutdown_send = connection.Pipe(duplex=False)
+
+            def monitor_engines():
+                try:
+                    engine_manager.monitor_engine_liveness()
+                finally:
+                    core_shutdown_send.close()
+                    core_shutdown_recv.close()
+
+            # start monitor for engine liveness
+            threading.Thread(target=monitor_engines, daemon=True).start()
+            sentinel_to_proc[core_shutdown_recv] = None  # type: ignore[assignment]
 
         # Check if any process terminates
-        while sentinel_to_proc or actor_run_refs:
-            # Wait for any process to terminate
-            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
+        while sentinel_to_proc:
+            # Wait for any process to terminate (or engine shutdown signal)
+            ready_sentinels: list[Any] = connection.wait(sentinel_to_proc)
 
             # Process any terminated processes
             for sentinel in ready_sentinels:
                 proc = sentinel_to_proc.pop(sentinel)
 
                 # Check if process exited with error
-                if proc.exitcode != 0:
+                if proc is not None and proc.exitcode != 0:
                     raise RuntimeError(
                         f"Process {proc.name} (PID: {proc.pid}) "
                         f"died with exit code {proc.exitcode}"
                     )
-
-            if actor_run_refs:
-                import ray
-
-                _, actor_run_refs = ray.wait(actor_run_refs, timeout=5)
+                if engine_manager and engine_manager.failed_proc_name is not None:
+                    raise RuntimeError(
+                        f"Engine core process {engine_manager.failed_proc_name} "
+                        "died unexpectedly."
+                    )
 
     except KeyboardInterrupt:
         logger.info("Received KeyboardInterrupt, shutting down API servers...")
     except Exception as e:
         logger.exception("Exception occurred while running API servers: %s", str(e))
         raise
-    finally:
-        logger.info("Terminating remaining processes ...")
-        api_server_manager.close()
-        if coordinator:
-            coordinator.close()
-        if engine_manager:
-            engine_manager.close()
 
 
 # Note(rob): shutdown function cannot be a bound method,
 # else the gc cannot collect the object.
-def shutdown(procs: list[BaseProcess]):
+def shutdown(procs: list[BaseProcess], timeout: float | None = None) -> None:
+    """Shutdown processes with timeout.
+
+    Args:
+        procs: List of processes to shutdown
+        timeout: Maximum time in seconds to wait for graceful shutdown
+    """
+    if timeout is None:
+        timeout = 0.0
+
+    # Allow at least 5 seconds for remaining procs to terminate.
+    timeout = max(timeout, 5.0)
+
     # Shutdown the process.
     for proc in procs:
         if proc.is_alive():
             proc.terminate()
 
-    # Allow 5 seconds for remaining procs to terminate.
-    deadline = time.monotonic() + 5
+    # Allow time for remaining procs to terminate.
+    deadline = time.monotonic() + timeout
     for proc in procs:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -412,7 +450,7 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
     Returns:
         A memoryview of the tensor data as uint8.
     """
-    return tensor.flatten().contiguous().view(torch.uint8).numpy().data
+    return tensor.flatten().cpu().contiguous().view(torch.uint8).numpy().data
 
 
 @dataclass

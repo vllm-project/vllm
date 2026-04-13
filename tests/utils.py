@@ -43,12 +43,10 @@ from vllm.distributed import (
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
 from vllm.model_executor.kernels.linear import (
-    FP8ScaledMMLinearKernel,
+    _KernelT,
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
     QuantKey,
 )
 from vllm.model_executor.model_loader import get_model_loader
@@ -58,7 +56,6 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import (
-    cuda_device_count_stateless,
     set_random_seed,  # noqa: F401 - re-exported for use in test files
 )
 
@@ -122,6 +119,12 @@ ROCM_EXTRA_ARGS = (
     if current_platform.is_rocm()
     else []
 )
+# Python-API equivalent of ROCM_EXTRA_ARGS for use with EngineArgs kwargs.
+ROCM_ENGINE_KWARGS: dict = (
+    {"enable_prefix_caching": False, "max_num_seqs": 1}
+    if current_platform.is_rocm()
+    else {}
+)
 
 
 class RemoteVLLMServer:
@@ -143,6 +146,17 @@ class RemoteVLLMServer:
     ) -> None:
         """Subclasses override this method to customize server process launch"""
         raise NotImplementedError
+
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download model weights before starting the server to avoid timeout."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
 
     def __init__(
         self,
@@ -195,15 +209,7 @@ class RemoteVLLMServer:
             getattr(args, "show_hidden_metrics_for_version", None) is not None
         )
 
-        # download the model before starting the server to avoid timeout
-        is_local = os.path.isdir(model)
-        if not is_local:
-            engine_args = AsyncEngineArgs.from_cli_args(args)
-            model_config = engine_args.create_model_config()
-            load_config = engine_args.create_load_config()
-
-            model_loader = get_model_loader(load_config)
-            model_loader.download_model(model_config)
+        self._pre_download_model(model, args)
 
         # Record GPU memory before server start so we know what
         # "released" looks like.
@@ -216,13 +222,31 @@ class RemoteVLLMServer:
             )
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 360
-        self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
+        max_wait_seconds = max_wait_seconds or 480
+        try:
+            self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
+        except Exception:
+            # If the server never became healthy, we must still clean up
+            # the subprocess tree. Without this, a timeout in __init__
+            # leaks the server + EngineCore processes (and their GPU
+            # memory), because __exit__ is never called when __init__
+            # raises inside a ``with`` statement.
+            self._shutdown()
+            raise
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self._shutdown()
+
+    def _shutdown(self) -> None:
+        """Kill the server process tree and wait for GPU memory release.
+
+        Called from both ``__exit__`` (normal path) and ``__init__``
+        (when the server fails to start). Must be safe to call even if
+        the process is already dead.
+        """
         pid = self.proc.pid
 
         # Get the process group ID. Because we used
@@ -232,13 +256,10 @@ class RemoteVLLMServer:
         except (ProcessLookupError, OSError):
             pgid = None
 
-        # Phase 1: graceful SIGTERM to the entire process group
-        if pgid is not None:
-            with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(pgid, signal.SIGTERM)
-                print(f"[RemoteOpenAIServer] Sent SIGTERM to process group {pgid}")
-        else:
+        # Phase 1: graceful SIGTERM to the root process
+        with contextlib.suppress(ProcessLookupError, OSError):
             self.proc.terminate()
+            print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
 
         try:
             self.proc.wait(timeout=15)
@@ -259,33 +280,92 @@ class RemoteVLLMServer:
                 self.proc.wait(timeout=10)
                 print(f"[RemoteOpenAIServer] Server {pid} killed")
             except subprocess.TimeoutExpired:
-                # Phase 3: last resort - find and kill any orphaned children
-                self._kill_orphaned_children(pid)
+                pass
 
-        # Wait for GPU memory to actually be *freed*, not just
+        # After killing the root process, ensure all children in the
+        # process group (e.g. EngineCore workers) are also dead.
+        # On ROCm especially, surviving children hold GPU contexts and
+        # prevent VRAM from being reclaimed by the driver.
+        self._kill_process_group_survivors(pgid)
+
+        # Wait for GPU memory to actually be freed, not just
         # "stabilized at whatever level it's at".
         self._wait_for_gpu_memory_release()
 
-    def _kill_orphaned_children(self, parent_pid: int) -> None:
-        """Best-effort cleanup of any lingering child processes."""
-        try:
-            import psutil
+    def _kill_process_group_survivors(
+        self, pgid: int | None, timeout: float = 15.0
+    ) -> None:
+        """SIGKILL any processes still in the server's process group
+        and wait for them to exit.
 
-            parent = psutil.Process(parent_pid)
-            children = parent.children(recursive=True)
-            for child in children:
-                print(
-                    f"[RemoteOpenAIServer] Killing orphaned child "
-                    f"pid={child.pid} name={child.name()}"
-                )
-                child.kill()
-            psutil.wait_procs(children, timeout=5)
-        except Exception as e:
-            # psutil may not be installed, or processes already gone
-            print(f"[RemoteOpenAIServer] Orphan cleanup failed: {e}")
-            # Fallback: try to kill by pgid one more time
-            with contextlib.suppress(ProcessLookupError, OSError):
-                os.killpg(parent_pid, signal.SIGKILL)
+        Because the server is launched with ``start_new_session=True``,
+        all its children (EngineCore, workers, etc.) share the same
+        pgid. After the root process is killed, stragglers -- especially
+        on ROCm where GPU contexts linger until the *process* exits --
+        must be reaped explicitly.
+
+        Uses ``/proc`` to scan for pgid members so this works even after
+        the parent has been reaped (unlike ``psutil.Process.children``).
+        """
+        if pgid is None:
+            return
+
+        # Send SIGKILL to the entire process group one more time.
+        # This is cheap and harmless if everyone is already dead.
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+
+        # Collect surviving PIDs by scanning /proc for matching pgid.
+        # This works on Linux even after the parent has been waited on
+        # and is more reliable than psutil.Process(parent).children().
+        survivor_pids = self._find_pgid_members(pgid)
+
+        if not survivor_pids:
+            return
+
+        print(
+            f"[RemoteOpenAIServer] {len(survivor_pids)} process(es) still "
+            f"in pgid {pgid} after SIGKILL: {survivor_pids}"
+        )
+
+        # Wait for each survivor to actually exit so the GPU driver
+        # releases its VRAM.
+        deadline = time.time() + timeout
+        while survivor_pids and time.time() < deadline:
+            still_alive = []
+            for spid in survivor_pids:
+                try:
+                    os.kill(spid, 0)  # Check if still alive
+                    still_alive.append(spid)
+                except (ProcessLookupError, OSError):
+                    pass
+            survivor_pids = still_alive
+            if survivor_pids:
+                time.sleep(0.5)
+
+        if survivor_pids:
+            print(
+                f"[RemoteOpenAIServer] WARNING: processes {survivor_pids} "
+                f"in pgid {pgid} could not be killed within {timeout}s"
+            )
+
+    @staticmethod
+    def _find_pgid_members(pgid: int) -> list[int]:
+        """Return PIDs of all living processes whose pgid matches."""
+        members: list[int] = []
+        proc_path = Path("/proc")
+        if not proc_path.is_dir():
+            return members
+        for entry in proc_path.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            try:
+                if os.getpgid(pid) == pgid:
+                    members.append(pid)
+            except OSError:
+                continue
+        return members
 
     def _get_gpu_memory_used(self) -> float | None:
         """Get total GPU memory used across all visible devices in bytes."""
@@ -301,7 +381,7 @@ class RemoteVLLMServer:
             elif current_platform.is_cuda():
                 with _nvml():
                     total_used = 0
-                    device_count = cuda_device_count_stateless()
+                    device_count = current_platform.device_count()
                     for i in range(device_count):
                         handle = nvmlDeviceGetHandleByIndex(i)
                         mem_info = nvmlDeviceGetMemoryInfo(handle)
@@ -312,13 +392,16 @@ class RemoteVLLMServer:
             return None
         return None
 
-    def _wait_for_gpu_memory_release(self, timeout: float = 60.0):
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 120.0, log_interval: float = 10.0
+    ):
         """Wait for GPU memory to drop back toward pre-server levels.
 
-        Two-phase strategy:
-          1. Try to wait for memory to return close to pre-server baseline.
-          2. If that doesn't happen, fall back to waiting for stabilization
-             and log a warning (the next server might still OOM).
+        Waits the full timeout for memory to return close to the
+        pre-server baseline. Does NOT fall back to a "stabilization"
+        heuristic -- if memory is still held when the timeout expires,
+        the test fails so the problem is surfaced immediately rather
+        than causing cascading OOM failures in every subsequent test.
         """
         baseline = self._pre_server_gpu_memory
         if baseline is None:
@@ -331,8 +414,7 @@ class RemoteVLLMServer:
         target = baseline + headroom_bytes
 
         start = time.time()
-        last_used: float | None = None
-        stable_count = 0
+        next_log_time = start + log_interval
 
         while time.time() - start < timeout:
             used = self._get_gpu_memory_used()
@@ -344,7 +426,6 @@ class RemoteVLLMServer:
             target_gb = target / 1e9
             elapsed = time.time() - start
 
-            # Phase 1: memory dropped to near baseline - we're done.
             if used <= target:
                 print(
                     f"[RemoteOpenAIServer] GPU memory released to "
@@ -353,28 +434,19 @@ class RemoteVLLMServer:
                 )
                 return
 
-            # Phase 2 (after 40s): fall back to stabilization check.
-            # This handles cases where another process is using GPU memory
-            # and we'll never reach baseline.
-            if elapsed > 40.0 and last_used is not None:
-                delta = abs(used - last_used)
-                if delta < 200 * 1024 * 1024:  # 200 MB
-                    stable_count += 1
-                    if stable_count >= 3:
-                        print(
-                            f"[RemoteOpenAIServer] WARNING: GPU memory "
-                            f"stabilized at {used_gb:.2f} GB "
-                            f"(target was {target_gb:.2f} GB). "
-                            f"Proceeding - next server may OOM."
-                        )
-                        return
-                else:
-                    stable_count = 0
+            now = time.time()
+            if now >= next_log_time:
+                print(
+                    f"[RemoteOpenAIServer] Waiting for GPU memory release: "
+                    f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
+                    f"[{elapsed:.0f}s/{timeout:.0f}s]"
+                )
+                next_log_time = now + log_interval
 
-            last_used = used
             time.sleep(1.0)
 
-        # Timeout - log clearly so CI failures are diagnosable
+        # Timeout -- raise so the current test fails with a clear
+        # message instead of silently poisoning subsequent tests.
         final_used = self._get_gpu_memory_used()
         final_gb = final_used / 1e9 if final_used else 0.0
         raise RuntimeError(
@@ -515,7 +587,22 @@ class RemoteLaunchRenderServer(RemoteVLLMServer):
             start_new_session=True,
         )
 
-    def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download only the tokenizer files (no model weights needed)."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            get_tokenizer(
+                model_config.tokenizer,
+                tokenizer_mode=model_config.tokenizer_mode,
+                trust_remote_code=model_config.trust_remote_code,
+                revision=model_config.tokenizer_revision,
+            )
+
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 30.0, log_interval: float = 10.0
+    ):
         pass  # No GPU used
 
 
@@ -1407,7 +1494,7 @@ def multi_gpu_marks(*, num_gpus: int):
     """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
     test_selector = pytest.mark.distributed(num_gpus=num_gpus)
     test_skipif = pytest.mark.skipif(
-        cuda_device_count_stateless() < num_gpus,
+        current_platform.device_count() < num_gpus,
         reason=f"Need at least {num_gpus} GPUs to run the test.",
     )
 
@@ -1439,7 +1526,7 @@ def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
         @gpu_tier_mark(max_gpus=1)          # only on single-GPU
         @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
     """
-    gpu_count = cuda_device_count_stateless()
+    gpu_count = current_platform.device_count()
     marks = []
 
     if min_gpus > 1:
@@ -1722,31 +1809,52 @@ class TestFP8Layer(torch.nn.Module):
         weight_shape: tuple[int, int],
         activation_quant_key: QuantKey,
         weight_quant_key: QuantKey,
+        input_dtype: torch.dtype,
         out_dtype: torch.dtype | None = None,
+        transpose_weights: bool = False,
         device: torch.device | None = None,
-        force_kernel: FP8ScaledMMLinearKernel | None = None,
+        force_kernel: type[_KernelT] | None = None,
     ):
         super().__init__()
-        per_tensor_weights = weight_quant_key.scale.group_shape.is_per_tensor()
-        is_static_activation_scale = activation_quant_key.scale.static
-        weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
-
-        self.weight_scale = torch.rand(
-            weight_scale_shape, dtype=torch.float32, device=device
-        )
-        self.input_scale = (
-            torch.rand(1, dtype=torch.float32, device=device)
-            if is_static_activation_scale
-            else None
-        )
-        self.weight = torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE).t()
-        self.input_scale_ub = None
+        act_scale_desc = activation_quant_key.scale
+        weight_scale_desc = weight_quant_key.scale
+        is_block_wise = act_scale_desc.group_shape.is_per_group()
+        if is_block_wise:
+            block_size = weight_scale_desc.group_shape.col
+            weight_scale_shape = weight_shape[0] // block_size
+            self.weight_scale_inv = torch.rand(
+                (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+            )
+            self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
+            self.input_scale = None
+            self.weight_scale = None
+            if transpose_weights:
+                self.weight = self.weight.t()
+        else:
+            per_tensor_weights = weight_scale_desc.group_shape.is_per_tensor()
+            is_static_activation_scale = act_scale_desc.static
+            weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
+            self.weight_scale_inv = None
+            self.weight_scale = torch.rand(
+                weight_scale_shape, dtype=torch.float32, device=device
+            )
+            self.input_scale = (
+                torch.rand(1, dtype=torch.float32, device=device)
+                if is_static_activation_scale
+                else None
+            )
+            self.weight = (
+                torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE).t()
+            )
+            self.input_scale_ub = None
 
         out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
 
         self.kernel = init_fp8_linear_kernel(
             activation_quant_key=activation_quant_key,
             weight_quant_key=weight_quant_key,
+            weight_shape=weight_shape,
+            input_dtype=input_dtype,
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )
@@ -1758,61 +1866,3 @@ class TestFP8Layer(torch.nn.Module):
         self, y: torch.Tensor, bias: torch.Tensor | None = None
     ) -> torch.Tensor:
         return self.kernel.apply_weights(self, y, bias)
-
-
-# TODO: Drop TestBlockFP8Layer in favour of a unified TestFP8Layer
-# after refactoring W8A8BlockFp8LinearOp.
-# https://github.com/vllm-project/vllm/issues/31818
-class TestBlockFP8Layer:
-    """
-    Test helper for blockwise FP8 linear operations. Creates random weights
-    and scales for W8A8BlockFp8LinearOp.
-
-    This is a workaround until W8A8BlockFp8LinearOp implements the kernel
-    abstraction (ScaledMMLinearKernel) for blockwise quantization.
-
-    Args:
-        weight_shape: Shape of the weight tensor (out_features, in_features).
-        group_shape: Blockwise quantization group shape.
-        cutlass_block_fp8_supported: Whether CUTLASS blockwise FP8 is available.
-        use_aiter_and_is_supported: Whether to use aiter quantization ops.
-        transpose_weights: Whether to transpose weights after creation.
-    """
-
-    def __init__(
-        self,
-        weight_shape: tuple[int, int],
-        group_shape: GroupShape,
-        cutlass_block_fp8_supported: bool = False,
-        use_aiter_and_is_supported: bool = False,
-        transpose_weights: bool = False,
-    ):
-        weight_scale_shape = weight_shape[0] // group_shape[1]
-        self.weight_scale = torch.rand(
-            (weight_scale_shape, weight_scale_shape), dtype=torch.float32
-        )
-        self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
-        self.input_scale = None
-        if transpose_weights:
-            self.weight = self.weight.t()
-
-        self.linear_op = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
-            act_quant_group_shape=group_shape,
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported,
-            use_aiter_and_is_supported=use_aiter_and_is_supported,
-        )
-
-    def __call__(
-        self, y: torch.Tensor, bias: torch.Tensor | None = None
-    ) -> torch.Tensor:
-        return self.linear_op.apply(
-            input=y,
-            weight=self.weight,
-            weight_scale=self.weight_scale,
-            input_scale=self.input_scale,
-            bias=bias,
-        )
-
-    def is_quant_fp8_enabled(self) -> bool:
-        return self.linear_op.input_quant_op.enabled()
