@@ -324,6 +324,57 @@ class TestConfigureSubprocess:
 
 
 # ---------------------------------------------------------------------------
+# _expand_for_ucx / _pattern_uses_nccl_syntax
+# ---------------------------------------------------------------------------
+
+
+class TestExpandForUcx:
+    def test_expands_with_sysfs(self, monkeypatch, tmp_path):
+        ib_path = tmp_path / "infiniband"
+        (ib_path / "mlx5_0" / "ports" / "1").mkdir(parents=True)
+        (ib_path / "mlx5_1" / "ports" / "1").mkdir(parents=True)
+        monkeypatch.setattr(nic_utils, "_SYSFS_IB_PATH", ib_path)
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+        result = nic_utils._expand_for_ucx("mlx5")
+        assert result == "mlx5_0:1,mlx5_1:1"
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+    def test_plain_device_port_passthrough_without_sysfs(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(nic_utils, "_SYSFS_IB_PATH", tmp_path / "noexist")
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+        # Plain device:port should pass through even without sysfs
+        result = nic_utils._expand_for_ucx("mlx5_0:1,mlx5_1:1")
+        assert result == "mlx5_0:1,mlx5_1:1"
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+    def test_nccl_prefix_raises_without_sysfs(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(nic_utils, "_SYSFS_IB_PATH", tmp_path / "noexist")
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+        with pytest.raises(RuntimeError, match="requires expansion"):
+            nic_utils._expand_for_ucx("mlx5")
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+    def test_nccl_exact_raises_without_sysfs(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(nic_utils, "_SYSFS_IB_PATH", tmp_path / "noexist")
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+        with pytest.raises(RuntimeError, match="requires expansion"):
+            nic_utils._expand_for_ucx("=mlx5_0:1")
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+    def test_nccl_exclude_raises_without_sysfs(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(nic_utils, "_SYSFS_IB_PATH", tmp_path / "noexist")
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+        with pytest.raises(RuntimeError, match="requires expansion"):
+            nic_utils._expand_for_ucx("^mlx5_1")
+        nic_utils.enumerate_ib_devices.cache_clear()
+
+
+# ---------------------------------------------------------------------------
 # Auto-detection
 # ---------------------------------------------------------------------------
 
