@@ -1,12 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 import tempfile
 
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from vllm.benchmarks.datasets import TxtSlicesDataset
+from vllm.benchmarks.create_txt_slices_dataset import create_txt_slices_jsonl
+from vllm.benchmarks.datasets import CustomDataset
 
 
 @pytest.fixture(scope="session")
@@ -26,29 +28,50 @@ sunt in culpa qui officia deserunt mollit anim id est laborum.
 
 
 @pytest.mark.benchmark
-def test_txt_slices(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+def test_create_txt_slices_jsonl(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+    """Test that create_txt_slices_jsonl produces valid JSONL for CustomDataset."""
     # Write the text content to a temporary file
     # Use delete=False for Python 3.10 compatibility (delete_on_close is 3.12+)
     with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
         f.write(text_content)
         f.close()
-        temp_file_path = f.name
+        txt_path = f.name
+
+    jsonl_path = txt_path + ".jsonl"
 
     try:
-        dataset = TxtSlicesDataset(dataset_path=temp_file_path)
+        create_txt_slices_jsonl(
+            input_path=txt_path,
+            output_path=jsonl_path,
+            tokenizer_name="gpt2",
+            num_prompts=10,
+            input_len=10,
+            output_len=10,
+        )
 
+        # Verify the JSONL file is valid and has the expected structure
+        with open(jsonl_path) as jf:
+            records = [json.loads(line) for line in jf]
+
+        assert len(records) == 10
+        for record in records:
+            assert "prompt" in record
+            assert "output_tokens" in record
+            assert isinstance(record["prompt"], str)
+            assert record["output_tokens"] == 10
+
+        # Verify the JSONL file can be loaded by CustomDataset
+        dataset = CustomDataset(dataset_path=jsonl_path)
         samples = dataset.sample(
-            hf_tokenizer, num_requests=10, input_len=10, output_len=10
+            tokenizer=hf_tokenizer,
+            num_requests=10,
+            output_len=10,
+            skip_chat_template=True,
         )
 
         assert len(samples) == 10
-        assert all(sample.prompt_len == 10 for sample in samples)
         assert all(sample.expected_output_len == 10 for sample in samples)
-
-        for sample in samples:
-            tokenized_prompt = hf_tokenizer(
-                sample.prompt, add_special_tokens=True
-            ).input_ids
-            assert len(tokenized_prompt) == 10
     finally:
-        os.unlink(f.name)
+        os.unlink(txt_path)
+        if os.path.exists(jsonl_path):
+            os.unlink(jsonl_path)

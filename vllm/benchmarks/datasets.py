@@ -10,7 +10,6 @@ generation. Supported dataset types include:
   - BurstGPT
   - HuggingFace
   - VisionArena
-  - TxtSlices
 """
 
 import argparse
@@ -20,7 +19,6 @@ import json
 import logging
 import math
 import random
-import urllib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
@@ -36,6 +34,7 @@ from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
+from vllm.benchmarks.shared import get_sampling_params
 from vllm.inputs import MultiModalDataDict
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
@@ -499,65 +498,6 @@ def gen_prompt_decode_to_target_len(
 # -----------------------------------------------------------------------------
 
 
-def get_sampling_params(
-    rng: np.random.Generator,
-    num_requests: int,
-    input_range_ratio: float,
-    output_range_ratio: float,
-    input_len: int,
-    output_len: int,
-    tokenizer: TokenizerLike,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Sample per-request input/output token lengths and vocab offsets.
-
-    Lengths are drawn uniformly from integer ranges around the configured
-    means, controlled by ``input_range_ratio`` and ``output_range_ratio``.
-    Tokenizer special tokens are subtracted from ``input_len`` before
-    computing the sampling interval.
-
-    Returns:
-        (input_lens, output_lens, offsets) – three 1-D ``np.ndarray`` of
-        shape ``(num_requests,)``.
-    """
-    if not (0.0 <= input_range_ratio < 1.0):
-        raise ValueError("input_range_ratio must be in [0, 1).")
-    if not (0.0 <= output_range_ratio < 1.0):
-        raise ValueError("output_range_ratio must be in [0, 1).")
-    num_special_tokens = int(tokenizer.num_special_tokens_to_add())
-    real_input_len = max(0, int(input_len) - num_special_tokens)
-    input_low = math.floor(real_input_len * (1 - input_range_ratio))
-    input_high = math.ceil(real_input_len * (1 + input_range_ratio))
-    output_low = math.floor(output_len * (1 - output_range_ratio))
-    output_high = math.ceil(output_len * (1 + output_range_ratio))
-    # Ensure the lower bound for output length is at least 1 to
-    # prevent sampling 0 tokens.
-    output_low = max(output_low, 1)
-    output_high = max(output_high, 1)
-
-    if input_low > input_high:
-        raise ValueError(
-            f"Invalid input sampling interval: low={input_low} > high={input_high}"
-        )
-    if output_low > output_high:
-        raise ValueError(
-            f"Invalid output sampling interval: low={output_low} > high={output_high}"
-        )
-
-    logger.info(
-        "Sampling input_len from [%s, %s] and output_len from [%s, %s]",
-        input_low,
-        input_high,
-        output_low,
-        output_high,
-    )
-
-    input_lens = rng.integers(input_low, input_high + 1, size=num_requests)
-    output_lens = rng.integers(output_low, output_high + 1, size=num_requests)
-    offsets = rng.integers(0, tokenizer.vocab_size, size=num_requests)
-    return input_lens, output_lens, offsets
-
-
 class RandomDataset(BenchmarkDataset):
     """
     Synthetic text-only dataset for serving/throughput benchmarks.
@@ -917,114 +857,6 @@ class RandomDatasetForReranking(RandomDataset):
             )
 
         return batch_requests
-
-
-# -----------------------------------------------------------------------------
-# TxtSlicesDataset Implementation
-# -----------------------------------------------------------------------------
-
-
-class TxtSlicesDataset(BenchmarkDataset):
-    """
-    Implements the TxtSlices dataset. Takes a URL or file path to a text file,
-    tokenizes the entire content, and generates sample requests by randomly
-    slicing from the tokenized sequence with cycling support.
-    """
-
-    def __init__(
-        self,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        dataset_path = kwargs.get("dataset_path")
-        if dataset_path is None:
-            raise ValueError(
-                "dataset_path must be provided to create a TxtSlicesDataset."
-            )
-        self.text = self.load_data(dataset_path)
-        if len(self.text) == 0:
-            raise ValueError("The text file is empty and cannot be sampled from.")
-
-        self._rng = np.random.default_rng(self.random_seed)
-        self.rng = random.Random(self.random_seed)
-
-    @staticmethod
-    def load_data(dataset_path: str) -> str:
-        if dataset_path.startswith(("http://", "https://")):
-            with urllib.request.urlopen(dataset_path) as response:
-                return response.read().decode("utf-8")
-        else:
-            with open(dataset_path, encoding="utf-8") as f:
-                return f.read()
-
-    def get_token_ids(self, tokenizer: TokenizerLike) -> tuple[int, ...]:
-        tokenized = tokenizer(self.text, add_special_tokens=False)
-        token_ids = tokenized.input_ids
-        if len(token_ids) == 0:
-            raise ValueError("The text is empty and cannot be sampled from.")
-        return token_ids
-
-    def generate_prompt(
-        self,
-        tokenizer: TokenizerLike,
-        token_ids: tuple[int, ...],
-        input_len: int,
-    ) -> str:
-        num_available_tokens = len(token_ids)
-
-        # Randomly select a start position
-        start_pos = self.rng.randint(0, num_available_tokens - 1)
-
-        # Extract tokens with cycling if necessary
-        prompt_token_ids = tuple(
-            token_ids[(start_pos + j) % num_available_tokens] for j in range(input_len)
-        )
-
-        # Decode the tokens to get the prompt
-        return tokenizer.decode(prompt_token_ids, skip_special_tokens=False)
-
-    def sample(
-        self,
-        tokenizer: TokenizerLike,
-        num_requests: int,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
-        input_len: int = 1024,
-        output_len: int = 128,
-        range_ratio: float = 0.0,
-        input_range_ratio: float | None = None,
-        output_range_ratio: float | None = None,
-        **kwargs,
-    ) -> list[SampleRequest]:
-        resolved_input_rr = (
-            input_range_ratio if input_range_ratio is not None else range_ratio
-        )
-        resolved_output_rr = (
-            output_range_ratio if output_range_ratio is not None else range_ratio
-        )
-
-        token_ids = self.get_token_ids(tokenizer)
-        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
-
-        input_lens, output_lens, _ = get_sampling_params(
-            self._rng,
-            num_requests,
-            resolved_input_rr,
-            resolved_output_rr,
-            input_len,
-            output_len,
-            tokenizer,
-        )
-
-        return [
-            SampleRequest(
-                prompt=self.generate_prompt(tokenizer, token_ids, int(input_lens[i])),
-                prompt_len=int(input_lens[i]) + num_special_tokens,
-                expected_output_len=int(output_lens[i]),
-                request_id=request_id_prefix + str(i),
-            )
-            for i in range(num_requests)
-        ]
 
 
 # -----------------------------------------------------------------------------
@@ -1614,7 +1446,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "custom_mm",
             "prefix_repetition",
             "spec_bench",
-            "txt-slices",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -1628,8 +1459,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=str,
         default=None,
         action=_ValidateDatasetArgs,
-        help="Path to the sharegpt/sonnet dataset, the HF dataset ID if using HF "
-        "dataset, or the path/URL to a txt file for the txt-slices dataset.",
+        help="Path to the sharegpt/sonnet dataset or the HF dataset ID if "
+        "using HF dataset.",
     )
     parser.add_argument(
         "--no-oversample",
@@ -1809,7 +1640,6 @@ def add_random_dataset_base_args(
     - random (random dataset)
     - random-mm (random multimodal dataset)
     - random-rerank (random dataset for reranking)
-    - txt-slices (txt-slices dataset)
 
     Args:
         parser_or_group: Either a parser or an argument group to add arguments to.
@@ -2274,21 +2104,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 suffix_len=args.prefix_repetition_suffix_len,
                 num_prefixes=args.prefix_repetition_num_prefixes,
                 output_len=args.prefix_repetition_output_len,
-                request_id_prefix=args.request_id_prefix,
-                no_oversample=args.no_oversample,
-            ),
-            "txt-slices": lambda: TxtSlicesDataset(
-                random_seed=args.seed,
-                dataset_path=args.dataset_path,
-                disable_shuffle=args.disable_shuffle,
-            ).sample(
-                tokenizer=tokenizer,
-                num_requests=args.num_prompts,
-                input_len=args.random_input_len,
-                output_len=args.random_output_len,
-                range_ratio=args.random_range_ratio,
-                input_range_ratio=args.random_input_range_ratio,
-                output_range_ratio=args.random_output_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
