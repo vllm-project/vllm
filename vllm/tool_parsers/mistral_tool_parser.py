@@ -323,7 +323,7 @@ class MistralToolParser(ToolParser):
                     )[0]
                     tool_calls = json.loads(raw_tool_call)
                 except (IndexError, json.JSONDecodeError):
-                    logger.exception("Error in extracting tool call from response: {e}")
+                    logger.exception("Error in extracting tool call from response.")
                     # If raw decoding and decoding post regex rule fails, then just
                     # return content.
                     return ExtractedToolCallInformation(
