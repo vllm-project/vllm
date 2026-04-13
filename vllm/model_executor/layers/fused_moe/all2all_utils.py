@@ -225,6 +225,14 @@ def maybe_make_prepare_finalize(
 
     elif moe.use_fi_nvl_one_sided_kernels:
         assert quant_config is not None
+        if quant_config.quant_dtype != "nvfp4":
+            raise ValueError(
+                "The 'flashinfer_nvlink_one_sided' all2all backend only "
+                "supports nvfp4 activation quantization, but got "
+                f"quant_dtype={quant_config.quant_dtype!r}. Use a different "
+                "all2all backend (e.g. 'flashinfer_nvlink_two_sided' or "
+                "'allgather_reducescatter') for non-nvfp4 models."
+            )
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
