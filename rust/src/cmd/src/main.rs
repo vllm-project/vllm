@@ -2,6 +2,7 @@ mod cli;
 mod logging;
 mod managed_engine;
 
+use std::env;
 use std::process::ExitStatus;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -11,6 +12,33 @@ use tracing::{info, warn};
 
 use crate::cli::{Cli, Command};
 use crate::managed_engine::{ManagedEngineHandle, allocate_handshake_port};
+
+const TOKIO_WORKER_THREADS_ENV: &str = "TOKIO_WORKER_THREADS";
+const DEFAULT_MAX_TOKIO_WORKER_THREADS: usize = 32;
+
+/// Cap the default number of Tokio worker threads if the user did not explicitly set
+/// `TOKIO_WORKER_THREADS` to avoid spawning too many threads on machines with a large number of
+/// CPUs, which may lead to excessive context switching and degraded performance.
+fn tokio_worker_threads() -> Option<usize> {
+    if env::var_os(TOKIO_WORKER_THREADS_ENV).is_some() {
+        return None;
+    }
+
+    std::thread::available_parallelism()
+        .map(|parallelism| {
+            let available = parallelism.get();
+            let worker_threads = available.min(DEFAULT_MAX_TOKIO_WORKER_THREADS);
+            if worker_threads < available {
+                info!(
+                    available_parallelism = available,
+                    capped_worker_threads = worker_threads,
+                    "capping tokio worker threads, set {TOKIO_WORKER_THREADS_ENV} to override"
+                );
+            }
+            worker_threads
+        })
+        .ok()
+}
 
 /// Reason that caused a managed `serve` session to stop.
 #[derive(Debug)]
@@ -41,11 +69,23 @@ async fn shutdown_signal() {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     logging::init_tracing();
     let cli = Cli::parse();
 
+    let mut runtime = tokio::runtime::Builder::new_multi_thread();
+    runtime.enable_all();
+    if let Some(worker_threads) = tokio_worker_threads() {
+        runtime.worker_threads(worker_threads);
+    }
+
+    runtime
+        .build()
+        .context("failed to build Tokio runtime")?
+        .block_on(async_main(cli))
+}
+
+async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
         Command::Serve(args) => {
