@@ -360,9 +360,13 @@ def _rocm_aiter_fused_topk_fake(
     router_logits: torch.Tensor,
     top_k: int,
     gate_up: bool,
-) -> None:
-    # tuple[torch.Tensor, torch.Tensor]:
-    pass
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = x.shape[0]
+    topk_weights = torch.empty(
+        (num_tokens, top_k), dtype=torch.float32, device=x.device
+    )
+    topk_indices = torch.empty((num_tokens, top_k), dtype=torch.int32, device=x.device)
+    return topk_weights, topk_indices
 
 
 # Cache whether aiter supports FP8 MLA parameters

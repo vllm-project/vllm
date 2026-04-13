@@ -9,6 +9,7 @@ from compressed_tensors.quantization import QuantizationArgs, QuantizationStrate
 from torch.nn import Parameter
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
@@ -16,19 +17,20 @@ from vllm.model_executor.kernels.linear import (
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    STRATEGY_TO_PARAMETER_TYPE,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    maybe_post_process_fp8_weight_block,
-    process_fp8_weight_block_strategy,
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    create_fp8_quant_key,
     kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
@@ -36,19 +38,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
 )
-from vllm.model_executor.parameter import (
-    BlockQuantScaleParameter,
-    ChannelQuantScaleParameter,
-    PerTensorScaleParameter,
-)
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
-
-strategy_to_parameter_type = {
-    QuantizationStrategy.BLOCK: BlockQuantScaleParameter,
-    QuantizationStrategy.CHANNEL: ChannelQuantScaleParameter,
-    QuantizationStrategy.TENSOR: PerTensorScaleParameter,
-}
 
 STATIC_QUANT = True
 DYNAMIC_QUANT = False
@@ -68,6 +59,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.weight_quant = weight_quant
         self.strategy = weight_quant.strategy
         self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
         self.fp8_linear: Any = None
@@ -115,7 +107,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # WEIGHT SCALE
         weight_scale = create_fp8_scale_parameter(
-            strategy_to_parameter_type[self.strategy],
+            STRATEGY_TO_PARAMETER_TYPE[self.strategy],
             output_partition_sizes,
             input_size_per_partition,
             layer.weight_block_size,
@@ -169,10 +161,12 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         elif self.strategy == QuantizationStrategy.BLOCK:
             assert self.is_static_input_scheme is False
-            weight, weight_scale = process_fp8_weight_block_strategy(
-                layer.weight, layer.weight_scale
-            )
-            input_scale = None
+            self.fp8_linear.process_weights_after_loading(layer)
+
+            layer.input_scale = None
+            # fp8_linear.process_weights_after_loading applies the post process
+            # and reassigns the weight and weight_scale buffers to layer attributes.
+            return
 
         else:
             raise ValueError(
@@ -191,8 +185,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         else:
             layer.input_scale = None
-        if self.strategy == QuantizationStrategy.BLOCK:
-            maybe_post_process_fp8_weight_block(layer)
 
         if hasattr(self, "fp8_linear"):
             self.fp8_linear.process_weights_after_loading(layer)
@@ -203,13 +195,4 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if self.weight_block_size is not None:
-            return self.w8a8_block_fp8_linear.apply(
-                input=x,
-                weight=layer.weight,
-                weight_scale=layer.weight_scale,
-                input_scale=layer.input_scale,
-                bias=bias,
-            )
-
         return self.fp8_linear.apply_weights(layer, x, bias)

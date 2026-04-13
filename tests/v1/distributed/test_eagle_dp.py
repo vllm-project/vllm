@@ -37,7 +37,7 @@ else:
     strict=False,
 )
 async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
-    if not current_platform.is_rocm():
+    if not current_platform.is_rocm() and not current_platform.is_xpu():
         # This test checks that running a model with and without eagle
         # leads to identical tokens.
         #

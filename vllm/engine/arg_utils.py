@@ -416,6 +416,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    numa_bind: bool = ParallelConfig.numa_bind
+    numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
+    numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -860,6 +863,13 @@ class EngineArgs:
         parallel_group.add_argument(
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
+        )
+        parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
+        parallel_group.add_argument(
+            "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
+        )
+        parallel_group.add_argument(
+            "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1581,7 +1591,7 @@ class EngineArgs:
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context, model_config
         )
-
+        self._set_default_reasoning_config_args()
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1826,6 +1836,9 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            numa_bind=self.numa_bind,
+            numa_bind_nodes=self.numa_bind_nodes,
+            numa_bind_cpus=self.numa_bind_cpus,
         )
 
         speculative_config = self.create_speculative_config(
@@ -2219,6 +2232,13 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
+
+    def _set_default_reasoning_config_args(self):
+        if not self.reasoning_parser:
+            return
+        if self.reasoning_config is None:
+            self.reasoning_config = ReasoningConfig()
+        self.reasoning_config.reasoning_parser = self.reasoning_parser
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,

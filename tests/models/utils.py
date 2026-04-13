@@ -375,6 +375,7 @@ def softmax(data):
 @dataclass
 class ModelInfo:
     name: str
+    revision: str | None = None
     architecture: str = ""
     dtype: str = "auto"
     max_model_len: int | None = None
