@@ -20,8 +20,12 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 from ..inductor_pass import enable_fake_mode
-from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
-from .act_quant_fusion import ActivationQuantPattern
+from ..vllm_inductor_pass import (
+    VllmFusionPatternMatcherPass,
+    VllmInductorPass,
+    VllmPatternMatcherPass,
+    VllmPatternReplacement,
+)
 from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
@@ -338,7 +342,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
         return self.hash_source(self, *fusion_patterns)
 
 
-class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
+class AiterSiluMulFp8GroupQuantPattern(VllmPatternReplacement):
     """
     This pattern fuses aiter silu_and_mul & group fp8 quant custom
     ops into an aiter silu_and_mul_group_fp8_quant op.
@@ -357,26 +361,29 @@ class AiterSiluMulFp8GroupQuantPattern(ActivationQuantPattern):
             self.silu_and_mul_matcher.inputs()[0],
         ]
 
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        def pattern(
+    @property
+    def pattern(self):
+        def _pattern(
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at1 = self.silu_and_mul_matcher(input)
             at2 = self.quant_matcher(at1)
             return at2[0], at2[1]
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        def _replacement(
             input: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at = self.FUSED_SILU_MUL_QUANT_OP(x=input, group_size=128)
             return at[0], at[1]
 
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
-        )
+        return _replacement
 
 
-class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmPatternMatcherPass):
+class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmFusionPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
@@ -386,29 +393,12 @@ class RocmAiterSiluMulFp8GroupQuantFusionPass(VllmPatternMatcherPass):
     https://github.com/pytorch/pytorch/pull/139321#issuecomment-2452354980
     """
 
-    @enable_fake_mode
     def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config)
+        super().__init__(config, "rocm_aiter_silu_mul_fp8_group_quant_fusion_pass")
 
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="rocm_aiter_silu_mul_fp8_group_quant_fusion_pass"
-        )
+        self.register(AiterSiluMulFp8GroupQuantPattern())
 
-        AiterSiluMulFp8GroupQuantPattern().register(self.patterns)
-
-        self.dump_patterns(config, self.patterns)
-
-    @VllmInductorPass.time_and_log
-    def __call__(self, graph: torch.fx.Graph) -> None:
-        self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
-
-    def uuid(self) -> str:
-        fusion_patterns = [
-            ActivationQuantPattern,
-            AiterSiluMulFp8GroupQuantPattern,
-        ]
-        return VllmInductorPass.hash_source(self, *fusion_patterns)
+        self.dump_patterns(config, self.pm_pass)
 
 
 class AddAiterRMSNormPadPattern:
