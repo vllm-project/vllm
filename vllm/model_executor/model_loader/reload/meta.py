@@ -23,6 +23,8 @@ SKIP_MODULES: set[str] = {"HadamardTransform"}
 
 SKIP_TENSORS: set[str] = {
     "bias",
+    "w13_bias",
+    "w2_bias",
     "_expert_map",
     "expert_mask",
     "expert_global_to_physical",
