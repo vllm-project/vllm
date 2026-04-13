@@ -171,6 +171,90 @@ class GGUFModelLoader(BaseModelLoader):
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
+        if model_type in ("qwen3_5", "qwen3_5_text"):
+            model_type = "qwen35"
+            # dt_bias may not exist in GGUF (can be folded into dt_proj)
+            sideload_params.append(
+                re.compile(
+                    r"model\.(language_model\.)?layers\.\d+"
+                    r"\.linear_attn\.dt_bias"
+                )
+            )
+            if is_multimodal:
+                # Manual GGUF→HF mappings for Qwen3.5 merger (mmproj)
+                # gguf-py MMPROJ map doesn't have linear_fc1/fc2 patterns
+                gguf_to_hf_name_map["mm.0.weight"] = (
+                    "model.visual.merger.linear_fc1.weight"
+                )
+                gguf_to_hf_name_map["mm.0.bias"] = (
+                    "model.visual.merger.linear_fc1.bias"
+                )
+                gguf_to_hf_name_map["mm.2.weight"] = (
+                    "model.visual.merger.linear_fc2.weight"
+                )
+                gguf_to_hf_name_map["mm.2.bias"] = (
+                    "model.visual.merger.linear_fc2.bias"
+                )
+                gguf_to_hf_name_map["mm.input_norm.weight"] = (
+                    "model.visual.merger.norm.weight"
+                )
+                gguf_to_hf_name_map["mm.input_norm.bias"] = (
+                    "model.visual.merger.norm.bias"
+                )
+        if model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+            model_type = "qwen35moe"
+            # dt_bias may not exist in GGUF (can be folded into dt_proj)
+            sideload_params.append(
+                re.compile(
+                    r"model\.(language_model\.)?layers\.\d+"
+                    r"\.linear_attn\.dt_bias"
+                )
+            )
+            if is_multimodal:
+                # Same merger mappings for MoE variant
+                gguf_to_hf_name_map["mm.0.weight"] = (
+                    "model.visual.merger.linear_fc1.weight"
+                )
+                gguf_to_hf_name_map["mm.0.bias"] = (
+                    "model.visual.merger.linear_fc1.bias"
+                )
+                gguf_to_hf_name_map["mm.2.weight"] = (
+                    "model.visual.merger.linear_fc2.weight"
+                )
+                gguf_to_hf_name_map["mm.2.bias"] = (
+                    "model.visual.merger.linear_fc2.bias"
+                )
+                gguf_to_hf_name_map["mm.input_norm.weight"] = (
+                    "model.visual.merger.norm.weight"
+                )
+                gguf_to_hf_name_map["mm.input_norm.bias"] = (
+                    "model.visual.merger.norm.bias"
+                )
+            # GGUF layer map assumes merged expert weights
+            num_layers = text_config.num_hidden_layers
+            # Multimodal uses model.language_model.layers prefix
+            layer_prefix = (
+                "model.language_model.layers"
+                if is_multimodal
+                else "model.layers"
+            )
+            layer_prefix_re = layer_prefix.replace(".", "\\.")
+            for idx in range(num_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+                    f"{layer_prefix}.{idx}.mlp.experts.0.down_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
+                    f"{layer_prefix}.{idx}.mlp.experts.0.gate_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
+                    f"{layer_prefix}.{idx}.mlp.experts.0.up_proj.weight"
+                )
+                sideload_params.append(
+                    re.compile(
+                        f"{layer_prefix_re}\\.{idx}"
+                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
         if model_type == "minimax_m2":
             model_type = "minimax-m2"
             # GGUF layer map assumes merged expert weights
@@ -207,7 +291,12 @@ class GGUFModelLoader(BaseModelLoader):
 
         if is_multimodal:
             mm_proj_arch = gguf.MODEL_ARCH.MMPROJ
-            vision_num_layers = config.vision_config.num_hidden_layers
+            # Some vision configs use 'depth' instead of 'num_hidden_layers'
+            # (e.g. Qwen3_5VisionConfig)
+            vision_num_layers = getattr(
+                config.vision_config, "num_hidden_layers",
+                getattr(config.vision_config, "depth", 0),
+            )
             vision_name_map = gguf.get_tensor_name_map(mm_proj_arch, vision_num_layers)
         else:
             vision_name_map = None
@@ -271,6 +360,10 @@ class GGUFModelLoader(BaseModelLoader):
             # gguf-py expects it.
             if hf_name.startswith("language_model."):
                 hf_name = hf_name[15:]  # Remove 'language_model.'
+            elif hf_name.startswith("model.language_model."):
+                # Qwen3.5-style: model.language_model.X → model.X
+                # gguf-py text tensor map expects model.layers.* format
+                hf_name = "model." + hf_name[21:]
 
             # Parse parameter name and suffix
             if hf_name.endswith((".weight", ".bias")):
@@ -287,6 +380,10 @@ class GGUFModelLoader(BaseModelLoader):
             # Priority 1: Search vision/projector parameters for multimodal models
             if vision_name_map is not None:
                 gguf_name = vision_name_map.get_name(base_name)
+                # Try without 'model.' prefix for vision params
+                # (Qwen3.5 HF uses model.visual.* but gguf-py expects visual.*)
+                if gguf_name is None and base_name.startswith("model."):
+                    gguf_name = vision_name_map.get_name(base_name[6:])
 
             # Priority 2: Search text backbone parameters
             if gguf_name is None:
@@ -358,41 +455,156 @@ class GGUFModelLoader(BaseModelLoader):
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         """
         Iterate over GGUF model weights, loading from both main model file and
-        mmproj.gguf for multimodal Gemma3 models.
+        mmproj.gguf for multimodal models.
 
-        For Gemma3 multimodal GGUF models:
-        - Main file (gemma-3-*.gguf): Language model weights (model.*)
+        For multimodal GGUF models:
+        - Main file (*.gguf): Language model weights (blk.*)
         - mmproj file (mmproj*.gguf): Vision tower + projector weights (v.*, mm.*)
 
         Yields:
             Tuples of (parameter_name, tensor) for all model weights
         """
         hf_config = model_config.hf_config
-        is_multimodal = hasattr(hf_config, "vision_config")
-
+        is_multimodal = (
+            hasattr(hf_config, "vision_config")
+            and hf_config.vision_config is not None
+        )
+        mmproj_file = (
+            detect_gguf_multimodal(model_name_or_path)
+            if is_multimodal
+            else None
+        )
         if is_multimodal:
-            # Load mm_proj (mm_encoder + projector) for multimodal weights
-            mmproj_file = detect_gguf_multimodal(model_name_or_path)
             assert mmproj_file is not None, (
-                "Could not find mm_proj file for multimodal GGUF model"
+                "Could not find mm_proj file for multimodal GGUF model. "
+                "Please ensure mmproj.gguf is in the same directory or "
+                "available in the HF repo."
             )
-            yield from gguf_quant_weights_iterator(mmproj_file, gguf_to_hf_name_map)
+            # Qwen3.5 uses 3D conv (temporal_patch_size>1) for patch_embed
+            # but GGUF mmproj stores it as 4D (2D conv). Expand to 5D.
+            temporal_patch_size = getattr(
+                hf_config.vision_config, "temporal_patch_size", 1
+            )
+            needs_patch_embed_expansion = temporal_patch_size > 1
+            if needs_patch_embed_expansion:
+                for name, weight in gguf_quant_weights_iterator(
+                    mmproj_file, gguf_to_hf_name_map
+                ):
+                    if (
+                        "patch_embed.proj.weight" in name
+                        and weight.dim() == 4
+                    ):
+                        weight = (
+                            weight.unsqueeze(2)
+                            .repeat(1, 1, temporal_patch_size, 1, 1)
+                            / temporal_patch_size
+                        )
+                    yield name, weight
+            else:
+                yield from gguf_quant_weights_iterator(
+                    mmproj_file, gguf_to_hf_name_map
+                )
 
         gguf_files = self._get_all_gguf_files(model_name_or_path)
         if len(gguf_files) > 1:
-            yield from gguf_quant_weights_iterator_multi(
+            main_iter = gguf_quant_weights_iterator_multi(
                 gguf_files, gguf_to_hf_name_map
             )
         else:
-            yield from gguf_quant_weights_iterator(
+            main_iter = gguf_quant_weights_iterator(
                 model_name_or_path, gguf_to_hf_name_map
             )
+
+        # Qwen3.5-specific GGUF weight transformations
+        model_type = hf_config.model_type
+        is_qwen35 = model_type in ("qwen3_5", "qwen3_5_moe")
+        if is_qwen35:
+            # Modules forced unquantized: GGUF may have them quantized
+            # but model uses plain params. Skip their qweight/qweight_type.
+            skip_quant_prefixes = ("lm_head.", "embed_tokens.")
+            for name, weight in main_iter:
+                # Skip GGUF quant params for forced-unquantized modules
+                if any(p in name for p in skip_quant_prefixes) and (
+                    "qweight" in name
+                ):
+                    continue
+                # GDN: GGUF stores conv1d as 2D [d, k] but model
+                # expects 3D [d, 1, k] (depthwise Conv1d).
+                if "conv1d.weight" in name and weight.dim() == 2:
+                    weight = weight.unsqueeze(1)
+                # GGUF flattens small linear layers (e.g. shared expert
+                # gate [1, hidden] → [hidden]). Restore the output dim.
+                if (
+                    name.endswith(".weight")
+                    and weight.dim() == 1
+                    and "norm" not in name
+                ):
+                    weight = weight.unsqueeze(0)
+                yield name, weight
+        else:
+            yield from main_iter
+
+    def _ensure_mmproj(
+        self, model_config: ModelConfig, local_model_path: str
+    ) -> None:
+        """Download mmproj file for multimodal GGUF models if not present.
+
+        When using HF repos, the mmproj file may need to be downloaded
+        separately so it ends up in the same cache directory as the main
+        GGUF file.
+        """
+        hf_config = model_config.hf_config
+        is_multimodal = (
+            hasattr(hf_config, "vision_config")
+            and hf_config.vision_config is not None
+        )
+        if not is_multimodal:
+            return
+
+        # Already available locally
+        if detect_gguf_multimodal(local_model_path) is not None:
+            return
+
+        # Try to download from the same HF repo
+        model_name = model_config.model
+        repo_id = None
+        if "/" in model_name and model_name.endswith(".gguf"):
+            repo_id = model_name.rsplit("/", 1)[0]
+        elif "/" in model_name and ":" in model_name:
+            repo_id = model_name.rsplit(":", 1)[0]
+
+        if repo_id is None:
+            return
+
+        try:
+            from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+
+            repo_files = list_filtered_repo_files(
+                repo_id,
+                allow_patterns=["*mmproj*.gguf"],
+                revision=model_config.revision,
+            )
+            for mmproj_file in repo_files:
+                logger.info(
+                    "Auto-downloading mmproj file: %s from %s",
+                    mmproj_file,
+                    repo_id,
+                )
+                hf_hub_download(
+                    repo_id=repo_id,
+                    filename=mmproj_file,
+                    revision=model_config.revision,
+                )
+                return
+        except Exception as e:
+            logger.warning("Failed to auto-download mmproj: %s", e)
 
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)
 
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         local_model_path = self._prepare_weights(model_config)
+        self._ensure_mmproj(model_config, local_model_path)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         model.load_weights(
             self._get_weights_iterator(model_config, local_model_path, gguf_weights_map)
@@ -403,6 +615,7 @@ class GGUFModelLoader(BaseModelLoader):
     ) -> nn.Module:
         device_config = vllm_config.device_config
         local_model_path = self._prepare_weights(model_config)
+        self._ensure_mmproj(model_config, local_model_path)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
         gguf_files = self._get_all_gguf_files(local_model_path)
@@ -421,6 +634,14 @@ class GGUFModelLoader(BaseModelLoader):
             for name, weight_type in weight_type_map.items()
             if weight_type in ("F32", "F16", "BF16") and name.endswith(".weight")
         ]
+        # Qwen3.5 multimodal: lm_head and embed_tokens use
+        # ParallelLMHead/VocabParallelEmbedding which don't support
+        # GGUF quantized params when routed through AutoWeightsLoader.
+        model_type = model_config.hf_config.model_type
+        if model_type in ("qwen3_5", "qwen3_5_moe"):
+            for name in ("lm_head", "embed_tokens"):
+                if name not in unquant_names:
+                    unquant_names.append(name)
         logger.debug("GGUF unquantized modules: %s", unquant_names)
         if TYPE_CHECKING:
             vllm_config.quant_config = cast(GGUFConfig, vllm_config.quant_config)
