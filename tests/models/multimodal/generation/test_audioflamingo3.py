@@ -98,15 +98,12 @@ def llm():
     model_info = HF_EXAMPLE_MODELS.get_hf_info("AudioFlamingo3ForConditionalGeneration")
     model_info.check_transformers_version(on_fail="skip")
 
-    try:
-        return LLM(
-            model=MODEL_NAME,
-            dtype="bfloat16",
-            enforce_eager=True,
-            limit_mm_per_prompt={"audio": 1},
-        )
-    except Exception as e:
-        pytest.skip(f"Failed to load model {MODEL_NAME}: {e}")
+    return LLM(
+        model=MODEL_NAME,
+        dtype="bfloat16",
+        enforce_eager=True,
+        limit_mm_per_prompt={"audio": 1},
+    )
 
 
 def test_single_generation(llm):

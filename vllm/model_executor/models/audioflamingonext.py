@@ -27,35 +27,17 @@ from transformers.models.audioflamingonext import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .musicflamingo import (
-    MusicFlamingoDummyInputsBuilder,
-    MusicFlamingoEmbeddingInputs,
-    MusicFlamingoEncoder,
-    MusicFlamingoFeatureInputs,
-    MusicFlamingoInputs,
-    MusicFlamingoMultiModalProcessor,
-    MusicFlamingoMultiModalProjector,
-    MusicFlamingoProcessingInfo,
-    MusicFlamingoRotaryEmbedding,
+    MusicFlamingoDummyInputsBuilder as AudioFlamingoNextDummyInputsBuilder,
 )
 from .musicflamingo import (
     MusicFlamingoForConditionalGeneration as _MusicFlamingoForConditionalGeneration,
 )
-
-AudioFlamingoNextFeatureInputs = MusicFlamingoFeatureInputs
-AudioFlamingoNextEmbeddingInputs = MusicFlamingoEmbeddingInputs
-AudioFlamingoNextInputs = MusicFlamingoInputs
-
-
-class AudioFlamingoNextEncoder(MusicFlamingoEncoder):
-    pass
-
-
-class AudioFlamingoNextRotaryEmbedding(MusicFlamingoRotaryEmbedding):
-    pass
-
-
-class AudioFlamingoNextMultiModalProjector(MusicFlamingoMultiModalProjector):
-    pass
+from .musicflamingo import (
+    MusicFlamingoMultiModalProcessor as AudioFlamingoNextMultiModalProcessor,
+)
+from .musicflamingo import (
+    MusicFlamingoProcessingInfo,
+)
 
 
 class AudioFlamingoNextProcessingInfo(MusicFlamingoProcessingInfo):
@@ -67,14 +49,6 @@ class AudioFlamingoNextProcessingInfo(MusicFlamingoProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
-
-
-class AudioFlamingoNextDummyInputsBuilder(MusicFlamingoDummyInputsBuilder):
-    pass
-
-
-class AudioFlamingoNextMultiModalProcessor(MusicFlamingoMultiModalProcessor):
-    pass
 
 
 @MULTIMODAL_REGISTRY.register_processor(
