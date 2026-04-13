@@ -76,6 +76,86 @@ direct_register_custom_op(
     fake_impl=_triton_per_token_group_quant_fp8_fake,
 )
 
+_FP8_DTYPE = current_platform.fp8_dtype()
+_FP8_MIN, _FP8_MAX = get_fp8_min_max()
+_FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
+
+
+@triton.jit
+def _fused_per_token_quant_fp8_kernel(
+    x_ptr,
+    out_q_ptr,
+    out_s_ptr,
+    num_columns,
+    x_row_stride,
+    eps,
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """Fuse per-token abs-max scale computation and FP8 quantization
+    into a single kernel, avoiding torch.compile decomposition."""
+    row = tl.program_id(0)
+
+    x_ptr += (row.to(tl.int64) * x_row_stride)
+    out_q_ptr += (row.to(tl.int64) * num_columns)
+
+    cols = tl.arange(0, BLOCK)
+    mask = cols < num_columns
+
+    x = tl.load(x_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+
+    absmax = tl.maximum(tl.max(tl.abs(x)), eps)
+    scale = absmax * (1.0 / fp8_max)
+
+    x_q = tl.clamp(x / scale, fp8_min, fp8_max).to(out_q_ptr.dtype.element_ty)
+
+    tl.store(out_q_ptr + cols, x_q, mask=mask)
+    tl.store(out_s_ptr + row, scale)
+
+
+def _fused_per_token_quant_fp8(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused per-token FP8 quantization: computes per-row abs-max scale and
+    quantizes to FP8 in a single Triton kernel."""
+    x_2d = x.contiguous().view(-1, x.shape[-1])
+    M, N = x_2d.shape
+
+    out_q = torch.empty_like(x_2d, dtype=_FP8_DTYPE)
+    out_s = torch.empty(M, 1, device=x.device, dtype=torch.float32)
+
+    BLOCK = triton.next_power_of_2(N)
+
+    _fused_per_token_quant_fp8_kernel[(M,)](
+        x_2d,
+        out_q,
+        out_s,
+        N,
+        x_2d.stride(0),
+        _FP8_MIN_SCALING_FACTOR,
+        fp8_min=float(_FP8_MIN),
+        fp8_max=float(_FP8_MAX),
+        BLOCK=BLOCK,
+    )
+
+    return out_q.view(x.shape), out_s.view(*x.shape[:-1], 1)
+
+
+def _fused_per_token_quant_fp8_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    out_q = torch.empty_like(x, dtype=_FP8_DTYPE)
+    out_s = torch.empty(*x.shape[:-1], 1, device=x.device, dtype=torch.float32)
+    return out_q, out_s
+
+
+direct_register_custom_op(
+    "fused_per_token_quant_fp8",
+    _fused_per_token_quant_fp8,
+    fake_impl=_fused_per_token_quant_fp8_fake,
+)
+
 
 def input_to_float8(
     x: torch.Tensor, dtype: torch.dtype | None = None
