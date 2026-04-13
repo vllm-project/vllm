@@ -1664,6 +1664,9 @@ async def main() -> None:
             f"{Color.GREEN}Writing per-request stats JSON: "
             f"{args.stats_json_output}{Color.RESET}"
         )
+        os.makedirs(
+            os.path.dirname(os.path.abspath(args.stats_json_output)), exist_ok=True
+        )
         with open(args.stats_json_output, "w") as f:
             json.dump(stats_data, f, indent=2)
 
