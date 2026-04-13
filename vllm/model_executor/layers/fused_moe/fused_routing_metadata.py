@@ -84,8 +84,7 @@ def _fused_routing_kernel1(
     sort_keys = (safe_eid.to(tl.uint32) << 16) | offs_p.to(tl.uint32)
     sorted_keys = tl.sort(sort_keys, 0)
 
-    # Extract sorted expert IDs and original pair indices
-    sorted_eid = (sorted_keys >> 16).to(tl.int32)
+    # Extract original pair indices from lower 16 bits
     sorted_orig_idx = (sorted_keys & 0xFFFF).to(tl.int32)
 
     # combine_indx[sorted_pos] = original_pair_index
@@ -94,17 +93,14 @@ def _fused_routing_kernel1(
     tl.store(combine_ptr + offs_p, sorted_orig_idx)
 
     # dispatch_indx[original_pair] = sorted_pos (inverse permutation)
-    # Write dispatch by scattering: for each sorted position sp,
-    # dispatch[sorted_orig_idx[sp]] = sp
-    for sp in tl.static_range(0, P_val):
-        orig_idx = tl.load(combine_ptr + sp)
-        tl.store(dispatch_ptr + orig_idx, sp)
+    # Vectorized scatter: dispatch[sorted_orig_idx[sp]] = sp
+    tl.store(dispatch_ptr + sorted_orig_idx, offs_p, mask=offs_p < P_actual)
 
     # --- Step 2: Compute histogram from sorted order ---
     # Count how many valid pairs map to each expert.
     # Use vectorized comparison against expert IDs.
     hist = tl.zeros((N_EXPERTS_val,), dtype=tl.int32)
-    for p in tl.static_range(0, P_val):
+    for p in range(P_val):
         eid = tl.load(topk_ids_ptr + p).to(tl.int32)
         valid = (eid >= 0)
         match = tl.where((offs_e == eid) & valid, 1, 0)
@@ -123,20 +119,15 @@ def _fused_routing_kernel1(
     # slice_offs[N_EXPERTS] = cum[N_EXPERTS-1] = total
     tl.store(slice_offs_ptr + offs_e, exc_sum, mask=offs_e < N_EXPERTS_val)
     # Store the total at position N_EXPERTS_val
-    # Total = last element of cum
     total = tl.sum(hist, 0)
-    if N_EXPERTS_val > 0:
-        tl.store(slice_offs_ptr + N_EXPERTS_val, total)
+    tl.store(slice_offs_ptr + N_EXPERTS_val, total)
 
     # --- Step 4: Build gate_scal in sorted order ---
-    # gate_scal[sorted_pos] = topk_weights[combine[sorted_pos]]
-    weights = tl.load(topk_weights_ptr + offs_p, mask=offs_p < P_actual,
-                      other=-1.0)
-    # Gather weights by sorted_orig_idx
-    for sp in tl.static_range(0, P_val):
-        orig = tl.load(combine_ptr + sp)
-        w = tl.load(topk_weights_ptr + orig)
-        tl.store(gate_scal_ptr + sp, w)
+    # Vectorized gather: gate_scal[sp] = topk_weights[sorted_orig_idx[sp]]
+    gathered_weights = tl.load(topk_weights_ptr + sorted_orig_idx,
+                               mask=offs_p < P_actual, other=-1.0)
+    tl.store(gate_scal_ptr + offs_p, gathered_weights,
+             mask=offs_p < P_actual)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +166,7 @@ def _fused_routing_kernel2(
     block_offs_vals = tl.zeros((EP1_PAD,), dtype=tl.int32)
     running_blocks = 0
 
-    for e in tl.static_range(0, N_EXPERTS_val):
+    for e in range(N_EXPERTS_val):
         h = tl.load(hist_ptr + e)
         block_offs_vals = tl.where(offs_ep1 == e, running_blocks,
                                    block_offs_vals)
@@ -197,11 +188,11 @@ def _fused_routing_kernel2(
              mask=offs_tiles < MAX_TILES)
 
     # Fill block_schedule entries for each expert
-    for e in tl.static_range(0, N_EXPERTS_val):
+    for e in range(N_EXPERTS_val):
         h = tl.load(hist_ptr + e)
         n_tiles = (h + ((1 << block_m_log2) - 1)) >> block_m_log2
         tile_start = tl.load(block_offs_ptr + base_offs + e)
-        for b in tl.static_range(0, TILE_LIMIT):
+        for b in range(TILE_LIMIT):
             if b < n_tiles:
                 val = (b << 16) + e
                 tl.store(
