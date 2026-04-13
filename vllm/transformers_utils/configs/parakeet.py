@@ -54,15 +54,19 @@ class ExtractorConfig:
     n_fft: int = 512
     padding_value: float = 0.0
 
-    @staticmethod
-    def from_hf_config(config: PretrainedConfig) -> "ExtractorConfig":
+    @classmethod
+    def from_hf_config(cls, config: PretrainedConfig) -> "ExtractorConfig":
         assert isinstance(config, PretrainedConfig)
-        hop_length = int(getattr(config, "hop_length", ExtractorConfig.hop_length))
-        return ExtractorConfig(
+        defaults = ("hop_length", "win_length", "preemphasis", "n_fft", "padding_value")
+        optional_kwargs = {
+            name: getattr(config, name) for name in defaults if hasattr(config, name)
+        }
+
+        return cls(
             feature_size=config.num_mel_bins,
             sampling_rate=config.sampling_rate,
-            hop_length=hop_length,
             subsampling_factor=config.subsampling_factor,
             subsampling_conv_kernel_size=config.subsampling_conv_kernel_size,
             subsampling_conv_stride=config.subsampling_conv_stride,
+            **optional_kwargs,
         )
