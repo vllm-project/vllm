@@ -102,10 +102,11 @@ class TestValidateNcclHcaSyntax:
 class TestExpandNcclHcaPattern:
     def test_prefix_match(self):
         result = nic_utils.expand_nccl_hca_pattern("mlx5", SAMPLE_IB_DEVICES)
+        # sorted() uses lexicographic order: "mlx5_10:1" < "mlx5_1:1"
         assert result == [
             "mlx5_0:1",
-            "mlx5_1:1",
             "mlx5_10:1",
+            "mlx5_1:1",
             "mlx5_2:1",
             "mlx5_2:2",
             "mlx5_3:1",
@@ -119,7 +120,8 @@ class TestExpandNcclHcaPattern:
     def test_prefix_match_hits_mlx5_10(self):
         # mlx5_1 (prefix) should match mlx5_1 AND mlx5_10
         result = nic_utils.expand_nccl_hca_pattern("mlx5_1", SAMPLE_IB_DEVICES)
-        assert result == ["mlx5_1:1", "mlx5_10:1"]
+        # Lexicographic: "mlx5_10:1" < "mlx5_1:1"
+        assert result == ["mlx5_10:1", "mlx5_1:1"]
 
     def test_with_port(self):
         result = nic_utils.expand_nccl_hca_pattern("mlx5_2:1", SAMPLE_IB_DEVICES)
