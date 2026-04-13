@@ -192,6 +192,12 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class JinaForRankingConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.embedding_size = 512
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -226,8 +232,8 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         config = model_config.hf_config
         config.num_labels = 1
         pooler_config = model_config.pooler_config
-        if pooler_config.logit_bias is None:
-            pooler_config.logit_bias = 2.65
+        if pooler_config.logit_mean is None:
+            pooler_config.logit_mean = 2.65
 
 
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
@@ -612,6 +618,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,

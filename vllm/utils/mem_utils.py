@@ -13,7 +13,11 @@ import torch.types
 
 from vllm.platforms import current_platform
 
-from .mem_constants import GiB_bytes, MiB_bytes
+from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
+
+
+def format_kib(b: int) -> str:
+    return f"{round(b / KiB_bytes, 2)}"
 
 
 def format_mib(b: int) -> str:
