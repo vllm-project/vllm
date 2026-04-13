@@ -25,7 +25,6 @@ if TYPE_CHECKING:
 
 else:
     RequestLogger = object
-    SupportedTask = object
 
 
 logger = init_logger(__name__)
