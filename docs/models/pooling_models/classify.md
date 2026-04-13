@@ -294,11 +294,12 @@ Example configuration:
 --pooler-config '{"use_activation": true, "logit_mean": 4.5, "logit_sigma": 1.0}'
 ```
 
-!!! note "Deprecated parameters"
-    `logit_bias` and `logit_scale` are deprecated aliases for `logit_mean` and `logit_sigma` respectively. When using `logit_scale`, it is automatically converted to `logit_sigma = 1/logit_scale`. These deprecated parameters will be removed in a future release.
-
 ## Removed Features
 
 ### Remove softmax from PoolingParams
 
 We have already removed `softmax` and `activation` from PoolingParams. Instead, use `use_activation`, since we allow `classify` and `token_classify` to use any activation function.
+
+### Remove `logit_bias` and `logit_scale`
+
+`logit_bias` and `logit_scale` are deprecated aliases for `logit_mean` and `logit_sigma` respectively. When using `logit_scale`, it is automatically converted to `logit_sigma = 1/logit_scale`. These deprecated parameters will be removed in v0.21.

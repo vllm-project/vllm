@@ -92,16 +92,16 @@ class PoolerConfig:
     activation((logit - logit_mean) / logit_sigma). Defaults to None.
     """
 
-    # Deprecated aliases — will be removed in a future release
+    # Deprecated aliases — will be removed in v0.21
     logit_bias: float | None = None
     """
-    Deprecated: Use logit_mean instead. Will be removed in a future release.
+    Deprecated: Use logit_mean instead. Will be removed in v0.21.
     """
 
     logit_scale: float | None = None
     """
     Deprecated: Use logit_sigma instead (note: logit_sigma = 1/logit_scale).
-    Will be removed in a future release.
+    Will be removed in v0.21.
     """
 
     ## for reward models
@@ -127,7 +127,7 @@ class PoolerConfig:
                     "`logit_bias` is deprecated, use `logit_mean` instead."
                 )
             logger.warning(
-                "`logit_bias` is deprecated and will be removed in a future release. "
+                "`logit_bias` is deprecated and will be removed in v0.21. "
                 "Use `logit_mean` instead."
             )
             self.logit_mean = self.logit_bias
@@ -141,7 +141,7 @@ class PoolerConfig:
                     "`logit_scale` is deprecated, use `logit_sigma` instead."
                 )
             logger.warning(
-                "`logit_scale` is deprecated and will be removed in a future release. "
+                "`logit_scale` is deprecated and will be removed in v0.21. "
                 "Use `logit_sigma` instead (logit_sigma = 1/logit_scale)."
             )
             if self.logit_scale == 0:
