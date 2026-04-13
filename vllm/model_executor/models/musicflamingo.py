@@ -93,6 +93,25 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
         position_angles = self._compute_position_angles(self.inv_freq)
         self.register_buffer("position_angles", position_angles, persistent=False)
 
+    def _restore_fp32_rope_buffers(self) -> None:
+        rope_init_fn: Callable = self.compute_default_rope_parameters
+        if self.rope_type != "default":
+            rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
+        inv_freq, self.attention_scaling = rope_init_fn(
+            self.config, self.inv_freq.device
+        )
+
+        # Keep RoPE state in fp32 to avoid long-range phase drift
+        # after model-wide bf16 casts.
+        self.inv_freq = inv_freq
+        self.original_inv_freq = inv_freq.clone()
+        self.position_angles = self._compute_position_angles(inv_freq)
+
+    def _apply(self, fn):
+        super()._apply(fn)
+        self._restore_fp32_rope_buffers()
+        return self
+
     @staticmethod
     def compute_default_rope_parameters(
         config: MusicFlamingoConfig | None = None,

@@ -138,6 +138,8 @@ def test_audioflamingonext_audio_feature_pipeline_matches_hf_small_config():
         AudioFlamingoNextEncoder,
         AudioFlamingoNextMultiModalProjector,
         AudioFlamingoNextRotaryEmbedding,
+    )
+    from vllm.model_executor.models.musicflamingo import (
         _build_audio_timestamps,
         apply_rotary_time_emb,
     )
@@ -192,6 +194,9 @@ def test_audioflamingonext_audio_feature_pipeline_matches_hf_small_config():
 
     vllm_rope = AudioFlamingoNextRotaryEmbedding(config).eval()
     vllm_rope.load_state_dict(hf_model.pos_emb.state_dict(), strict=False)
+    vllm_rope = vllm_rope.to(dtype=torch.bfloat16)
+    assert vllm_rope.inv_freq.dtype == torch.float32
+    assert vllm_rope.position_angles.dtype == torch.float32
 
     input_features = torch.randn(3, 80, 3000)
     feature_attention_mask = torch.zeros(3, 3000, dtype=torch.bool)
