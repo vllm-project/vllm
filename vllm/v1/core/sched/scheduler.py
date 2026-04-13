@@ -1585,23 +1585,16 @@ class Scheduler(SchedulerInterface):
         self._enqueue_waiting_request(request)
         return False
 
-    def _get_routed_experts_block_ids(self, request: Request) -> list[int] | None:
-        """Get block IDs for the attention KV-cache group, or None."""
+    def _get_routed_experts_block_ids(self, request: Request) -> list[int]:
+        """Get block IDs for the attention KV-cache group."""
         kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
-        if kv_blocks is None:
-            return None
         all_block_ids = kv_blocks.get_block_ids()
-        if self.routed_experts_mgr.attn_gid >= len(all_block_ids):
-            return None
-        block_ids = all_block_ids[self.routed_experts_mgr.attn_gid]
-        return block_ids if block_ids else None
+        return all_block_ids[self.routed_experts_mgr.attn_gid]
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
         if not self.vllm_config.model_config.enable_return_routed_experts:
             return None
         block_ids = self._get_routed_experts_block_ids(request)
-        if block_ids is None:
-            return None
         return self.routed_experts_mgr.get(block_ids, request.num_tokens - 1)
 
     def pop_aborted_routed_experts(self, req_id: str) -> np.ndarray | None:
