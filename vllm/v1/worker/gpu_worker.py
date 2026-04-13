@@ -496,7 +496,9 @@ class Worker(WorkerBase):
             return None
 
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        pp_rank = get_pp_group().rank_in_group
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        return {pp_rank * tp_size + tp_rank: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
