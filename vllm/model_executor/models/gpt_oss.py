@@ -560,6 +560,14 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 pcp_rank=get_pcp_group().rank_in_group,
             )
 
+        def _is_mxfp4(weight_dtype: str | None) -> bool:
+            """Return True for any MXFP4 weight-dtype variant.
+
+            Covers "gpt_oss_mxfp4" (GptOssMxfp4MoEMethod) and "mxfp4"
+            (QuarkMoEMethod with fp4 weights) and any future variants.
+            """
+            return weight_dtype is not None and "mxfp4" in weight_dtype
+
         def _get_moe_weight_dtype(layer_id: int = 0) -> str | None:
             """Helper function to get MoE quantization weight dtype.
 
@@ -578,7 +586,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
         moe_weight_dtype = _get_moe_weight_dtype(layer_id=0)
 
-        if moe_weight_dtype == "mxfp4":
+        if _is_mxfp4(moe_weight_dtype):
             # MXFP4 requires OCP_MX_BLOCK_SIZE alignment
             intermediate_size_block = intermediate_size // OCP_MX_BLOCK_SIZE
             per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
@@ -682,7 +690,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 continue
 
             # Unified handler for mxfp4 weights and scales
-            elif moe_quant_method == "mxfp4" and any(
+            elif _is_mxfp4(moe_quant_method) and any(
                 name.endswith(suffix)
                 for suffix in [
                     ".w13_weight_scale",
@@ -1116,8 +1124,22 @@ class GptOssModel(nn.Module, EagleModelMixin):
             if hasattr(self.config, "quantization_config")
             else None
         )
-
+        # Normalize the checkpoint's quant_method to the internal name.
+        # Note: there are three places where "mxfp4" -> "gpt_oss_mxfp4"
+        # normalization occurs, each serving a different data path:
+        #   1. GptOssMxfp4Config.override_quantization_method() — sets
+        #      ModelConfig.quantization (used to select the QuantizationConfig
+        #      class at model init time), reading from model_arch_config which
+        #      is a snapshot taken before verify_and_update_model_config runs.
+        #   2. GptOssForCausalLMConfig.verify_and_update_model_config() —
+        #      patches hf_config.quantization_config in-place (a separate copy
+        #      of the dict from model_arch_config) for later hf_config lookups.
+        #   3. Here — reads directly from self.config (the raw HF config) which
+        #      may still carry the original "mxfp4" string from the checkpoint.
         if quant_method == "mxfp4":
+            quant_method = "gpt_oss_mxfp4"
+
+        if quant_method == "gpt_oss_mxfp4":
             return self._load_weights_mxfp4(
                 ep_rank_end,
                 ep_rank_start,
