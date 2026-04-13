@@ -513,6 +513,9 @@ def test_grouped_matmul_nvfp4_packed_matches_cutlass_reference() -> None:
         row_offset += rows
         scale_row_offset += a_scale.shape[0]
 
+    expert_offsets.append(row_offset)
+    a_scale_offsets.append(scale_row_offset)
+
     packed_a_fp4_t = torch.cat(packed_a_fp4, dim=0)
     packed_a_scale_t = torch.cat(packed_a_scale, dim=0)
     packed_b_fp4_t = torch.stack(packed_b_fp4, dim=0)

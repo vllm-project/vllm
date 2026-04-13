@@ -426,26 +426,6 @@ def _grouped_matmul_fp4_packed_persistent_kernel(
         tl.store(c_ptrs, c, mask=m_mask[:, None] & n_mask[None, :])
 
 
-def _canonicalize_grouped_offsets(
-    offsets: torch.Tensor,
-    *,
-    num_experts: int,
-    name: str,
-) -> torch.Tensor:
-    if offsets.ndim != 1:
-        raise RuntimeError(f"{name} must be 1-D, got shape {tuple(offsets.shape)}.")
-    if offsets.numel() == num_experts + 1:
-        offsets = offsets[:-1]
-    if offsets.numel() != num_experts:
-        raise RuntimeError(
-            f"{name} must have {num_experts} or {num_experts + 1} entries, "
-            f"got {offsets.numel()}."
-        )
-    if offsets.dtype not in (torch.int32, torch.int64):
-        offsets = offsets.to(dtype=torch.int32)
-    return offsets
-
-
 def _grouped_matmul_nvfp4_packed(
     a_fp4: torch.Tensor,
     b_fp4: torch.Tensor,
@@ -475,25 +455,18 @@ def _grouped_matmul_nvfp4_packed(
             scales.
         b_scale: [E, N_pad, K_s] float8_e4m3fn swizzled weight block scales.
         alpha: [E] float32 per-expert alpha.
-        expert_offsets: [E] or [E+1] start row offsets in ``a_fp4``/output.
+        expert_offsets: [E+1] int32 prefix-sum row offsets in ``a_fp4``/output.
         problem_sizes: [E, 3] int tensor containing per-expert (M, N, K).
-        a_scale_offsets: Optional [E] or [E+1] start row offsets in ``a_scale``.
-            If not provided, ``expert_offsets`` are reused.
+        a_scale_offsets: Optional [E+1] int32 prefix-sum row offsets in
+            ``a_scale``. If not provided, ``expert_offsets`` are reused.
         output: Pre-allocated [>= M_total, >= N_max] tensor for the GEMM output.
 
     Returns:
         [M_total, N_max] tensor with grouped expert GEMM outputs.
     """
-    assert a_fp4.ndim == 2 and b_fp4.ndim == 3, (
-        "Expected packed a_fp4=[M_total, K_packed] and b_fp4=[E, N, K_packed]."
-    )
     assert a_fp4.dtype == torch.uint8 and b_fp4.dtype == torch.uint8
-    assert a_scale.ndim == 2 and b_scale.ndim == 3
     assert a_scale.dtype == torch.float8_e4m3fn and b_scale.dtype == torch.float8_e4m3fn
     assert alpha.dtype == torch.float32
-    assert problem_sizes.ndim == 2 and problem_sizes.shape[1] == 3, (
-        f"Expected problem_sizes shape [E, 3], got {tuple(problem_sizes.shape)}."
-    )
 
     E = b_fp4.shape[0]
     if E == 0:
@@ -501,22 +474,11 @@ def _grouped_matmul_nvfp4_packed(
         N_out = b_fp4.shape[1]
         return output.flatten()[: M_logical * N_out].view(M_logical, N_out)
 
-    assert problem_sizes.shape[0] == E, (
-        f"Expected problem_sizes.shape[0] == num_experts ({E}), "
-        f"got {problem_sizes.shape[0]}."
-    )
-    assert b_fp4.shape[2] == a_fp4.shape[1], "Packed K dimensions must match."
-    assert alpha.numel() == E, f"alpha must have {E} elements, got {alpha.numel()}."
-
     if a_scale_offsets is None:
         a_scale_offsets = expert_offsets
 
-    expert_offsets = _canonicalize_grouped_offsets(
-        expert_offsets, num_experts=E, name="expert_offsets"
-    )
-    a_scale_offsets = _canonicalize_grouped_offsets(
-        a_scale_offsets, num_experts=E, name="a_scale_offsets"
-    )
+    expert_offsets = expert_offsets[:-1]
+    a_scale_offsets = a_scale_offsets[:-1]
 
     BLOCK_SIZE_M = 128
     BLOCK_SIZE_N = 128
