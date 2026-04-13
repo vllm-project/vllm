@@ -1274,6 +1274,10 @@ def _run_one_config(
 ) -> None:
     set_random_seed(7)
 
+    from .hack import findit
+
+    findit()
+
     """Generic test loop that sets up environment and delegates to test_body_fn.
 
     This function is called directly by test_moe_layer and test_moe_layer_eplb
