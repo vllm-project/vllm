@@ -570,7 +570,7 @@ class OpenAIServingChat(OpenAIServing):
                 parsers: list[Parser | None] = [
                     self.parser_cls(
                         tokenizer,
-                        request.tools if tool_choice_auto else None,
+                        request.tools,
                         chat_template_kwargs=chat_template_kwargs,
                     )
                     for _ in range(num_choices)
