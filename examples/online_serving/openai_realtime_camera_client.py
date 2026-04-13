@@ -9,7 +9,7 @@ frames are discarded and newer frames are kept (drop-oldest policy).
 
 Before running, start vLLM with a vision model that supports video, e.g.:
 
-    vllm serve Qwen2.5-VL-7B-Instruct --enforce-eager
+    vllm serve Qwen3-VL-8B-Instruct --enforce-eager
 
 Requirements:
 - websockets
