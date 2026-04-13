@@ -64,6 +64,6 @@ steps:
   device: h200_18gb
   soft_fail: true
   source_file_dependencies:
-  - requirements/nightly_torch_test.txt
+  - requirements/test/nightly-torch.txt
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
