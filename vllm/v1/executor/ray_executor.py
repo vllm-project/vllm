@@ -470,8 +470,29 @@ class RayDistributedExecutor(Executor):
     @staticmethod
     def _get_async_refs(refs, worker, timeout=None):
         ray.get(refs, timeout=timeout)
-        logger.info(f"get_async_refs worker: {worker}")
         return worker.execute_method.remote("get_execute_model_output")
+
+    @staticmethod
+    def _get_async_pp_refs(
+        refs,
+        worker,
+        expected_step_id: int,
+        timeout=None,
+    ):
+        marker = ray.get(refs, timeout=timeout)
+        if not isinstance(marker, tuple) or len(marker) != 2:
+            raise RuntimeError(
+                f"Unexpected PP async marker from compiled DAG: {marker!r}"
+            )
+        _, step_id = marker
+        if step_id != expected_step_id:
+            raise RuntimeError(
+                "PP async marker step mismatch: "
+                f"expected {expected_step_id}, got {step_id}"
+            )
+        return worker.execute_method.remote(
+            "get_execute_model_output", step_id=expected_step_id
+        )
 
 
     def _execute_dag(
@@ -493,8 +514,9 @@ class RayDistributedExecutor(Executor):
             with self.tracer.log_event("ray_executor.forward_dag_execute"):
                 if use_async_pp:
                     self._pp_async_step_id += 1
+                    submitted_step_id = self._pp_async_step_id
                     refs = self.forward_dag.execute(  # type: ignore
-                        (scheduler_output, grammar_output, self._pp_async_step_id)
+                        (scheduler_output, grammar_output, submitted_step_id)
                     )
                 else:
                     refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
@@ -502,13 +524,28 @@ class RayDistributedExecutor(Executor):
             if self.scheduler_config.async_scheduling:
                 assert non_block
 
-                if not use_async_pp:
+                if use_async_pp:
+                    # PP async: first wait for marker, then fetch this step's
+                    # materialized output by step_id.
+                    output_workers = self.pp_tp_workers[-1]
+                    assert len(refs) == len(output_workers), (
+                        "Ray compiled DAG outputs must match the last PP output "
+                        "worker group."
+                    )
+                    with self.tracer.log_event("ray_executor.wrap_async_pp_refs"):
+                        refs = [
+                            partial(
+                                RayDistributedExecutor._get_async_pp_refs,
+                                ref,
+                                worker,
+                                submitted_step_id,
+                            )
+                            for ref, worker in zip(refs, output_workers)
+                        ]
+                else:
                     # Non-PP async: delay output retrieval so the driver can
                     # schedule the next batch before blocking on this step's
                     # ModelRunnerOutput transfer.
-                    # For PP async, the last rank now returns ModelRunnerOutput
-                    # directly through the compiled DAG channel (same as
-                    # non-async PP), so no extra wrapping is needed here.
                     output_workers = self.workers
                     assert len(refs) == len(output_workers), (
                         "Ray compiled DAG outputs must match the output worker group."

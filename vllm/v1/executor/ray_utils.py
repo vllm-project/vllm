@@ -5,7 +5,7 @@ import atexit
 import os
 import time
 from collections import defaultdict, deque
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Union
 
 import vllm.platforms
@@ -65,6 +65,8 @@ try:
             self.compiled_dag_cuda_device_set = False
             self._execute_model_outputs = deque[Any]()
             self._pp_execute_model_outputs: dict[int, Any] = {}
+            self._pp_async_output_futures: dict[int, Future[Any]] = {}
+            self._pp_async_output_materializer = ThreadPoolExecutor(max_workers=1)
             # State for the early sampled-token irecv. The actual P2P traffic
             # runs on GPUModelRunner.pp_sampled_token_group so it does not
             # interfere with Ray compiled-DAG PP communication.
@@ -98,6 +100,7 @@ try:
             self._final_trace_saved = True
 
         def shutdown(self) -> None:
+            self._pp_async_output_materializer.shutdown(wait=False)
             self._save_trace()
             super().shutdown()
 
@@ -268,11 +271,29 @@ try:
                     and self._is_last_rank()
                 ):
                     if get_pp_group().world_size > 1:
-                        # PP async: return ModelRunnerOutput directly through the
-                        # compiled DAG channel.
+                        # PP async: return a marker immediately, and let the
+                        # driver fetch this step's output by step_id.
+                        assert step_id is not None, (
+                            "PP async path requires a step_id."
+                        )
                         if isinstance(output, AsyncModelRunnerOutput):
-                            output = output.get_output()
-                        return output
+                            # Keep at most one outstanding deferred async
+                            # output to preserve decode-step ordering.
+                            while self._pp_async_output_futures:
+                                oldest_step = min(self._pp_async_output_futures)
+                                oldest_fut = self._pp_async_output_futures.pop(
+                                    oldest_step
+                                )
+                                self._pp_execute_model_outputs[oldest_step] = (
+                                    oldest_fut.result()
+                                )
+                            fut = self._pp_async_output_materializer.submit(
+                                output.get_output
+                            )
+                            self._pp_async_output_futures[step_id] = fut
+                        else:
+                            self._pp_execute_model_outputs[step_id] = output
+                        return self.rpc_rank, step_id
                     # Non-PP async: buffer so the driver can schedule the next
                     # batch without blocking on this step's output transfer.
                     self._execute_model_outputs.append(output)
@@ -293,17 +314,17 @@ try:
             )
             with self.tracer.log_event("ray_utils.get_execute_model_output"):
                 if step_id is None:
-                    logger.info(
-                        "get_execute_model_output step=None deque_len=%s",
-                        len(self._execute_model_outputs),
-                    )
                     assert self._execute_model_outputs, "No execute_model output available"
                     output = self._execute_model_outputs.popleft()
                 else:
-                    assert step_id in self._pp_execute_model_outputs, (
-                        f"No execute_model output available for step {step_id}"
-                    )
-                    output = self._pp_execute_model_outputs.pop(step_id)
+                    if step_id in self._pp_async_output_futures:
+                        fut = self._pp_async_output_futures.pop(step_id)
+                        output = fut.result()
+                    else:
+                        assert step_id in self._pp_execute_model_outputs, (
+                            f"No execute_model output available for step {step_id}"
+                        )
+                        output = self._pp_execute_model_outputs.pop(step_id)
                 if isinstance(output, AsyncModelRunnerOutput):
                     # Ensure outputs crossing Ray compiled DAG are serializable.
                     # AsyncModelRunnerOutput holds CUDA events and cannot be
