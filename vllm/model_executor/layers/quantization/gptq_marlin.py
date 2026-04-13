@@ -823,8 +823,8 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=layer.w13_qweight,
+            w2=layer.w2_qweight,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
