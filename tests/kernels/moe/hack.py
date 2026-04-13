@@ -29,8 +29,8 @@ def find_cuda_home_1():
 
     # nvcc is typically at CUDA_HOME/bin/nvcc
     # So we go up two directories
-    nvcc_path = Path(nvcc_path).resolve()
-    cuda_home = nvcc_path.parent.parent
+    nvcc_path2 = Path(nvcc_path).resolve()  # noqa
+    cuda_home = str(nvcc_path2.parent.parent)  # noqa
 
     return cuda_home
 
