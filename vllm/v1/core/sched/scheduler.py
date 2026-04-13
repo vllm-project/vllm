@@ -996,14 +996,6 @@ class Scheduler(SchedulerInterface):
                 request.use_structured_output and not request.is_prefill_chunk
             )
 
-            # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
-            # may be updated again in _update_from_output for speculative
-            # decoding. However, it is safe to call the method here because
-            # encoder inputs are always part of the prompt, not the output,
-            # and thus are unaffected by speculative decoding.
-            if request.has_encoder_inputs:
-                self._free_encoder_inputs(request)
-
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
@@ -1388,6 +1380,10 @@ class Scheduler(SchedulerInterface):
                     num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
                     request_id=req_id,
                 )
+
+            # Free encoder inputs only after the step has actually executed.
+            if request.has_encoder_inputs:
+                self._free_encoder_inputs(request)
 
             stopped = False
             new_logprobs = None
@@ -1959,7 +1955,8 @@ class Scheduler(SchedulerInterface):
         )
         return SchedulerStats(
             num_running_reqs=len(self.running),
-            num_waiting_reqs=len(self.waiting) + len(self.skipped_waiting),
+            num_waiting_reqs=len(self.waiting),
+            num_skipped_waiting_reqs=len(self.skipped_waiting),
             kv_cache_usage=self.kv_cache_manager.usage,
             encoder_cache_usage=self._get_encoder_cache_usage(),
             prefix_cache_stats=prefix_cache_stats,

@@ -75,6 +75,7 @@ class Exaone4GatedMLP(nn.Module):
         reduce_results: bool = True,
         bias: bool = False,
         prefix: str = "",
+        use_data_parallel: bool = False,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -83,6 +84,7 @@ class Exaone4GatedMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel,
         )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
@@ -91,6 +93,7 @@ class Exaone4GatedMLP(nn.Module):
             quant_config=quant_config,
             reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
+            disable_tp=use_data_parallel,
         )
         if hidden_act != "silu":
             raise ValueError(
