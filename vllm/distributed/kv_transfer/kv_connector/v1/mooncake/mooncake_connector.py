@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import aiohttp
 import asyncio
+import copy
 import os
 import threading
 import time
@@ -165,10 +166,12 @@ class SendTask:
     send_request: dict[str, PushReqMeta] = field(default_factory=dict)
     # pd_head_ratio == 1 use
     wait_event: torch.npu.Event | None = None
+    wait_events: list[torch.npu.Event] = field(default_factory=list)
     # pd_head_ratio > 1 use
     k_cache: torch.Tensor | None = None
     v_cache: torch.Tensor | None = None
     layer_idx: int = 0
+    layer_idxs: list[int] = field(default_factory=list)
 
 @dataclass
 class SendBlockMeta:
@@ -318,8 +321,8 @@ class MooncakeConnector(KVConnectorBase_V1):
         self.connector_worker.start_load_kv(self._connector_metadata)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """MooncakeConnector does not do layerwise saving."""
-        pass
+        assert self.connector_worker is not None
+        self.connector_worker.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
         self,
@@ -872,6 +875,14 @@ class MooncakeConnectorWorker:
         self.is_kv_producer: bool = kv_transfer_config.kv_role == "kv_producer"
         self.is_kv_consumer: bool = kv_transfer_config.kv_role == "kv_consumer"
         self.use_layerwise = vllm_config.kv_transfer_config.kv_connector_extra_config.get("use_layerwise", False)
+        self.layer_chunk_size = max(
+            1,
+            int(
+                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
+                    "layer_chunk_size", 1
+                )
+            ),
+        )
         self.num_sender_workers = kv_transfer_config.kv_connector_extra_config.get(
             "num_workers", 10
         )
@@ -991,6 +1002,50 @@ class MooncakeConnectorWorker:
         self.layerwise_send_queue = asyncio.Queue[SendTask]()
         self.remote_agent_meta = dict() # {engine_id : agent_meta}
         self.total_layers = vllm_config.model_config.get_num_layers(vllm_config.parallel_config)
+        self.pending_layer_send_tasks: list[SendTask] = []
+
+    def _enqueue_layer_send_task(self, send_task: SendTask) -> None:
+        assert self.layerwise_send_queue is not None
+        self.sender_loop.call_soon_threadsafe(
+            self.layerwise_send_queue.put_nowait, send_task
+        )
+
+    def _flush_pending_layer_send_tasks(self) -> None:
+        if not self.pending_layer_send_tasks:
+            return
+
+        batch_task = SendTask(send_request=dict(self.pending_layer_send_tasks[0].send_request))
+        batch_task.wait_events = [
+            task.wait_event
+            for task in self.pending_layer_send_tasks
+            if task.wait_event is not None
+        ]
+        batch_task.layer_idxs = [task.layer_idx for task in self.pending_layer_send_tasks]
+        if batch_task.layer_idxs:
+            batch_task.layer_idx = batch_task.layer_idxs[-1]
+        if batch_task.wait_events:
+            batch_task.wait_event = batch_task.wait_events[-1]
+
+        logger.debug(
+            "MooncakeConnector flushing %d pending layerwise send tasks as one batch: %s.",
+            len(self.pending_layer_send_tasks),
+            batch_task.layer_idxs,
+        )
+        self._enqueue_layer_send_task(batch_task)
+        self.pending_layer_send_tasks.clear()
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        if not (self.use_layerwise and self.is_kv_producer):
+            return
+        if self.layer_chunk_size <= 1:
+            return
+        if not self.pending_layer_send_tasks:
+            return
+        # wait_for_layer_load is called before executing the current layer.
+        # When the current layer index reaches the end of a chunk boundary,
+        # flush all previously saved layers in the chunk.
+        if self.current_layer % self.layer_chunk_size == self.layer_chunk_size - 1:
+            self._flush_pending_layer_send_tasks()
 
     def save_kv_layer(
         self,
@@ -1009,18 +1064,27 @@ class MooncakeConnectorWorker:
 
             assert self.layerwise_send_queue is not None
             assert reshape_cache_event is not None
-            import copy
             layer_send_task = copy.deepcopy(connector_metadata.send_task)
 
             layer_send_task.wait_event = reshape_cache_event
+            layer_send_task.wait_events = [reshape_cache_event]
             layer_send_task.k_cache = keys
             layer_send_task.v_cache = values
             layer_send_task.layer_idx = self.current_layer
+            layer_send_task.layer_idxs = [self.current_layer]
 
-            logger.debug(f"MooncakeConnector save_kv_layer {self.current_layer} put : {layer_send_task.send_request.keys()} to layerwise_send_queue")
-            self.sender_loop.call_soon_threadsafe(
-                self.layerwise_send_queue.put_nowait, layer_send_task
+            logger.debug(
+                "MooncakeConnector save_kv_layer %s buffered : %s",
+                self.current_layer,
+                layer_send_task.send_request.keys(),
             )
+            if self.use_layerwise and self.layer_chunk_size > 1:
+                self.pending_layer_send_tasks.append(layer_send_task)
+            else:
+                self._enqueue_layer_send_task(layer_send_task)
+
+            if self.current_layer == self.total_layers - 1:
+                self._flush_pending_layer_send_tasks()
             self.current_layer += 1
     
     async def _mooncake_recv_listener(self, ready_event: threading.Event):
@@ -1125,12 +1189,16 @@ class MooncakeConnectorWorker:
         except Exception as e:
             logger.error(f"Error in _handle_request: {e}", exc_info=True)
 
-    def get_transfer_meta(self, send_task: SendTask, req_id: str, req_meta: PushReqMeta, remote_kv_base_addrs: list[int]):
+    def get_transfer_meta(
+        self,
+        layer_idx: int,
+        req_meta: PushReqMeta,
+        remote_kv_base_addrs: list[int],
+    ):
         src_list: list[str] = []
         dst_list: list[str] = []
         length_list: list[int] = []
 
-        layer_idx = send_task.layer_idx
         remote_block_ids = req_meta.remote_block_ids
         local_kv_base_addr = self.kv_caches_base_addr
         local_block_ids = req_meta.local_block_ids
@@ -1164,6 +1232,7 @@ class MooncakeConnectorWorker:
     def _transfer_kv_cache(self, send_task: SendTask):
         # Merge transmission tasks of the same session
         session_meta: dict[str, TransferMeta] = {}
+        layer_idxs = send_task.layer_idxs or [send_task.layer_idx]
         for req_id, req_meta in send_task.send_request.items():
             # assert req_meta.remote_engine_id in self.remote_agent_meta , f"[===] _transfer_kv_cache {req_meta.remote_engine_id} not in {self.remote_agent_meta.keys()}"
             # assert self.tp_rank in self.remote_agent_meta[req_meta.remote_engine_id] , f"[===] _transfer_kv_cache {self.tp_rank} not in {self.remote_agent_meta[req_meta.remote_engine_id]}"
@@ -1171,11 +1240,14 @@ class MooncakeConnectorWorker:
             if session_id not in session_meta:
                 session_meta[session_id] = TransferMeta(src=[], dst=[], length=[], req_ids=[], remote_worker_addr=None)
 
-            (src_list, dst_list, length_list) = self.get_transfer_meta(send_task, req_id, req_meta, remote_kv_base_addrs)
+            for layer_idx in layer_idxs:
+                (src_list, dst_list, length_list) = self.get_transfer_meta(
+                    layer_idx, req_meta, remote_kv_base_addrs
+                )
 
-            session_meta[session_id].src.extend(src_list)
-            session_meta[session_id].dst.extend(dst_list)
-            session_meta[session_id].length.extend(length_list)
+                session_meta[session_id].src.extend(src_list)
+                session_meta[session_id].dst.extend(dst_list)
+                session_meta[session_id].length.extend(length_list)
             session_meta[session_id].req_ids.append(req_id)
             session_meta[session_id].remote_worker_addr = remote_worker_addr
         """
@@ -1184,7 +1256,12 @@ class MooncakeConnectorWorker:
         You can manually build the master branch of the project at https://gitcode.com/cann/hixl
         to resolve this issue before the 8.5.RC1 release.
         """
-        send_task.wait_event.synchronize()  # type:ignore
+        wait_events = send_task.wait_events or (
+            [send_task.wait_event] if send_task.wait_event is not None else []
+        )
+        # for wait_event in wait_events:
+        wait_events[-1].synchronize()  # type:ignore
+        send_done = bool(layer_idxs) and layer_idxs[-1] == (self.total_layers - 1)
         for session_id, transfer_meta in session_meta.items():
             
             if len(transfer_meta.src) > 0:
@@ -1195,17 +1272,22 @@ class MooncakeConnectorWorker:
                     logger.error(
                         f"Mooncake transfer failed for send requests {transfer_meta.req_ids} kv cache to {session_id}"
                     )
-                    if send_task.layer_idx == (self.total_layers - 1):
+                    if send_done:
                         for req_id in transfer_meta.req_ids:
                             d_req_id = send_task.send_request[req_id].d_req_id
                             self.send_done_send_signal(
                                 d_req_id, transfer_meta.remote_worker_addr
                             )  # TODO Send a signal indicating transmission failure
                 else:
-                    if send_task.layer_idx == (self.total_layers - 1):
+                    if send_done:
                         for req_id in transfer_meta.req_ids:
                             d_req_id = send_task.send_request[req_id].d_req_id
-                            self.send_done_send_signal(d_req_id, transfer_meta.remote_worker_addr, layer_idx=send_task.layer_idx, total_layers=self.total_layers)
+                            self.send_done_send_signal(
+                                d_req_id,
+                                transfer_meta.remote_worker_addr,
+                                layer_idx=layer_idxs[-1],
+                                total_layers=self.total_layers,
+                            )
 
     def send_done_send_signal(self, req_id, remote_worker_addr, layer_idx=None, total_layers=None):
         logger.info(
@@ -1891,6 +1973,7 @@ class MooncakeConnectorWorker:
                     logger.info(f"MooncakeConnector start_load_kv update {self.remote_agent_meta}")
                     self.remote_agent_meta.update(metadata.agent_info)
                 self.current_layer = 0
+                self.pending_layer_send_tasks.clear()
 
 
 def group_concurrent_contiguous(
