@@ -7,14 +7,12 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import init_nvfp4_linear_kernel
+from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationNvFp4LinearKernel,
+)
 from vllm.model_executor.layers.quantization.quark.schemes.quark_scheme import (
     QuarkScheme,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    NvFp4LinearBackend,
-    apply_nvfp4_linear,
-    convert_to_nvfp4_linear_kernel_format,
-    select_nvfp4_linear_backend,
 )
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
@@ -41,17 +39,15 @@ class QuarkNVFP4(QuarkScheme):
     def __init__(
         self,
     ):
+        self.kernel = init_nvfp4_linear_kernel()
         self.group_size = 16
-        self.backend = select_nvfp4_linear_backend()
 
-        if self.backend != NvFp4LinearBackend.EMULATION:
+        if not isinstance(self.kernel, EmulationNvFp4LinearKernel):
             logger.warning_once(
-                "Only the backend NvFp4LinearBackend.EMULATION is tested with"
-                f" QuarkNVFP4, got backend={self.backend}. Use at your own risk."
+                "Only EmulationNvFp4LinearKernel is tested with"
+                " QuarkNVFP4, got kernel=%s. Use at your own risk.",
+                type(self.kernel).__name__,
             )
-            self.swizzle: bool | None = None
-        else:
-            self.swizzle = False
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -125,18 +121,19 @@ class QuarkNVFP4(QuarkScheme):
 
         weight_global_scale = layer.weight_scale_2.to(torch.float32)
 
-        if (
-            torch.unique(weight_global_scale).numel() != 1
-            and self.backend == NvFp4LinearBackend.EMULATION
-        ):
-            raise ValueError(
-                "Different weight_global_scale has different values for "
-                "parallel layers (e.g. q_proj, k_proj, v_proj) is not supported."
+        if torch.unique(weight_global_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This"
+                " will likely result in reduced accuracy. Please verify the"
+                " model accuracy. Consider using a checkpoint with a shared"
+                " global NVFP4 scale for fused layers."
             )
 
         weight_global_scale = weight_global_scale.max()
 
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
+        del layer.weight_scale_2
 
         layer.alpha = Parameter(
             layer.input_global_scale * layer.weight_global_scale, requires_grad=False
@@ -146,11 +143,7 @@ class QuarkNVFP4(QuarkScheme):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(
-            self.backend,
-            layer,
-        )
-        del layer.weight_scale_2
+        self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(
         self,
@@ -158,10 +151,4 @@ class QuarkNVFP4(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
-            swizzle=self.swizzle,
-        )
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
