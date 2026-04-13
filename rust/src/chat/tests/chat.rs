@@ -156,7 +156,7 @@ async fn connect_chat_llm_with_ipc(
 #[derive(Clone)]
 struct FakeChatBackend {
     has_template: bool,
-    model_id: Option<String>,
+    model_id: String,
 }
 
 #[derive(Debug)]
@@ -196,21 +196,21 @@ impl FakeChatBackend {
     fn new() -> Self {
         Self {
             has_template: true,
-            model_id: None,
+            model_id: "test-model".to_string(),
         }
     }
 
     fn without_template() -> Self {
         Self {
             has_template: false,
-            model_id: None,
+            model_id: "test-model".to_string(),
         }
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
             has_template: true,
-            model_id: Some(model_id.into()),
+            model_id: model_id.into(),
         }
     }
 }
@@ -220,8 +220,8 @@ impl TextBackend for FakeChatBackend {
         Arc::new(FakeChatTokenizer)
     }
 
-    fn model_id(&self) -> Option<&str> {
-        self.model_id.as_deref()
+    fn model_id(&self) -> &str {
+        &self.model_id
     }
 }
 
@@ -283,6 +283,10 @@ impl Tokenizer for FailingDecodeTokenizer {
 impl TextBackend for FailingDecodeBackend {
     fn tokenizer(&self) -> DynTokenizer {
         Arc::new(FailingDecodeTokenizer)
+    }
+
+    fn model_id(&self) -> &str {
+        self.inner.model_id()
     }
 }
 
@@ -1425,13 +1429,20 @@ async fn chat_stream_and_collect_preserve_prompt_and_sample_logprobs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chat_rejects_tool_parsing_without_model_hint() {
+async fn chat_rejects_unknown_tool_parser_before_engine_request() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
     let engine_id = b"engine-chat-tool-no-model".to_vec();
     let (shutdown_tx, engine_task) =
-        spawn_mock_engine_task(handshake_address.clone(), engine_id, |_, _| {
-            Box::pin(async move {})
+        spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
+            Box::pin(async move {
+                assert!(
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer))
+                        .await
+                        .is_err(),
+                    "chat request should fail before any engine request is sent"
+                );
+            })
         });
 
     let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
@@ -1440,13 +1451,18 @@ async fn chat_rejects_tool_parsing_without_model_hint() {
         &ipc,
         backend,
     )
-    .await;
+    .await
+    .with_tool_call_parser("definitely_missing_tool_parser");
     let error = match chat.chat(sample_tool_request("chat-tool-no-model")).await {
-        Ok(_) => panic!("tool parsing without model hint should fail"),
+        Ok(_) => panic!("unknown explicit tool parser should fail"),
         Err(error) => error,
     };
 
-    assert!(matches!(error, vllm_chat::Error::ToolParserRequiresModelId));
+    assert!(matches!(
+        error,
+        vllm_chat::Error::ToolParserUnavailableByName { name, .. }
+        if name == "definitely_missing_tool_parser"
+    ));
 
     let _ = shutdown_tx.send(());
     engine_task.await.unwrap();

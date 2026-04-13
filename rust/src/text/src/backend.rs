@@ -29,10 +29,8 @@ pub trait TextBackend: Send + Sync {
         false
     }
 
-    /// Return the backend model ID when available.
-    fn model_id(&self) -> Option<&str> {
-        None
-    }
+    /// Return the backend model ID.
+    fn model_id(&self) -> &str;
 
     /// Return tokenizer/model-derived hints used to enrich southbound sampling parameters.
     fn sampling_hints(&self) -> Result<SamplingHints> {

@@ -98,8 +98,8 @@ impl TextBackend for HfTextBackend {
         self.model_config.is_moe()
     }
 
-    fn model_id(&self) -> Option<&str> {
-        Some(&self.model_id)
+    fn model_id(&self) -> &str {
+        &self.model_id
     }
 
     fn sampling_hints(&self) -> Result<SamplingHints> {

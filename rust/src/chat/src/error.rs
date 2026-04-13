@@ -12,8 +12,6 @@ pub enum Error {
     MissingChatTemplate,
     #[error("chat template error: {0}")]
     ChatTemplate(String),
-    #[error("tool parsing requires a backend model ID")]
-    ToolParserRequiresModelId,
     #[error("tool parsing is not available for model `{model_id}`")]
     ToolParserUnavailableForModel { model_id: String },
     #[error(

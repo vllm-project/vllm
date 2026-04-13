@@ -395,7 +395,7 @@ async fn recv_engine_message(dealer: &mut DealerSocket) -> Vec<Bytes> {
 
 #[derive(Clone, Debug)]
 struct FakeChatBackend {
-    model_id: Option<String>,
+    model_id: String,
 }
 
 #[derive(Debug)]
@@ -420,12 +420,14 @@ impl Tokenizer for FakeChatTokenizer {
 
 impl FakeChatBackend {
     fn new() -> Self {
-        Self { model_id: None }
+        Self {
+            model_id: "test-model".to_string(),
+        }
     }
 
     fn with_model_id(model_id: impl Into<String>) -> Self {
         Self {
-            model_id: Some(model_id.into()),
+            model_id: model_id.into(),
         }
     }
 }
@@ -435,8 +437,8 @@ impl TextBackend for FakeChatBackend {
         Arc::new(FakeChatTokenizer)
     }
 
-    fn model_id(&self) -> Option<&str> {
-        self.model_id.as_deref()
+    fn model_id(&self) -> &str {
+        &self.model_id
     }
 }
 
@@ -494,6 +496,10 @@ impl Tokenizer for FailingDecodeTokenizer {
 impl TextBackend for FailingDecodeChatBackend {
     fn tokenizer(&self) -> DynTokenizer {
         Arc::new(FailingDecodeTokenizer)
+    }
+
+    fn model_id(&self) -> &str {
+        "test-model"
     }
 }
 

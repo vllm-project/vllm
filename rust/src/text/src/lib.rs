@@ -74,8 +74,8 @@ impl TextLlm {
         self
     }
 
-    /// Return the backend model ID when available.
-    pub fn model_id(&self) -> Option<&str> {
+    /// Return the backend model ID.
+    pub fn model_id(&self) -> &str {
         self.backend.model_id()
     }
 

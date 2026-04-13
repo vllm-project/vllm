@@ -7,20 +7,18 @@ mod tool;
 use std::sync::Arc;
 
 use futures::Stream;
-use reasoning_parser::{ParserFactory as ReasoningParserFactory, ReasoningParser};
+use openai_protocol::common::Tool as OpenAiTool;
+use reasoning_parser::ReasoningParser;
 use subenum::subenum;
-use tool_parser::ParserFactory as ToolParserFactory;
-use tracing::info;
+use tool_parser::ToolParser;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use self::reasoning::reasoning_event_stream;
 use self::tool::tool_event_stream;
 use crate::FinishReason;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
 use crate::output::structured::structured_chat_event_stream;
-use crate::renderers::ReasoningParserInit;
-use crate::request::{ChatTool, ChatToolChoice};
 
 /// Internal assistant event before final assembly.
 ///
@@ -116,6 +114,12 @@ trait AssistantEventStream = Stream<Item = Result<AssistantEvent>> + Send + 'sta
 pub(crate) trait DecodedTextEventStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
 pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'static;
 
+pub(crate) struct OutputProcessors {
+    pub(crate) reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    pub(crate) parser_tools: Vec<OpenAiTool>,
+    pub(crate) tool_parser: Option<Box<dyn ToolParser>>,
+}
+
 /// Transforms a raw generate-output token stream into structured chat events
 /// through three sequential stages once text decoding has already happened:
 ///
@@ -124,88 +128,15 @@ pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'st
 /// 3. [`structured_chat_event_stream`] — final block assembly
 pub(crate) fn output_stream(
     intermediate: bool,
-    tools: Vec<ChatTool>,
-    tool_choice: ChatToolChoice,
     decoded: impl DecodedTextEventStream,
-    reasoning_parser_init: ReasoningParserInit,
-    model_id: Option<&str>,
-    reasoning_parser_factory: &ReasoningParserFactory,
-    tool_parser_factory: &ToolParserFactory,
-    reasoning_parser_name: Option<&str>,
-    tool_call_parser_name: Option<&str>,
+    OutputProcessors {
+        reasoning_parser,
+        parser_tools,
+        tool_parser,
+    }: OutputProcessors,
 ) -> Result<impl ChatEventStream> {
-    let tool_parsing_enabled = matches!(tool_choice, ChatToolChoice::Auto) && !tools.is_empty();
-    let (tool_parser, parser_tools) = if tool_parsing_enabled {
-        let parser = if let Some(name) = tool_call_parser_name {
-            // Explicit parser name takes precedence.
-            tool_parser_factory
-                .registry()
-                .create_parser(name)
-                .ok_or_else(|| Error::ToolParserUnavailableByName {
-                    name: name.to_string(),
-                    available_names: Vec::new(),
-                })?
-        } else if let Some(model_id) = model_id {
-            tool_parser_factory
-                .registry()
-                .create_for_model(model_id)
-                .ok_or_else(|| Error::ToolParserUnavailableForModel {
-                    model_id: model_id.to_string(),
-                })?
-        } else {
-            return Err(Error::ToolParserRequiresModelId);
-        };
-        let parser_tools = tools.iter().map(ChatTool::to_openai_tool).collect();
-        (Some(parser), parser_tools)
-    } else {
-        (None, Vec::new())
-    };
-    let reasoning_parser = if let Some(name) = reasoning_parser_name {
-        // Explicit parser name takes precedence.
-        Some(
-            reasoning_parser_factory
-                .registry()
-                .create_parser(name)
-                .ok_or_else(|| Error::ReasoningParserUnavailableByName {
-                    name: name.to_string(),
-                    available_names: Vec::new(),
-                })?,
-        )
-    } else {
-        model_id.and_then(|model_id| {
-            reasoning_parser_factory
-                .registry()
-                .create_for_model(model_id)
-        })
-    };
-
-    LOG_ONCE.call_once(|| {
-        // TODO: tool-parser doesn't expose its model type
-        if let Some(reasoning_parser) = &reasoning_parser {
-            let model_type = reasoning_parser.model_type();
-            info!(model_type, "using reasoning parser");
-        }
-    });
-
-    let reasoning_parser = apply_reasoning_parser_init(reasoning_parser, reasoning_parser_init);
     let reasoning = reasoning_event_stream(decoded, reasoning_parser);
     let tool = tool_event_stream(reasoning, intermediate, parser_tools, tool_parser);
-    Ok(structured_chat_event_stream(tool))
-}
-
-static LOG_ONCE: std::sync::Once = std::sync::Once::new();
-
-fn apply_reasoning_parser_init(
-    mut reasoning_parser: Option<Box<dyn ReasoningParser>>,
-    reasoning_parser_init: ReasoningParserInit,
-) -> Option<Box<dyn ReasoningParser>> {
-    if let Some(parser) = reasoning_parser.as_mut() {
-        if reasoning_parser_init.mark_reasoning_started {
-            parser.mark_reasoning_started();
-        }
-        if reasoning_parser_init.mark_think_start_stripped {
-            parser.mark_think_start_stripped();
-        }
-    }
-    reasoning_parser
+    let structured = structured_chat_event_stream(tool);
+    Ok(structured)
 }

@@ -36,8 +36,9 @@ mod renderers;
 mod request;
 mod stream;
 
-use reasoning_parser::ParserFactory as ReasoningParserFactory;
-use tool_parser::ParserFactory as ToolParserFactory;
+use reasoning_parser::{ParserFactory as ReasoningParserFactory, ReasoningParser};
+use tool_parser::{ParserFactory as ToolParserFactory, ToolParser};
+use tracing::info;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
@@ -136,8 +137,8 @@ impl ChatLlm {
         &self.text
     }
 
-    /// Return the model ID reported by the underlying text backend when available.
-    pub fn model_id(&self) -> Option<&str> {
+    /// Return the model ID reported by the underlying text backend.
+    pub fn model_id(&self) -> &str {
         self.text.model_id()
     }
 
@@ -151,6 +152,9 @@ impl ChatLlm {
         request.validate()?;
 
         let rendered = self.backend.chat_renderer().render(&request)?;
+        let output_processors =
+            self.prepare_output_processors(&request, rendered.reasoning_parser_init)?;
+
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
             prompt: Prompt::Text(rendered.prompt),
@@ -163,18 +167,9 @@ impl ChatLlm {
             data_parallel_rank: request.data_parallel_rank,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from);
-        let structured_stream = output::output_stream(
-            request.intermediate,
-            request.tools,
-            request.tool_choice,
-            decoded_stream,
-            rendered.reasoning_parser_init,
-            self.text.model_id(),
-            &self.reasoning_parser_factory,
-            &self.tool_parser_factory,
-            self.reasoning_parser.as_deref(),
-            self.tool_call_parser.as_deref(),
-        )?;
+
+        let structured_stream =
+            output::output_stream(request.intermediate, decoded_stream, output_processors)?;
 
         Ok(ChatEventStream::new(
             request.request_id,
@@ -188,6 +183,98 @@ impl ChatLlm {
         Ok(())
     }
 }
+
+impl ChatLlm {
+    fn prepare_output_processors(
+        &self,
+        request: &ChatRequest,
+        reasoning_parser_init: ReasoningParserInit,
+    ) -> Result<output::OutputProcessors> {
+        let tool_parsing_enabled =
+            matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
+        let tool_parser = if tool_parsing_enabled {
+            Some(self.resolve_tool_parser()?)
+        } else {
+            None
+        };
+        let parser_tools = if tool_parsing_enabled {
+            request.tools.iter().map(ChatTool::to_openai_tool).collect()
+        } else {
+            Vec::new()
+        };
+        let reasoning_parser = self.resolve_reasoning_parser(reasoning_parser_init)?;
+
+        LOG_ONCE.call_once(|| {
+            // TODO: tool-parser doesn't expose its model type.
+            if let Some(reasoning_parser) = &reasoning_parser {
+                let model_type = reasoning_parser.model_type();
+                info!(model_type, "using reasoning parser");
+            }
+        });
+
+        Ok(output::OutputProcessors {
+            reasoning_parser,
+            parser_tools,
+            tool_parser,
+        })
+    }
+
+    fn resolve_tool_parser(&self) -> Result<Box<dyn ToolParser>> {
+        let registry = self.tool_parser_factory.registry();
+
+        if let Some(name) = self.tool_call_parser.as_deref() {
+            // Explicit parser name takes precedence.
+            return registry.create_parser(name).ok_or_else(|| {
+                Error::ToolParserUnavailableByName {
+                    name: name.to_string(),
+                    available_names: available_tool_parser_names(&self.tool_parser_factory),
+                }
+            });
+        }
+
+        let model_id = self.text.model_id();
+        registry
+            .create_for_model(model_id)
+            .ok_or_else(|| Error::ToolParserUnavailableForModel {
+                model_id: model_id.to_string(),
+            })
+    }
+
+    fn resolve_reasoning_parser(
+        &self,
+        reasoning_parser_init: ReasoningParserInit,
+    ) -> Result<Option<Box<dyn ReasoningParser>>> {
+        let registry = self.reasoning_parser_factory.registry();
+
+        let mut reasoning_parser = if let Some(name) = self.reasoning_parser.as_deref() {
+            // Explicit parser name takes precedence.
+            registry.create_parser(name).map(Some).ok_or_else(|| {
+                Error::ReasoningParserUnavailableByName {
+                    name: name.to_string(),
+                    available_names: available_reasoning_parser_names(
+                        &self.reasoning_parser_factory,
+                    ),
+                }
+            })?
+        } else {
+            registry.create_for_model(self.text.model_id())
+        };
+
+        // Apply initialization hints from the rendering result.
+        if let Some(parser) = reasoning_parser.as_mut() {
+            if reasoning_parser_init.mark_reasoning_started {
+                parser.mark_reasoning_started();
+            }
+            if reasoning_parser_init.mark_think_start_stripped {
+                parser.mark_think_start_stripped();
+            }
+        }
+
+        Ok(reasoning_parser)
+    }
+}
+
+static LOG_ONCE: std::sync::Once = std::sync::Once::new();
 
 #[cfg(test)]
 mod tests {
