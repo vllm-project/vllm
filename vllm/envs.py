@@ -1723,7 +1723,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_SPINLOCK_EXT": lambda: bool(
         int(
             os.getenv("VLLM_USE_SPINLOCK_EXT", "0")
-        ),
+        )
+    ),
 }
 
 
