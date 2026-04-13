@@ -15,6 +15,7 @@ from packaging import version
 from packaging.version import Version
 from torch.library import Library, infer_schema
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -365,8 +366,9 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        from vllm.platforms import current_platform
+
+        current_platform.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
@@ -706,7 +708,12 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
-HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.12.0.dev")
+HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+
+# Allow toggling LayerName usage via environment variable.
+# Defaults to True on torch >= 2.11, False otherwise.
+# Set VLLM_USE_LAYERNAME=0 to disable even on torch >= 2.11.
+_USE_LAYERNAME = HAS_OPAQUE_TYPE and envs.VLLM_USE_LAYERNAME
 
 if HAS_OPAQUE_TYPE:
     from torch._opaque_base import OpaqueBase
@@ -714,31 +721,51 @@ else:
     OpaqueBase = object  # type: ignore[misc, assignment]
 
 
-class ModuleName(OpaqueBase):  # type: ignore[misc]
+class LayerName(OpaqueBase):  # type: ignore[misc]
     """Wraps a module name string for use as a torch opaque type.
 
     When torch >= 2.11, this is registered as a hoisted value-type opaque
     object so that torch.compile lifts it as a graph input instead of baking
-    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    it as a constant.  This avoids per-layer recompilation for custom ops
+    that accept layer name strings (attention, MOE, KV cache, etc.).
     """
 
     def __init__(self, value: str):
         self.value = value
 
     def __eq__(self, other):
-        return isinstance(other, ModuleName) and self.value == other.value
+        return isinstance(other, LayerName) and self.value == other.value
 
     def __hash__(self):
         return hash(self.value)
 
     def __fx_repr__(self):
-        return (f"ModuleName({self.value!r})", {ModuleName})
+        return (f"LayerName({self.value!r})", {"LayerName": LayerName})
 
 
 if HAS_OPAQUE_TYPE:
     from torch._library.opaque_object import register_opaque_type
 
-    register_opaque_type(ModuleName, typ="value", hoist=True)
+    register_opaque_type(LayerName, typ="value", hoist=True)
+
+# On torch >= 2.11 (with VLLM_USE_LAYERNAME enabled), custom op
+# layer_name parameters use LayerName; otherwise they remain plain str.
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    LayerNameType: TypeAlias = str | LayerName
+else:
+    LayerNameType = LayerName if _USE_LAYERNAME else str
+
+
+def _resolve_layer_name(layer_name: str | LayerName) -> str:
+    """Unwrap a LayerName to str, or return str unchanged."""
+    return layer_name.value if isinstance(layer_name, LayerName) else layer_name
+
+
+def _encode_layer_name(layer_name: str) -> str | LayerName:
+    """Wrap a str layer name as LayerName when enabled."""
+    return LayerName(layer_name) if _USE_LAYERNAME else layer_name
 
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
