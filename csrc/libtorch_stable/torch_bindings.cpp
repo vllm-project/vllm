@@ -10,10 +10,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 #ifndef USE_ROCM
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 #endif
-
-  // Per-token group quantization
-  ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
-
   // Compute per-token-group FP8 quantized tensor and scaling factor.
   // The dummy arguments are here so we can correctly fuse with RMSNorm.
   ops.def(
@@ -22,8 +18,6 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "int group_size, float eps, float fp8_min, float fp8_max, bool "
       "scale_ue8m0, bool dummy_is_scale_transposed, bool dummy_is_tma_aligned "
       ") -> ()");
-  ops.impl("per_token_group_fp8_quant_packed",
-           TORCH_BOX(&per_token_group_quant_8bit_packed));
 
   // Compute per-token-group 8-bit quantized tensor and UE8M0-packed,
   // TMA-aligned scales for DeepGEMM.
@@ -32,13 +26,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor! output_s_packed, int group_size, float eps, float fp8_min, "
       "float fp8_max) -> ()");
 #ifndef USE_ROCM
-  ops.impl("per_token_group_quant_int8",
-           TORCH_BOX(&per_token_group_quant_int8));
   // Compute per-token-group INT8 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
+
   // CUTLASS w8a8 GEMM, supporting symmetric per-tensor or per-row/column
   // quantization, as well as bias
   ops.def(
@@ -210,8 +203,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
+  ops.impl("per_token_group_fp8_quant", TORCH_BOX(&per_token_group_quant_fp8));
+  ops.impl("per_token_group_fp8_quant_packed",
+           TORCH_BOX(&per_token_group_quant_8bit_packed));
+
 #ifndef USE_ROCM
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
+
+  ops.impl("per_token_group_quant_int8",
+           TORCH_BOX(&per_token_group_quant_int8));
 
   // CUTLASS scaled_mm ops
   ops.impl("cutlass_scaled_mm", TORCH_BOX(&cutlass_scaled_mm));
