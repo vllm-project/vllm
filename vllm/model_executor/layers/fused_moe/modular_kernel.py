@@ -748,6 +748,18 @@ class FusedMoEExperts(ABC):
         """
         return False
 
+    @property
+    def writes_final_output_directly(self) -> bool:
+        """
+        Whether apply() writes the fully reduced final output directly into the
+        provided output tensor.
+
+        Backends that return True may bypass framework-managed temporary
+        workspace allocation when they also manage their own internal
+        workspaces.
+        """
+        return False
+
 
 class FusedMoEExpertsModular(FusedMoEExperts):
     """
@@ -1026,6 +1038,17 @@ class FusedMoEKernelModularImpl:
             and moe_parallel_config.dp_size > 1
             and moe_parallel_config.use_ep
         )
+        self._empty_tensor_cache: dict[tuple[torch.device, torch.dtype], torch.Tensor] = {}
+
+    def _get_empty_tensor(
+        self, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
+        key = (device, dtype)
+        empty = self._empty_tensor_cache.get(key)
+        if empty is None:
+            empty = torch.empty((0,), device=device, dtype=dtype)
+            self._empty_tensor_cache[key] = empty
+        return empty
 
     def _allocate_buffers(
         self,
@@ -1191,6 +1214,7 @@ class FusedMoEKernelModularImpl:
 
     def _fused_experts(
         self,
+        output: torch.Tensor,
         in_dtype: torch.dtype,
         a1q: torch.Tensor,
         a1q_scale: torch.Tensor | None,
@@ -1218,19 +1242,24 @@ class FusedMoEKernelModularImpl:
         if M_full == 0:
             return torch.empty_like(a1q, dtype=in_dtype)
 
-        workspace13, workspace2, fused_out = self._allocate_buffers(
-            in_dtype,
-            a1q.device,
-            M_full,
-            M_full,
-            N,
-            K,
-            top_k,
-            global_num_experts,
-            local_num_experts,
-            expert_tokens_meta,
-            activation,
-        )
+        if self.fused_experts.writes_final_output_directly:
+            workspace13 = self._get_empty_tensor(a1q.device, in_dtype)
+            workspace2 = workspace13
+            fused_out = output
+        else:
+            workspace13, workspace2, fused_out = self._allocate_buffers(
+                in_dtype,
+                a1q.device,
+                M_full,
+                M_full,
+                N,
+                K,
+                top_k,
+                global_num_experts,
+                local_num_experts,
+                expert_tokens_meta,
+                activation,
+            )
 
         self.fused_experts.apply(
             output=fused_out,
@@ -1379,6 +1408,7 @@ class FusedMoEKernelModularImpl:
         )
 
         fused_out = self._fused_experts(
+            output=output,
             in_dtype=hidden_states.dtype,
             a1q=a1q,
             a1q_scale=a1q_scale,
