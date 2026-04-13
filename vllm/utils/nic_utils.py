@@ -310,22 +310,17 @@ def _get_nic_device_spec(parallel_config, gpu_index: int) -> str | None:
     return devices[gpu_index]
 
 
-def _strip_nccl_syntax(pattern: str) -> str:
-    """Best-effort fallback: strip NCCL-only prefixes (``=``, ``^``) from
-    a pattern so it can be passed to UCX as plain device names.
-
-    Exclude tokens (``^``) are dropped entirely since UCX has no exclusion
-    mechanism.  Exact-match tokens (``=mlx5_0:1``) are reduced to bare
-    names (``mlx5_0:1``).
-    """
-    parts: list[str] = []
+def _pattern_uses_nccl_syntax(pattern: str) -> bool:
+    """Return whether the pattern uses NCCL-only syntax (``=``, ``^``,
+    or bare prefix without ``:port``) that requires sysfs expansion."""
     for token in pattern.split(","):
         token = token.strip()
-        if token.startswith("^"):
-            # UCX cannot express exclusions; skip
-            continue
-        parts.append(token.lstrip("="))
-    return ",".join(parts) if parts else pattern
+        if token.startswith("^") or token.startswith("="):
+            return True
+        # A bare name without :port is a prefix pattern in NCCL
+        if ":" not in token:
+            return True
+    return False
 
 
 def _expand_for_ucx(pattern: str) -> str:
@@ -336,13 +331,17 @@ def _expand_for_ucx(pattern: str) -> str:
     """
     available = enumerate_ib_devices()
     if available is None:
-        logger.warning(
-            "No InfiniBand devices in sysfs; cannot expand pattern "
-            "for UCX_NET_DEVICES (pattern: %s). "
-            "Stripping NCCL-only syntax as best-effort fallback.",
-            pattern,
-        )
-        return _strip_nccl_syntax(pattern)
+        if _pattern_uses_nccl_syntax(pattern):
+            raise RuntimeError(
+                f"NIC binding pattern {pattern!r} uses NCCL_IB_HCA syntax "
+                "(prefix match, = exact, or ^ exclude) that requires "
+                "expansion against /sys/class/infiniband/, but no "
+                "InfiniBand devices were found in sysfs. Use explicit "
+                "'device:port' format (e.g. 'mlx5_0:1') or ensure the "
+                "RDMA sysfs is available."
+            )
+        # Plain device:port tokens can be passed through as-is
+        return pattern
     return ",".join(expand_nccl_hca_pattern(pattern, available))
 
 
