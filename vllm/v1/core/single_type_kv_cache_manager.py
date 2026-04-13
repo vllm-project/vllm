@@ -315,7 +315,6 @@ class SingleTypeKVCacheManager(ABC):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -325,9 +324,8 @@ class SingleTypeKVCacheManager(ABC):
         `max_length`. The prefix should be a common prefix hit for all the
         kv cache groups in `kv_cache_group_ids`. If no cache hit is found,
         return an empty list.
-        If eagle is enabled, drop the last matched block to force recompute the
-        last block to get the required hidden states for eagle drafting head.
-        Need to be customized for each attention type.
+        Note: EAGLE drop (dropping the last matched block) is handled at
+        the Coordinator level, not here in the Manager.
 
         Args:
             block_hashes: The block hashes of the request.
@@ -335,7 +333,6 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
             alignment_tokens: The returned cache hit length (in tokens) should
                 be a multiple of this value (in tokens). By default, it should
                 be set to the block_size.
@@ -425,7 +422,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -454,10 +450,6 @@ class FullAttentionManager(SingleTypeKVCacheManager):
                     computed.append(cached)
             else:
                 break
-        if use_eagle and computed_blocks[0]:
-            # Need to drop the last matched block if eagle is enabled.
-            for computed in computed_blocks:
-                computed.pop()
         while (
             block_size != alignment_tokens  # Faster for common case.
             and len(computed_blocks[0]) * block_size % alignment_tokens != 0
@@ -490,7 +482,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -506,12 +497,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         sliding_window_contiguous_blocks = cdiv(
             kv_cache_spec.sliding_window - 1, kv_cache_spec.block_size
         )
-        if use_eagle:
-            # Need to drop the last matched block if eagle is enabled. For
-            # sliding window layer, we achieve this by increasing the number of
-            # contiguous blocks needed for prefix cache hit by one and dropping
-            # the last matched block.
-            sliding_window_contiguous_blocks += 1
 
         # TODO: reduce i by sliding_window_contiguous_blocks when cache miss, to
         # optimize the time complexity from O(max_num_blocks) to
@@ -560,18 +545,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 del computed[num_contiguous_blocks:]
             while (
                 block_size != alignment_tokens  # Faster for common case.
-                and len(computed_blocks[0]) * block_size % alignment_tokens != 0
-            ):
-                for computed in computed_blocks:
-                    computed.pop()
-        if use_eagle and computed_blocks[0]:
-            for computed in computed_blocks:
-                computed.pop()
-            # Re-align after eagle pop: the pop may break the alignment
-            # when block_size != alignment_tokens (hybrid models with
-            # different page sizes, e.g. Gemma4).
-            while (
-                block_size != alignment_tokens
                 and len(computed_blocks[0]) * block_size % alignment_tokens != 0
             ):
                 for computed in computed_blocks:
@@ -629,7 +602,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -660,7 +632,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
             kv_cache_group_ids: The ids of the kv cache groups.
             block_pool: The block pool.
             kv_cache_spec: The kv cache spec.
-            use_eagle: Whether to use eagle.
             dcp_world_size: The world size of decode context parallelism.
             pcp_world_size: The world size of prefill context parallelism.
             alignment_tokens: The returned cache hit length (in tokens) should
@@ -672,9 +643,6 @@ class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, ChunkedLocalAttentionSpec), (
             "ChunkedLocalAttentionManager can only be used for "
             "chunked local attention groups"
-        )
-        assert use_eagle is False, (
-            "Hybrid KV cache is not supported for " + "eagle + chunked local attention."
         )
         assert dcp_world_size == 1, "DCP not support chunked local attn now."
         assert pcp_world_size == 1, "PCP not support chunked local attn now."
@@ -789,7 +757,6 @@ class MambaManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
@@ -1071,7 +1038,6 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
         kv_cache_group_ids: list[int],
         block_pool: BlockPool,
         kv_cache_spec: KVCacheSpec,
-        use_eagle: bool,
         alignment_tokens: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,

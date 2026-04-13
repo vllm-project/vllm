@@ -357,12 +357,32 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             kv_cache_group_ids=[0],
             block_pool=self.block_pool,
             kv_cache_spec=self.kv_cache_spec,
-            use_eagle=self.use_eagle,
             alignment_tokens=self.block_size,
             dcp_world_size=self.dcp_world_size,
             pcp_world_size=self.pcp_world_size,
         )
-        return hit_blocks, len(hit_blocks[0]) * self.block_size
+        hit_length = len(hit_blocks[0]) * self.block_size
+
+        # EAGLE drop: reduce hit_length by one block and re-query the manager
+        # to verify the hit is still valid at the reduced length. Re-querying
+        # (rather than simply popping) is necessary for attention types like
+        # sliding window where contiguity requirements may invalidate the
+        # remaining blocks after a pop.
+        if self.use_eagle and hit_length > 0:
+            hit_length = max(0, hit_length - self.block_size)
+            hit_blocks = self.single_type_managers[0].find_longest_cache_hit(
+                block_hashes=block_hashes,
+                max_length=hit_length,
+                kv_cache_group_ids=[0],
+                block_pool=self.block_pool,
+                kv_cache_spec=self.kv_cache_spec,
+                alignment_tokens=self.block_size,
+                dcp_world_size=self.dcp_world_size,
+                pcp_world_size=self.pcp_world_size,
+            )
+            hit_length = len(hit_blocks[0]) * self.block_size
+
+        return hit_blocks, hit_length
 
 
 class HybridKVCacheCoordinator(KVCacheCoordinator):
@@ -463,6 +483,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         types. This converges because length monotonically decreases and is
         bounded below by 0.
 
+        EAGLE drop is applied once after convergence, not inside the loop.
+        This avoids the spiral block dropping problem where repeated EAGLE
+        drops in each iteration would reduce the hit length to 0.
+        See https://github.com/vllm-project/vllm/issues/32802.
+
         Args:
             block_hashes: The block hashes of the request.
             max_cache_hit_length: The maximum length of the cache hit.
@@ -484,16 +509,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         hit_length = max_cache_hit_length
         hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
 
-        # Simple hybrid (1 full attn + 1 other): one iteration suffices.
-        # Full attn is always first if it exists. This avoids EAGLE drops
-        # being applied multiple times to non-full-attn groups.
-        # FIXME (yifan): However, for complex hybrid models with multiple attn
-        # groups, we still have the EAGLE spiral block dropping problem. See
-        # discussion in issue https://github.com/vllm-project/vllm/issues/32802.
-        is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
-            self.attention_groups[0][0], FullAttentionSpec
-        )
-
+        # Phase 1: Iterative convergence (no EAGLE drop, so no spiral).
         while True:
             curr_hit_length = hit_length
 
@@ -517,7 +533,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                         kv_cache_group_ids=group_ids,
                         block_pool=self.block_pool,
                         kv_cache_spec=spec,
-                        use_eagle=self.use_eagle,
                         alignment_tokens=self.lcm_block_size,
                     )
                     curr_hit_length = len(hit_blocks[0]) * spec.block_size
@@ -527,17 +542,55 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             if curr_hit_length >= hit_length:
                 break
             hit_length = curr_hit_length
-            # Simple hybrid: exit after one iteration
-            if is_simple_hybrid:
-                break
 
-        # Truncate full attention blocks to final hit_length (if present)
+        # Phase 2: Truncate full attention blocks to final hit_length.
         spec, group_ids, _ = self.attention_groups[0]
         if isinstance(spec, FullAttentionSpec):
             num_blocks = hit_length // spec.block_size
             for group_id in group_ids:
                 if (blks := hit_blocks_by_group[group_id]) is not None:
                     del blks[num_blocks:]
+
+        # Phase 3: EAGLE drop — applied once after convergence.
+        # Drop one lcm_block_size worth of tokens, then verify that
+        # non-full-attention groups still have valid hits at the new length.
+        if self.use_eagle and hit_length > 0:
+            hit_length = max(0, hit_length - self.lcm_block_size)
+
+            # Truncate full attention (downward-closed, always safe).
+            for spec, group_ids, _ in self.attention_groups:
+                if isinstance(spec, FullAttentionSpec):
+                    num_blocks = hit_length // spec.block_size
+                    for group_id in group_ids:
+                        if (blks := hit_blocks_by_group[group_id]) is not None:
+                            del blks[num_blocks:]
+
+            # Re-query non-full-attention groups at the new length to ensure
+            # their hits are still valid (e.g. sliding window contiguity).
+            for spec, group_ids, manager_cls in self.attention_groups:
+                if not isinstance(spec, FullAttentionSpec):
+                    hit_blocks = manager_cls.find_longest_cache_hit(
+                        block_hashes=_get_block_hashes(spec),
+                        max_length=hit_length,
+                        kv_cache_group_ids=group_ids,
+                        block_pool=self.block_pool,
+                        kv_cache_spec=spec,
+                        alignment_tokens=self.lcm_block_size,
+                    )
+                    new_len = len(hit_blocks[0]) * spec.block_size
+                    if new_len < hit_length:
+                        hit_length = new_len
+                    for group_id, blocks in zip(group_ids, hit_blocks):
+                        hit_blocks_by_group[group_id] = blocks
+
+            # If non-full-attn groups further reduced hit_length, also
+            # truncate full attention blocks accordingly.
+            for spec, group_ids, _ in self.attention_groups:
+                if isinstance(spec, FullAttentionSpec):
+                    num_blocks = hit_length // spec.block_size
+                    for group_id in group_ids:
+                        if (blks := hit_blocks_by_group[group_id]) is not None:
+                            del blks[num_blocks:]
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group
