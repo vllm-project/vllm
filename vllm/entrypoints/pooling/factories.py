@@ -214,7 +214,7 @@ def get_pooling_invocation_types(
         )
 
     # NOTE: Items defined earlier take higher priority
-    invocation_types: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = []
+    invocation_types: list[tuple["RequestType", tuple["GetHandlerFn", "EndpointFn"]]] = []
 
     if "embed" in supported_tasks:
         from .embed.api_router import create_embedding, embedding
