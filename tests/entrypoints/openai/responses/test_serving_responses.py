@@ -1381,6 +1381,14 @@ class TestParallelToolCallStreaming:
             "Arguments from the registration delta must not be dropped"
         )
 
+        # Verify the delta event was also emitted for first-delta args
+        deltas = [
+            e for e in events
+            if e.type == "response.function_call_arguments.delta"
+        ]
+        assert len(deltas) == 1
+        assert deltas[0].delta == '{"city": "Berlin"}'
+
     @pytest.mark.asyncio
     async def test_reasoning_then_tool_call_transition(self, monkeypatch):
         """When reasoning deltas precede tool calls, the reasoning item must
@@ -1417,7 +1425,11 @@ class TestParallelToolCallStreaming:
 
         # Reasoning close must come BEFORE tool call open
         reasoning_done_idx = types.index("response.reasoning_text.done")
-        tc_added_idx = types.index("response.output_item.added")
+        tc_added_idx = next(
+            i for i, e in enumerate(events)
+            if e.type == "response.output_item.added"
+            and getattr(e.item, "type", None) == "function_call"
+        )
         assert reasoning_done_idx < tc_added_idx, (
             "Reasoning must be closed before tool call is opened"
         )
