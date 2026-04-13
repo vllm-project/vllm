@@ -492,3 +492,44 @@ def test_kv_cache_dtype_skip_layers(vllm_runner, monkeypatch):
                 assert layer.self_attn.attn.kv_cache_dtype == expected
 
         llm.apply_model(check_layers)
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="FP8 is not supported on this GPU type.",
+)
+@pytest.mark.quant_model
+def test_fp8_online_bias_model(vllm_runner, example_prompts):
+    """Regression test: online FP8 on models with bias=True (e.g. Qwen2)."""
+    from tests.models.utils import check_logprobs_close
+
+    model = "Qwen/Qwen2-0.5B"
+    max_model_len = 2048
+    max_tokens = 32
+    num_logprobs = 5
+
+    with vllm_runner(
+        model,
+        max_model_len=max_model_len,
+        enforce_eager=True,
+    ) as vllm_model:
+        baseline_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    with vllm_runner(
+        model,
+        max_model_len=max_model_len,
+        enforce_eager=True,
+        quantization="fp8",
+    ) as vllm_model:
+        test_outputs = vllm_model.generate_greedy_logprobs(
+            example_prompts, max_tokens, num_logprobs
+        )
+
+    check_logprobs_close(
+        outputs_0_lst=baseline_outputs,
+        outputs_1_lst=test_outputs,
+        name_0="bf16",
+        name_1="fp8_online",
+    )
