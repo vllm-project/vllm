@@ -17,7 +17,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_act_int8_process_scales,
     marlin_moe_permute_scales,
@@ -225,7 +224,28 @@ def _process_weights_marlin(
     layer: torch.nn.Module,
     quant_config: "GPTQMarlinConfig",
     input_dtype: torch.dtype | None,
-) -> None:
+    w13_qweight: torch.Tensor,
+    w2_qweight: torch.Tensor,
+    w13_scales: torch.Tensor,
+    w2_scales: torch.Tensor,
+    w13_g_idx: torch.Tensor,
+    w2_g_idx: torch.Tensor,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor,  # w13_g_idx
+    torch.Tensor,  # w2_g_idx
+    torch.Tensor,  # w13_g_idx_sort_indices
+    torch.Tensor,  # w2_g_idx_sort_indices
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
     """Standard Marlin weight post-processing shared by MARLIN and
     BATCHED_MARLIN backends.
 
@@ -239,120 +259,137 @@ def _process_weights_marlin(
     """
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
+    w13_weight_out: torch.Tensor
+    w2_weight_out: torch.Tensor
+    marlin_w13_scales: torch.Tensor
+    marlin_w2_scales: torch.Tensor
+    w13_g_idx_sort_indices: torch.Tensor | None = None
+    w2_g_idx_sort_indices: torch.Tensor | None = None
+    w13_input_global_scale: torch.Tensor | None = None
+    w2_input_global_scale: torch.Tensor | None = None
+    w13_bias_out: torch.Tensor | None = None
+    w2_bias_out: torch.Tensor | None = None
+
     # --- FP8 weight / scale adjustment ---
     if input_dtype == torch.float8_e4m3fn:
-        ops.marlin_int4_fp8_preprocess(layer.w13_qweight, inplace=True)
-        ops.marlin_int4_fp8_preprocess(layer.w2_qweight, inplace=True)
-        layer.w13_scales.data = layer.w13_scales.data * 512
-        layer.w2_scales.data = layer.w2_scales.data * 512
+        w13_weight_out = ops.marlin_int4_fp8_preprocess(w13_qweight, inplace=False)
+        w2_weight_out = ops.marlin_int4_fp8_preprocess(w2_qweight, inplace=False)
+        marlin_w13_scales = w13_scales.data * 512
+        marlin_w2_scales = w2_scales.data * 512
 
     # --- Process act_order (g_idx) ---
     if quant_config.desc_act:
-        num_experts = layer.w13_g_idx.shape[0]
-        w13_g_idx_sort_indices = torch.empty_like(layer.w13_g_idx)
-        w2_g_idx_sort_indices = torch.empty_like(layer.w2_g_idx)
-        w13_sorted_g_idx = torch.empty_like(layer.w13_g_idx)
-        w2_sorted_g_idx = torch.empty_like(layer.w2_g_idx)
+        num_experts = w13_g_idx.shape[0]
+        w13_g_idx_sort_indices = torch.empty_like(w13_g_idx)
+        w2_g_idx_sort_indices = torch.empty_like(w2_g_idx)
+        w13_sorted_g_idx = torch.empty_like(w13_g_idx)
+        w2_sorted_g_idx = torch.empty_like(w2_g_idx)
         for e in range(num_experts):
-            w13_g_idx_sort_indices[e] = torch.argsort(layer.w13_g_idx[e]).to(
-                torch.int32
-            )
-            w2_g_idx_sort_indices[e] = torch.argsort(layer.w2_g_idx[e]).to(torch.int32)
-            w13_sorted_g_idx[e] = layer.w13_g_idx[e][w13_g_idx_sort_indices[e]]
-            w2_sorted_g_idx[e] = layer.w2_g_idx[e][w2_g_idx_sort_indices[e]]
-        replace_parameter(layer, "w13_g_idx", w13_sorted_g_idx)
-        replace_parameter(layer, "w2_g_idx", w2_sorted_g_idx)
-        replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+            w13_g_idx_sort_indices[e] = torch.argsort(w13_g_idx[e]).to(torch.int32)
+            w2_g_idx_sort_indices[e] = torch.argsort(w2_g_idx[e]).to(torch.int32)
+            w13_sorted_g_idx[e] = w13_g_idx[e][w13_g_idx_sort_indices[e]]
+            w2_sorted_g_idx[e] = w2_g_idx[e][w2_g_idx_sort_indices[e]]
+        # replace_parameter(layer, "w13_g_idx", w13_sorted_g_idx)
+        # replace_parameter(layer, "w2_g_idx", w2_sorted_g_idx)
+        # replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+        # replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
     else:
-        num_experts = layer.w13_g_idx.shape[0]
-        device = layer.w13_g_idx.device
-        layer.w13_g_idx = torch.nn.Parameter(
+        num_experts = w13_g_idx.shape[0]
+        device = w13_g_idx.device
+        w13_g_idx = torch.nn.Parameter(
             torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
-        layer.w2_g_idx = torch.nn.Parameter(
+        w2_g_idx = torch.nn.Parameter(
             torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
-        layer.w13_g_idx_sort_indices = torch.nn.Parameter(
+        w13_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
-        layer.w2_g_idx_sort_indices = torch.nn.Parameter(
+        w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty((num_experts, 0), dtype=torch.int32, device=device),
             requires_grad=False,
         )
 
     # --- Repack weights ---
     marlin_w13_qweight = ops.gptq_marlin_moe_repack(
-        layer.w13_qweight,
-        layer.w13_g_idx_sort_indices,
-        layer.w13_qweight.shape[1] * quant_config.pack_factor,
-        layer.w13_qweight.shape[2],
+        w13_weight_out,
+        w13_g_idx_sort_indices,
+        w13_weight_out.shape[1] * quant_config.pack_factor,
+        w13_weight_out.shape[2],
         quant_config.quant_type.size_bits,
         is_a_8bit=is_a_8bit,
     )
-    replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
     marlin_w2_qweight = ops.gptq_marlin_moe_repack(
-        layer.w2_qweight,
-        layer.w2_g_idx_sort_indices,
-        layer.w2_qweight.shape[1] * quant_config.pack_factor,
-        layer.w2_qweight.shape[2],
+        w2_weight_out,
+        w2_g_idx_sort_indices,
+        w2_weight_out.shape[1] * quant_config.pack_factor,
+        w2_weight_out.shape[2],
         quant_config.quant_type.size_bits,
         is_a_8bit=is_a_8bit,
     )
-    replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
+    # replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
+    # replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
 
     # Alias for modular kernel (expects w13_weight / w2_weight)
-    layer.w13_weight = layer.w13_qweight
-    layer.w2_weight = layer.w2_qweight
+    # layer.w13_weight = layer.w13_qweight
+    # layer.w2_weight = layer.w2_qweight
 
     # --- Permute scales ---
     marlin_w13_scales = marlin_moe_permute_scales(
-        s=layer.w13_scales,
+        s=marlin_w13_scales,
         size_k=layer.intermediate_size_per_partition,
-        size_n=layer.w13_scales.shape[2],
+        size_n=marlin_w13_scales.shape[2],
         group_size=quant_config.group_size,
         is_a_8bit=is_a_8bit,
     )
-    if input_dtype == torch.int8 and layer.num_groups_w13 > 1:
-        marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
-            marlin_w13_scales
-        )
-        layer.register_parameter(
-            "w13_input_global_scale",
-            torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
-        )
-    replace_parameter(layer, "w13_scales", marlin_w13_scales)
-
     marlin_w2_scales = marlin_moe_permute_scales(
-        s=layer.w2_scales,
-        size_k=layer.w2_scales.shape[1]
+        s=marlin_w2_scales,
+        size_k=marlin_w2_scales.shape[1]
         * (
             quant_config.group_size
             if quant_config.group_size != -1
             else quant_config.pack_factor
         ),
-        size_n=layer.w2_scales.shape[2],
+        size_n=marlin_w2_scales.shape[2],
         group_size=quant_config.group_size,
         is_a_8bit=is_a_8bit,
     )
-    if input_dtype == torch.int8 and layer.num_groups_w2 > 1:
-        marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
-            marlin_w2_scales
-        )
-        layer.register_parameter(
-            "w2_input_global_scale",
-            torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
-        )
-    replace_parameter(layer, "w2_scales", marlin_w2_scales)
+    # replace_parameter(layer, "w13_scales", marlin_w13_scales)
+    # replace_parameter(layer, "w2_scales", marlin_w2_scales)
+
+    if input_dtype == torch.int8:
+        if layer.num_groups_w13 > 1:
+            marlin_w13_scales, w13_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w13_scales
+            )
+        if layer.num_groups_w2 > 1:
+            marlin_w2_scales, w2_input_global_scale = marlin_act_int8_process_scales(
+                marlin_w2_scales
+            )
 
     # --- Permute bias ---
-    if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
-        layer.w13_bias.data = marlin_permute_bias(layer.w13_bias)
-    if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
-        layer.w2_bias.data = marlin_permute_bias(layer.w2_bias)
+    if w13_bias is not None:
+        w13_bias_out = marlin_permute_bias(w13_bias)
+    if w2_bias is not None:
+        w2_bias_out = marlin_permute_bias(w2_bias)
+
+    return (
+        marlin_w13_qweight,
+        marlin_w2_qweight,
+        marlin_w13_scales,
+        marlin_w2_scales,
+        w13_g_idx,
+        w2_g_idx,
+        w13_g_idx_sort_indices,
+        w2_g_idx_sort_indices,
+        w13_input_global_scale,
+        w2_input_global_scale,
+        w13_bias_out,
+        w2_bias_out,
+    )
 
 
 def convert_to_wna16_moe_kernel_format(
@@ -360,7 +397,24 @@ def convert_to_wna16_moe_kernel_format(
     layer: torch.nn.Module,
     quant_config: QuantizationConfig,
     input_dtype: torch.dtype | None,
-) -> None:
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> tuple[
+    torch.Tensor,  # w13_qweight
+    torch.Tensor,  # w2_qweight
+    torch.Tensor,  # w13_scales
+    torch.Tensor,  # w2_scales
+    torch.Tensor | None,  # w13_g_idx
+    torch.Tensor | None,  # w2_g_idx
+    torch.Tensor | None,  # w13_g_idx_sort_indices
+    torch.Tensor | None,  # w2_g_idx_sort_indices
+    torch.Tensor | None,  # w13_input_global_scale
+    torch.Tensor | None,  # w2_input_global_scale
+    torch.Tensor | None,  # w13_bias
+    torch.Tensor | None,  # w2_bias
+]:
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
     To add a new backend, implement a ``_process_weights_<name>`` helper and
@@ -372,12 +426,7 @@ def convert_to_wna16_moe_kernel_format(
         quant_config: the ``QuantizationConfig`` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
     """
-    if backend == WNA16MoEBackend.NONE:
-        # No modular-kernel support; weights are used as-is by the legacy
-        # fused_marlin_moe() path, which handles all transforms internally.
-        return
-
-    elif backend in (
+    if backend in (
         WNA16MoEBackend.MARLIN,
         WNA16MoEBackend.BATCHED_MARLIN,
     ):
@@ -390,7 +439,46 @@ def convert_to_wna16_moe_kernel_format(
                 "Marlin WNA16 MoE backend requires GPTQMarlinConfig, got "
                 f"{type(quant_config).__name__}."
             )
-        _process_weights_marlin(layer, quant_config, input_dtype)
+        (
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            w13_bias,
+            w2_bias,
+        ) = _process_weights_marlin(
+            layer,
+            quant_config,
+            input_dtype,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            getattr(layer, "w13_g_idx", None),
+            getattr(layer, "w2_g_idx", None),
+            getattr(layer, "w13_bias", None),
+            getattr(layer, "w2_bias", None),
+        )
+        return (
+            w13_qweight,
+            w2_qweight,
+            w13_scales,
+            w2_scales,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            w13_bias,
+            w2_bias,
+        )
 
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")

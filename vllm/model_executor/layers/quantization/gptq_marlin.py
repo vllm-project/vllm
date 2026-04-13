@@ -36,6 +36,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
     get_linear_quant_method,
@@ -684,12 +685,70 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
                 "W8A8-INT8 is not supported by marlin kernel."
             )
 
-        convert_to_wna16_moe_kernel_format(
+        (
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            w13_g_idx,
+            w2_g_idx,
+            w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices,
+            w13_input_global_scale,
+            w2_input_global_scale,
+            w13_bias,
+            w2_bias,
+        ) = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
             input_dtype=self.input_dtype,
+            w13=layer.w13_qweight,
+            w2=layer.w2_qweight,
+            w13_scale=layer.w13_scales,
+            w2_scale=layer.w2_scales,
         )
+
+        replace_parameter(layer, "w13_qweight", w13)
+        replace_parameter(layer, "w2_qweight", w2)
+        replace_parameter(layer, "w13_scales", w13_scale)
+        replace_parameter(layer, "w2_scales", w2_scale)
+        replace_parameter(layer, "w13_g_idx", w13_g_idx)
+        replace_parameter(layer, "w2_g_idx", w2_g_idx)
+        replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
+        replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
+        if w13_input_global_scale is not None:
+            if hasattr(layer, "w13_input_global_scale"):
+                replace_parameter(
+                    layer, "w13_input_global_scale", w13_input_global_scale
+                )
+            else:
+                layer.register_parameter(
+                    "w13_input_global_scale",
+                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
+                )
+        if w2_input_global_scale is not None:
+            if hasattr(layer, "w2_input_global_scale"):
+                replace_parameter(layer, "w2_input_global_scale", w2_input_global_scale)
+            else:
+                layer.register_parameter(
+                    "w2_input_global_scale",
+                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
+                )
+        if w13_bias is not None:
+            if hasattr(layer, "w13_bias"):
+                replace_parameter(layer, "w13_bias", w13_bias)
+            else:
+                layer.register_parameter(
+                    "w13_bias", torch.nn.Parameter(w13_bias, requires_grad=False)
+                )
+        if w2_bias is not None:
+            if hasattr(layer, "w2_bias"):
+                replace_parameter(layer, "w2_bias", w2_bias)
+            else:
+                layer.register_parameter(
+                    "w2_bias", torch.nn.Parameter(w2_bias, requires_grad=False)
+                )
 
         self._setup_kernel(layer)
 
