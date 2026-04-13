@@ -161,8 +161,6 @@ __launch_bounds__(TPB) __global__ void moeTopK(
     int* source_rows,
     const int num_experts,
     const int k,
-    const int start_expert,
-    const int end_expert,
     const bool renormalize,
     const float* bias)
 {
@@ -178,8 +176,9 @@ __launch_bounds__(TPB) __global__ void moeTopK(
     const int block_row = blockIdx.x;
 
     const bool row_is_active = finished ? !finished[block_row] : true;
-    const int thread_read_offset = blockIdx.x * num_experts;
+    const int thread_read_offset = block_row * num_experts;
     float selected_sum = 0.f;
+    extern __shared__ IndType shared_indices[];
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
         thread_kvp.key = 0;
@@ -200,11 +199,11 @@ __launch_bounds__(TPB) __global__ void moeTopK(
 
             for (int prior_k = 0; prior_k < k_idx; ++prior_k)
             {
-                const int prior_winning_expert = indices[k * block_row + prior_k];
+                const IndType prior_winning_expert = shared_indices[prior_k];
 
                 if (prior_winning_expert == expert)
                 {
-                    inp_kvp = thread_kvp;
+                    inp_kvp.value = -1.f;
                 }
             }
 
@@ -216,20 +215,25 @@ __launch_bounds__(TPB) __global__ void moeTopK(
         {
             // Ignore experts the node isn't responsible for with expert parallelism
             const int expert = result_kvp.key;
-            const bool node_uses_expert = expert >= start_expert && expert < end_expert;
-            const bool should_process_row = row_is_active && node_uses_expert;
+            const bool should_process_row = row_is_active;
 
             const int idx = k * block_row + k_idx;
             // Return the unbiased scores for output weights
             output[idx] = inputs_after_softmax[thread_read_offset + expert];
-            indices[idx] = should_process_row ? (expert - start_expert) : num_experts;
-            assert(indices[idx] >= 0);
+            shared_indices[k_idx] = should_process_row ? expert : num_experts;
+            assert(shared_indices[k_idx] >= 0);
             source_rows[idx] = k_idx * num_rows + block_row;
             if (renormalize) {
                 selected_sum += inputs_after_softmax[thread_read_offset + expert];
             }
         }
         __syncthreads();
+    }
+    
+    for(int k_idx = threadIdx.x; k_idx < k; k_idx += TPB)
+    {
+        const int idx = k * block_row + k_idx;
+        indices[idx] = shared_indices[k_idx];
     }
 
     // Renormalize the k weights for this row to sum to 1, if requested.
@@ -708,9 +712,10 @@ void topkGatingKernelLauncher(
             } else {
                 TORCH_CHECK(false, "Unsupported scoring func");
             }
-            moeTopK<TPB><<<num_tokens, TPB, 0, stream>>>(
+            size_t shared_mem_size = topk * sizeof(IndType);
+            moeTopK<TPB><<<num_tokens, TPB, shared_mem_size, stream>>>(
                 workspace, nullptr, topk_weights, topk_indices, token_expert_indices,
-                num_experts, topk, 0, num_experts, renormalize, bias);
+                num_experts, topk, renormalize, bias);
         }
     }
 }
