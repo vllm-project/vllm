@@ -461,34 +461,24 @@ class CudaCommunicator(DeviceCommunicatorBase):
     def _all_gather_symm_mem(self, input_: torch.Tensor) -> torch.Tensor:
         """AllGather a single tensor using NCCL symmetric memory (NVLS).
 
-        Only called for uniform-size all_gather (variable sizes are guarded
-        out by the caller).  See _reduce_scatter_symm_mem for notes on
-        copy-skip and memory.
+        Only the output needs to be in symmetric memory; NCCL does not
+        require the AG input to be symmetrically allocated.
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
-            is_symmetric_memory_tensor,
             nccl_symm_mem_context,
         )
 
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
 
-        input_already_symm = is_symmetric_memory_tensor(input_)
         out_size = (input_.size(0) * self.world_size,) + input_.size()[1:]
 
         with nccl_symm_mem_context(pynccl_comm):
-            if not input_already_symm:
-                symm_input = torch.empty_like(input_)
             symm_output = torch.empty(
                 out_size, dtype=input_.dtype, device=input_.device
             )
 
-        if input_already_symm:
-            symm_input = input_
-        else:
-            symm_input.copy_(input_)
-
-        pynccl_comm.all_gather(symm_output, symm_input)
+        pynccl_comm.all_gather(symm_output, input_)
         return symm_output
 
     def _all_gather_batched_symm_mem(
@@ -497,11 +487,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         """AllGather a list of tensors using NCCL symmetric memory (NVLS).
 
         Uses group_start/group_end to batch the collectives.
-        Only called for uniform-size all_gather (variable sizes are guarded
-        out by the caller).
+        Only the output needs to be in symmetric memory (see
+        _all_gather_symm_mem).
         """
         from vllm.distributed.device_communicators.pynccl_allocator import (
-            is_symmetric_memory_tensor,
             nccl_symm_mem_context,
         )
 
@@ -509,29 +498,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
         assert pynccl_comm is not None
         world_size = self.world_size
 
-        symm_inputs = []
         symm_outputs = []
-        needs_copy = []
         with nccl_symm_mem_context(pynccl_comm):
             for inp in inputs:
-                already_symm = is_symmetric_memory_tensor(inp)
-                needs_copy.append(not already_symm)
-                if not already_symm:
-                    symm_inputs.append(torch.empty_like(inp))
-                else:
-                    symm_inputs.append(inp)
                 out_size = (inp.size(0) * world_size,) + inp.size()[1:]
                 symm_outputs.append(
                     torch.empty(out_size, dtype=inp.dtype, device=inp.device)
                 )
 
-        for do_copy, symm_in, inp in zip(needs_copy, symm_inputs, inputs):
-            if do_copy:
-                symm_in.copy_(inp)
-
         pynccl_comm.group_start()
-        for symm_out, symm_in in zip(symm_outputs, symm_inputs):
-            pynccl_comm.all_gather(symm_out, symm_in)
+        for symm_out, inp in zip(symm_outputs, inputs):
+            pynccl_comm.all_gather(symm_out, inp)
         pynccl_comm.group_end()
 
         return symm_outputs
