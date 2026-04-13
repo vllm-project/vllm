@@ -218,7 +218,7 @@ do not configure CPU worker affinity.
 
 On multi-GPU servers with multiple RDMA NICs (e.g., ConnectX adapters), each GPU
 is typically closest to a specific NIC through the PCIe topology. When a worker
-communicates via an NIC on a different NUMA node or PCIe switch, traffic must
+communicates via a NIC on a different NUMA node or PCIe switch, traffic must
 cross an extra hop, increasing latency and reducing throughput.
 
 `--nic-bind` sets `NCCL_IB_HCA` and `UCX_NET_DEVICES` per worker so each

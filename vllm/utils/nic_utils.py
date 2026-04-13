@@ -151,7 +151,8 @@ def expand_nccl_hca_pattern(
 
     # If no explicit include tokens, start with all devices
     has_include_token = any(
-        _NCCL_HCA_TOKEN_RE.fullmatch(t.strip()).group("exclude") is None  # type: ignore[union-attr]
+        (m := _NCCL_HCA_TOKEN_RE.fullmatch(t.strip())) is not None
+        and m.group("exclude") is None
         for t in pattern.split(",")
     )
     if not has_include_token:
@@ -309,6 +310,24 @@ def _get_nic_device_spec(parallel_config, gpu_index: int) -> str | None:
     return devices[gpu_index]
 
 
+def _strip_nccl_syntax(pattern: str) -> str:
+    """Best-effort fallback: strip NCCL-only prefixes (``=``, ``^``) from
+    a pattern so it can be passed to UCX as plain device names.
+
+    Exclude tokens (``^``) are dropped entirely since UCX has no exclusion
+    mechanism.  Exact-match tokens (``=mlx5_0:1``) are reduced to bare
+    names (``mlx5_0:1``).
+    """
+    parts: list[str] = []
+    for token in pattern.split(","):
+        token = token.strip()
+        if token.startswith("^"):
+            # UCX cannot express exclusions; skip
+            continue
+        parts.append(token.lstrip("="))
+    return ",".join(parts) if parts else pattern
+
+
 def _expand_for_ucx(pattern: str) -> str:
     """Expand a NCCL_IB_HCA pattern into a UCX_NET_DEVICES value.
 
@@ -319,10 +338,11 @@ def _expand_for_ucx(pattern: str) -> str:
     if available is None:
         logger.warning(
             "No InfiniBand devices in sysfs; cannot expand pattern "
-            "for UCX_NET_DEVICES (pattern: %s).",
+            "for UCX_NET_DEVICES (pattern: %s). "
+            "Stripping NCCL-only syntax as best-effort fallback.",
             pattern,
         )
-        return pattern  # best effort: pass through as-is
+        return _strip_nccl_syntax(pattern)
     return ",".join(expand_nccl_hca_pattern(pattern, available))
 
 

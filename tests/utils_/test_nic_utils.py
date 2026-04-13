@@ -329,8 +329,8 @@ class TestConfigureSubprocess:
 
 
 class TestAutoDetect:
-    def test_auto_detect_matches_numa(self, monkeypatch, tmp_path):
-        # Set up fake sysfs
+    def test_get_auto_nic_devices(self, monkeypatch, tmp_path):
+        # Set up fake sysfs: mlx5_0 on NUMA 0, mlx5_1 on NUMA 1
         ib_path = tmp_path / "infiniband"
         for dev, numa_node in [("mlx5_0", 0), ("mlx5_1", 1)]:
             dev_path = ib_path / dev
@@ -342,25 +342,28 @@ class TestAutoDetect:
         nic_utils.enumerate_ib_devices.cache_clear()
         nic_utils.get_auto_nic_devices.cache_clear()
 
-        # Verify sysfs enumeration picks up the devices
-        available = nic_utils.enumerate_ib_devices()
-        assert available == {"mlx5_0": [1], "mlx5_1": [1]}
+        # Mock _get_gpu_numa_nodes to return a known GPU-to-NUMA mapping
+        monkeypatch.setattr(nic_utils, "_get_gpu_numa_nodes", lambda: [0, 1])
 
-        # Verify NUMA node detection
-        assert nic_utils.get_ib_device_numa_node("mlx5_0") == 0
-        assert nic_utils.get_ib_device_numa_node("mlx5_1") == 1
+        result = nic_utils.get_auto_nic_devices()
+        # GPU 0 on NUMA 0 → =mlx5_0:1, GPU 1 on NUMA 1 → =mlx5_1:1
+        assert result == ["=mlx5_0:1", "=mlx5_1:1"]
 
-        # Verify NUMA-based matching logic: GPU on node 0 → mlx5_0,
-        # GPU on node 1 → mlx5_1
-        nic_by_numa: dict[int, list[str]] = {}
-        for dev, ports in available.items():
-            nic_numa = nic_utils.get_ib_device_numa_node(dev)
-            if nic_numa is not None:
-                for port in ports:
-                    nic_by_numa.setdefault(nic_numa, []).append(f"{dev}:{port}")
+        nic_utils.enumerate_ib_devices.cache_clear()
+        nic_utils.get_auto_nic_devices.cache_clear()
 
-        assert nic_by_numa == {0: ["mlx5_0:1"], 1: ["mlx5_1:1"]}
+    def test_get_auto_nic_devices_no_gpu_numa(self, monkeypatch):
+        monkeypatch.setattr(nic_utils, "_get_gpu_numa_nodes", lambda: None)
+        nic_utils.get_auto_nic_devices.cache_clear()
+        assert nic_utils.get_auto_nic_devices() is None
+        nic_utils.get_auto_nic_devices.cache_clear()
 
+    def test_get_auto_nic_devices_no_ib(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(nic_utils, "_get_gpu_numa_nodes", lambda: [0, 1])
+        monkeypatch.setattr(nic_utils, "_SYSFS_IB_PATH", tmp_path / "noexist")
+        nic_utils.enumerate_ib_devices.cache_clear()
+        nic_utils.get_auto_nic_devices.cache_clear()
+        assert nic_utils.get_auto_nic_devices() is None
         nic_utils.enumerate_ib_devices.cache_clear()
         nic_utils.get_auto_nic_devices.cache_clear()
 
