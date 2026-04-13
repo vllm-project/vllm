@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 
     from vllm.engine.protocol import EngineClient
     from vllm.entrypoints.logger import RequestLogger
+    from vllm.entrypoints.sagemaker.api_router import (
+        EndpointFn,
+        GetHandlerFn,
+        RequestType,
+    )
 
 else:
     RequestLogger = object
@@ -206,15 +211,8 @@ def get_pooling_invocation_types(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
-    if TYPE_CHECKING:
-        from vllm.entrypoints.sagemaker.api_router import (
-            EndpointFn,
-            GetHandlerFn,
-            RequestType,
-        )
-
     # NOTE: Items defined earlier take higher priority
-    invocation_types: list[tuple["RequestType", tuple["GetHandlerFn", "EndpointFn"]]] = []
+    invocation_types: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = []
 
     if "embed" in supported_tasks:
         from .embed.api_router import create_embedding, embedding
