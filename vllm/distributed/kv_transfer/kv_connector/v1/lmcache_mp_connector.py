@@ -305,13 +305,19 @@ class LMCacheMPRequestMetadata:
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
         #
-        # Why computed_blocks includes num_lmcache_hit_blocks:
+        # Why computed_blocks includes both hit-block counts:
         #
-        # Include lmcache-hit blocks so that the upper bound
-        # matches num_stored_blocks (which already covers
-        # them). Hit blocks are NOT re-stored.
+        # * num_lmcache_hit_blocks: LMCache-hit blocks are already counted in
+        #   num_stored_blocks (set during lookup), so they must be included
+        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        # * num_vllm_hit_blocks: When vLLM GPU prefix cache (APC) is active,
+        #   num_scheduled_tokens only covers the *newly computed* tokens and
+        #   does NOT include the APC-hit tokens.  Without adding
+        #   num_vllm_hit_blocks the upper bound is too low and those already-
+        #   computed blocks are silently skipped, causing under-storing.
         computed_blocks = (
             tracker.num_scheduled_tokens // vllm_block_size
+            + tracker.num_vllm_hit_blocks
             + tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
