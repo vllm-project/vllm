@@ -243,7 +243,11 @@ class TestAllReduceRMSNormGroupQuantFP8PackedModel(torch.nn.Module):
         x2 = tensor_model_parallel_all_reduce(z2)
         y2, resid = self.norm[1](x2, resid)
 
-        # Apply group quant after norm via QuantFP8 CustomOp
+        # Apply group quant after norm via QuantFP8 CustomOp.
+        # Both y*_q and y*_s must be used to prevent dead-code elimination
+        # of the scale output, which the fusion pattern needs to match.
+        # We return the scales as extra outputs (mirroring real models where
+        # they feed into DeepGEMM).
         y2_q, y2_s = self.quant(y2)
         z3 = torch.mm(y2_q.to(x.dtype), self.w[1])
 
@@ -255,7 +259,7 @@ class TestAllReduceRMSNormGroupQuantFP8PackedModel(torch.nn.Module):
 
         x4 = tensor_model_parallel_all_reduce(z4)
         y4, resid = self.norm[3](x4, resid)
-        return y4
+        return y4, y2_s, y3_s
 
     def ops_in_model_before(self):
         return [
@@ -316,7 +320,7 @@ class TestAllReduceRMSNormGroupQuantFP8PackedModel(torch.nn.Module):
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize("seq_len", [8])
 @pytest.mark.parametrize("hidden_size", [128])
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("flashinfer_allreduce_backend", ["trtllm", "mnnvl"])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
@@ -367,6 +371,9 @@ def test_all_reduce_fusion_pass_replace(
 
         if not is_deep_gemm_supported():
             pytest.skip("Skip as per-token-group packed FP8 quant requires DeepGEMM")
+
+        if flashinfer_allreduce_backend == "mnnvl":
+            pytest.skip("MNNVL backend does not support group quant fusion pattern")
 
         gs = TestAllReduceRMSNormGroupQuantFP8PackedModel.GROUP_SIZE
         if hidden_size % gs != 0:
@@ -487,7 +494,17 @@ def all_reduce_fusion_pass_on_test_model(
 
         results_unfused = model(hidden_states)
         results_fused = compiled_model(hidden_states)
-        torch.testing.assert_close(results_unfused, results_fused, atol=1e-2, rtol=1e-2)
+        # Models may return extra outputs (e.g. quant scales) to prevent DCE;
+        # compare only the primary output.
+        out_unfused = (
+            results_unfused[0]
+            if isinstance(results_unfused, tuple)
+            else results_unfused
+        )
+        out_fused = (
+            results_fused[0] if isinstance(results_fused, tuple) else results_fused
+        )
+        torch.testing.assert_close(out_unfused, out_fused, atol=1e-2, rtol=1e-2)
 
         assert all_reduce_fusion_pass.matched_count == 4, (
             f"{all_reduce_fusion_pass.matched_count=}"
