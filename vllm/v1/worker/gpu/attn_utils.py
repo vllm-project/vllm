@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from dataclasses import dataclass
+from math import prod
 from typing import Any, cast
 
 import numpy as np
@@ -183,7 +184,22 @@ def _reshape_kv_cache(
 
             dtype = kv_cache_spec.dtype
             raw_tensor = raw_tensor.view(dtype)
-            raw_tensor = raw_tensor.view(kv_cache_shape)
+            logical_numel = prod(kv_cache_shape)
+            if raw_tensor.numel() == logical_numel:
+                raw_tensor = raw_tensor.view(kv_cache_shape)
+            else:
+                assert kv_cache_spec.page_size_padded is not None
+                elems_per_page = (
+                    kv_cache_spec.page_size_bytes // raw_tensor.element_size()
+                )
+                logical_elems_per_page = logical_numel // num_blocks
+                assert logical_elems_per_page <= elems_per_page
+                contiguous_strides = torch.empty(kv_cache_shape).stride()
+                raw_tensor = torch.as_strided(
+                    raw_tensor,
+                    size=kv_cache_shape,
+                    stride=(elems_per_page, *contiguous_strides[1:]),
+                )
             kv_caches[layer_name] = raw_tensor.permute(*inv_order)
     return kv_caches
 

@@ -427,3 +427,40 @@ def test_per_head_quant_scales_backend_selection(
                     use_per_head_quant_scales=True,
                 )
             assert backend_name in str(exc_info.value)
+
+
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="This selector regression test targets CUDA FlashAttention gating.",
+)
+def test_flash_attn_rejects_int4_kv_cache():
+    _cached_get_attn_backend.cache_clear()
+
+    attention_config = AttentionConfig(
+        backend=AttentionBackendEnum.FLASH_ATTN,
+        flash_attn_version=3,
+    )
+    cache_config = CacheConfig(block_size=64)
+    vllm_config = VllmConfig(
+        attention_config=attention_config, cache_config=cache_config
+    )
+
+    if CudaPlatform is None:
+        pytest.skip("CudaPlatform not available")
+    with (
+        set_current_vllm_config(vllm_config),
+        patch("vllm.platforms.current_platform", CudaPlatform()),
+    ):
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA is required for FlashAttention selection tests")
+        capability = torch.cuda.get_device_capability()
+        if capability[0] != 9:
+            pytest.skip("FA3 selector path requires Hopper (SM 9.x) GPUs")
+
+        with pytest.raises(ValueError) as exc_info:
+            get_attn_backend(
+                head_size=128,
+                dtype=torch.float16,
+                kv_cache_dtype="int4_per_token_head",
+            )
+        assert "FLASH_ATTN" in str(exc_info.value)

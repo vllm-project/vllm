@@ -13,6 +13,9 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.kv_dequant.triton_tile import (
+    prepare_kv_tile,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 logger = init_logger(__name__)
@@ -31,63 +34,6 @@ def apply_softcap(S, x):
     p1 = tl.exp(Sdiv)
     p2 = tl.exp(-Sdiv)
     return x * (p1 - p2) / (p1 + p2)
-
-
-@triton.jit
-def _prepare_kv_tile(
-    data,
-    Q,
-    tensor_scale,
-    scale_cache_ptr,
-    physical_block_idx,
-    seq_offset,
-    kv_head_idx,
-    stride_s_blk,
-    stride_s_slot,
-    stride_s_head,
-    tile_mask,
-    BLOCK_SIZE: tl.constexpr,
-    KV_QUANT_MODE: tl.constexpr,
-):
-    """Prepare a loaded KV tile for attention computation.
-
-    Casts the raw KV data to Q's dtype and loads per-token-head scales
-    when applicable:
-
-    - ``KV_QUANT_MODE == 0``: cast only (no-op for bf16/fp16).
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize inline
-      using the tensor-wide scale.
-    - ``KV_QUANT_MODE >= 2`` (per-token-head int8/fp8): cast to Q's
-      dtype and return per-head scales separately — the caller applies
-      them after the dot product for better numerical efficiency.
-
-    Returns ``(data, token_head_scales)``.  *token_head_scales* is only
-    meaningful when ``KV_QUANT_MODE >= 2``; callers gate its use on
-    the same constexpr so the compiler eliminates dead code.
-    """
-    # KV_QUANT_MODE values: 0=none, 1=fp8 per-tensor,
-    #                       2=int8 per-token-head, 3=fp8 per-token-head
-
-    # Placeholder scales (float32) — never read when KV_QUANT_MODE < 2.
-    unused_scales = tile_mask.to(tl.float32)
-
-    if KV_QUANT_MODE == 1:  # FP8 per-tensor
-        if Q.dtype.is_fp8():
-            return data.to(Q.dtype), unused_scales
-        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype), unused_scales
-    if KV_QUANT_MODE >= 2:  # per-token-head (int8 or fp8)
-        scale_idx = (
-            physical_block_idx * stride_s_blk
-            + (seq_offset % BLOCK_SIZE) * stride_s_slot
-            + kv_head_idx * stride_s_head
-        )
-        token_head_scales = tl.load(
-            scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
-        )
-        return data.to(Q.dtype), token_head_scales
-    # .to(Q.dtype) is a no-op when data is already Q's type (bf16/fp16),
-    # but required so Triton sees consistent return types across branches.
-    return data.to(Q.dtype), unused_scales
 
 
 @triton.jit
@@ -163,7 +109,7 @@ def kernel_unified_attention_2d(
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    # KV cache quantization: 0=none, 1=fp8, 2=per-token-head
+    # KV cache quantization: 0=none, 1=fp8, 2/3=per-token-head, 4=int4 per-token-head
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
@@ -174,9 +120,11 @@ def kernel_unified_attention_2d(
     stride_ks_blk=0,
     stride_ks_slot=0,
     stride_ks_head=0,
+    stride_ks_group=0,
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
+    stride_vs_group=0,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -308,17 +256,19 @@ def kernel_unified_attention_2d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
+        cache_offs_d = tl.where(KV_QUANT_MODE == 4, offs_d // 2, offs_d)
+
         v_offset = (
             physical_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_2
-            + offs_d[None, :] * stride_v_cache_3
+            + cache_offs_d[None, :] * stride_v_cache_3
             + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
         )
 
         k_offset = (
             physical_block_idx[None, :] * stride_k_cache_0
             + kv_head_idx * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
+            + cache_offs_d[:, None] * stride_k_cache_3
             + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
         )
 
@@ -328,7 +278,7 @@ def kernel_unified_attention_2d(
             mask=dim_mask[:, None] & tile_mask[None, :],
             other=0.0,
         )
-        K, k_token_head_scales = _prepare_kv_tile(
+        K, k_token_head_scales = prepare_kv_tile(
             K_load,
             Q,
             k_scale,
@@ -339,7 +289,10 @@ def kernel_unified_attention_2d(
             stride_ks_blk,
             stride_ks_slot,
             stride_ks_head,
+            stride_ks_group,
+            offs_d,
             tile_mask,
+            False,
             BLOCK_SIZE,
             KV_QUANT_MODE,
         )
@@ -350,7 +303,7 @@ def kernel_unified_attention_2d(
             mask=dim_mask[None, :] & tile_mask[:, None],
             other=0.0,
         )
-        V, v_token_head_scales = _prepare_kv_tile(
+        V, v_token_head_scales = prepare_kv_tile(
             V_load,
             Q,
             v_scale,
@@ -361,7 +314,10 @@ def kernel_unified_attention_2d(
             stride_vs_blk,
             stride_vs_slot,
             stride_vs_head,
+            stride_vs_group,
+            offs_d,
             tile_mask,
+            True,
             BLOCK_SIZE,
             KV_QUANT_MODE,
         )
@@ -404,7 +360,9 @@ def kernel_unified_attention_2d(
 
         # Per-token-head quant: fuse softmax_scale with per-head k_scale
         # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-        if KV_QUANT_MODE >= 2:
+        if KV_QUANT_MODE == 4:
+            S += scale * tl.dot(Q, K)
+        elif KV_QUANT_MODE >= 2:
             S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
         else:
             S += scale * tl.dot(Q, K)
@@ -472,7 +430,9 @@ def kernel_unified_attention_2d(
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         # Per-token-head quant: apply v_scale to P instead of V.
-        if KV_QUANT_MODE >= 2:
+        if KV_QUANT_MODE == 4:
+            acc += tl.dot(P.to(V.dtype), V)
+        elif KV_QUANT_MODE >= 2:
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
@@ -547,7 +507,7 @@ def kernel_unified_attention_3d(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
-    # KV cache quantization: 0=none, 1=fp8, 2=per-token-head
+    # KV cache quantization: 0=none, 1=fp8, 2/3=per-token-head, 4=int4 per-token-head
     KV_QUANT_MODE: tl.constexpr = 0,
     # Per-token-head scale caches (KV_QUANT_MODE >= 2)
     # Shape: [num_blocks, block_size, num_kv_heads]
@@ -556,9 +516,11 @@ def kernel_unified_attention_3d(
     stride_ks_blk=0,
     stride_ks_slot=0,
     stride_ks_head=0,
+    stride_ks_group=0,
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
+    stride_vs_group=0,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -699,17 +661,19 @@ def kernel_unified_attention_3d(
             block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
         ).to(tl.int64)
 
+        cache_offs_d = tl.where(KV_QUANT_MODE == 4, offs_d // 2, offs_d)
+
         v_offset = (
             physical_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_2
-            + offs_d[None, :] * stride_v_cache_3
+            + cache_offs_d[None, :] * stride_v_cache_3
             + (seq_offset % BLOCK_SIZE)[:, None] * stride_v_cache_1
         )
 
         k_offset = (
             physical_block_idx[None, :] * stride_k_cache_0
             + kv_head_idx * stride_k_cache_2
-            + offs_d[:, None] * stride_k_cache_3
+            + cache_offs_d[:, None] * stride_k_cache_3
             + (seq_offset % BLOCK_SIZE)[None, :] * stride_k_cache_1
         )
 
@@ -719,7 +683,7 @@ def kernel_unified_attention_3d(
             mask=dim_mask[:, None] & tile_mask[None, :],
             other=0.0,
         )
-        K, k_token_head_scales = _prepare_kv_tile(
+        K, k_token_head_scales = prepare_kv_tile(
             K_load,
             Q,
             k_scale,
@@ -730,7 +694,10 @@ def kernel_unified_attention_3d(
             stride_ks_blk,
             stride_ks_slot,
             stride_ks_head,
+            stride_ks_group,
+            offs_d,
             tile_mask,
+            False,
             BLOCK_SIZE,
             KV_QUANT_MODE,
         )
@@ -741,7 +708,7 @@ def kernel_unified_attention_3d(
             mask=dim_mask[None, :] & tile_mask[:, None],
             other=0.0,
         )
-        V, v_token_head_scales = _prepare_kv_tile(
+        V, v_token_head_scales = prepare_kv_tile(
             V_load,
             Q,
             v_scale,
@@ -752,7 +719,10 @@ def kernel_unified_attention_3d(
             stride_vs_blk,
             stride_vs_slot,
             stride_vs_head,
+            stride_vs_group,
+            offs_d,
             tile_mask,
+            True,
             BLOCK_SIZE,
             KV_QUANT_MODE,
         )
@@ -795,7 +765,9 @@ def kernel_unified_attention_3d(
 
         # Per-token-head quant: fuse softmax_scale with per-head k_scale
         # to avoid a separate BLOCK_M × TILE_SIZE multiply on S.
-        if KV_QUANT_MODE >= 2:
+        if KV_QUANT_MODE == 4:
+            S += scale * tl.dot(Q, K)
+        elif KV_QUANT_MODE >= 2:
             S += tl.dot(Q, K) * (scale * k_token_head_scales[None, :])
         else:
             S += scale * tl.dot(Q, K)
@@ -863,7 +835,9 @@ def kernel_unified_attention_3d(
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
         # Per-token-head quant: apply v_scale to P instead of V.
-        if KV_QUANT_MODE >= 2:
+        if KV_QUANT_MODE == 4:
+            acc += tl.dot(P.to(V.dtype), V)
+        elif KV_QUANT_MODE >= 2:
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
@@ -1181,9 +1155,15 @@ def unified_attention(
             stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
             stride_ks_slot=k_scale_cache.stride(1) if k_scale_cache is not None else 0,
             stride_ks_head=k_scale_cache.stride(2) if k_scale_cache is not None else 0,
+            stride_ks_group=k_scale_cache.stride(3)
+            if k_scale_cache is not None and k_scale_cache.ndim == 4
+            else 0,
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
+            stride_vs_group=v_scale_cache.stride(3)
+            if v_scale_cache is not None and v_scale_cache.ndim == 4
+            else 0,
         )
     else:
         kernel_unified_attention_3d[
@@ -1242,9 +1222,15 @@ def unified_attention(
             stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
             stride_ks_slot=k_scale_cache.stride(1) if k_scale_cache is not None else 0,
             stride_ks_head=k_scale_cache.stride(2) if k_scale_cache is not None else 0,
+            stride_ks_group=k_scale_cache.stride(3)
+            if k_scale_cache is not None and k_scale_cache.ndim == 4
+            else 0,
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
+            stride_vs_group=v_scale_cache.stride(3)
+            if v_scale_cache is not None and v_scale_cache.ndim == 4
+            else 0,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,

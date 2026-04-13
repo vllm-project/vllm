@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
+from math import prod
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -6578,12 +6579,24 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
+                    logical_numel = prod(kv_cache_shape)
+                    if raw_tensor.numel() == logical_numel:
+                        raw_tensor = raw_tensor.view(kv_cache_shape)
+                    else:
+                        assert kv_cache_spec.page_size_padded is not None
+                        elems_per_page = (
+                            kv_cache_spec.page_size_bytes // raw_tensor.element_size()
+                        )
+                        logical_elems_per_page = logical_numel // num_blocks
+                        assert logical_elems_per_page <= elems_per_page
+                        contiguous_strides = torch.empty(kv_cache_shape).stride()
+                        raw_tensor = torch.as_strided(
+                            raw_tensor,
+                            size=kv_cache_shape,
+                            stride=(elems_per_page, *contiguous_strides[1:]),
+                        )
+                    kv_caches[layer_name] = raw_tensor.permute(*inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]

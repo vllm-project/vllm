@@ -184,7 +184,7 @@ class FlashAttentionBackend(AttentionBackend):
     def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
         if kv_cache_dtype is None:
             return True
-        if is_quantized_kv_cache(kv_cache_dtype):
+        if kv_cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             return flash_attn_supports_fp8()
         return kv_cache_dtype in ["auto", "float16", "bfloat16"]
 

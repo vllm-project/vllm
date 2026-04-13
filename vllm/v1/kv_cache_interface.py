@@ -38,17 +38,28 @@ class KVQuantMode(IntEnum):
     FP8_PER_TENSOR = 1  # per-tensor scales (current fp8 path)
     INT8_PER_TOKEN_HEAD = 2  # per-token-head dynamic scales for int8
     FP8_PER_TOKEN_HEAD = 3  # per-token-head dynamic scales for fp8
+    INT4_PER_TOKEN_HEAD = 4  # per-token-head dynamic scales for packed int4
 
     @property
     def is_per_token_head(self) -> bool:
         """True for any per-token-head quantization mode."""
         return self >= 2
 
+    @property
+    def packing_factor(self) -> int:
+        return {KVQuantMode.INT4_PER_TOKEN_HEAD: 2}.get(self, 1)
+
+    def packed_head_size(self, head_size: int) -> int:
+        assert head_size % self.packing_factor == 0
+        return head_size // self.packing_factor
+
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
     if kv_cache_dtype == "int8_per_token_head":
         return KVQuantMode.INT8_PER_TOKEN_HEAD
+    if kv_cache_dtype == "int4_per_token_head":
+        return KVQuantMode.INT4_PER_TOKEN_HEAD
     if kv_cache_dtype == "fp8_per_token_head":
         return KVQuantMode.FP8_PER_TOKEN_HEAD
     if kv_cache_dtype.startswith("fp8"):
@@ -63,6 +74,37 @@ def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
 def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
     """Return True if *kv_cache_dtype* needs per-token-head scales."""
     return get_kv_quant_mode(kv_cache_dtype).is_per_token_head
+
+
+INT4_CHANNELS_PER_SCALE = 32
+
+
+def get_int4_num_scale_groups(head_size: int) -> int:
+    return cdiv(head_size, INT4_CHANNELS_PER_SCALE)
+
+
+def get_per_token_head_scale_dtype(kv_quant_mode: KVQuantMode) -> torch.dtype | None:
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        return torch.float16
+    if kv_quant_mode.is_per_token_head:
+        return torch.float32
+    return None
+
+
+def get_per_token_head_scale_count(head_size: int, kv_quant_mode: KVQuantMode) -> int:
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        return get_int4_num_scale_groups(head_size)
+    if kv_quant_mode.is_per_token_head:
+        return 1
+    return 0
+
+
+def get_kv_cache_head_size_bytes(
+    head_size: int, dtype: torch.dtype, kv_quant_mode: KVQuantMode
+) -> int:
+    if kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+        return kv_quant_mode.packed_head_size(head_size)
+    return head_size * get_dtype_size(dtype)
 
 
 @dataclass(frozen=True)
@@ -121,12 +163,20 @@ class AttentionSpec(KVCacheSpec):
     @property
     def page_size_bytes(self) -> int:
         real_page_size = self.real_page_size_bytes
-        # Per-token-head scales are stored in separate tensors managed
-        # by the attention backend, but the memory is carved from the
-        # raw KV cache allocation so it must be budgeted here.
-        if self.kv_quant_mode.is_per_token_head:
+        scale_dtype = get_per_token_head_scale_dtype(self.kv_quant_mode)
+        # Per-token-head scales are stored in separate typed views managed
+        # by the attention backend, but the memory is carved from the raw KV
+        # cache allocation so it must be budgeted here.
+        if scale_dtype is not None:
+            scale_count = get_per_token_head_scale_count(
+                self.head_size, self.kv_quant_mode
+            )
             real_page_size += (
-                2 * self.block_size * self.num_kv_heads * get_dtype_size(torch.float32)
+                2
+                * self.block_size
+                * self.num_kv_heads
+                * scale_count
+                * get_dtype_size(scale_dtype)
             )
         if self.page_size_padded is not None:
             assert self.page_size_padded >= real_page_size
@@ -139,8 +189,9 @@ class AttentionSpec(KVCacheSpec):
             2
             * self.block_size
             * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
+            * get_kv_cache_head_size_bytes(
+                self.head_size, self.dtype, self.kv_quant_mode
+            )
         )
 
 
@@ -240,8 +291,14 @@ class FullAttentionSpec(AttentionSpec):
         return (
             self.block_size
             * self.num_kv_heads
-            * (self.head_size + self.head_size_v)
-            * get_dtype_size(self.dtype)
+            * (
+                get_kv_cache_head_size_bytes(
+                    self.head_size, self.dtype, self.kv_quant_mode
+                )
+                + get_kv_cache_head_size_bytes(
+                    self.head_size_v, self.dtype, self.kv_quant_mode
+                )
+            )
         )
 
 
@@ -259,8 +316,9 @@ class MLAAttentionSpec(FullAttentionSpec):
         return (
             self.block_size
             * self.num_kv_heads
-            * self.head_size
-            * get_dtype_size(self.dtype)
+            * get_kv_cache_head_size_bytes(
+                self.head_size, self.dtype, self.kv_quant_mode
+            )
         )
 
     @classmethod

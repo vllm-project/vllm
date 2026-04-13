@@ -26,7 +26,7 @@ from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.system_utils import update_environment_variables
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import get_dtype_size, set_random_seed
 from vllm.v1.attention.backend import MultipleOf
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.core.kv_cache_utils import estimate_max_model_len, get_kv_cache_configs
@@ -975,6 +975,84 @@ def test_update_hybrid_attention_mamba_layout_with_num_block_2_rewrites_stride()
         We expect _update_hybrid_attention_mamba_layout to re-stride the cache from:
         (2, num_blocks) -> (num_blocks, 2), even when num_blocks==2, 
         which was ambiguous before get_kv_cache_block_dim was used"""
+
+
+def test_reshape_kv_cache_tensors_handles_padded_attention_pages():
+    class _MockBackend:
+        @staticmethod
+        def get_kv_cache_shape(
+            num_blocks,
+            block_size,
+            num_kv_heads,
+            head_size,
+            cache_dtype_str,
+        ):
+            return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    block_size = 16
+    num_kv_heads = 1
+    head_size = 8
+    dtype = torch.float16
+    num_blocks = 2
+
+    attn_spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=dtype,
+        page_size_padded=1024,
+    )
+    assert attn_spec.real_page_size_bytes == 512
+    assert attn_spec.page_size_bytes == 1024
+
+    layer_name = "attn"
+    kv_cache_config = KVCacheConfig(
+        num_blocks=num_blocks,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=attn_spec.page_size_bytes * num_blocks,
+                shared_by=[layer_name],
+            )
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(layer_names=[layer_name], kv_cache_spec=attn_spec)
+        ],
+    )
+    raw_tensor = torch.zeros(attn_spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    runner_stub = SimpleNamespace(
+        cache_config=SimpleNamespace(cache_dtype="int8_per_token_head"),
+        runner_only_attn_layers=set(),
+        _kv_cache_spec_attn_group_iterator=lambda: iter(
+            [AttentionGroup(_MockBackend, [layer_name], attn_spec, 0)]
+        ),
+    )
+
+    kv_caches = GPUModelRunner._reshape_kv_cache_tensors(
+        runner_stub,
+        kv_cache_config,
+        {layer_name: raw_tensor},
+        [block_size],
+    )
+    kv_cache = kv_caches[layer_name]
+
+    assert kv_cache.shape == (num_blocks, 2, block_size, num_kv_heads, head_size)
+    assert kv_cache.stride(0) == attn_spec.page_size_bytes // get_dtype_size(dtype)
+
+    kv_cache[0].fill_(1.0)
+    kv_cache[1].fill_(2.0)
+
+    raw_half = raw_tensor.view(dtype)
+    elems_per_page = attn_spec.page_size_bytes // get_dtype_size(dtype)
+    logical_elems_per_page = attn_spec.real_page_size_bytes // get_dtype_size(dtype)
+
+    assert torch.all(raw_half[:logical_elems_per_page] == 1.0)
+    assert torch.all(raw_half[logical_elems_per_page:elems_per_page] == 0.0)
+    assert torch.all(
+        raw_half[elems_per_page : elems_per_page + logical_elems_per_page] == 2.0
+    )
+    assert torch.all(
+        raw_half[elems_per_page + logical_elems_per_page : 2 * elems_per_page] == 0.0
+    )
 
 
 def test_hybrid_block_table_initialization():
