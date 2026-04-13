@@ -1439,7 +1439,7 @@ class TimedTrace(BenchmarkDataset):
         with open(self.dataset_path) as f:
             self.data = f.readlines()
 
-    def _sample_token(self, num_tokens: int, tokenizer: TokenizerLike) -> list[int]:
+    def _sample_token(self, num_tokens: int, tokenizer: TokenizerLike, seed: int | None = None) -> list[int]:
         # Initialize vocab only if it doesn't exist yet
         if not hasattr(self, "vocab"):
             self.vocab = tokenizer.get_vocab()
@@ -1452,7 +1452,13 @@ class TimedTrace(BenchmarkDataset):
             # Create a sorted list of vocab values for deterministic sampling
             self.vocab_values_sorted = sorted(self.vocab.values())
 
-        sampled_token_ids = random.choices(self.vocab_values_sorted, k=num_tokens)
+        # Use the provided seed if given, otherwise use global random state
+        if seed is not None:
+            rng = random.Random(seed)
+            sampled_token_ids = rng.choices(self.vocab_values_sorted, k=num_tokens)
+        else:
+            sampled_token_ids = random.choices(self.vocab_values_sorted, k=num_tokens)
+        
         return sampled_token_ids
 
     def _expand_prompt(
@@ -1474,8 +1480,10 @@ class TimedTrace(BenchmarkDataset):
             key = f"{h}:{expanded_size}"
 
             if key not in self._expanded_generated_prompts:
+                # Convert key to a deterministic seed
+                key_seed = hash(key) & 0xFFFFFFFF  # Convert to 32-bit int
                 self._expanded_generated_prompts[key] = self._sample_token(
-                    expanded_size, tokenizer
+                    expanded_size, tokenizer, seed=key_seed
                 )
             # once inserted get the tokenized prompt and append to the list
             raw_tokenized_prompt.extend(self._expanded_generated_prompts[key])
