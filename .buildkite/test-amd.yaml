@@ -7439,7 +7439,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 1: qwen2" -1
+- label: "Multi-Modal Models (Standard) 1: qwen2 -1"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7454,7 +7454,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 1: qwen2" -2
+- label: "Multi-Modal Models (Standard) 1: qwen2 -2"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7469,7 +7469,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 1: qwen2" -3
+- label: "Multi-Modal Models (Standard) 1: qwen2 -3"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7484,7 +7484,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 1: qwen2" -4
+- label: "Multi-Modal Models (Standard) 1: qwen2 -4"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7514,7 +7514,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" -1
+- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma -1"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7529,7 +7529,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" -2
+- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma -2"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7544,7 +7544,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" -3
+- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma -3"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7559,7 +7559,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma" -4
+- label: "Multi-Modal Models (Standard) 2: qwen3 + gemma -4"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7589,7 +7589,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" -1
+- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl -1"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7604,7 +7604,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" -2
+- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl -2"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7619,7 +7619,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" -3
+- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl -3"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7634,7 +7634,7 @@ steps:
   - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl" -4
+- label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl -4"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7664,7 +7664,7 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 4: other + whisper" -1
+- label: "Multi-Modal Models (Standard) 4: other + whisper -1"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7679,7 +7679,7 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 4: other + whisper" -2
+- label: "Multi-Modal Models (Standard) 4: other + whisper -2"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7694,7 +7694,7 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 4: other + whisper" -3
+- label: "Multi-Modal Models (Standard) 4: other + whisper -3"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
@@ -7709,7 +7709,7 @@ steps:
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
-- label: "Multi-Modal Models (Standard) 4: other + whisper" -4
+- label: "Multi-Modal Models (Standard) 4: other + whisper -4"
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_8
