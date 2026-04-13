@@ -532,6 +532,11 @@ def rocm_aiter_sparse_attn_indexer(
     has_prefill = layer_attn_metadata.num_prefills > 0
     num_decode_tokens = layer_attn_metadata.num_decode_tokens
 
+    # during speculative decoding, k may be padded to the CUDA graph batch
+    # size while slot_mapping only covers actual tokens.
+    num_tokens = slot_mapping.shape[0]
+    k = k[:num_tokens]
+
     ops.indexer_k_quant_and_cache(
         k,
         kv_cache,
