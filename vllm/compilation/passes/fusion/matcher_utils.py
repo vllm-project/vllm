@@ -388,7 +388,8 @@ class MatcherSiluAndMul(MatcherCustomOp):
         super().__init__(enabled)
 
     def inputs(self) -> list[torch.Tensor]:
-        input = self.empty(32, 8)
+        # input = self.empty(32, 8)
+        input = self.empty(5, 4)
         return [input]
 
     def forward_custom(
