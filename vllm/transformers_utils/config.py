@@ -203,25 +203,23 @@ class HFConfigParser(ConfigParserBase):
                 trust_remote_code=trust_remote_code,
                 **kwargs,
             )
-        elif model_type in _CONFIG_REGISTRY:
-            # Use config_class.from_pretrained() directly so the correct
-            # class is returned even when the checkpoint's config.json
-            # has a different model_type on disk (e.g. "mixtral" vs a
-            # plugin-registered type).  AutoConfig.from_pretrained()
-            # would read model_type from the file and return the wrong
-            # class.
-            config_class = _CONFIG_REGISTRY[model_type]
-            config_class.model_type = model_type
-            AutoConfig.register(model_type, config_class, exist_ok=True)
-            trust_remote_code = False
-            config = config_class.from_pretrained(
-                model,
-                revision=revision,
-                code_revision=code_revision,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
         else:
+            if model_type in _CONFIG_REGISTRY:
+                # Register the config class to AutoConfig to ensure it's used in future
+                # calls to `from_pretrained`
+                config_class = _CONFIG_REGISTRY[model_type]
+                config_class.model_type = model_type
+                AutoConfig.register(model_type, config_class, exist_ok=True)
+                # If the on-disk model_type differs from the overridden
+                # one, register under both so AutoConfig.from_pretrained
+                # returns the correct class regardless of what the
+                # checkpoint says
+                if (config_model_type := config_dict.get("model_type")) != model_type:
+                    config_class.model_type = config_model_type
+                    AutoConfig.register(config_model_type, config_class, exist_ok=True)
+                    config_class.model_type = model_type
+                # Now that it is registered, it is not considered remote code anymore
+                trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
