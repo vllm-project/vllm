@@ -8,6 +8,8 @@ from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
 
 
 class EagleProposer(SpecDecodeBaseProposer):
+    _supports_dsl: bool = True
+
     def __init__(
         self,
         vllm_config: VllmConfig,
