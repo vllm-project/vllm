@@ -186,7 +186,14 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModel,
         hf_output_post_proc=model_utils.ultravox_trunc_hf_output,
-        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        marks=[
+            pytest.mark.core_model,
+            pytest.mark.cpu_model,
+            # TODO: Remove skip once model has been upstreamed to Transformers
+            pytest.mark.skip(
+                reason="Custom model code is not compatible with Transformers v5"
+            ),
+        ],
     ),
     #### Transformers fallback to test
     ## To reduce test burden, we only test batching arbitrary image size
