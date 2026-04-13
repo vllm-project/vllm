@@ -255,15 +255,12 @@ class PrefillStats:
     num_local_cached_tokens: int = 0
     num_external_cached_tokens: int = 0
 
-    def set_once(
+    def set(
         self,
         num_prompt_tokens: int,
         num_local_cached_tokens: int,
         num_external_cached_tokens: int,
     ):
-        if self.num_prompt_tokens > 0:
-            return
-
         num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens
         assert num_cached_tokens <= num_prompt_tokens
 

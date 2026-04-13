@@ -120,7 +120,7 @@ def test_prompt_token_stats_all_computed():
 
     # Case 1: No caching (All tokens computed locally)
     prefill_stats = PrefillStats()
-    prefill_stats.set_once(
+    prefill_stats.set(
         num_prompt_tokens=1000,
         num_local_cached_tokens=0,
         num_external_cached_tokens=0,
@@ -140,7 +140,7 @@ def test_prompt_token_stats_partial_local_cache():
 
     # Case 2: Partial local cache
     prefill_stats = PrefillStats()
-    prefill_stats.set_once(
+    prefill_stats.set(
         num_prompt_tokens=1000,
         num_local_cached_tokens=300,
         num_external_cached_tokens=0,
@@ -160,7 +160,7 @@ def test_prompt_token_stats_partial_external_transfer():
 
     # Case 3: Partial external transfer
     prefill_stats = PrefillStats()
-    prefill_stats.set_once(
+    prefill_stats.set(
         num_prompt_tokens=1000,
         num_local_cached_tokens=0,
         num_external_cached_tokens=500,
@@ -180,7 +180,7 @@ def test_prompt_token_stats_mixed_sources():
 
     # Case 4: Mixed sources
     prefill_stats = PrefillStats()
-    prefill_stats.set_once(
+    prefill_stats.set(
         num_prompt_tokens=1000,
         num_local_cached_tokens=400,
         num_external_cached_tokens=200,
@@ -204,7 +204,7 @@ def test_prompt_token_stats_full_local_cache_recompute():
 
     # Case 5: Full local cache (999 cached, 1 recomputed)
     prefill_stats = PrefillStats()
-    prefill_stats.set_once(
+    prefill_stats.set(
         num_prompt_tokens=1000,
         num_local_cached_tokens=999,
         num_external_cached_tokens=0,
@@ -224,7 +224,7 @@ def test_prompt_token_stats_full_external_transfer_recompute():
 
     # Case 6: Full external transfer (999 from external, 1 recomputed)
     prefill_stats = PrefillStats()
-    prefill_stats.set_once(
+    prefill_stats.set(
         num_prompt_tokens=1000,
         num_local_cached_tokens=0,
         num_external_cached_tokens=999,

@@ -399,7 +399,7 @@ class MockEngineCore:
                 # Add prefill_stats on first output (prefill) for this request
                 if token_idx == 0:
                     prefill_stats = PrefillStats()
-                    prefill_stats.set_once(
+                    prefill_stats.set(
                         num_prompt_tokens=len(prompt_token_ids),
                         num_local_cached_tokens=0,
                         num_external_cached_tokens=0,
