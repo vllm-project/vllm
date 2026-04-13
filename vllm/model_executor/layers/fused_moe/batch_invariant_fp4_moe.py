@@ -5,7 +5,6 @@
 from dataclasses import dataclass
 
 import torch
-import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 import vllm.envs as envs
@@ -27,6 +26,10 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    pad_nvfp4_activation_for_cutlass,
+    slice_nvfp4_output,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -780,25 +783,24 @@ def fused_moe_batch_invariant_nvfp4(
         blockscale_offsets,
         top_k,
     )
-    if w1_padding_cols > 0:
-        a1_fp4 = F.pad(a1_fp4, (0, w1_padding_cols))
-
-    gemm1_out = _grouped_matmul_nvfp4_packed(
-        a_fp4=a1_fp4,
-        b_fp4=w13_weight,
-        a_scale=a1_scale,
-        b_scale=w13_weight_scale,
-        alpha=g1_alphas,
-        expert_offsets=expert_offsets,
-        a_scale_offsets=blockscale_offsets,
-        problem_sizes=problem_sizes1,
-        output=workspace13,
-        tiles_per_expert=workspace.tiles_per_expert,
-        expert_tile_start=workspace.expert_tile_start,
-        dummy_bias=workspace.dummy_bias,
+    a1_fp4 = pad_nvfp4_activation_for_cutlass(a1_fp4, w1_padding_cols)
+    gemm1_out = slice_nvfp4_output(
+        _grouped_matmul_nvfp4_packed(
+            a_fp4=a1_fp4,
+            b_fp4=w13_weight,
+            a_scale=a1_scale,
+            b_scale=w13_weight_scale,
+            alpha=g1_alphas,
+            expert_offsets=expert_offsets,
+            a_scale_offsets=blockscale_offsets,
+            problem_sizes=problem_sizes1,
+            output=workspace13,
+            tiles_per_expert=workspace.tiles_per_expert,
+            expert_tile_start=workspace.expert_tile_start,
+            dummy_bias=workspace.dummy_bias,
+        ),
+        w1_output_size,
     )
-    if gemm1_out.shape[-1] != w1_output_size:
-        gemm1_out = gemm1_out[:, :w1_output_size].contiguous()
 
     if activation_kind == MoEActivation.SILU:
         int_fp4, int_scale = ops.silu_and_mul_scaled_fp4_experts_quant(
@@ -822,25 +824,24 @@ def fused_moe_batch_invariant_nvfp4(
             blockscale_offsets,
             top_k,
         )
-    if w2_padding_cols > 0:
-        int_fp4 = F.pad(int_fp4, (0, w2_padding_cols))
-
-    gemm2_out = _grouped_matmul_nvfp4_packed(
-        a_fp4=int_fp4,
-        b_fp4=w2_weight,
-        a_scale=int_scale,
-        b_scale=w2_weight_scale,
-        alpha=g2_alphas,
-        expert_offsets=expert_offsets,
-        a_scale_offsets=blockscale_offsets,
-        problem_sizes=problem_sizes2,
-        output=workspace2,
-        tiles_per_expert=workspace.tiles_per_expert,
-        expert_tile_start=workspace.expert_tile_start,
-        dummy_bias=workspace.dummy_bias,
+    int_fp4 = pad_nvfp4_activation_for_cutlass(int_fp4, w2_padding_cols)
+    gemm2_out = slice_nvfp4_output(
+        _grouped_matmul_nvfp4_packed(
+            a_fp4=int_fp4,
+            b_fp4=w2_weight,
+            a_scale=int_scale,
+            b_scale=w2_weight_scale,
+            alpha=g2_alphas,
+            expert_offsets=expert_offsets,
+            a_scale_offsets=blockscale_offsets,
+            problem_sizes=problem_sizes2,
+            output=workspace2,
+            tiles_per_expert=workspace.tiles_per_expert,
+            expert_tile_start=workspace.expert_tile_start,
+            dummy_bias=workspace.dummy_bias,
+        ),
+        w2_output_size,
     )
-    if gemm2_out.shape[-1] != w2_output_size:
-        gemm2_out = gemm2_out[:, :w2_output_size].contiguous()
 
     epilogue_topk_weights = (
         torch.ones_like(routed_topk_weights)

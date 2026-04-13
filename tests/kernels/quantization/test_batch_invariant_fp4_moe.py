@@ -56,6 +56,12 @@ DTYPE = torch.bfloat16
 DEVICE = "cuda:0"
 FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 FLOAT4_E2M1_MAX = 6.0
+BATCH_INVARIANT_CASES = [
+    (1, False),
+    (2, False),
+    (4, False),
+    (1, True),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -112,6 +118,52 @@ def _global_scale(x: torch.Tensor) -> torch.Tensor:
     return (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / x.abs().max()).to(torch.float32)
 
 
+def _make_nvfp4_weights_and_scales(
+    *,
+    e: int,
+    n: int,
+    k: int,
+    scale_source: torch.Tensor,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    (_, w1_q, w1_blockscale, w1_gs), (_, w2_q, w2_blockscale, w2_gs) = (
+        make_test_weights(
+            e,
+            n,
+            k,
+            in_dtype=DTYPE,
+            quant_dtype="nvfp4",
+            block_shape=None,
+            per_out_ch_quant=False,
+        )
+    )
+    assert w1_blockscale is not None and w2_blockscale is not None
+    assert w1_gs is not None and w2_gs is not None
+
+    a1_gscale = _global_scale(scale_source).expand(e).contiguous()
+    a2_gscale = _global_scale(scale_source).expand(e).contiguous()
+    g1_alphas = ((1.0 / w1_gs) / a1_gscale).to(torch.float32)
+    g2_alphas = ((1.0 / w2_gs) / a2_gscale).to(torch.float32)
+    return (
+        w1_q,
+        w1_blockscale,
+        w2_q,
+        w2_blockscale,
+        a1_gscale,
+        a2_gscale,
+        g1_alphas,
+        g2_alphas,
+    )
+
+
 def _make_nvfp4_moe_tensors(
     *,
     m: int,
@@ -133,33 +185,27 @@ def _make_nvfp4_moe_tensors(
     torch.Tensor,
 ]:
     hidden_states = torch.randn((m, k), device=DEVICE, dtype=DTYPE) / 10
-    (_, w1_q, w1_blockscale, w1_gs), (_, w2_q, w2_blockscale, w2_gs) = (
-        make_test_weights(
-            e,
-            n,
-            k,
-            in_dtype=DTYPE,
-            quant_dtype="nvfp4",
-            block_shape=None,
-            per_out_ch_quant=False,
-        )
+    (
+        w1_q,
+        w1_blockscale,
+        w2_q,
+        w2_blockscale,
+        a1_gscale,
+        a2_gscale,
+        g1_alphas,
+        g2_alphas,
+    ) = _make_nvfp4_weights_and_scales(
+        e=e,
+        n=n,
+        k=k,
+        scale_source=hidden_states,
     )
-    assert w1_blockscale is not None and w2_blockscale is not None
-    assert w1_gs is not None and w2_gs is not None
 
     score = torch.randn((m, e), device=DEVICE, dtype=DTYPE)
     topk_weights, topk_ids, _ = fused_topk(
         hidden_states, score, topk, renormalize=False
     )
 
-    # Use realistic (non-trivial) per-expert activation global scales so that
-    # the alpha fusion in process_weights_after_loading is actually exercised.
-    # Trivial gscale=1.0 would mask missing fusion since multiplying by 1 is
-    # identity.
-    a1_gscale = _global_scale(hidden_states).expand(e).contiguous()
-    a2_gscale = _global_scale(hidden_states).expand(e).contiguous()
-    g1_alphas = ((1.0 / w1_gs) / a1_gscale).to(torch.float32)
-    g2_alphas = ((1.0 / w2_gs) / a2_gscale).to(torch.float32)
     return (
         hidden_states,
         topk_weights,
@@ -175,15 +221,60 @@ def _make_nvfp4_moe_tensors(
     )
 
 
+def _run_batch_invariant_nvfp4(
+    *,
+    hidden_states: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    w1_q: torch.Tensor,
+    w1_blockscale: torch.Tensor,
+    w2_q: torch.Tensor,
+    w2_blockscale: torch.Tensor,
+    a1_gscale: torch.Tensor,
+    a2_gscale: torch.Tensor,
+    g1_alphas: torch.Tensor,
+    g2_alphas: torch.Tensor,
+    activation: MoEActivation = MoEActivation.SILU,
+    apply_router_weight_on_input: bool = False,
+    expert_map: torch.Tensor | None = None,
+) -> torch.Tensor:
+    workspace13, workspace2 = _batch_invariant_fp4_workspaces(
+        m=hidden_states.shape[0],
+        topk=topk_ids.shape[1],
+        w1_row_dim=w1_q.shape[1],
+        hidden_dim=hidden_states.shape[1],
+        activation=activation,
+        device=hidden_states.device,
+        dtype=hidden_states.dtype,
+    )
+    output = torch.empty_like(hidden_states)
+    fused_moe_batch_invariant_nvfp4(
+        hidden_states=hidden_states,
+        topk_ids=topk_ids,
+        topk_weights=topk_weights,
+        w13_weight=w1_q,
+        w13_weight_scale=w1_blockscale,
+        w2_weight=w2_q,
+        w2_weight_scale=w2_blockscale,
+        a1_gscale=a1_gscale,
+        g1_alphas=g1_alphas,
+        a2_gscale=a2_gscale,
+        g2_alphas=g2_alphas,
+        activation=activation,
+        workspace13=workspace13,
+        workspace2=workspace2,
+        output=output,
+        workspace=_make_nvfp4_workspace(w1_q.shape[0]),
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        expert_map=expert_map,
+    )
+    return output
+
+
 @REQUIRES_SM100
 @pytest.mark.parametrize(
     "topk,apply_router_weight_on_input",
-    [
-        (1, False),
-        (2, False),
-        (4, False),
-        (1, True),
-    ],
+    BATCH_INVARIANT_CASES,
 )
 @torch.inference_mode()
 def test_batch_invariant_nvfp4_moe_matches_cutlass(
@@ -208,16 +299,6 @@ def test_batch_invariant_nvfp4_moe_matches_cutlass(
             g1_alphas,
             g2_alphas,
         ) = _make_nvfp4_moe_tensors(m=32, n=128, k=128, e=8, topk=topk)
-
-        w13, w2 = _batch_invariant_fp4_workspaces(
-            m=32,
-            topk=topk,
-            w1_row_dim=w1_q.shape[1],
-            hidden_dim=128,
-            activation=MoEActivation.SILU,
-            device=DEVICE,
-            dtype=DTYPE,
-        )
 
         quant_config = nvfp4_moe_quant_config(
             g1_alphas=g1_alphas,
@@ -248,24 +329,18 @@ def test_batch_invariant_nvfp4_moe_matches_cutlass(
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        fallback_out = torch.empty_like(hidden_states)
-        fused_moe_batch_invariant_nvfp4(
+        fallback_out = _run_batch_invariant_nvfp4(
             hidden_states=hidden_states,
-            topk_ids=topk_ids,
             topk_weights=topk_weights,
-            w13_weight=w1_q,
-            w13_weight_scale=w1_blockscale,
-            w2_weight=w2_q,
-            w2_weight_scale=w2_blockscale,
+            topk_ids=topk_ids,
+            w1_q=w1_q,
+            w1_blockscale=w1_blockscale,
+            w2_q=w2_q,
+            w2_blockscale=w2_blockscale,
             a1_gscale=a1_gscale,
-            g1_alphas=g1_alphas,
             a2_gscale=a2_gscale,
+            g1_alphas=g1_alphas,
             g2_alphas=g2_alphas,
-            activation=MoEActivation.SILU,
-            workspace13=w13,
-            workspace2=w2,
-            output=fallback_out,
-            workspace=_make_nvfp4_workspace(8),
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
         torch.testing.assert_close(fallback_out, cutlass_out, atol=1e-1, rtol=1e-1)
@@ -274,12 +349,7 @@ def test_batch_invariant_nvfp4_moe_matches_cutlass(
 @REQUIRES_SM100
 @pytest.mark.parametrize(
     "topk,apply_router_weight_on_input",
-    [
-        (1, False),
-        (2, False),
-        (4, False),
-        (1, True),
-    ],
+    BATCH_INVARIANT_CASES,
 )
 @torch.inference_mode()
 def test_batch_invariant_nvfp4_moe_batch_size_invariance(
@@ -293,24 +363,21 @@ def test_batch_invariant_nvfp4_moe_batch_size_invariance(
         [x_single, torch.randn((7, k), device=DEVICE, dtype=DTYPE) / 10], dim=0
     )
 
-    (_, w1_q, w1_blockscale, w1_gs), (_, w2_q, w2_blockscale, w2_gs) = (
-        make_test_weights(
-            e,
-            n,
-            k,
-            in_dtype=DTYPE,
-            quant_dtype="nvfp4",
-            block_shape=None,
-            per_out_ch_quant=False,
-        )
+    (
+        w1_q,
+        w1_blockscale,
+        w2_q,
+        w2_blockscale,
+        a1_gscale,
+        a2_gscale,
+        g1_alphas,
+        g2_alphas,
+    ) = _make_nvfp4_weights_and_scales(
+        e=e,
+        n=n,
+        k=k,
+        scale_source=x_batch,
     )
-    assert w1_blockscale is not None and w2_blockscale is not None
-    assert w1_gs is not None and w2_gs is not None
-
-    a1_gscale = _global_scale(x_batch).expand(e).contiguous()
-    a2_gscale = _global_scale(x_batch).expand(e).contiguous()
-    g1_alphas = ((1.0 / w1_gs) / a1_gscale).to(torch.float32)
-    g2_alphas = ((1.0 / w2_gs) / a2_gscale).to(torch.float32)
 
     topk_ids_single = torch.randint(0, e, (1, topk), device=DEVICE, dtype=torch.int32)
     topk_ids_batch = torch.cat(
@@ -327,265 +394,35 @@ def test_batch_invariant_nvfp4_moe_batch_size_invariance(
     topk_weights_batch /= topk_weights_batch.sum(dim=-1, keepdim=True)
     topk_weights_batch[0] = topk_weights_single[0]
 
-    w13_1, w2_1 = _batch_invariant_fp4_workspaces(
-        m=1,
-        topk=topk,
-        w1_row_dim=w1_q.shape[1],
-        hidden_dim=k,
-        activation=MoEActivation.SILU,
-        device=DEVICE,
-        dtype=DTYPE,
-    )
-    w13_8, w2_8 = _batch_invariant_fp4_workspaces(
-        m=8,
-        topk=topk,
-        w1_row_dim=w1_q.shape[1],
-        hidden_dim=k,
-        activation=MoEActivation.SILU,
-        device=DEVICE,
-        dtype=DTYPE,
-    )
-
-    out_single = torch.empty_like(x_single)
-    fused_moe_batch_invariant_nvfp4(
+    out_single = _run_batch_invariant_nvfp4(
         hidden_states=x_single,
-        topk_ids=topk_ids_single,
         topk_weights=topk_weights_single,
-        w13_weight=w1_q,
-        w13_weight_scale=w1_blockscale,
-        w2_weight=w2_q,
-        w2_weight_scale=w2_blockscale,
+        topk_ids=topk_ids_single,
+        w1_q=w1_q,
+        w1_blockscale=w1_blockscale,
+        w2_q=w2_q,
+        w2_blockscale=w2_blockscale,
         a1_gscale=a1_gscale,
-        g1_alphas=g1_alphas,
         a2_gscale=a2_gscale,
+        g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
-        activation=MoEActivation.SILU,
-        workspace13=w13_1,
-        workspace2=w2_1,
-        output=out_single,
-        workspace=_make_nvfp4_workspace(e),
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
-    out_batch = torch.empty_like(x_batch)
-    fused_moe_batch_invariant_nvfp4(
+    out_batch = _run_batch_invariant_nvfp4(
         hidden_states=x_batch,
-        topk_ids=topk_ids_batch,
         topk_weights=topk_weights_batch,
-        w13_weight=w1_q,
-        w13_weight_scale=w1_blockscale,
-        w2_weight=w2_q,
-        w2_weight_scale=w2_blockscale,
+        topk_ids=topk_ids_batch,
+        w1_q=w1_q,
+        w1_blockscale=w1_blockscale,
+        w2_q=w2_q,
+        w2_blockscale=w2_blockscale,
         a1_gscale=a1_gscale,
-        g1_alphas=g1_alphas,
         a2_gscale=a2_gscale,
+        g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
-        activation=MoEActivation.SILU,
-        workspace13=w13_8,
-        workspace2=w2_8,
-        output=out_batch,
-        workspace=_make_nvfp4_workspace(e),
         apply_router_weight_on_input=apply_router_weight_on_input,
     )
     assert torch.equal(out_single[0], out_batch[0])
-
-
-# NVFP4 MoE does not support expert parallelism yet; this test fails until it does.
-@pytest.mark.skip(
-    reason="NVFP4 MoE expert parallelism not supported; test fails until then.",
-)
-@REQUIRES_SM100
-@torch.inference_mode()
-def test_batch_invariant_nvfp4_moe_ignores_invalid_sentinel_routes() -> None:
-    set_random_seed(23)
-    m, e, n, k = 32, 8, 128, 128
-    (
-        hidden_states,
-        _,
-        _,
-        w1_q,
-        w1_blockscale,
-        w2_q,
-        w2_blockscale,
-        a1_gscale,
-        a2_gscale,
-        g1_alphas,
-        g2_alphas,
-    ) = _make_nvfp4_moe_tensors(m=m, n=n, k=k, e=e, topk=1)
-
-    valid_topk_ids = torch.randint(0, e, (m, 1), device=DEVICE, dtype=torch.int32)
-    valid_topk_weights = torch.rand((m, 1), device=DEVICE, dtype=torch.float32)
-    invalid_topk_ids = torch.full((m, 1), -1, device=DEVICE, dtype=torch.int32)
-    invalid_topk_weights = torch.rand((m, 1), device=DEVICE, dtype=torch.float32)
-
-    topk_ids_with_invalid = torch.cat([valid_topk_ids, invalid_topk_ids], dim=1)
-    topk_weights_with_invalid = torch.cat(
-        [valid_topk_weights, invalid_topk_weights], dim=1
-    )
-
-    w13, w2 = _batch_invariant_fp4_workspaces(
-        m=m,
-        topk=2,
-        w1_row_dim=w1_q.shape[1],
-        hidden_dim=k,
-        activation=MoEActivation.SILU,
-        device=DEVICE,
-        dtype=DTYPE,
-    )
-
-    out_with_invalid = torch.empty_like(hidden_states)
-    fused_moe_batch_invariant_nvfp4(
-        hidden_states=hidden_states,
-        topk_ids=topk_ids_with_invalid,
-        topk_weights=topk_weights_with_invalid,
-        w13_weight=w1_q,
-        w13_weight_scale=w1_blockscale,
-        w2_weight=w2_q,
-        w2_weight_scale=w2_blockscale,
-        a1_gscale=a1_gscale,
-        g1_alphas=g1_alphas,
-        a2_gscale=a2_gscale,
-        g2_alphas=g2_alphas,
-        activation=MoEActivation.SILU,
-        workspace13=w13,
-        workspace2=w2,
-        output=out_with_invalid,
-        workspace=_make_nvfp4_workspace(e),
-    )
-    out_valid_only = torch.empty_like(hidden_states)
-    fused_moe_batch_invariant_nvfp4(
-        hidden_states=hidden_states,
-        topk_ids=valid_topk_ids,
-        topk_weights=valid_topk_weights,
-        w13_weight=w1_q,
-        w13_weight_scale=w1_blockscale,
-        w2_weight=w2_q,
-        w2_weight_scale=w2_blockscale,
-        a1_gscale=a1_gscale,
-        g1_alphas=g1_alphas,
-        a2_gscale=a2_gscale,
-        g2_alphas=g2_alphas,
-        activation=MoEActivation.SILU,
-        workspace13=w13,
-        workspace2=w2,
-        output=out_valid_only,
-        workspace=_make_nvfp4_workspace(e),
-    )
-
-    torch.testing.assert_close(out_with_invalid, out_valid_only, atol=1e-1, rtol=1e-1)
-
-
-# NVFP4 MoE does not support expert parallelism yet; this test fails until it does.
-@pytest.mark.skip(
-    reason="NVFP4 MoE expert parallelism not supported; test fails until then.",
-)
-@REQUIRES_SM100
-@torch.inference_mode()
-def test_batch_invariant_nvfp4_moe_expert_map_invalidation_matches_local_routes() -> (
-    None
-):
-    set_random_seed(29)
-    m, e_local, n, k = 32, 4, 128, 128
-    (
-        hidden_states,
-        _,
-        _,
-        w1_q,
-        w1_blockscale,
-        w2_q,
-        w2_blockscale,
-        a1_gscale,
-        a2_gscale,
-        g1_alphas,
-        g2_alphas,
-    ) = _make_nvfp4_moe_tensors(m=m, n=n, k=k, e=e_local, topk=1)
-
-    global_num_experts = 8
-    expert_map = torch.full((global_num_experts,), -1, dtype=torch.int32, device=DEVICE)
-    mapped_global_ids = torch.tensor([1, 3, 5, 7], dtype=torch.int64, device=DEVICE)
-    expert_map[mapped_global_ids] = torch.arange(
-        e_local, dtype=torch.int32, device=DEVICE
-    )
-
-    valid_global_ids = mapped_global_ids[
-        torch.randint(0, mapped_global_ids.numel(), (m, 1), device=DEVICE)
-    ]
-    invalid_global_candidates = torch.tensor(
-        [0, 2, 4, 6], dtype=torch.int64, device=DEVICE
-    )
-    invalid_global_ids = invalid_global_candidates[
-        torch.randint(0, invalid_global_candidates.numel(), (m, 1), device=DEVICE)
-    ]
-    topk_ids_global = torch.cat([valid_global_ids, invalid_global_ids], dim=1).to(
-        torch.int32
-    )
-    topk_weights_global = torch.rand((m, 2), device=DEVICE, dtype=torch.float32)
-
-    w13_g, w2_g = _batch_invariant_fp4_workspaces(
-        m=m,
-        topk=2,
-        w1_row_dim=w1_q.shape[1],
-        hidden_dim=k,
-        activation=MoEActivation.SILU,
-        device=DEVICE,
-        dtype=DTYPE,
-    )
-    w13_l, w2_l = _batch_invariant_fp4_workspaces(
-        m=m,
-        topk=1,
-        w1_row_dim=w1_q.shape[1],
-        hidden_dim=k,
-        activation=MoEActivation.SILU,
-        device=DEVICE,
-        dtype=DTYPE,
-    )
-
-    out_with_expert_map = torch.empty_like(hidden_states)
-    fused_moe_batch_invariant_nvfp4(
-        hidden_states=hidden_states,
-        topk_ids=topk_ids_global,
-        topk_weights=topk_weights_global,
-        w13_weight=w1_q,
-        w13_weight_scale=w1_blockscale,
-        w2_weight=w2_q,
-        w2_weight_scale=w2_blockscale,
-        a1_gscale=a1_gscale,
-        g1_alphas=g1_alphas,
-        a2_gscale=a2_gscale,
-        g2_alphas=g2_alphas,
-        activation=MoEActivation.SILU,
-        workspace13=w13_g,
-        workspace2=w2_g,
-        output=out_with_expert_map,
-        workspace=_make_nvfp4_workspace(e_local),
-        expert_map=expert_map,
-    )
-
-    topk_ids_local = expert_map[topk_ids_global[:, :1]].to(torch.int32)
-    assert torch.all(topk_ids_local >= 0)
-    out_local_only = torch.empty_like(hidden_states)
-    fused_moe_batch_invariant_nvfp4(
-        hidden_states=hidden_states,
-        topk_ids=topk_ids_local,
-        topk_weights=topk_weights_global[:, :1].contiguous(),
-        w13_weight=w1_q,
-        w13_weight_scale=w1_blockscale,
-        w2_weight=w2_q,
-        w2_weight_scale=w2_blockscale,
-        a1_gscale=a1_gscale,
-        g1_alphas=g1_alphas,
-        a2_gscale=a2_gscale,
-        g2_alphas=g2_alphas,
-        activation=MoEActivation.SILU,
-        workspace13=w13_l,
-        workspace2=w2_l,
-        output=out_local_only,
-        workspace=_make_nvfp4_workspace(e_local),
-        expert_map=None,
-    )
-
-    torch.testing.assert_close(
-        out_with_expert_map, out_local_only, atol=1e-1, rtol=1e-1
-    )
 
 
 @REQUIRES_SM100
@@ -609,33 +446,18 @@ def test_batch_invariant_nvfp4_moe_all_invalid_routes_return_zero() -> None:
 
     topk_ids = torch.full((m, 2), -1, dtype=torch.int32, device=DEVICE)
     topk_weights = torch.rand((m, 2), dtype=torch.float32, device=DEVICE)
-    w13_z, w2_z = _batch_invariant_fp4_workspaces(
-        m=m,
-        topk=2,
-        w1_row_dim=w1_q.shape[1],
-        hidden_dim=k,
-        activation=MoEActivation.SILU,
-        device=DEVICE,
-        dtype=DTYPE,
-    )
-    out = torch.empty_like(hidden_states)
-    fused_moe_batch_invariant_nvfp4(
+    out = _run_batch_invariant_nvfp4(
         hidden_states=hidden_states,
-        topk_ids=topk_ids,
         topk_weights=topk_weights,
-        w13_weight=w1_q,
-        w13_weight_scale=w1_blockscale,
-        w2_weight=w2_q,
-        w2_weight_scale=w2_blockscale,
+        topk_ids=topk_ids,
+        w1_q=w1_q,
+        w1_blockscale=w1_blockscale,
+        w2_q=w2_q,
+        w2_blockscale=w2_blockscale,
         a1_gscale=a1_gscale,
-        g1_alphas=g1_alphas,
         a2_gscale=a2_gscale,
+        g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
-        activation=MoEActivation.SILU,
-        workspace13=w13_z,
-        workspace2=w2_z,
-        output=out,
-        workspace=_make_nvfp4_workspace(e),
     )
 
     torch.testing.assert_close(out, torch.zeros_like(out), atol=0.0, rtol=0.0)
