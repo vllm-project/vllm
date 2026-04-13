@@ -281,7 +281,7 @@ endif()
 
 set(VLLM_SPINLOCK_EXT_SRC
   "csrc/spinlock.cpp")
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR $ENV{VLLM_CPU_X86})
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
   list(APPEND SPINLOCK_COMPILE_FLAGS "-mmwaitx")
 endif()
 define_extension_target(

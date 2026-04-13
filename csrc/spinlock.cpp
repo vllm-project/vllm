@@ -58,15 +58,15 @@ static PyObject* method_spinlock(PyObject* self, PyObject* args,
   Py_buffer buffer;
   PyObject* callback;
   double timeout = 0.;
-
-  spinlock_state_t* state = PyModule_GetState(self);
+(
+  spinlock_state_t* state = (spinlock_state_t*)PyModule_GetState(self);
   if (state == NULL) {
     PyErr_SetString(PyExc_TypeError, "Failed to retrieve module state!");
     return NULL;
   }
 
-  static char* keywords[] = {"buffer", "callback", "timeout", NULL};
-  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*O|d", keywords, &buffer,
+  static const char* keywords[] = {"buffer", "callback", "timeout", NULL};
+  if (!PyArg_ParseTupleAndKeywords(args, kwargs, "y*O|d", (char **)keywords, &buffer,
                                    &callback, &timeout)) {
     return NULL;
   }
