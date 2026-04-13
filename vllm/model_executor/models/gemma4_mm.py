@@ -125,8 +125,12 @@ class Gemma4AudioInputs(TensorSchema):
     """
 
     type: Literal["audio"] = "audio"
-    input_features_padded: Annotated[torch.Tensor, TensorShape("bn", "s", "f")]
-    input_features_mask: Annotated[torch.Tensor, TensorShape("bn", "s")]
+    input_features_padded: Annotated[
+        torch.Tensor, TensorShape("bn", "s", "f", dynamic_dims={"s"})
+    ]
+    input_features_mask: Annotated[
+        torch.Tensor, TensorShape("bn", "s", dynamic_dims={"s"})
+    ]
 
 
 Gemma4ImageInputs = Gemma4ImagePixelInputs
