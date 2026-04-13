@@ -1296,6 +1296,7 @@ class FusedMoE(CustomOp):
             # specific to each case
             quant_method = getattr(param, "quant_method", None)
             if "bias" in weight_name:
+                shard_dim = 1 if load_all_experts else 0
                 quant_method = FusedMoeWeightScaleSupported.CHANNEL.value
             if quant_method == FusedMoeWeightScaleSupported.CHANNEL.value:
                 self._load_per_channel_weight_scale(

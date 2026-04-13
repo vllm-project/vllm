@@ -202,9 +202,11 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             max_num_tokens = self.max_num_tokens
             num_dispatchers = self.num_dispatchers
             assert max_num_tokens is not None and num_dispatchers is not None
+            input_shape_m = num_experts * max_num_tokens
             real_shape_m = num_experts * max_num_tokens * num_dispatchers
             output_shape = (num_experts, max_num_tokens * num_dispatchers, K)
         else:
+            input_shape_m = M
             real_shape_m = M * topk
             output_shape = (M, K)
 
@@ -217,12 +219,13 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             dtypes.bfloat16: torch.bfloat16,
             dtypes.float8e4m3: torch.float8_e4m3fn,
             dtypes.int8: torch.int8,
+            dtypes.int4: torch.uint8,
         }
 
         buffer_metas = {
             "quanted_gate_up_input": {
-                "shape": (real_shape_m, K),
-                "dtype": torch_dtype_map[c_dtype],
+                "shape": (input_shape_m, K),
+                "dtype": torch_dtype_map[a_dtype],
             },
             "gate_up_output": {
                 "shape": (real_shape_m, N * 2),

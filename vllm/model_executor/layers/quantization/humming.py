@@ -392,6 +392,7 @@ class HummingLinearMethod(LinearMethodBase):
             float_dtypes = [torch.float16, torch.bfloat16, torch.float32]
             is_unquantized = name == "weight" and loaded_weight.dtype in float_dtypes
             if is_unquantized and self.is_online_quant:
+                # online quant (fp16/bf16 -> quant_type)
                 assert isinstance(self.weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
                 has_global_scale = "TENSOR" in str(self.weight_schema.weight_scale_type)
@@ -416,6 +417,8 @@ class HummingLinearMethod(LinearMethodBase):
                 return None
             elif is_unquantized and not self.is_online_quant:
                 # fallback to unquantized linear
+                # some model skip some layer when quantizing model, but
+                # don't mark the layer as unquantized.
                 if layer.is_fallback:
                     return None
                 layer.is_fallback = True
@@ -440,11 +443,11 @@ class HummingLinearMethod(LinearMethodBase):
                     return layer.weight.weight_loader(param, loaded_weight, shard_id)
                 return layer.weight.weight_loader(param, loaded_weight)
 
+            # weight processing logic for specific quantization schema
             loaded_weight = self.weight_schema.process_loaded_weight(
                 tensor=loaded_weight,
                 name=name,
             )
-            loaded_weight = may_pad_loaded_weight(param, loaded_weight)
             if shard_id is not None:
                 return weight_loader(param, loaded_weight, shard_id)
             return weight_loader(param, loaded_weight)
@@ -479,12 +482,10 @@ class HummingLinearMethod(LinearMethodBase):
             if block_size is not None:
                 layer.weight_block_size = block_size
 
-        weight_tensor_attrs = self.weight_schema.get_padded_tensors_attrs(
+        weight_tensor_attrs = self.weight_schema.get_tensors_attrs(
             shape_n=layer.output_size_per_partition,
             shape_k=layer.input_size_per_partition,
             param_dtype=params_dtype,
-            pad_n_to_multiple=256,
-            pad_k_to_multiple=128,
             stack_size=len(layer.output_partition_sizes),
         )
 
@@ -516,6 +517,8 @@ class HummingLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if layer.is_fallback:
             return None
+
+        # convert from checkpoint format to humming format
         if not isinstance(self.weight_schema, HummingWeightSchema):
             self.weight_schema, tensors = self.weight_schema.convert_humming(
                 tensors=layer.state_dict(),
@@ -540,6 +543,7 @@ class HummingLinearMethod(LinearMethodBase):
 
             del tensors
 
+        # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
         assert isinstance(self.weight_schema, HummingWeightSchema)
         force_requant = self.force_weight_schema is not None
         if force_requant and self.weight_schema != self.force_weight_schema:
@@ -561,6 +565,7 @@ class HummingLinearMethod(LinearMethodBase):
 
             del tensors
 
+        # prepare layer config from humming kernel
         HummingMethod.prepare_layer_meta(
             layer=layer,
             shape_n=layer.output_size_per_partition,
@@ -573,7 +578,12 @@ class HummingLinearMethod(LinearMethodBase):
             torch_dtype=layer.param_dtype,
         )
 
-        HummingMethod.transform_humming_layer(layer, already_padded=True)
+        # preprocess weight for inference 
+        HummingMethod.transform_humming_layer(layer)
+
+        # compute_config: kernel configs that do not directly affect weights
+        # but significantly impact kernel behavior or computation precision.
+        # see https://github.com/inclusionAI/humming/blob/main/docs/config.md
         compute_config = {
             "use_batch_invariant": envs.VLLM_BATCH_INVARIANT,
             "use_f16_accum": envs.VLLM_HUMMING_USE_F16_ACCUM,
@@ -587,7 +597,14 @@ class HummingLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return HummingMethod.forward_layer(layer, x, compute_config=self.compute_config)
+        flatten_inputs = x.view(-1, x.size(-1))
+        output = HummingMethod.forward_layer(
+            layer=layer,
+            inputs=flatten_inputs,
+            compute_config=self.compute_config,
+        )
+        output = output.view(*x.shape[:-1], output.size(-1))
+        return output
 
 
 class HummingMoEMethod(FusedMoEMethodBase):
@@ -614,6 +631,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             name = param.param_name
             float_dtypes = [torch.float16, torch.bfloat16, torch.float32]
             is_unquantized = name == "weight" and loaded_weight.dtype in float_dtypes
+            # online quant (fp16/bf16 -> quant_type)
             if is_unquantized:
                 assert isinstance(self.weight_schema, HummingWeightSchema)
                 f16_dtype = DataType.from_torch_dtype(layer.param_dtype)
@@ -649,11 +667,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
                 return success if return_success else None
 
+            # weight processing logic for specific quantization schema
             loaded_weight = self.weight_schema.process_loaded_weight(
                 tensor=loaded_weight,
                 name=name,
             )
-            loaded_weight = may_pad_loaded_weight(param, loaded_weight)
             return weight_loader(
                 param,
                 loaded_weight,
@@ -681,6 +699,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
         weight_loader = self.prepare_weight_loader(layer, weight_loader)
         extra_weight_attrs["weight_loader"] = weight_loader
 
+        # sublayer: a layer contains multiple sets of weights for quantized GEMM
+        # (e.g., weight, weight_scale, etc.).
+        # The weight names of sublayer start with the prefix "{sublayer_name}_"
         layer.sublayer_configs = {
             "w13": {
                 "shape_n": intermediate_size_per_partition * 2,
@@ -691,8 +712,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     num_experts=num_experts,
                     param_dtype=params_dtype,
                     has_bias=self.moe.has_bias,
-                    pad_n_to_multiple=256,
-                    pad_k_to_multiple=128,
                 ),
             },
             "w2": {
@@ -704,8 +723,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     num_experts=num_experts,
                     param_dtype=params_dtype,
                     has_bias=self.moe.has_bias,
-                    pad_n_to_multiple=256,
-                    pad_k_to_multiple=128,
                 ),
             },
         }
@@ -748,6 +765,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         for sublayer_name, configs in layer.sublayer_configs.items():
             input_schema = self.input_schema
             weight_schema = self.weight_schema
+            # convert from checkpoint format to humming format
             if not isinstance(weight_schema, HummingWeightSchema):
                 tensors: dict[str, torch.Tensor] = dict(
                     (key.removeprefix(sublayer_name + "_"), value)
@@ -786,6 +804,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     param = torch.nn.Parameter(tensor, requires_grad=False)
                     setattr(layer, name, param)
 
+            # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
             assert isinstance(weight_schema, HummingWeightSchema)
             force_requant = self.force_weight_schema is not None
             if force_requant and weight_schema != self.force_weight_schema:
@@ -817,6 +836,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
                 del tensors
 
+            # prepare layer config from humming kernel
             HummingMethod.prepare_layer_meta(
                 layer=layer,
                 shape_n=configs["shape_n"],
@@ -831,12 +851,10 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 sublayer_name=sublayer_name,
             )
 
-            HummingMethod.transform_humming_layer(
-                layer=layer,
-                sublayer_name=sublayer_name,
-                already_padded=True,
-            )
+            # preprocess weight for inference
+            HummingMethod.transform_humming_layer(layer, sublayer_name=sublayer_name)
 
+        # use moe modular
         experts: HummingIndexedExperts | HummingGroupedExperts
         if get_humming_moe_gemm_type() == "indexed":
             experts = HummingIndexedExperts(layer, self)
@@ -876,6 +894,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
             topk=topk_ids.size(1),
             activation=layer.activation,
         )
+
+        assert workspace1.data_ptr() == output.data_ptr()
 
         self.experts.main_apply(
             hidden_states=x,
