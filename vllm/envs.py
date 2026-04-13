@@ -258,6 +258,7 @@ if TYPE_CHECKING:
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
+    VLLM_POOL_CUDAGRAPH_BATCH_SIZES: str | None = None
 
 
 def get_default_cache_root():
@@ -1713,6 +1714,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
         int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "0"))
+    ),
+    # Comma-separated list of batch sizes for pooler CUDA graph capture.
+    # When set, the pooler CUDA graph optimization will capture graphs for
+    # these batch sizes instead of the default range (1..128).
+    # Example: "1,2,4,8,16,32,64,128,256"
+    "VLLM_POOL_CUDAGRAPH_BATCH_SIZES": lambda: os.environ.get(
+        "VLLM_POOL_CUDAGRAPH_BATCH_SIZES", None
     ),
 }
 
