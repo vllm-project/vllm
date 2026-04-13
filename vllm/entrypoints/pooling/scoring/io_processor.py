@@ -299,8 +299,38 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
 class FlashLateInteractionIOProcessor(LateInteractionIOProcessor):
     name = "flash-late-interaction"
 
-    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
-        return outputs
+    def post_process_online(
+        self,
+        ctx: ScoringServeContext,
+    ):
+        assert ctx.query_final_res_batch is not None
+        assert ctx.final_res_batch is not None
+        assert isinstance(ctx.n_queries, int)
+
+        # Expand queries if 1:N scoring
+        if len(ctx.query_final_res_batch) == 1:
+            ctx.query_final_res_batch = ctx.query_final_res_batch * len(
+                ctx.final_res_batch
+            )
+
+        final_res_batch: list[PoolingRequestOutput] = []
+        for d1, d2 in zip(ctx.query_final_res_batch, ctx.final_res_batch):
+            padding: list[int] = []
+            if (pad_token_id := self.pad_token_id) is not None:
+                padding = [pad_token_id]
+
+            tokens = d1.prompt_token_ids + padding + d2.prompt_token_ids
+
+            final_res_batch.append(
+                PoolingRequestOutput(
+                    request_id=f"{d1.request_id}_{d2.request_id}",
+                    outputs=d2.outputs,
+                    prompt_token_ids=tokens,
+                    num_cached_tokens=d1.num_cached_tokens + d2.num_cached_tokens,
+                    finished=True,
+                )
+            )
+        ctx.final_res_batch = final_res_batch
 
 
 class CrossEncoderIOProcessor(ScoringIOProcessor):

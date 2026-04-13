@@ -20,6 +20,14 @@ from .typing import ScoreContentPartParam, ScoreInput
 
 
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
+    max_tokens_per_query: int = Field(
+        default=0,
+        description=(
+            "Maximum number of tokens per query. Queries longer than "
+            "this will be truncated to this length. 0 means no "
+            "query-level truncation is applied."
+        ),
+    )
     max_tokens_per_doc: int = Field(
         default=0,
         description=(
@@ -27,14 +35,6 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             "this will be truncated to this length. 0 means no "
             "document-level truncation is applied (only truncate_prompt_tokens "
             "applies to the combined query+document)."
-        ),
-    )
-    max_tokens_per_query: int = Field(
-        default=0,
-        description=(
-            "Maximum number of tokens per query. Queries longer than "
-            "this will be truncated to this length. 0 means no "
-            "query-level truncation is applied."
         ),
     )
 

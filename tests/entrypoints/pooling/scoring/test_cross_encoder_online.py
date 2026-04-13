@@ -472,32 +472,7 @@ async def test_pooling_token_classify(server: RemoteOpenAIServer):
 
 
 @pytest.mark.asyncio
-async def test_rerank_max_tokens_per_doc(server: RemoteOpenAIServer):
-    """Test that max_tokens_per_doc truncates documents correctly."""
-    query = "What is the capital of France?"
-    long_doc = "The capital of France is Paris. " * 50
-    short_doc = "The capital of Brazil is Brasilia."
-
-    rerank_response = requests.post(
-        server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": query,
-            "documents": [long_doc, short_doc],
-            "max_tokens_per_doc": 10,
-        },
-    )
-    rerank_response.raise_for_status()
-    rerank = RerankResponse.model_validate(rerank_response.json())
-
-    assert rerank.id is not None
-    assert rerank.results is not None
-    assert len(rerank.results) == 2
-    assert rerank.usage.prompt_tokens > 0
-
-
-@pytest.mark.asyncio
-async def test_rerank_max_tokens_per_doc_reduces_tokens(
+async def test_rerank_max_tokens_per_doc(
     server: RemoteOpenAIServer,
 ):
     """Test that max_tokens_per_doc actually reduces the token count."""
@@ -566,38 +541,6 @@ async def test_rerank_max_tokens_per_doc_validation(
     )
     assert response.status_code == 400
     assert "max_tokens_per_doc must be a non-negative integer" in response.text
-
-
-@pytest.mark.asyncio
-async def test_score_max_tokens_per_doc_with_score_template(
-    server: RemoteOpenAIServer,
-):
-    """Test max_tokens_per_doc compatibility with score endpoint.
-
-    Ensures that max_tokens_per_doc works when used via the rerank API
-    which internally uses score templates (cross-encoder path).
-    This addresses compatibility with score template features from
-    PRs #30550 and #31335.
-    """
-    query = "What is the capital of France?"
-    long_doc = "The capital of France is Paris. " * 20
-
-    # Rerank with truncation — exercises the cross-encoder path which
-    # uses score templates when available
-    rerank_response = requests.post(
-        server.url_for("rerank"),
-        json={
-            "model": MODEL_NAME,
-            "query": query,
-            "documents": [long_doc],
-            "max_tokens_per_doc": 15,
-        },
-    )
-    rerank_response.raise_for_status()
-    rerank = RerankResponse.model_validate(rerank_response.json())
-    assert rerank.results is not None
-    assert len(rerank.results) == 1
-    assert rerank.usage.prompt_tokens > 0
 
 
 @pytest.mark.asyncio

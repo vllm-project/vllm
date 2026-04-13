@@ -113,7 +113,7 @@ def test_classify(llm):
 
 
 @pytest.mark.skip_global_cleanup
-def test_max_tokens_per_doc_offline(llm: LLM):
+def test_max_tokens_per_doc(llm: LLM):
     """Test max_tokens_per_doc via PoolingParams.extra_kwargs (offline)."""
     long_doc = "The capital of France is Paris. " * 20
 
