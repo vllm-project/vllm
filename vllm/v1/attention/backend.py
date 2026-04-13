@@ -388,6 +388,12 @@ class CommonAttentionMetadata:
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
 
+    num_prompt_tokens: torch.Tensor | None = None
+    """(batch_size,) int tensor: original prompt length for each request.
+    Needed by dual-cache RoPE implementations (e.g. LongRoPE SplitByLength)
+    to select the correct cache per-sequence under chunked prefill, where
+    positions.max() of a chunk does not reflect the full prompt length."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -470,6 +476,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            num_prompt_tokens=maybe_slice_reqs(self.num_prompt_tokens),
         )
 
 

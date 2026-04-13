@@ -2192,6 +2192,7 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            num_prompt_tokens=num_prompt_tokens_cpu,
         )
 
         if self.dcp_world_size > 1:
