@@ -878,6 +878,25 @@ def test_target_modules_none_uses_all(
 
 
 @pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_match_packed_runtime_modules(
+    default_vllm_config, dist_init, dummy_model_gate_up, device
+):
+    """Packed runtime modules should be selected by their adapter-visible names."""
+    _test_target_modules(
+        dummy_model_gate_up,
+        ["gate_proj"],
+        device,
+        expected_lora=[("gate_up_proj", MergedColumnParallelLinearWithLoRA)],
+        expected_no_lora=[
+            ("dense1", ColumnParallelLinearWithLoRA),
+            ("dense2", RowParallelLinearWithLoRA),
+            ("layer1.dense1", ColumnParallelLinearWithLoRA),
+            ("layer1.dense2", RowParallelLinearWithLoRA),
+        ],
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_load_adapter_warns_on_unsupported_modules(
     default_vllm_config, dist_init, dummy_model_gate_up, device, tmp_path
 ):

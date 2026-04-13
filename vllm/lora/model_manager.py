@@ -630,7 +630,11 @@ class LoRAModelManager:
         """
         if not is_supported_lora_module(module_name, self.supported_lora_modules):
             return False
-        return is_in_target_modules(module_name, self.lora_config.target_modules)
+        return is_in_target_modules(
+            module_name,
+            self.lora_config.target_modules,
+            self.packed_modules_mapping,
+        )
 
     def _get_punica_wrapper(self, module_name: str) -> PunicaWrapperBase | None:
         """

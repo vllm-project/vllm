@@ -160,7 +160,11 @@ class WorkerLoRAManager:
                         lora_request.lora_path,
                         ", ".join(sorted(expected_lora_modules_lst)),
                     )
-                elif not is_in_target_modules(module_name, target_modules):
+                elif not is_in_target_modules(
+                    module_name,
+                    target_modules,
+                    packed_modules_mapping,
+                ):
                     logger.warning_once(
                         "LoRA module '%s' in adapter '%s' is not in the "
                         "deployment-time target_modules restriction [%s]."
