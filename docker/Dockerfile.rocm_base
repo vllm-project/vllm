@@ -1,7 +1,7 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.2-complete
-ARG TRITON_BRANCH="ba5c1517"
+ARG TRITON_BRANCH="4ed88892" # https://github.com/ROCm/pytorch/blob/0446f7ba2fdcc4ffd2921949bf20f86d79677544/.ci/docker/ci_commit_pins/triton.txt
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
-ARG PYTORCH_BRANCH="8514f051" # release/2.10 as of 3/17
+ARG PYTORCH_BRANCH="0446f7ba" # release/2.11 as of 4/13
 ARG PYTORCH_REPO="https://github.com/ROCm/pytorch.git"
 ARG PYTORCH_VISION_BRANCH="v0.24.1"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
@@ -136,12 +136,10 @@ ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
 # Cherry picking the following
 # https://github.com/triton-lang/triton/pull/8991
-# https://github.com/triton-lang/triton/pull/9541
 RUN cd triton \
     && git checkout ${TRITON_BRANCH} \
     && git config --global user.email "you@example.com" && git config --global user.name "Your Name" \
     && git cherry-pick 555d04f \
-    && git cherry-pick dd998b6 \
     && if [ ! -f setup.py ]; then cd python; fi \
     && python3 setup.py bdist_wheel --dist-dir=dist \
     && mkdir -p /app/install && cp dist/*.whl /app/install
