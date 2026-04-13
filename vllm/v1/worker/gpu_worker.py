@@ -797,7 +797,7 @@ class Worker(WorkerBase):
 
         assert isinstance(gradient_params, _GradientParams)
         input_ids = torch.tensor(prompt_token_ids, dtype=torch.long, device=self.device)
-        out = self.model_runner.compute_gradients(input_ids, gradient_params)
+        out = self.model_runner.compute_gradients(input_ids, gradient_params)  # type: ignore[attr-defined]
 
         result: dict = {}
         if out.token_log_probs is not None:

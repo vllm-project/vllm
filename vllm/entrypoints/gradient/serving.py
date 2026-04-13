@@ -18,8 +18,9 @@ from vllm.entrypoints.gradient.protocol import (
     GradientResponse,
     GradientTokenLogProb,
 )
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.gradient_params import GradientParams
+from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -82,9 +83,11 @@ class ServingGradient:
         )
         if not target_token_ids:
             return ErrorResponse(
-                message="Target text produced no tokens after tokenization.",
-                type="invalid_request_error",
-                code=400,
+                error=ErrorInfo(
+                    message="Target text produced no tokens after tokenization.",
+                    type="invalid_request_error",
+                    code=400,
+                )
             )
 
         # Build GradientParams.
@@ -104,13 +107,15 @@ class ServingGradient:
         )
         if not prompt_token_ids:
             return ErrorResponse(
-                message="Prompt text produced no tokens after tokenization.",
-                type="invalid_request_error",
-                code=400,
+                error=ErrorInfo(
+                    message="Prompt text produced no tokens after tokenization.",
+                    type="invalid_request_error",
+                    code=400,
+                )
             )
 
         # Use TokensPrompt format (a PromptType) for the engine.
-        prompt = {"prompt_token_ids": prompt_token_ids}
+        prompt: TokensPrompt = {"prompt_token_ids": prompt_token_ids}
 
         # Call the engine.
         result = None
@@ -123,9 +128,11 @@ class ServingGradient:
 
         if result is None:
             return ErrorResponse(
-                message="Gradient computation produced no output.",
-                type="server_error",
-                code=500,
+                error=ErrorInfo(
+                    message="Gradient computation produced no output.",
+                    type="server_error",
+                    code=500,
+                )
             )
 
         # Build response.

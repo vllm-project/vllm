@@ -5,6 +5,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+GradientTarget = Literal["input_embeddings", "output_embeddings"]
+
+
+def _default_gradient_targets() -> list[GradientTarget]:
+    return ["input_embeddings"]
+
 
 class GradientRequest(BaseModel):
     """Request body for the /v1/gradients endpoint."""
@@ -19,8 +25,8 @@ class GradientRequest(BaseModel):
         "both",
     ] = "token_log_probs"
 
-    gradient_targets: list[Literal["input_embeddings", "output_embeddings"]] = Field(
-        default_factory=lambda: ["input_embeddings"]
+    gradient_targets: list[GradientTarget] = Field(
+        default_factory=_default_gradient_targets
     )
 
     target_token_indices: list[int] | None = None

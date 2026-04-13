@@ -133,7 +133,9 @@ class GradientRunner:
             grad_target_names.append("output_embeddings")
 
         # --- Forward pass (builds computation graph) ---
-        hidden_states = self.model.forward(
+        # Concrete model classes accept intermediate_tensors and inputs_embeds
+        # but the VllmModel Protocol only declares (input_ids, positions).
+        hidden_states = self.model.forward(  # type: ignore[call-arg]
             input_ids=None,
             positions=positions,
             intermediate_tensors=None,
