@@ -38,10 +38,10 @@ from vllm.utils.network_utils import (
     is_valid_ipv6_address,
 )
 
-if envs.VLLM_USE_MONITORX:
-    from vllm.monitorx import monitorx
+if envs.VLLM_USE_SPINLOCK_EXT:
+    from vllm.spinlock import spinlock
 
-MONITORX_TIMEOUT_SECONDS = 0.1
+SPINLOCK_TIMEOUT_SECONDS = 0.1
 
 if TYPE_CHECKING:
     from _typeshed import SizedBuffer
@@ -552,8 +552,8 @@ class MessageQueue:
                     written_flag = metadata_buffer[0]
                     return not (written_flag and read_count != self.buffer.n_reader)
 
-                if envs.VLLM_USE_MONITORX and not check():
-                    monitorx(metadata_buffer, check, timeout=MONITORX_TIMEOUT_SECONDS)
+                if envs.VLLM_USE_SPINLOCK_EXT and not check():
+                    spinlock(metadata_buffer, check, timeout=SPINLOCK_TIMEOUT_SECONDS)
 
                 if not check():
                     # this block is written and not read by all readers
@@ -673,11 +673,11 @@ class MessageQueue:
                     written_flag = metadata_buffer[0]
                     return not (not written_flag or read_flag)
 
-                if envs.VLLM_USE_MONITORX and not check():
-                    monitorx(
+                if envs.VLLM_USE_SPINLOCK_EXT and not check():
+                    spinlock(
                         metadata_buffer[0 : self.local_reader_rank + 1],
                         check,
-                        timeout=MONITORX_TIMEOUT_SECONDS,
+                        timeout=SPINLOCK_TIMEOUT_SECONDS,
                     )
 
                 if not check():

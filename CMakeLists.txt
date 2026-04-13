@@ -276,20 +276,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
-# monitorx extension - TODO compiler flags for intrinsics
+# spinlock extension - TODO compiler flags for intrinsics
 #
 
-set(VLLM_MONITORX_EXT_SRC
-  "csrc/monitorx.cpp")
+set(VLLM_SPINLOCK_EXT_SRC
+  "csrc/spinlock.cpp")
 
 set_gencode_flags_for_srcs(
-  SRCS "${VLLM_MONITORX_EXT_SRC}"
+  SRCS "${VLLM_SPINLOCK_EXT_SRC}"
 )
 define_extension_target(
-  monitorx
+  spinlock
   DESTINATION vllm
   LANGUAGE CXX
-  SOURCES ${VLLM_MONITORX_EXT_SRC}
+  SOURCES ${VLLM_SPINLOCK_EXT_SRC}
   COMPILE_FLAGS "-mmwaitx"
   USE_SABI 3.11
   WITH_SOABI)

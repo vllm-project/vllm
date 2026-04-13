@@ -24,9 +24,9 @@ extern "C" {
 typedef struct {
   unsigned int cpu_support;
   unsigned int max_monitor_line_size;
-} monitorx_state_t;
+} spinlock_state_t;
 
-static void determine_cpu_support(monitorx_state_t* state) {
+static void determine_cpu_support(spinlock_state_t* state) {
   state->cpu_support = CPU_SUPPORT_NONE;
   state->max_monitor_line_size = 0;
 
@@ -53,13 +53,13 @@ static void determine_cpu_support(monitorx_state_t* state) {
 #endif
 }
 
-static PyObject* method_monitorx(PyObject* self, PyObject* args,
+static PyObject* method_spinlock(PyObject* self, PyObject* args,
                                  PyObject* kwargs) {
   Py_buffer buffer;
   PyObject* callback;
   double timeout = 0.;
 
-  monitorx_state_t* state = PyModule_GetState(self);
+  spinlock_state_t* state = PyModule_GetState(self);
   if (state == NULL) {
     PyErr_SetString(PyExc_TypeError, "Failed to retrieve module state!");
     return NULL;
@@ -179,20 +179,20 @@ static PyObject* method_monitorx(PyObject* self, PyObject* args,
   Py_RETURN_FALSE;
 }
 
-static PyMethodDef monitorx_methods[] = {
-    {"monitorx", (PyCFunction)method_monitorx, METH_VARARGS | METH_KEYWORDS,
+static PyMethodDef spinlock_methods[] = {
+    {"spinlock", (PyCFunction)method_spinlock, METH_VARARGS | METH_KEYWORDS,
      "Wait for store with callback"},
     {NULL, NULL, 0, NULL}};
 
-static struct PyModuleDef monitorx_module = {
-    PyModuleDef_HEAD_INIT, "monitorx",
-    "Python interface for monitorx/mwaitx CPU instructions",
-    sizeof(monitorx_state_t), monitorx_methods};
+static struct PyModuleDef spinlock_module = {
+    PyModuleDef_HEAD_INIT, "spinlock",
+    "Hardware-optimized spinlocks for Python",
+    sizeof(spinlock_state_t), spinlock_methods};
 
-PyMODINIT_FUNC PyInit_monitorx(void) {
-  PyObject* m = PyModule_Create(&monitorx_module);
+PyMODINIT_FUNC PyInit_spinlock(void) {
+  PyObject* m = PyModule_Create(&spinlock_module);
   if (m != NULL) {
-    monitorx_state_t* state = (monitorx_state_t*)PyModule_GetState(m);
+    spinlock_state_t* state = (spinlock_state_t*)PyModule_GetState(m);
     if (state != NULL) {
       determine_cpu_support(state);
     }
