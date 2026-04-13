@@ -15,7 +15,6 @@ from vllm.gradient_params import GradientParams
 from vllm.inputs import EngineInput, PromptType
 from vllm.lora.request import LoRARequest
 from vllm.outputs import GradientRequestOutput, PoolingRequestOutput, RequestOutput
-from vllm.plugins.io_processors import IOProcessor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams

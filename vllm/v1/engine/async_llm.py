@@ -32,7 +32,6 @@ from vllm.outputs import (
     PoolingRequestOutput,
     RequestOutput,
 )
-from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
