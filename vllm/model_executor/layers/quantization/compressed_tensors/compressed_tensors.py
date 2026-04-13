@@ -1101,11 +1101,8 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         # Set the _float variants that the attention backend uses.
         # For 1-D tensors (e.g., shape [1]), extract the scalar value.
         def _to_scalar(tensor: torch.Tensor) -> float:
-            if tensor.ndim == 0:
-                return tensor.item()
-            else:
-                # For n_scales > 1 (e.g., ATTN_HEAD strategy), take max
-                return tensor.max().item()
+            # For n_scales > 1 (e.g., ATTN_HEAD strategy), take max
+            return tensor.max().item()
 
         layer._k_scale_float = _to_scalar(layer.k_scale)
         layer._v_scale_float = _to_scalar(layer.v_scale)
