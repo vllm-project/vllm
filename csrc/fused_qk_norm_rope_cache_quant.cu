@@ -781,6 +781,19 @@ void fused_qk_norm_rope_cache_quant(
   int const num_tokens = positions.numel();
   if (num_tokens == 0) return;
 
+  // ── Input validation ──
+  TORCH_CHECK(cos_sin_cache.dim() == 2,
+              "cos_sin_cache must be 2D: [max_position, rotary_dim]");
+  TORCH_CHECK(cos_sin_cache.size(1) % 2 == 0, "rotary_dim must be even");
+  TORCH_CHECK(cos_sin_cache.size(1) <= head_dim,
+              "rotary_dim must be <= head_dim");
+  TORCH_CHECK(q_weight.dim() == 1 && q_weight.size(0) == head_dim,
+              "q_weight must be 1D with size head_dim");
+  TORCH_CHECK(k_weight.dim() == 1 && k_weight.size(0) == head_dim,
+              "k_weight must be 1D with size head_dim");
+  TORCH_CHECK(positions.dim() == 1, "positions must be 1D: [num_tokens]");
+  TORCH_CHECK(slot_mapping.dim() == 1, "slot_mapping must be 1D: [num_tokens]");
+
   int const rotary_dim = cos_sin_cache.size(1);
   at::cuda::OptionalCUDAGuard const guard(query.device());
   cudaStream_t const stream = at::cuda::getCurrentCUDAStream();
