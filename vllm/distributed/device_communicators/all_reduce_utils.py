@@ -355,8 +355,18 @@ def _precompute_p2p_access_cache(path: str) -> None:
             result = pickle.load(f)
     for _i, _j, r in zip(batch_src, batch_tgt, result):
         cache[f"{_i}->{_j}"] = r
-    with open(path, "w") as f:
-        json.dump(cache, f, indent=4)
+    # Write atomically: write to a temp file then rename so that a crash
+    # mid-write does not leave a corrupted JSON that causes JSONDecodeError
+    # on the next startup.
+    temp_path = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(temp_path, "w") as f:
+            json.dump(cache, f, indent=4)
+        os.replace(temp_path, path)
+    except Exception:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+        raise
 
 
 def gpu_p2p_access_check(src: int, tgt: int) -> bool:
