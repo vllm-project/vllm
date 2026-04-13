@@ -6,13 +6,11 @@ from types import ModuleType
 
 from vllm.v1.kv_cache_interface import KVQuantMode
 
-from . import flash_attn_tile, flashinfer_tile, triton_tile
+from . import flashinfer_tile, triton_tile
 
 _BACKEND_TILE_MODULE: dict[str, ModuleType] = {
     "TritonAttentionBackend": triton_tile,
     "TritonAttentionImpl": triton_tile,
-    "FlashAttentionBackend": flash_attn_tile,
-    "FlashAttentionImpl": flash_attn_tile,
     "FlashInferBackend": flashinfer_tile,
     "FlashInferImpl": flashinfer_tile,
 }
