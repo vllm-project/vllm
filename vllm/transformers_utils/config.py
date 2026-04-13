@@ -123,6 +123,22 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
 
 _SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
+
+def _register_custom_configs() -> None:
+    """Eagerly register all custom configs with AutoConfig.
+
+    Transformers v5 loads the model config during tokenizer initialization.
+    Without this, custom model types fall back to base PreTrainedConfig,
+    which lacks required attributes like ``max_position_embeddings``.
+    """
+    for model_type in list(_CONFIG_REGISTRY.keys()):
+        config_class = _CONFIG_REGISTRY[model_type]
+        config_class.model_type = model_type
+        AutoConfig.register(model_type, config_class, exist_ok=True)
+
+
+_register_custom_configs()
+
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
 }
