@@ -482,12 +482,13 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.gauge_waiting_by_reason: dict[str, dict[int, Gauge]] = {}
         for waiting_reason in [WAITING_REASON_CAPACITY, WAITING_REASON_DEFERRED]:
-            self.gauge_waiting_by_reason[waiting_reason] = {
-                idx: gauge_waiting_by_reason.labels(
-                    model_name, str(idx), waiting_reason
-                )
-                for idx in engine_indexes
+            per_engine_labelvalues_with_reason = {
+                idx: labelvalues + [waiting_reason]
+                for idx, labelvalues in per_engine_labelvalues.items()
             }
+            self.gauge_waiting_by_reason[waiting_reason] = create_metric_per_engine(
+                gauge_waiting_by_reason, per_engine_labelvalues_with_reason
+            )
 
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
