@@ -178,7 +178,7 @@ __launch_bounds__(TPB) __global__ void moeTopK(
     const bool row_is_active = finished ? !finished[block_row] : true;
     const int thread_read_offset = block_row * num_experts;
     float selected_sum = 0.f;
-    extern __shared__ alignas(sizeof(IndType)) char dynamic_smem[];
+    extern __shared__ char dynamic_smem[];
     IndType* shared_indices = reinterpret_cast<IndType*>(dynamic_smem);
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
