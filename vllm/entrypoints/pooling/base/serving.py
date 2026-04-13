@@ -232,6 +232,7 @@ class PoolingServingBase(ABC):
                 "greater than max_model_len."
                 " Please request a smaller truncation size."
             )
+
         return None
 
     async def _get_trace_headers(
