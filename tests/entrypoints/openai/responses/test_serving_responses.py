@@ -7,9 +7,6 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 from openai.types.responses import (
-    ResponseFunctionCallArgumentsDeltaEvent,
-    ResponseFunctionCallArgumentsDoneEvent,
-    ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
     ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
@@ -1286,7 +1283,9 @@ class TestParallelToolCallStreaming:
 
         added_events = [e for e in events if e.type == "response.output_item.added"]
         output_indexes = sorted(e.output_index for e in added_events)
-        assert output_indexes == [0, 1], "Output indexes must be distinct and sequential"
+        assert output_indexes == [0, 1], (
+            "Output indexes must be distinct and sequential"
+        )
 
         names = {e.output_index: e.item.name for e in added_events}
         assert names[0] == "get_weather"
