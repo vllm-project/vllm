@@ -232,8 +232,8 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         config = model_config.hf_config
         config.num_labels = 1
         pooler_config = model_config.pooler_config
-        if pooler_config.logit_bias is None:
-            pooler_config.logit_bias = 2.65
+        if pooler_config.logit_mean is None:
+            pooler_config.logit_mean = 2.65
 
 
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
