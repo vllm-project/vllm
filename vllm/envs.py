@@ -300,10 +300,7 @@ def use_aot_compile() -> bool:
         else "0"
     )
 
-    return (
-        not bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0")))
-        and os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
-    )
+    return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
 
 
 def use_mega_aot_artifact():
