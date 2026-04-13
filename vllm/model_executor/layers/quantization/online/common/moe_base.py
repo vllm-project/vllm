@@ -117,8 +117,8 @@ class OnlineMoEMethodBase(FusedMoEMethodBase):
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
         raise ValueError(
-            f"{self.__class__.__name__} uses the new modular kernel initialization "
-            "logic. This function should not be called."
+            f"{self.__class__.__name__} uses the new modular kernel "
+            "initialization logic. This function should not be called."
         )
 
     @property
