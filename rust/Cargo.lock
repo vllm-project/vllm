@@ -2028,9 +2028,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm-tokenizer"
-version = "1.3.1"
+version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12ad03a55de903cebce3cd630391efcfd42b75f87d2af5b7ad7e1c42b30961b3"
+checksum = "4992c0d29fdf0e964a5a1446c4b61b74ce7148b064b18feabfb375f7717e5d96"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -2964,9 +2964,9 @@ dependencies = [
 
 [[package]]
 name = "reasoning-parser"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aaa0aac992a56c07b341d74ee164b7dc01c732e4433c8c3eeac0cb46b3c8027b"
+checksum = "4fe8123bad128776fa83c2d62e3e4eb8f381b713e2fd518e3cc1e7c53d29fb8a"
 dependencies = [
  "parking_lot",
  "thiserror 2.0.18",

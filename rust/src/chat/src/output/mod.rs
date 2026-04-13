@@ -7,7 +7,7 @@ mod tool;
 use std::sync::Arc;
 
 use futures::Stream;
-use reasoning_parser::ParserFactory as ReasoningParserFactory;
+use reasoning_parser::{ParserFactory as ReasoningParserFactory, ReasoningParser};
 use subenum::subenum;
 use tool_parser::ParserFactory as ToolParserFactory;
 use tracing::info;
@@ -19,6 +19,7 @@ use crate::FinishReason;
 use crate::error::{Error, Result};
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
 use crate::output::structured::structured_chat_event_stream;
+use crate::renderers::ReasoningParserInit;
 use crate::request::{ChatTool, ChatToolChoice};
 
 /// Internal assistant event before final assembly.
@@ -126,6 +127,7 @@ pub(crate) fn output_stream(
     tools: Vec<ChatTool>,
     tool_choice: ChatToolChoice,
     decoded: impl DecodedTextEventStream,
+    reasoning_parser_init: ReasoningParserInit,
     model_id: Option<&str>,
     reasoning_parser_factory: &ReasoningParserFactory,
     tool_parser_factory: &ToolParserFactory,
@@ -185,9 +187,25 @@ pub(crate) fn output_stream(
         }
     });
 
+    let reasoning_parser = apply_reasoning_parser_init(reasoning_parser, reasoning_parser_init);
     let reasoning = reasoning_event_stream(decoded, reasoning_parser);
     let tool = tool_event_stream(reasoning, intermediate, parser_tools, tool_parser);
     Ok(structured_chat_event_stream(tool))
 }
 
 static LOG_ONCE: std::sync::Once = std::sync::Once::new();
+
+fn apply_reasoning_parser_init(
+    mut reasoning_parser: Option<Box<dyn ReasoningParser>>,
+    reasoning_parser_init: ReasoningParserInit,
+) -> Option<Box<dyn ReasoningParser>> {
+    if let Some(parser) = reasoning_parser.as_mut() {
+        if reasoning_parser_init.mark_reasoning_started {
+            parser.mark_reasoning_started();
+        }
+        if reasoning_parser_init.mark_think_start_stripped {
+            parser.mark_think_start_stripped();
+        }
+    }
+    reasoning_parser
+}

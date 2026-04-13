@@ -447,7 +447,7 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
         let mut prompt = String::new();
         for message in &request.messages {
             prompt.push_str(message.role().as_str());
@@ -458,7 +458,10 @@ impl ChatRenderer for FakeChatBackend {
         if request.chat_options.add_generation_prompt {
             prompt.push_str("assistant:");
         }
-        Ok(prompt)
+        Ok(vllm_chat::RenderedPrompt {
+            prompt,
+            reasoning_parser_init: Default::default(),
+        })
     }
 }
 
@@ -501,7 +504,7 @@ impl ChatBackend for FailingDecodeChatBackend {
 }
 
 impl ChatRenderer for FailingDecodeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<vllm_chat::RenderedPrompt> {
         FakeChatBackend::new().render(request)
     }
 }

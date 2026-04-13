@@ -8,7 +8,7 @@ use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
     ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DynChatRenderer, FinishReason, SamplingParams,
+    ChatToolChoice, DynChatRenderer, FinishReason, RenderedPrompt, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
@@ -232,7 +232,7 @@ impl ChatBackend for FakeChatBackend {
 }
 
 impl ChatRenderer for FakeChatBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         if !self.has_template {
             return Err(vllm_chat::Error::MissingChatTemplate);
         }
@@ -248,7 +248,10 @@ impl ChatRenderer for FakeChatBackend {
             prompt.push_str("assistant:");
         }
 
-        Ok(prompt)
+        Ok(RenderedPrompt {
+            prompt,
+            reasoning_parser_init: Default::default(),
+        })
     }
 }
 
@@ -290,7 +293,7 @@ impl ChatBackend for FailingDecodeBackend {
 }
 
 impl ChatRenderer for FailingDecodeBackend {
-    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<String> {
+    fn render(&self, request: &ChatRequest) -> vllm_chat::Result<RenderedPrompt> {
         self.inner.render(request)
     }
 }

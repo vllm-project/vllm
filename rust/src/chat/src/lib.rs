@@ -19,7 +19,7 @@ pub use event::{
     AssistantToolCall, ChatEvent,
 };
 use futures::{StreamExt, TryStreamExt as _};
-pub use renderers::{ChatRenderer, DynChatRenderer};
+pub use renderers::{ChatRenderer, DynChatRenderer, ReasoningParserInit, RenderedPrompt};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, SamplingParams,
@@ -150,10 +150,10 @@ impl ChatLlm {
     pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
 
-        let prompt = self.backend.chat_renderer().render(&request)?;
+        let rendered = self.backend.chat_renderer().render(&request)?;
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
-            prompt: Prompt::Text(prompt),
+            prompt: Prompt::Text(rendered.prompt),
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,
             intermediate: request.intermediate,
@@ -168,6 +168,7 @@ impl ChatLlm {
             request.tools,
             request.tool_choice,
             decoded_stream,
+            rendered.reasoning_parser_init,
             self.text.model_id(),
             &self.reasoning_parser_factory,
             &self.tool_parser_factory,
@@ -212,6 +213,6 @@ mod tests {
         let error = validate_parser_overrides(None, Some("definitely_missing_reasoning_parser"))
             .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: base, cohere_cmd, deepseek_r1, glm45, kimi, minimax, nano_v3, qwen3, qwen3_thinking, step3)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: base, cohere_cmd, deepseek_r1, deepseek_v31, glm45, kimi, kimi_k25, kimi_thinking, minimax, nano_v3, qwen3, qwen3_thinking, step3)"].assert_eq(&error.to_report_string());
     }
 }

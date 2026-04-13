@@ -143,7 +143,7 @@ pub(crate) async fn reasoning_event_stream(
 mod tests {
 
     use futures::{StreamExt as _, stream};
-    use reasoning_parser::{ParseError, ParserResult, ReasoningParser};
+    use reasoning_parser::{ParseError, ParserFactory, ParserResult, ReasoningParser};
     use vllm_llm::FinishReason;
     use vllm_text::output::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
@@ -185,6 +185,10 @@ mod tests {
         fn is_in_reasoning(&self) -> bool {
             false
         }
+
+        fn mark_reasoning_started(&mut self) {}
+
+        fn mark_think_start_stripped(&mut self) {}
     }
 
     #[tokio::test]
@@ -304,6 +308,102 @@ mod tests {
                         }],
                     }),
                     token_ids: vec![],
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen3_parser_without_init_keeps_text_as_normal_content() {
+        let events = stream::iter(vec![
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "thought ".to_string(),
+                token_ids: vec![],
+                logprobs: None,
+                finished: None,
+            }),
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "done</think>OK".to_string(),
+                token_ids: vec![],
+                logprobs: None,
+                finished: None,
+            }),
+        ]);
+
+        let parser = ParserFactory::new()
+            .registry()
+            .create_parser("qwen3")
+            .expect("qwen3 parser should be registered");
+        let collected = reasoning_event_stream(events, Some(parser))
+            .collect::<Vec<_>>()
+            .await;
+
+        let events = collected
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .expect("reasoning stream should not fail");
+
+        assert_eq!(
+            events,
+            vec![
+                ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "thought ".to_string(),
+                },
+                ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "done</think>OK".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn qwen3_parser_with_prefill_init_splits_reasoning_from_final_text() {
+        let events = stream::iter(vec![
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "thought ".to_string(),
+                token_ids: vec![],
+                logprobs: None,
+                finished: None,
+            }),
+            Ok(DecodedTextEvent::TextDelta {
+                delta: "done</think>OK".to_string(),
+                token_ids: vec![],
+                logprobs: None,
+                finished: None,
+            }),
+        ]);
+
+        let mut parser = ParserFactory::new()
+            .registry()
+            .create_parser("qwen3")
+            .expect("qwen3 parser should be registered");
+        parser.mark_reasoning_started();
+        parser.mark_think_start_stripped();
+        let collected = reasoning_event_stream(events, Some(parser))
+            .collect::<Vec<_>>()
+            .await;
+
+        let events = collected
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .expect("reasoning stream should not fail");
+
+        assert_eq!(
+            events,
+            vec![
+                ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Reasoning,
+                    delta: "thought ".to_string(),
+                },
+                ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Reasoning,
+                    delta: "done".to_string(),
+                },
+                ContentEvent::TextDelta {
+                    kind: AssistantBlockKind::Text,
+                    delta: "OK".to_string(),
                 },
             ]
         );
