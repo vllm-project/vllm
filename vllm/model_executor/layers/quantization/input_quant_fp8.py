@@ -33,11 +33,12 @@ try:
     # Register as custom op so torch.compile keeps it as opaque node (no graph break)
     @torch.library.custom_op("vllm::sgl_fused_fp8_quant", mutates_args=())
     def _sgl_fused_fp8_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        x_2d = x.view(-1, x.shape[-1])
+        x_cont = x.contiguous()
+        x_2d = x_cont.view(-1, x_cont.shape[-1])
         out_q = torch.empty_like(x_2d, dtype=_FP8_DTYPE)
         out_s = torch.empty(x_2d.shape[0], 1, device=x.device, dtype=torch.float32)
         _sgl_per_token_quant_fp8(x_2d, out_q, out_s)
-        return out_q.view(x.shape), out_s
+        return out_q.view(x.shape), out_s.view(*x.shape[:-1], 1)
 
     @_sgl_fused_fp8_quant.register_fake
     def _sgl_fused_fp8_quant_fake(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
