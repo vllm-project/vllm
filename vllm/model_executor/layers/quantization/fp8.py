@@ -337,16 +337,6 @@ class Fp8LinearMethod(LinearMethodBase):
                 self.weight_block_size,
             )
 
-        if not self.block_quant and self.use_aiter_and_is_supported:
-            output_size_per_partition = sum(output_partition_sizes)
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=self.current_act_quant_key,
-                weight_quant_key=self.current_weight_quant_key,
-                out_dtype=self.out_dtype,
-                weight_shape=(output_size_per_partition, input_size_per_partition),
-                module_name=self.__class__.__name__,
-            )
-
         weight = create_fp8_weight_parameter(
             output_size_per_partition, input_size_per_partition, weight_loader
         )
@@ -436,9 +426,6 @@ class Fp8LinearMethod(LinearMethodBase):
             replace_parameter(layer, "input_scale", input_scale)
         else:
             layer.input_scale = None
-
-        if self.block_quant and self.use_deep_gemm:
-            maybe_post_process_fp8_weight_block(layer)
 
         self.fp8_linear.process_weights_after_loading(layer)
 

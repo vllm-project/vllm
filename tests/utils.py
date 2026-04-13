@@ -1856,7 +1856,6 @@ class TestFP8Layer(torch.nn.Module):
             weight_shape=weight_shape,
             input_dtype=input_dtype,
             out_dtype=out_dtype,
-            weight_shape=weight_shape,
             force_kernel=force_kernel,
         )
         self.kernel.process_weights_after_loading(self)

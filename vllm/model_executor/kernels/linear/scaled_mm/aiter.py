@@ -9,16 +9,14 @@ from vllm._aiter_ops import (
     rocm_aiter_ops,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.utils import replace_parameter
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
 )
 from .cutlass import CutlassInt8ScaledMMLinearKernel
 from .ScaledMMLinearKernel import (
@@ -176,6 +174,7 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
         # Aiter's shuffled per-token Gemm performs better than torch only when its
         # tuned.
+        print(f"[DEBUG] N: {N}, K: {K}, dtype: {fp8_dtype}, is_tuned: {rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype)}")
         if not rocm_aiter_ops.is_shuffled_per_token_w8a8_gemm_tuned(N, K, fp8_dtype):
             return (
                 False,
