@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections.abc import Sequence
-from typing import Any, TypeAlias, cast
+from typing import Any, TypeAlias
 
 import torch.nn.functional as F
 
@@ -16,7 +16,7 @@ from vllm.entrypoints.pooling.typing import (
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
-from vllm.tasks import PoolingTask, ScoreType
+from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
 from ...chat_utils import ChatTemplateResolutionError
@@ -34,7 +34,7 @@ ScoringServeContext: TypeAlias = PoolingServeContext[ScoringRequest]
 
 
 class ScoringIOProcessor(PoolingIOProcessor):
-    name: ScoreType
+    name: str
     pooling_task: PoolingTask
 
     def __init__(self, *args, **kwargs):
@@ -63,7 +63,7 @@ class ScoringIOProcessor(PoolingIOProcessor):
 
 
 class BiEncoderIOProcessor(ScoringIOProcessor):
-    name: ScoreType = "bi-encoder"
+    name = "bi-encoder"
     pooling_task: PoolingTask = "embed"
 
     #######################################
@@ -94,20 +94,17 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         )
 
         ctx.engine_inputs = engine_inputs
-        ctx.intermediates = len(scoring_data.data_1)
+        ctx.n_queries = len(scoring_data.data_1)
 
     def post_process_online(
         self,
         ctx: ScoringServeContext,
     ):
-        if ctx.final_res_batch is None:
-            raise ValueError("Final response batch not available")
-
-        if ctx.intermediates is None:
-            raise ValueError("data_1 len not available")
+        assert ctx.final_res_batch is not None
+        assert isinstance(ctx.n_queries, int)
 
         ctx.final_res_batch = self._post_process(
-            outputs=ctx.final_res_batch, offset=cast(int, ctx.intermediates)
+            outputs=ctx.final_res_batch, n_queries=ctx.n_queries
         )
 
     #######################################
@@ -124,8 +121,8 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
         self,
         ctx: OfflineOutputsContext,
     ) -> list[PoolingRequestOutput]:
-        assert ctx.offset is not None
-        return self._post_process(outputs=ctx.outputs, offset=ctx.offset)
+        assert ctx.n_queries is not None
+        return self._post_process(outputs=ctx.outputs, n_queries=ctx.n_queries)
 
     #######################################
     # helpers
@@ -145,9 +142,9 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
             prompts=data_1 + data_2, tok_params=tok_params, prompt_extras=prompt_extras
         )
 
-    def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
-        emb_data_1 = outputs[:offset]
-        emb_data_2 = outputs[offset:]
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
+        emb_data_1 = outputs[:n_queries]
+        emb_data_2 = outputs[n_queries:]
 
         if len(emb_data_1) == 1:
             emb_data_1 = emb_data_1 * len(emb_data_2)
@@ -177,13 +174,13 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
 
 
 class LateInteractionIOProcessor(BiEncoderIOProcessor):
-    name: ScoreType = "late-interaction"
+    name = "late-interaction"
     pooling_task: PoolingTask = "token_embed"
 
-    def _post_process(self, outputs: list[PoolingRequestOutput], offset: int):
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
         # Split into query and document embeddings
-        emb_data_1 = outputs[:offset]
-        emb_data_2 = outputs[offset:]
+        emb_data_1 = outputs[:n_queries]
+        emb_data_2 = outputs[n_queries:]
 
         # Expand queries if 1:N scoring
         if len(emb_data_1) == 1:
@@ -217,8 +214,15 @@ class LateInteractionIOProcessor(BiEncoderIOProcessor):
         return final_res_batch
 
 
+class FlashLateInteractionIOProcessor(LateInteractionIOProcessor):
+    name = "flash-late-interaction"
+
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
+        return outputs
+
+
 class CrossEncoderIOProcessor(ScoringIOProcessor):
-    name: ScoreType = "cross-encoder"
+    name = "cross-encoder"
     pooling_task: PoolingTask = "classify"
 
     def __init__(self, *args, **kwargs):
@@ -274,7 +278,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
     def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
         assert isinstance(ctx.prompts, ScoringData)
-        assert not isinstance(ctx.pooling_params, list)
+        assert not isinstance(ctx.pooling_params, Sequence)
 
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
@@ -412,8 +416,138 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         return full_prompt, engine_prompt
 
 
-ScoringIOProcessors: dict[ScoreType, type[ScoringIOProcessor]] = {
-    "bi-encoder": BiEncoderIOProcessor,
-    "late-interaction": LateInteractionIOProcessor,
-    "cross-encoder": CrossEncoderIOProcessor,
+class JinaRankingIOProcessorMixin:
+    @staticmethod
+    def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
+        for token in special_tokens.values():
+            text = text.replace(token, "")
+        return text
+
+    @staticmethod
+    def format_docs_prompts_func(
+        query: str,
+        docs: list[str],
+        special_tokens: dict[str, str] | None = None,
+        instruction: str | None = None,
+        no_thinking: bool = True,
+    ) -> str:
+        # TODO: Try converting the code below into a chat template.
+
+        default_special_tokens = {
+            "query_embed_token": "<|rerank_token|>",
+            "doc_embed_token": "<|embed_token|>",
+        }
+        if special_tokens is None:
+            special_tokens = default_special_tokens
+
+        query = JinaRankingIOProcessorMixin.sanitize_input(query, special_tokens)
+        docs = [
+            JinaRankingIOProcessorMixin.sanitize_input(doc, special_tokens)
+            for doc in docs
+        ]
+
+        prefix = (
+            "<|im_start|>system\n"
+            "You are a search relevance expert who can determine a ranking of the passages based on how relevant they are to the query. "  # noqa: E501
+            "If the query is a question, how relevant a passage is depends on how well it answers the question. "  # noqa: E501
+            "If not, try to analyze the intent of the query and assess how well each passage satisfies the intent. "  # noqa: E501
+            "If an instruction is provided, you should follow the instruction when determining the ranking."  # noqa: E501
+            "<|im_end|>\n<|im_start|>user\n"
+        )
+        suffix = "<|im_end|>\n<|im_start|>assistant\n"
+        if no_thinking:
+            suffix += "<think>\n\n</think>\n\n"
+
+        doc_emb_token = special_tokens["doc_embed_token"]
+        query_emb_token = special_tokens["query_embed_token"]
+
+        prompt = (
+            f"I will provide you with {len(docs)} passages, each indicated by a numerical identifier. "  # noqa: E501
+            f"Rank the passages based on their relevance to query: {query}\n"
+        )
+
+        if instruction:
+            prompt += f"<instruct>\n{instruction}\n</instruct>\n"
+
+        doc_prompts = [
+            f'<passage id="{i}">\n{doc}{doc_emb_token}\n</passage>'
+            for i, doc in enumerate(docs)
+        ]
+        prompt += "\n".join(doc_prompts) + "\n"
+        prompt += f"<query>\n{query}{query_emb_token}\n</query>"
+
+        return prefix + prompt + suffix
+
+    @staticmethod
+    def ensure_str(data: Sequence[Any]) -> list[str]:
+        text: list[str] = []
+        for prompt in data:
+            if not isinstance(prompt, str):
+                raise ValueError(
+                    "The JinaForRanking model only supports text as input."
+                )
+            text.append(prompt)
+        return text
+
+
+class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorMixin):
+    name = "jina-reranking-scoring"
+    pooling_task: PoolingTask = "token_embed"
+
+    def _pre_process(
+        self,
+        scoring_data: ScoringData,
+        tok_params: TokenizeParams,
+        prompt_extras: dict[str, Any] | None = None,
+    ) -> Sequence[EngineInput]:
+        queries = self.ensure_str(scoring_data.data_1)
+        docs = self.ensure_str(scoring_data.data_2)
+
+        if len(queries) == 1:
+            prompts = [self.format_docs_prompts_func(query=queries[0], docs=docs)]
+        else:
+            prompts = [
+                self.format_docs_prompts_func(query=q, docs=[d])
+                for q, d in zip(queries, docs)
+            ]
+
+        return self._preprocess_completion_offline(
+            prompts=prompts, tok_params=tok_params, prompt_extras=prompt_extras
+        )
+
+    def _post_process(self, outputs: list[PoolingRequestOutput], n_queries: int):
+        final_res_batch: list[PoolingRequestOutput] = []
+
+        for i in range(len(outputs)):
+            embeds = outputs[i].outputs.data.float()
+
+            # The JinaForRanking model concatenates docs first, then query.
+            # Let's stay consistent with this novel design.
+            query_embeds = embeds[-1]
+            doc_embeds = embeds[:-1]
+
+            scores = F.cosine_similarity(query_embeds, doc_embeds)
+
+            for score in scores:
+                final_res_batch.append(
+                    PoolingRequestOutput(
+                        request_id=outputs[i].request_id,
+                        outputs=score,
+                        prompt_token_ids=outputs[i].prompt_token_ids,
+                        num_cached_tokens=outputs[i].num_cached_tokens,
+                        finished=True,
+                    )
+                )
+        return final_res_batch
+
+
+ScoringIOProcessors: dict[str, type[ScoringIOProcessor]] = {
+    p.name: p
+    for p in [
+        BiEncoderIOProcessor,
+        LateInteractionIOProcessor,
+        JinaRankingIOProcessor,
+        FlashLateInteractionIOProcessor,
+        CrossEncoderIOProcessor,
+    ]
 }

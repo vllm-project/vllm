@@ -143,6 +143,13 @@ class TorchCompileWithNoGuardsWrapper:
 
             compiled_ptr = self.check_invariants_and_forward
 
+        # Apply the constrain_to_fx_strides patch before first compilation.
+        # This covers STOCK_TORCH_COMPILE and DYNAMO_ONCE paths. The VLLM
+        # compile paths call this from their own compile() methods too.
+        from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+        _apply_constrain_to_fx_strides_patch()
+
         aot_context = nullcontext()
         if envs.VLLM_USE_AOT_COMPILE:
             if hasattr(torch._dynamo.config, "enable_aot_compile"):

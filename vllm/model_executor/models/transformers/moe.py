@@ -94,6 +94,8 @@ def transformers_moe_forward(
     self = forward_context.no_compile_layers[layer_name]
     self._topk_ids = topk_ids
     # Clone hidden_states because it will be mutated in-place in FusedMoE
+    # TODO(bnell): figure out a way to avoid calling runner directly.
+    # it is a hack that the weight are being passed via logits.
     return self.runner.forward(hidden_states.clone(), topk_weights)
 
 
