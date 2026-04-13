@@ -928,3 +928,350 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+# ===================================================================
+# Tests for multi-tool-call streaming in _process_simple_streaming_events
+# ===================================================================
+
+
+def _make_tool_delta(
+    *,
+    name: str | None = None,
+    arguments: str | None = None,
+) -> DeltaMessage:
+    """Build a DeltaMessage with a single tool call."""
+    from vllm.entrypoints.openai.engine.protocol import (
+        DeltaFunctionCall,
+        DeltaToolCall,
+    )
+
+    tc = DeltaToolCall(
+        index=0,
+        function=DeltaFunctionCall(name=name, arguments=arguments),
+    )
+    return DeltaMessage(tool_calls=[tc])
+
+
+def _make_serving_instance_with_tool_parser():
+    """Create an OpenAIServingResponses with a mocked tool parser."""
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        openai_serving_render=MagicMock(),
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+    return serving
+
+
+def _mock_parser_with_tool_deltas(serving, delta_sequence: list[DeltaMessage]):
+    """Set up serving.parser so that it returns a mock parser that
+    yields the given delta_sequence one at a time from parse_delta.
+
+    The mock has tool_parser set (truthy) but reasoning_parser as None.
+    """
+    call_count = 0
+
+    def mock_parse_delta(**kwargs):
+        nonlocal call_count
+        if call_count >= len(delta_sequence):
+            return None
+        result = delta_sequence[call_count]
+        call_count += 1
+        return result
+
+    mock_parser_instance = MagicMock()
+    mock_parser_instance.reasoning_parser = None
+    mock_parser_instance.tool_parser = MagicMock()  # truthy
+    mock_parser_instance.parse_delta = mock_parse_delta
+    mock_parser_instance.is_reasoning_end = MagicMock(return_value=False)
+    serving.parser = MagicMock(return_value=mock_parser_instance)
+
+
+async def _collect_tool_streaming_events(
+    delta_sequence: list[DeltaMessage],
+    monkeypatch,
+) -> list:
+    """Helper: feed delta_sequence through _process_simple_streaming_events
+    and return all emitted events."""
+
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+    serving = _make_serving_instance_with_tool_parser()
+    _mock_parser_with_tool_deltas(serving, delta_sequence)
+
+    # Create one SimpleContext per delta to feed the result_generator
+    contexts = [
+        _make_simple_context_with_output(f"chunk{i}", [10 + i])
+        for i in range(len(delta_sequence))
+    ]
+
+    async def result_generator():
+        for ctx in contexts:
+            yield ctx
+
+    request = ResponsesRequest(input="hi", tools=[], stream=True)
+    sampling_params = SamplingParams(max_tokens=64)
+    metadata = RequestResponseMetadata(request_id="req")
+    _identity_increment._counter = 0  # type: ignore
+
+    events = []
+    async for event in serving._process_simple_streaming_events(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=result_generator(),
+        context=SimpleContext(),
+        model_name="test-model",
+        tokenizer=MagicMock(),
+        request_metadata=metadata,
+        created_time=0,
+        _increment_sequence_number_and_return=_identity_increment,
+    ):
+        events.append(event)
+
+    return events
+
+
+class TestMultiToolCallStreamingDirect:
+    """Tests for multi-tool-call streaming through the actual
+    _process_simple_streaming_events method.
+
+    Covers the bug where multiple tool calls had their JSON arguments
+    concatenated, and validates transition events, output indices,
+    and single-tool-call regression.
+    """
+
+    @pytest.mark.asyncio
+    async def test_tool_call_transition_emits_correct_done_events(self, monkeypatch):
+        """When transitioning from one tool call to another, the code
+        must emit ``function_call_arguments.done`` (not
+        ``output_text.done``) and ``output_item.done`` must contain a
+        ``ResponseFunctionToolCall`` (not ``ResponseOutputMessage``).
+        """
+        from openai.types.responses import (
+            ResponseFunctionCallArgumentsDoneEvent,
+            ResponseFunctionToolCall,
+            ResponseOutputItemDoneEvent,
+        )
+
+        delta_sequence = [
+            _make_tool_delta(name="func_a"),
+            _make_tool_delta(arguments='{"x": 1}'),
+            _make_tool_delta(name="func_b"),
+            _make_tool_delta(arguments='{"y": 2}'),
+        ]
+
+        events = await _collect_tool_streaming_events(delta_sequence, monkeypatch)
+
+        # Collect function_call_arguments.done events
+        args_done = [
+            e for e in events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        ]
+        assert len(args_done) == 2, (
+            f"Expected 2 function_call_arguments.done, got {len(args_done)}"
+        )
+
+        # Collect output_item.done events that are function_calls
+        # (first tool call triggers a text→tool transition which emits
+        #  a message done for the initial empty text item — that's expected)
+        item_done = [
+            e
+            for e in events
+            if isinstance(e, ResponseOutputItemDoneEvent)
+            and isinstance(e.item, ResponseFunctionToolCall)
+        ]
+        assert len(item_done) == 2, (
+            f"Expected 2 function_call output_item.done, got {len(item_done)}"
+        )
+
+        # Both output_item.done must be function_call, not message
+        for done_evt in item_done:
+            assert isinstance(done_evt.item, ResponseFunctionToolCall), (
+                f"output_item.done should contain ResponseFunctionToolCall, "
+                f"got {type(done_evt.item).__name__}"
+            )
+
+        # No output_text.done should appear during tool→tool transition
+        from openai.types.responses import ResponseTextDoneEvent
+
+        # text_done may appear for the initial text→tool transition,
+        # but should NOT appear between tool calls. Check that any
+        # text_done events appear before the first function_call done.
+        text_done_indices = [
+            i for i, e in enumerate(events) if isinstance(e, ResponseTextDoneEvent)
+        ]
+        fc_done_indices = [
+            i
+            for i, e in enumerate(events)
+            if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        ]
+        if text_done_indices and fc_done_indices:
+            assert max(text_done_indices) < min(fc_done_indices), (
+                "text_done should only appear before the first "
+                "function_call_arguments.done"
+            )
+
+    @pytest.mark.asyncio
+    async def test_multi_tool_call_arguments_not_concatenated(self, monkeypatch):
+        """CORE BUG REGRESSION: when two tool calls stream in sequence,
+        each ``function_call_arguments.done`` event must contain *only*
+        that tool call's arguments — not a concatenation of both.
+
+        Before the fix, the second done event contained the concatenated
+        JSON of both tool calls.
+        """
+        import json
+
+        from openai.types.responses import (
+            ResponseFunctionCallArgumentsDoneEvent,
+        )
+
+        args_a = '{"city": "Berlin", "unit": "celsius"}'
+        args_b = '{"city": "Tokyo", "days": 3, "unit": "fahrenheit"}'
+
+        delta_sequence = [
+            _make_tool_delta(name="get_weather"),
+            _make_tool_delta(arguments=args_a),
+            _make_tool_delta(name="get_forecast"),
+            _make_tool_delta(arguments=args_b),
+        ]
+
+        events = await _collect_tool_streaming_events(delta_sequence, monkeypatch)
+
+        done_events = [
+            e for e in events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        ]
+        assert len(done_events) == 2, (
+            f"Expected 2 function_call_arguments.done, got {len(done_events)}"
+        )
+
+        # First tool call's arguments
+        parsed_a = json.loads(done_events[0].arguments)
+        assert parsed_a == {"city": "Berlin", "unit": "celsius"}, (
+            f"First tool call args wrong: {done_events[0].arguments!r}"
+        )
+
+        # Second tool call's arguments — must NOT contain first call's data
+        parsed_b = json.loads(done_events[1].arguments)
+        assert parsed_b == {"city": "Tokyo", "days": 3, "unit": "fahrenheit"}, (
+            f"Second tool call args wrong (possibly concatenated): "
+            f"{done_events[1].arguments!r}"
+        )
+
+        # Extra safety: each must be individually valid JSON
+        for i, evt in enumerate(done_events):
+            try:
+                json.loads(evt.arguments)
+            except json.JSONDecodeError:
+                pytest.fail(f"Tool call {i} has invalid JSON: {evt.arguments!r}")
+
+    @pytest.mark.asyncio
+    async def test_multi_tool_call_distinct_output_indices(self, monkeypatch):
+        """Each tool call must get a unique, incrementing output_index."""
+        from openai.types.responses import ResponseOutputItemAddedEvent
+
+        delta_sequence = [
+            _make_tool_delta(name="func_a"),
+            _make_tool_delta(arguments='{"a": 1}'),
+            _make_tool_delta(name="func_b"),
+            _make_tool_delta(arguments='{"b": 2}'),
+            _make_tool_delta(name="func_c"),
+            _make_tool_delta(arguments='{"c": 3}'),
+        ]
+
+        events = await _collect_tool_streaming_events(delta_sequence, monkeypatch)
+
+        added_events = [
+            e
+            for e in events
+            if isinstance(e, ResponseOutputItemAddedEvent)
+            and getattr(getattr(e, "item", None), "type", None) == "function_call"
+        ]
+        # 3 tool calls, but first one triggers both first_delta init
+        # and may produce an extra added event depending on the parser
+        assert len(added_events) >= 3, (
+            f"Expected at least 3 output_item.added for "
+            f"function_calls, got {len(added_events)}"
+        )
+
+        indices = [e.output_index for e in added_events]
+        # Must be strictly increasing
+        for i in range(1, len(indices)):
+            assert indices[i] > indices[i - 1], (
+                f"output_index not strictly increasing: {indices}"
+            )
+
+        # Item IDs must be distinct
+        ids = [e.item.id for e in added_events]
+        assert len(set(ids)) == len(ids), f"Item IDs are not unique: {ids}"
+
+    @pytest.mark.asyncio
+    async def test_single_tool_call_unchanged(self, monkeypatch):
+        """Regression: single tool call behavior must be preserved
+        after the multi-tool-call fix."""
+        import json
+
+        from openai.types.responses import (
+            ResponseFunctionCallArgumentsDoneEvent,
+            ResponseFunctionToolCall,
+            ResponseOutputItemAddedEvent,
+            ResponseOutputItemDoneEvent,
+        )
+
+        delta_sequence = [
+            _make_tool_delta(name="get_weather"),
+            _make_tool_delta(arguments='{"city":'),
+            _make_tool_delta(arguments=' "Berlin",'),
+            _make_tool_delta(arguments=' "unit": "celsius"}'),
+        ]
+
+        events = await _collect_tool_streaming_events(delta_sequence, monkeypatch)
+
+        # Exactly one function_call_arguments.done
+        done_events = [
+            e for e in events if isinstance(e, ResponseFunctionCallArgumentsDoneEvent)
+        ]
+        assert len(done_events) == 1, (
+            f"Expected 1 function_call_arguments.done, got {len(done_events)}"
+        )
+        assert json.loads(done_events[0].arguments) == {
+            "city": "Berlin",
+            "unit": "celsius",
+        }
+
+        # At least one output_item.added for function_call
+        # (parser may emit name-only first delta that triggers both
+        #  first_delta init and text→tool transition)
+        added_events = [
+            e
+            for e in events
+            if isinstance(e, ResponseOutputItemAddedEvent)
+            and getattr(getattr(e, "item", None), "type", None) == "function_call"
+        ]
+        assert len(added_events) >= 1
+
+        # At least one output_item.done with ResponseFunctionToolCall
+        fc_done = [
+            e
+            for e in events
+            if isinstance(e, ResponseOutputItemDoneEvent)
+            and isinstance(e.item, ResponseFunctionToolCall)
+        ]
+        assert len(fc_done) == 1
+        assert json.loads(fc_done[0].item.arguments) == {
+            "city": "Berlin",
+            "unit": "celsius",
+        }

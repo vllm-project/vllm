@@ -481,9 +481,7 @@ def emit_function_call_done_events(
         type="function_call",
         arguments=arguments,
         name=function_name,
-        item_id=state.current_item_id,
-        output_index=state.current_output_index,
-        sequence_number=-1,
+        id=state.current_item_id,
         call_id=state.current_call_id,
         status="completed",
     )
