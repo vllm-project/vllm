@@ -73,7 +73,6 @@ class OpenAIServingRealtimeVideo(OpenAIServing):
     ) -> AsyncGenerator[StreamingInput, None]:
         """Turn queued video batches into StreamingInput for engine.generate().
         """
-        # Use a mutable object (list) to track first batch state
 
         def _get_prompt() -> str:
             user_prompt = prompt_getter() if prompt_getter else prompt_text
