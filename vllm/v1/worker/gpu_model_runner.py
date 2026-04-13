@@ -698,6 +698,12 @@ class GPUModelRunner(
         )
 
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
+
+        # Persistent GPU buffer for num_prompt_tokens, used by
+        # CommonAttentionMetadata for per-sequence decisions in model layers.
+        self.num_prompt_tokens_buf = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
         if self.dcp_world_size > 1:
             self.dcp_local_seq_lens = self._make_buffer(
                 self.max_num_reqs, dtype=torch.int32
@@ -935,6 +941,14 @@ class GPUModelRunner(
             if self.uses_xdrope_dim > 0:
                 return self.xdrope_positions.gpu[:, num_tokens]
             return self.positions[num_tokens]
+
+    def _get_num_prompt_tokens_gpu(
+        self, cpu_tensor: torch.Tensor, num_reqs: int
+    ) -> torch.Tensor:
+        """Copy num_prompt_tokens into a persistent GPU buffer."""
+        buf = self.num_prompt_tokens_buf[:num_reqs]
+        buf.copy_(cpu_tensor[:num_reqs], non_blocking=True)
+        return buf
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype, numpy: bool = True
@@ -2192,6 +2206,9 @@ class GPUModelRunner(
             slot_mapping=slot_mapping_gid_0,
             causal=True,
             is_prefilling=is_prefilling,
+            num_prompt_tokens=self._get_num_prompt_tokens_gpu(
+                num_prompt_tokens_cpu, num_reqs_padded
+            ),
         )
 
         if self.dcp_world_size > 1:
