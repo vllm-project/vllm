@@ -71,6 +71,9 @@ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.xpu import (
+    XPUMxFp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4 import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
@@ -204,7 +207,7 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
         # To be added
     ],
     PlatformEnum.XPU: [
-        # To be added
+        XPUFP8ScaledMMLinearKernel,
     ],
 }
 
@@ -241,6 +244,10 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         EmulationMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        EmulationMxfp8LinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUMxFp8LinearKernel,
         EmulationMxfp8LinearKernel,
     ],
 }
@@ -742,6 +749,7 @@ __all__ = [
     "Mxfp8LinearLayerConfig",
     "FlashInferCutlassMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
+    "XPUMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
