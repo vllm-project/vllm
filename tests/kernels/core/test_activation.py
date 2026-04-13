@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -114,6 +116,67 @@ def test_act_and_mul(
         opcheck(fn, (out, x, layer.alpha, layer.limit))
     elif activation != "swiglustep_and_mul":
         opcheck(fn, (out, x))
+
+
+@pytest.mark.parametrize(
+    "activation,approximate",
+    [
+        ("gelu_and_mul", "none"),
+        ("gelu_and_mul", "tanh"),
+        ("new_gelu", None),
+        ("fast_gelu", None),
+        ("quick_gelu", None),
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [7, 83])
+@pytest.mark.parametrize("d", [512])
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@torch.inference_mode()
+def test_activation_cuda_alike_no_c_ext(
+    default_vllm_config,
+    activation: str,
+    approximate,
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+) -> None:
+    """Regression test: activations must not crash on cuda_alike platforms
+    (e.g. ROCm) when the vLLM C++ extension was built without GPU support
+    and the _C ops are absent."""
+    # Simulate a cuda_alike platform whose _C extension has no custom ops.
+    empty_C = SimpleNamespace()  # no attributes → hasattr(...) is always False
+
+    with (
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_rocm",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_xpu",
+            return_value=False,
+        ),
+        patch("vllm.model_executor.layers.activation.torch.ops._C", empty_C),
+    ):
+        if activation == "gelu_and_mul":
+            x = torch.randn(num_tokens, 2 * d, dtype=dtype)
+            layer = GeluAndMul(approximate=approximate)
+        elif activation == "new_gelu":
+            x = torch.randn(num_tokens, d, dtype=dtype)
+            layer = NewGELU()
+        elif activation == "fast_gelu":
+            x = torch.randn(num_tokens, d, dtype=dtype)
+            layer = FastGELU()
+        elif activation == "quick_gelu":
+            x = torch.randn(num_tokens, d, dtype=dtype)
+            layer = QuickGELU()
+
+    out = layer(x)
+    ref_out = layer.forward_native(x)
+    torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
 
 
 @pytest.mark.parametrize(
