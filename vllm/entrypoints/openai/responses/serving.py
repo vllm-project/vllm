@@ -1401,6 +1401,11 @@ class OpenAIServingResponses(OpenAIServing):
                                 name=tc.function.name,
                                 output_index=current_output_index,
                             )
+                            # Capture any arguments bundled with
+                            # the registration delta
+                            if tc.function.arguments:
+                                tc_state.args_parts.append(
+                                    tc.function.arguments)
                             tool_call_states[tc.index] = tc_state
                             yield _increment_sequence_number_and_return(
                                 ResponseOutputItemAddedEvent(

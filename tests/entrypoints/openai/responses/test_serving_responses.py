@@ -1358,3 +1358,67 @@ class TestParallelToolCallStreaming:
         )
         assert done.name == "tc_a"
         assert done.arguments == '{"x": 1}'
+
+    @pytest.mark.asyncio
+    async def test_first_delta_args_preserved(self, monkeypatch):
+        """When name + arguments arrive in the same registration delta,
+        arguments must appear in the finalized arguments.done event."""
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_for_tool_calls()
+
+        delta_sequence = [
+            # Name AND arguments bundled in one delta (atomic parser)
+            DeltaMessage(tool_calls=[
+                _tc(0, name="get_weather", args='{"city": "Berlin"}'),
+            ]),
+        ]
+        events = await _run_simple_streaming(serving, delta_sequence)
+
+        done = next(
+            e for e in events
+            if e.type == "response.function_call_arguments.done"
+        )
+        assert done.arguments == '{"city": "Berlin"}', (
+            "Arguments from the registration delta must not be dropped"
+        )
+
+    @pytest.mark.asyncio
+    async def test_reasoning_then_tool_call_transition(self, monkeypatch):
+        """When reasoning deltas precede tool calls, the reasoning item must
+        be properly closed before tool call items are opened."""
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+        serving = _make_serving_instance_with_reasoning()
+        # Need both reasoning_parser AND tool_parser truthy
+        _mock_parser_with_tool_calls(serving, [
+            DeltaMessage(reasoning="Let me think..."),
+            DeltaMessage(reasoning=" about this."),
+            DeltaMessage(tool_calls=[_tc(0, "get_weather")]),
+            DeltaMessage(tool_calls=[_tc(0, args='{"city": "NYC"}')]),
+        ])
+        # Override: set reasoning_parser truthy so reasoning deltas are
+        # recognized as reasoning (not text)
+        serving.parser.return_value.reasoning_parser = MagicMock()
+
+        events = await _run_simple_streaming(serving, [
+            DeltaMessage(reasoning="Let me think..."),
+            DeltaMessage(reasoning=" about this."),
+            DeltaMessage(tool_calls=[_tc(0, "get_weather")]),
+            DeltaMessage(tool_calls=[_tc(0, args='{"city": "NYC"}')]),
+        ])
+
+        types = [e.type for e in events]
+
+        # Reasoning must be opened and closed before tool calls
+        assert "response.reasoning_text.delta" in types
+        assert "response.reasoning_text.done" in types
+
+        # Tool call must be opened and closed
+        assert "response.output_item.added" in types
+        assert "response.function_call_arguments.done" in types
+
+        # Reasoning close must come BEFORE tool call open
+        reasoning_done_idx = types.index("response.reasoning_text.done")
+        tc_added_idx = types.index("response.output_item.added")
+        assert reasoning_done_idx < tc_added_idx, (
+            "Reasoning must be closed before tool call is opened"
+        )
