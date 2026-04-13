@@ -167,6 +167,7 @@ void mla_decode_block(
     const scalar_t* __restrict__ kv_cache,   // [block_size, head_dim]
     float* __restrict__ acc_out,             // [num_heads, v_head_dim]
     float* __restrict__ acc_lse,             // [num_heads]
+    float* __restrict__ kv_cache_f32_buf,  // [block_size * head_dim] or nullptr
     const int num_heads, const float scale, const int num_tokens) {
   using qk_load_vec_type = typename KernelVecType<scalar_t>::qk_load_vec_type;
   static_assert(
@@ -181,14 +182,12 @@ void mla_decode_block(
 
   const qk_vec_type* k_vecs;
   const f32_vec_type* v_vecs_f32;
-  float* kv_cache_f32 = nullptr;
 
   if constexpr (!std::is_same<scalar_t, float>::value) {
     // convert KV cache block to FP32 to reuse it across query heads and
     // attn @ V computation, since FP16/BF16->FP32 is expensive.
-    // TODO: move malloc outside of this fn to reuse across iterations.
-    const int nbytes = BLOCK_SIZE * HEAD_DIM * sizeof(float);
-    kv_cache_f32 = static_cast<float*>(std::aligned_alloc(64, nbytes));
+    // Buffer is pre-allocated by caller and reused across block iterations.
+    float* kv_cache_f32 = kv_cache_f32_buf;
 
     for (int block_offset = 0; block_offset < num_tokens; ++block_offset)
       for (int i = 0; i < HEAD_DIM; i += V_NUM_ELEM) {
@@ -236,10 +235,6 @@ void mla_decode_block(
     acc_out += V_HEAD_DIM;
     acc_lse += 1;
   }
-
-  if (kv_cache_f32 != nullptr) {
-    std::free(kv_cache_f32);
-  }
 }
 }  // namespace
 
@@ -283,6 +278,17 @@ void mla_decode_kvcache_cpu_impl(
         acc_out + thread_id * num_heads * V_HEAD_DIM;
     float* __restrict__ acc_lse_thread = acc_lse.data() + thread_id * num_heads;
 
+    // Pre-allocate per-thread buffer for KV cache FP32 conversion,
+    // reused across all block iterations (was previously malloc'd per block).
+    float* kv_cache_f32_buf = nullptr;
+    if constexpr (!std::is_same<scalar_t, float>::value) {
+      const int kv_buf_nbytes = BLOCK_SIZE * HEAD_DIM * sizeof(float);
+      kv_cache_f32_buf =
+          static_cast<float*>(std::aligned_alloc(64, kv_buf_nbytes));
+      TORCH_CHECK(kv_cache_f32_buf != nullptr,
+                  "Failed to allocate KV cache FP32 buffer");
+    }
+
     for (int seq_idx = 0; seq_idx < num_seqs; ++seq_idx) {
       // reset accumulator
       std::fill(acc_out_thread, acc_out_thread + num_heads * V_HEAD_DIM, 0.0f);
@@ -315,7 +321,7 @@ void mla_decode_kvcache_cpu_impl(
 
         mla_decode_block<scalar_t, HEAD_DIM, V_HEAD_DIM, BLOCK_SIZE>(
             q_vecs, kv_cache + physical_block_idx * kv_stride, acc_out_thread,
-            acc_lse_thread, num_heads, scale, num_tokens);
+            acc_lse_thread, kv_cache_f32_buf, num_heads, scale, num_tokens);
       }
 
 // merge attention states across threads
@@ -353,6 +359,11 @@ void mla_decode_kvcache_cpu_impl(
                                              head_idx * V_HEAD_DIM + i);
         }
       }
+    }
+
+    // Free per-thread KV cache conversion buffer
+    if (kv_cache_f32_buf != nullptr) {
+      std::free(kv_cache_f32_buf);
     }
   }
   if (PRE_CONVERT_QUERY) {
