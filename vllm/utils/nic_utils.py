@@ -197,6 +197,29 @@ def _match_devices(
 # ---------------------------------------------------------------------------
 
 
+def _get_gpu_numa_nodes() -> list[int] | None:
+    """Get per-GPU NUMA node list, reusing numa_utils when possible.
+
+    Tries :func:`numa_utils.get_auto_numa_nodes` first (cached, with
+    full availability checks).  If that returns *None* — e.g. because
+    mempolicy or CPU-affinity checks that are irrelevant for NIC binding
+    failed — falls back to calling the platform directly.
+    """
+    from vllm.utils.numa_utils import get_auto_numa_nodes
+
+    nodes = get_auto_numa_nodes()
+    if nodes is not None:
+        return nodes
+
+    # Fallback: call platform directly without NUMA-specific checks
+    # (mempolicy / CPU affinity don't matter for NIC binding).
+    from vllm.platforms import current_platform
+
+    if not hasattr(current_platform, "get_all_device_numa_nodes"):
+        return None
+    return current_platform.get_all_device_numa_nodes()
+
+
 @cache
 def get_auto_nic_devices() -> list[str] | None:
     """Auto-detect per-GPU NIC device specs via NUMA topology.
@@ -205,18 +228,11 @@ def get_auto_nic_devices() -> list[str] | None:
     GPU), using exact-match syntax so both NCCL and UCX get unambiguous
     values.  Returns *None* when detection is not possible.
     """
-    from vllm.platforms import current_platform
-
-    if not hasattr(current_platform, "get_all_device_numa_nodes"):
-        logger.warning(
-            "Platform %s does not support GPU NUMA detection; "
-            "skipping automatic NIC binding.",
-            type(current_platform).__name__,
-        )
-        return None
-
-    gpu_numa_nodes = current_platform.get_all_device_numa_nodes()
+    gpu_numa_nodes = _get_gpu_numa_nodes()
     if gpu_numa_nodes is None:
+        logger.warning(
+            "Could not detect GPU NUMA topology; skipping automatic NIC binding."
+        )
         return None
 
     available = enumerate_ib_devices()

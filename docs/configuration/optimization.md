@@ -287,6 +287,22 @@ Notes:
 - In containerized environments, ensure the InfiniBand sysfs directory is
   visible inside the container (usually the case when RDMA is enabled).
 
+#### Interaction with NUMA binding
+
+`--nic-bind` and `--numa-bind` are complementary features that both use NUMA
+topology. When both are enabled with auto-detection, they share the same
+GPU-to-NUMA mapping and will be consistent. However, when **explicit** values
+are provided for one but not the other (or for both), the user must ensure
+they are consistent — for example, if `--numa-bind-nodes` pins GPU 0 to NUMA
+node 0, the corresponding `--nic-bind-devices` entry should select a NIC on
+NUMA node 0 as well. A mismatch (GPU memory bound to one NUMA node, RDMA
+traffic routed through a NIC on a different NUMA node) introduces cross-NUMA
+PCIe traffic that **negates the benefit of both features** and may perform
+worse than no binding at all.
+
+To verify the effective binding, check the worker logs at startup. Both
+features log their per-worker assignments at `INFO` level.
+
 ### Batch-level DP for Multi-Modal Encoders
 
 By default, TP is used to shard the weights of multi-modal encoders just like for language decoders,
