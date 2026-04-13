@@ -162,9 +162,17 @@ class Gemma3Attention(nn.Module):
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
         self.is_sliding = layer_type == "sliding_attention"
-        sliding_window = config.sliding_window if self.is_sliding else None
+        self.is_block_local = layer_type == "linear_attention"
+        self.block_local_lookback = 1 if self.is_block_local else -1
+        is_local = self.is_sliding or self.is_block_local
+        sliding_window = config.sliding_window if is_local else None
 
         # Initialize the rotary embedding.
+        rope_local_type = getattr(
+            config,
+            "rope_local_type",
+            config.rope_parameters.get("rope_type", None),
+        )
         if layer_type in config.rope_parameters:
             # Transformers v5 rope config.
             rope_parameters = config.rope_parameters[layer_type]
@@ -173,10 +181,15 @@ class Gemma3Attention(nn.Module):
             # Global attention. Use the values in config.json.
             rope_parameters = config.rope_parameters
             # Local attention. Override the values in config.json.
-            if self.is_sliding:
-                rope_parameters = dict(
-                    rope_type="default", rope_theta=config.rope_local_base_freq
-                )
+            if self.is_sliding or self.is_block_local:
+                if rope_local_type not in ("yarn",):
+                    # Default: use a simple rope with local base freq.
+                    # When rope_local_type == "yarn", keep the global
+                    # rope_parameters (which contain YaRN scaling).
+                    rope_parameters = dict(
+                        rope_type="default",
+                        rope_theta=config.rope_local_base_freq,
+                    )
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -206,6 +219,7 @@ class Gemma3Attention(nn.Module):
             attn_type=attn_type,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
+            block_local_lookback=self.block_local_lookback,
             prefix=f"{prefix}.attn",
         )
 

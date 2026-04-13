@@ -177,6 +177,8 @@ def kernel_unified_attention_2d(
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
+    BLOCK_LOCAL_LOOKBACK: tl.constexpr = -1,
+    BLOCK_LOCAL_BLOCK_SIZE: tl.constexpr = -1,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -293,7 +295,13 @@ def kernel_unified_attention_2d(
         # where q_abs = context_len + q
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
+        if BLOCK_LOCAL_LOOKBACK > -1:
+            q_abs = context_len + qpos_lo
+            first_allowed_key = (
+                (q_abs // BLOCK_LOCAL_BLOCK_SIZE) - BLOCK_LOCAL_LOOKBACK
+            ) * BLOCK_LOCAL_BLOCK_SIZE
+        else:
+            first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
@@ -370,9 +378,19 @@ def kernel_unified_attention_2d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # Apply sliding window to base mask BEFORE mm_prefix OR.
-        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
-        if SLIDING_WINDOW > 0:
+        # Apply sliding window / block-local to base mask BEFORE
+        # mm_prefix OR.
+        # Order must match FlexAttention:
+        #   (causal AND sliding_window) OR mm_prefix
+        if BLOCK_LOCAL_LOOKBACK > -1:
+            seq_mask = seq_mask & (
+                (
+                    (context_len + query_pos[:, None]) // BLOCK_LOCAL_BLOCK_SIZE
+                    - (seq_offset[None, :] // BLOCK_LOCAL_BLOCK_SIZE)
+                )
+                <= BLOCK_LOCAL_LOOKBACK
+            )
+        elif SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
@@ -559,6 +577,8 @@ def kernel_unified_attention_3d(
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
+    BLOCK_LOCAL_LOOKBACK: tl.constexpr = -1,
+    BLOCK_LOCAL_BLOCK_SIZE: tl.constexpr = -1,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -681,7 +701,13 @@ def kernel_unified_attention_3d(
         # where q_abs = context_len + q
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
+        if BLOCK_LOCAL_LOOKBACK > -1:
+            q_abs = context_len + qpos_lo
+            first_allowed_key = (
+                (q_abs // BLOCK_LOCAL_BLOCK_SIZE) - BLOCK_LOCAL_LOOKBACK
+            ) * BLOCK_LOCAL_BLOCK_SIZE
+        else:
+            first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
@@ -761,9 +787,19 @@ def kernel_unified_attention_3d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # Apply sliding window to base mask BEFORE mm_prefix OR.
-        # Order must match FlexAttention: (causal AND sliding_window) OR mm_prefix
-        if SLIDING_WINDOW > 0:
+        # Apply sliding window / block-local to base mask BEFORE
+        # mm_prefix OR.
+        # Order must match FlexAttention:
+        #   (causal AND sliding_window) OR mm_prefix
+        if BLOCK_LOCAL_LOOKBACK > -1:
+            seq_mask = seq_mask & (
+                (
+                    (context_len + query_pos[:, None]) // BLOCK_LOCAL_BLOCK_SIZE
+                    - (seq_offset[None, :] // BLOCK_LOCAL_BLOCK_SIZE)
+                )
+                <= BLOCK_LOCAL_LOOKBACK
+            )
+        elif SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
 
         # PrefixLM: extend mask with bidirectional ranges for multimodal tokens.
@@ -1046,6 +1082,8 @@ def unified_attention(
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    # Block-local attention: restrict attention to aligned blocks.
+    block_local_lookback=-1,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -1093,6 +1131,14 @@ def unified_attention(
     # Tile sizes for prefill and decode. Gemma3 models use optimized values.
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+
+    # Compute block-local block size from sliding window if needed.
+    block_local_block_size = -1
+    if sliding_window_val > 0 and block_local_lookback > -1:
+        block_local_block_size = sliding_window_val // (block_local_lookback + 1)
+    elif sliding_window_val <= 0:
+        block_local_lookback = -1
+
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size,
         sliding_window_val,
@@ -1184,6 +1230,8 @@ def unified_attention(
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
+            BLOCK_LOCAL_LOOKBACK=block_local_lookback,
+            BLOCK_LOCAL_BLOCK_SIZE=block_local_block_size,
         )
     else:
         kernel_unified_attention_3d[
@@ -1245,6 +1293,8 @@ def unified_attention(
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
+            BLOCK_LOCAL_LOOKBACK=block_local_lookback,
+            BLOCK_LOCAL_BLOCK_SIZE=block_local_block_size,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
