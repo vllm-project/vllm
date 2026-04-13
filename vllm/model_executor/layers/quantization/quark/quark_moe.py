@@ -791,6 +791,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             act_dtype=act_dtype,
             moe_parallel_config=moe_parallel_config,
         )
+        # In case quantization emulation backend is used, there is no need to apply
+        # MXFP4-specific padding logic as the compute happens in higher precision.
         if (
             self.mxfp4_backend is not None
             and self.mxfp4_backend != Mxfp4MoeBackend.EMULATION
