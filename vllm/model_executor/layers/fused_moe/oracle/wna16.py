@@ -259,8 +259,8 @@ def _process_weights_marlin(
     """
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
 
-    w13_weight_out: torch.Tensor
-    w2_weight_out: torch.Tensor
+    marlin_w13_qweight: torch.Tensor
+    marlin_w2_qweight: torch.Tensor
     marlin_w13_scales: torch.Tensor
     marlin_w2_scales: torch.Tensor
     w13_g_idx_sort_indices: torch.Tensor | None = None
@@ -272,8 +272,8 @@ def _process_weights_marlin(
 
     # --- FP8 weight / scale adjustment ---
     if input_dtype == torch.float8_e4m3fn:
-        w13_weight_out = ops.marlin_int4_fp8_preprocess(w13_qweight, inplace=False)
-        w2_weight_out = ops.marlin_int4_fp8_preprocess(w2_qweight, inplace=False)
+        marlin_w13_qweight = ops.marlin_int4_fp8_preprocess(w13_qweight, inplace=False)
+        marlin_w2_qweight = ops.marlin_int4_fp8_preprocess(w2_qweight, inplace=False)
         marlin_w13_scales = w13_scales.data * 512
         marlin_w2_scales = w2_scales.data * 512
 
@@ -315,18 +315,18 @@ def _process_weights_marlin(
 
     # --- Repack weights ---
     marlin_w13_qweight = ops.gptq_marlin_moe_repack(
-        w13_weight_out,
+        marlin_w13_qweight,
         w13_g_idx_sort_indices,
-        w13_weight_out.shape[1] * quant_config.pack_factor,
-        w13_weight_out.shape[2],
+        marlin_w13_qweight.shape[1] * quant_config.pack_factor,
+        marlin_w13_qweight.shape[2],
         quant_config.quant_type.size_bits,
         is_a_8bit=is_a_8bit,
     )
     marlin_w2_qweight = ops.gptq_marlin_moe_repack(
-        w2_weight_out,
+        marlin_w2_qweight,
         w2_g_idx_sort_indices,
-        w2_weight_out.shape[1] * quant_config.pack_factor,
-        w2_weight_out.shape[2],
+        marlin_w2_qweight.shape[1] * quant_config.pack_factor,
+        marlin_w2_qweight.shape[2],
         quant_config.quant_type.size_bits,
         is_a_8bit=is_a_8bit,
     )
