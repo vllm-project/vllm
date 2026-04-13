@@ -2,9 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Batch-invariant NVFP4 fused MoE expert implementations."""
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from enum import Enum
 
 import torch
 import torch.nn.functional as F
@@ -77,25 +75,6 @@ class NvFP4MoEWorkspace:
     dummy_bias: torch.Tensor  # [0] float32
 
 
-class _GroupedGemmAMode(Enum):
-    NVFP4_PACKED = 0
-    BF16 = 1
-    MXFP8 = 2
-
-
-# Plain integer constants for use inside Triton kernels, which cannot resolve
-# Python Enum attribute access at compile time.
-_A_NVFP4_PACKED = tl.constexpr(int(_GroupedGemmAMode.NVFP4_PACKED.value))
-_A_BF16 = tl.constexpr(int(_GroupedGemmAMode.BF16.value))
-_A_MXFP8 = tl.constexpr(int(_GroupedGemmAMode.MXFP8.value))
-
-_A_DOT_TYPE: dict[_GroupedGemmAMode, str] = {
-    _GroupedGemmAMode.NVFP4_PACKED: "e2m1",
-    _GroupedGemmAMode.BF16: "bf16",
-    _GroupedGemmAMode.MXFP8: "e4m3",
-}
-
-
 @triton.jit
 def _unswizzle_scale(
     scale_raw,
@@ -118,7 +97,7 @@ def _unswizzle_scale(
     )
 
 
-def _validate_fp4_moe_shared_user_tensors(
+def _validate_fused_moe_batch_invariant_nvfp4_inputs(
     *,
     hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -127,12 +106,16 @@ def _validate_fp4_moe_shared_user_tensors(
     w13_weight_scale: torch.Tensor,
     w2_weight: torch.Tensor,
     w2_weight_scale: torch.Tensor,
+    a1_gscale: torch.Tensor | None,
+    g1_alphas: torch.Tensor | None,
+    a2_gscale: torch.Tensor | None,
+    g2_alphas: torch.Tensor | None,
     output: torch.Tensor,
     workspace13: torch.Tensor,
     workspace2: torch.Tensor,
     expert_map: torch.Tensor | None,
+    num_experts: int,
 ) -> None:
-    """Layouts shared by batch-invariant FP4 fused MoE entry points."""
     assert hidden_states.is_contiguous(), "hidden_states must be contiguous"
     assert hidden_states.dtype in (torch.float16, torch.bfloat16), (
         f"hidden_states must be float16 or bfloat16, got {hidden_states.dtype}"
@@ -154,40 +137,6 @@ def _validate_fp4_moe_shared_user_tensors(
     assert w2_weight_scale.is_contiguous(), "w2_weight_scale must be contiguous"
     if expert_map is not None:
         assert expert_map.is_contiguous(), "expert_map must be contiguous"
-
-
-def _validate_fused_moe_batch_invariant_nvfp4_inputs(
-    *,
-    hidden_states: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    w13_weight: torch.Tensor,
-    w13_weight_scale: torch.Tensor,
-    w2_weight: torch.Tensor,
-    w2_weight_scale: torch.Tensor,
-    a1_gscale: torch.Tensor | None,
-    g1_alphas: torch.Tensor | None,
-    a2_gscale: torch.Tensor | None,
-    g2_alphas: torch.Tensor | None,
-    output: torch.Tensor,
-    workspace13: torch.Tensor,
-    workspace2: torch.Tensor,
-    expert_map: torch.Tensor | None,
-    num_experts: int,
-) -> None:
-    _validate_fp4_moe_shared_user_tensors(
-        hidden_states=hidden_states,
-        topk_ids=topk_ids,
-        topk_weights=topk_weights,
-        w13_weight=w13_weight,
-        w13_weight_scale=w13_weight_scale,
-        w2_weight=w2_weight,
-        w2_weight_scale=w2_weight_scale,
-        output=output,
-        workspace13=workspace13,
-        workspace2=workspace2,
-        expert_map=expert_map,
-    )
 
     for name, tensor in (
         ("a1_gscale", a1_gscale),
@@ -301,23 +250,17 @@ def _grouped_matmul_fp4_packed_persistent_kernel(
     NUM_SMS: tl.constexpr,
     A_LARGE: tl.constexpr,
     B_LARGE: tl.constexpr,
-    A_MODE: tl.constexpr,
-    A_DOT_TYPE: tl.constexpr,
     B_SCALE_GROUP: tl.constexpr,
     HAS_ALPHA: tl.constexpr,
     HAS_BIAS: tl.constexpr,
 ):
-    """Persistent packed grouped FP4 expert weights with selectable A-side precision.
+    """Persistent packed grouped NVFP4 GEMM with FP4 activations and weights.
 
+    Both A and B are packed FP4 with per-block float8_e4m3fn scales.
     Launches ``NUM_SMS`` programs that loop over a global tile index space
     built from a prefix-sum of per-expert tile counts.  Each iteration maps
     a global tile id to ``(expert_id, local_tile_id)`` via binary search,
-    then executes the same GEMM tile logic as the non-persistent kernel.
-
-    ``A_MODE`` selects the A-side contract:
-    - NVFP4 packed FP4 + block scales
-    - BF16/FP16 dense activations without A scales
-    - MXFP8 dense FP8 activations with block scales
+    then executes the GEMM tile.
 
     B and B-scale tensors are pre-flattened by the wrapper:
     ``b_fp4`` from ``[E, N, K_packed]`` to ``[E*N, K_packed]``, and
@@ -345,22 +288,13 @@ def _grouped_matmul_fp4_packed_persistent_kernel(
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
     # Global descriptors created once before the loop.
-    if A_MODE == _A_NVFP4_PACKED:
-        a_desc = tl.make_tensor_descriptor(
-            a_ptr,
-            shape=[M_total, k_bytes_total],
-            strides=[stride_am, stride_ak],
-            block_shape=[BLOCK_SIZE_M, K_BYTES],
-            padding_option="zero",
-        )
-    else:
-        a_desc = tl.make_tensor_descriptor(
-            a_ptr,
-            shape=[M_total, K_total],
-            strides=[stride_am, stride_ak],
-            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
-            padding_option="zero",
-        )
+    a_desc = tl.make_tensor_descriptor(
+        a_ptr,
+        shape=[M_total, k_bytes_total],
+        strides=[stride_am, stride_ak],
+        block_shape=[BLOCK_SIZE_M, K_BYTES],
+        padding_option="zero",
+    )
     # B flattened to [E*N, K_packed] by the wrapper.
     b_desc = tl.make_tensor_descriptor(
         b_ptr,
@@ -369,29 +303,28 @@ def _grouped_matmul_fp4_packed_persistent_kernel(
         block_shape=[BLOCK_SIZE_N, K_BYTES],
         padding_option="zero",
     )
-    if A_MODE != _A_BF16:
-        a_scale_desc = tl.make_tensor_descriptor(
-            a_scale_ptr,
-            shape=[
-                1,
-                tl.cdiv(a_scale_rows_total, 128),
-                a_scale_cols_total // 4,
-                2,
-                256,
-            ],
-            strides=[
-                tl.cdiv(a_scale_rows_total, 128)
-                * (a_scale_cols_total // 4)
-                * 512
-                * stride_ask,
-                (a_scale_cols_total // 4) * 512 * stride_ask,
-                512 * stride_ask,
-                256 * stride_ask,
-                stride_ask,
-            ],
-            block_shape=[1, SCALE_M_TILES, SCALE_K_TILES, 2, 256],
-            padding_option="zero",
-        )
+    a_scale_desc = tl.make_tensor_descriptor(
+        a_scale_ptr,
+        shape=[
+            1,
+            tl.cdiv(a_scale_rows_total, 128),
+            a_scale_cols_total // 4,
+            2,
+            256,
+        ],
+        strides=[
+            tl.cdiv(a_scale_rows_total, 128)
+            * (a_scale_cols_total // 4)
+            * 512
+            * stride_ask,
+            (a_scale_cols_total // 4) * 512 * stride_ask,
+            512 * stride_ask,
+            256 * stride_ask,
+            stride_ask,
+        ],
+        block_shape=[1, SCALE_M_TILES, SCALE_K_TILES, 2, 256],
+        padding_option="zero",
+    )
     # B-scale flattened to [E*N_pad, K_s] by the wrapper.
     b_scale_n_tiles = tl.cdiv(num_experts * b_scale_n_per_expert, 128)
     b_scale_desc = tl.make_tensor_descriptor(
@@ -423,11 +356,9 @@ def _grouped_matmul_fp4_packed_persistent_kernel(
         )
 
         expert_row_offset = tl.load(expert_offsets_ptr + expert_id).to(tl.int32)
-        if A_MODE != _A_BF16:
-            expert_scale_offset = tl.load(a_scale_offsets_ptr + expert_id).to(tl.int32)
+        expert_scale_offset = tl.load(a_scale_offsets_ptr + expert_id).to(tl.int32)
         expert_row_offset = _maybe_widen(expert_row_offset, A_LARGE)
-        if A_MODE != _A_BF16:
-            expert_scale_offset = _maybe_widen(expert_scale_offset, A_LARGE)
+        expert_scale_offset = _maybe_widen(expert_scale_offset, A_LARGE)
 
         if HAS_ALPHA:
             alpha = tl.load(alpha_ptr + expert_id).to(tl.float32)
@@ -454,14 +385,8 @@ def _grouped_matmul_fp4_packed_persistent_kernel(
             a_m_start = _maybe_widen(expert_row_offset + start_m, A_LARGE)
             b_n_start = _maybe_widen(b_row_offset + start_n, B_LARGE)
 
-            if A_MODE == _A_NVFP4_PACKED:
-                a = a_desc.load([a_m_start, k_start_bytes])
-                a = tl.where(m_mask[:, None] & k_byte_mask[None, :], a, 0)
-            else:
-                k_start_elems = _maybe_widen(ki * BLOCK_SIZE_K, A_LARGE)
-                a = a_desc.load([a_m_start, k_start_elems])
-                k_elem_mask = (ki * BLOCK_SIZE_K + tl.arange(0, BLOCK_SIZE_K)) < K_total
-                a = tl.where(m_mask[:, None] & k_elem_mask[None, :], a, 0)
+            a = a_desc.load([a_m_start, k_start_bytes])
+            a = tl.where(m_mask[:, None] & k_byte_mask[None, :], a, 0)
             b_raw = b_desc.load([b_n_start, k_start_bytes])
             b = tl.where(n_mask[:, None] & k_byte_mask[None, :], b_raw, 0).T
 
@@ -475,23 +400,18 @@ def _grouped_matmul_fp4_packed_persistent_kernel(
                 TILE_SCALE_COLS=SCALE_K_TILE,
             )
 
-            if A_MODE == _A_NVFP4_PACKED or A_MODE == _A_MXFP8:  # noqa: SIM109
-                scale_tile_m = _maybe_widen(
-                    (expert_scale_offset + start_m) // 128, A_LARGE
-                )
-                a_scale_raw = a_scale_desc.load([0, scale_tile_m, scale_tile_k, 0, 0])
-                a_scale = _unswizzle_scale(
-                    a_scale_raw.reshape(BLOCK_SIZE_M, SCALE_K_TILE),
-                    TILE_ROWS=BLOCK_SIZE_M,
-                    TILE_SCALE_COLS=SCALE_K_TILE,
-                )
-            else:
-                a_scale = None
+            scale_tile_m = _maybe_widen((expert_scale_offset + start_m) // 128, A_LARGE)
+            a_scale_raw = a_scale_desc.load([0, scale_tile_m, scale_tile_k, 0, 0])
+            a_scale = _unswizzle_scale(
+                a_scale_raw.reshape(BLOCK_SIZE_M, SCALE_K_TILE),
+                TILE_ROWS=BLOCK_SIZE_M,
+                TILE_SCALE_COLS=SCALE_K_TILE,
+            )
 
             accumulator = tl.dot_scaled(
                 a,
                 a_scale,
-                A_DOT_TYPE,
+                "e2m1",
                 b,
                 b_scale,
                 "e2m1",
@@ -690,8 +610,6 @@ def _grouped_matmul_nvfp4_packed(
         NUM_SMS=NUM_SMS,
         A_LARGE=A_LARGE,
         B_LARGE=B_LARGE,
-        A_MODE=_GroupedGemmAMode.NVFP4_PACKED.value,
-        A_DOT_TYPE=_A_DOT_TYPE[_GroupedGemmAMode.NVFP4_PACKED],
         B_SCALE_GROUP=16,
         HAS_ALPHA=True,
         HAS_BIAS=False,
@@ -948,8 +866,8 @@ def fused_moe_batch_invariant_nvfp4(
 # ---------------------------------------------------------------------------
 
 
-class _BatchInvariantFP4ExpertsBase(mk.FusedMoEExpertsModular, ABC):
-    """Shared batch-invariant FP4 MoE expert logic."""
+class BatchInvariantNvfp4Experts(mk.FusedMoEExpertsModular):
+    """Batch-invariant NVFP4 (W4A4) MoE experts."""
 
     def __init__(
         self,
@@ -958,6 +876,21 @@ class _BatchInvariantFP4ExpertsBase(mk.FusedMoEExpertsModular, ABC):
     ):
         super().__init__(moe_config, quant_config)
         self._num_local_experts = moe_config.num_local_experts
+        self._cached_scale_vecs: (
+            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
+        ) = None
+
+        E = moe_config.num_local_experts
+        device = moe_config.device
+        self._workspace = NvFP4MoEWorkspace(
+            expert_offsets=torch.empty(E + 1, dtype=torch.int32, device=device),
+            blockscale_offsets=torch.empty(E + 1, dtype=torch.int32, device=device),
+            problem_sizes1=torch.empty(E, 3, dtype=torch.int32, device=device),
+            problem_sizes2=torch.empty(E, 3, dtype=torch.int32, device=device),
+            tiles_per_expert=torch.empty(E, dtype=torch.int32, device=device),
+            expert_tile_start=torch.zeros(E + 1, dtype=torch.int32, device=device),
+            dummy_bias=torch.empty(0, device=device, dtype=torch.float32),
+        )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -977,6 +910,13 @@ class _BatchInvariantFP4ExpertsBase(mk.FusedMoEExpertsModular, ABC):
         return True
 
     @staticmethod
+    def _supports_quant_scheme(
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
+
+    @staticmethod
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
@@ -990,66 +930,6 @@ class _BatchInvariantFP4ExpertsBase(mk.FusedMoEExpertsModular, ABC):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def supports_chunking(self) -> bool:
-        return True
-
-    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        return TopKWeightAndReduceNoOP()
-
-    def workspace_shapes(
-        self,
-        M: int,
-        N: int,
-        K: int,
-        topk: int,
-        global_num_experts: int,
-        local_num_experts: int,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: MoEActivation,
-    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        act_out_dim = self.adjust_N_for_activation(N, activation)
-        m_total = M * topk
-        cols13 = max(N, K)
-        extra = _map_extra_rows(m_total, cols13)
-        workspace13 = (m_total + extra, cols13)
-        workspace2 = (m_total, max(act_out_dim, K))
-        output_shape = (M, K)
-        return (workspace13, workspace2, output_shape)
-
-    @abstractmethod
-    def apply(
-        self,
-        output: torch.Tensor,
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        activation: MoEActivation,
-        global_num_experts: int,
-        expert_map: torch.Tensor | None,
-        a1q_scale: torch.Tensor | None,
-        a2_scale: torch.Tensor | None,
-        workspace13: torch.Tensor,
-        workspace2: torch.Tensor,
-        expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        apply_router_weight_on_input: bool | None,
-    ) -> None: ...
-
-    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
-        raise NotImplementedError("LoRA is not supported for batch-invariant FP4 MoE")
-
-
-class BatchInvariantNvfp4Experts(_BatchInvariantFP4ExpertsBase):
-    """Batch-invariant NVFP4 (W4A4) MoE experts."""
-
-    @staticmethod
-    def _supports_quant_scheme(
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        return (weight_key, activation_key) == (kNvfp4Static, kNvfp4Dynamic)
-
     @staticmethod
     def is_supported_config(
         cls,
@@ -1058,8 +938,6 @@ class BatchInvariantNvfp4Experts(_BatchInvariantFP4ExpertsBase):
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[bool, str | None]:
-        # Use it when batch invariance is requested (env)
-        # or the user pinned moe_backend explicitly.
         if (
             not envs.VLLM_BATCH_INVARIANT
             and moe_config.moe_backend != "batch_invariant"
@@ -1089,30 +967,34 @@ class BatchInvariantNvfp4Experts(_BatchInvariantFP4ExpertsBase):
             cls, moe_config, weight_key, activation_key, activation_format
         )
 
+    def supports_chunking(self) -> bool:
+        return True
+
     def supports_expert_map(self) -> bool:
         return False
 
-    def __init__(
-        self,
-        moe_config: mk.FusedMoEConfig,
-        quant_config: FusedMoEQuantConfig,
-    ):
-        super().__init__(moe_config, quant_config)
-        self._cached_scale_vecs: (
-            tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor] | None
-        ) = None
+    def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
+        return TopKWeightAndReduceNoOP()
 
-        E = moe_config.num_local_experts
-        device = moe_config.device
-        self._workspace = NvFP4MoEWorkspace(
-            expert_offsets=torch.empty(E + 1, dtype=torch.int32, device=device),
-            blockscale_offsets=torch.empty(E + 1, dtype=torch.int32, device=device),
-            problem_sizes1=torch.empty(E, 3, dtype=torch.int32, device=device),
-            problem_sizes2=torch.empty(E, 3, dtype=torch.int32, device=device),
-            tiles_per_expert=torch.empty(E, dtype=torch.int32, device=device),
-            expert_tile_start=torch.zeros(E + 1, dtype=torch.int32, device=device),
-            dummy_bias=torch.empty(0, device=device, dtype=torch.float32),
-        )
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        act_out_dim = self.adjust_N_for_activation(N, activation)
+        m_total = M * topk
+        cols13 = max(N, K)
+        extra = _map_extra_rows(m_total, cols13)
+        workspace13 = (m_total + extra, cols13)
+        workspace2 = (m_total, max(act_out_dim, K))
+        output_shape = (M, K)
+        return (workspace13, workspace2, output_shape)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Fuse activation scales into w_scale_2 in-place so that
@@ -1175,3 +1057,6 @@ class BatchInvariantNvfp4Experts(_BatchInvariantFP4ExpertsBase):
             apply_router_weight_on_input=bool(apply_router_weight_on_input),
             expert_map=expert_map,
         )
+
+    def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
+        raise NotImplementedError("LoRA is not supported for batch-invariant FP4 MoE")
