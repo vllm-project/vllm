@@ -93,3 +93,10 @@ zeromq = { git = "https://github.com/BugenZhao/zmq.rs", rev = "dde4ee5c48846b0cc
 
 [workspace.lints.clippy]
 too_many_arguments = "allow"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+lto = "thin"
+panic = "abort"
