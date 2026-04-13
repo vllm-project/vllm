@@ -25,6 +25,13 @@ def test_tree_decoding():
         max_tree_depth=3
     )
     
+    normal_sampling_params = SamplingParams(
+        n=27,
+        temperature=0.8,
+        max_tokens=256,
+        # tree_search_params=tree_config
+    )
+    
     sampling_params = SamplingParams(
         temperature=0.8,
         max_tokens=256,
@@ -64,6 +71,12 @@ def test_tree_decoding():
     for i, prompt in enumerate(test_prompts):
         print(f"\n--- 测试 {i+1}: '{prompt}' ---")
         
+        # normal_outputs = llm.generate(prompt, normal_sampling_params)
+        # for output in normal_outputs[0].outputs:
+        #     normal_text = output.text
+        #     print(f"normal结果: {normal_text}")
+        #     print(f"normal完整生成长度: {len(normal_text)} 字符")
+            
         # 生成文本
         outputs = llm.generate(prompt, sampling_params)
         
@@ -107,6 +120,7 @@ def test_tree_decoding_with_comparison():
     
     # 禁用tree decoding的配置
     normal_params = SamplingParams(
+        n=27,
         temperature=0.8,
         max_tokens=50,
         tree_search_params=TreeSearchParams(enable_tree_search=False)
@@ -142,15 +156,15 @@ def test_tree_decoding_with_comparison():
         print(f"结果: {normal_text}")
         
         # Tree decoding生成
-        print("\n--- Tree Decoding 生成 ---")
-        tree_outputs = llm.generate(test_prompt, tree_params)
-        tree_text = tree_outputs[0].outputs[0].text
-        print(f"结果: {tree_text}")
+        # print("\n--- Tree Decoding 生成 ---")
+        # tree_outputs = llm.generate(test_prompt, tree_params)
+        # tree_text = tree_outputs[0].outputs[0].text
+        # print(f"结果: {tree_text}")
         
-        print(f"\n对比结果:")
-        print(f"正常生成长度: {len(normal_text)} 字符")
-        print(f"Tree decoding长度: {len(tree_text)} 字符")
-        print(f"内容差异: {'有' if normal_text != tree_text else '无'}")
+        # print(f"\n对比结果:")
+        # print(f"正常生成长度: {len(normal_text)} 字符")
+        # print(f"Tree decoding长度: {len(tree_text)} 字符")
+        # print(f"内容差异: {'有' if normal_text != tree_text else '无'}")
         
         return True
         

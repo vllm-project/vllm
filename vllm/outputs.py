@@ -282,9 +282,9 @@ class RequestOutput:
                 branch_prefix = getattr(seq, '_new_branch_token_text', None) or ""
                 tree_text = branch_prefix + output_text
                 tree_ids = [new_branch_token_id] + tree_ids
-            elif old_branch_token_id is not None:
-                trim = getattr(seq, '_last_decoded_token_len', 0)
-                tree_text = output_text[:-trim] if trim > 0 else output_text    
+            if old_branch_token_id is not None:
+            #     trim = getattr(seq, '_last_decoded_token_len', 0)
+            #     tree_text = output_text[:-trim] if trim > 0 else output_text    
                 if len(tree_ids) > 0:
                     tree_ids = tree_ids[:-1]
 
