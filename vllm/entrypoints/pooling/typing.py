@@ -89,6 +89,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     ## for IOProcessorResponse
     response: Any | None = None
 
+    ## for flash-late-interaction
+    query_final_res_batch: list[PoolingRequestOutput] | None = None
+
 
 @dataclass
 class OfflineInputsContext:

@@ -237,6 +237,7 @@ class ServingScores(PoolingServing):
 
         await self._prepare_generators(query_ctx)
         await self._collect_batch(query_ctx)
+        ctx.query_final_res_batch = query_ctx.final_res_batch
 
     async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None
