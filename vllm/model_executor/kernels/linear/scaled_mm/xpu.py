@@ -8,6 +8,11 @@ from vllm.model_executor.kernels.linear import (  # noqa: E501
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticChannelSym,
+    kFp8StaticTensorSym,
+)
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 
@@ -24,6 +29,11 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def can_implement(
         cls, config: FP8ScaledMMLinearLayerConfig
     ) -> tuple[bool, str | None]:
+        if config.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
+            return (
+                False,
+                "XPUFP8ScaledMM only support per-channel and per-tensor quantization",
+            )
         if config.weight_quant_key.dtype not in {
             torch.float8_e5m2,
             torch.float8_e4m3fn,
@@ -38,6 +48,9 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
         self.config = config
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        replace_parameter(layer, "weight", layer.weight.data.t())
 
     def apply_weights(
         self,
