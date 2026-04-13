@@ -614,7 +614,7 @@ class EngineArgs:
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
 
-    mamba_backend: MambaBackendEnum | None = MambaConfig.backend
+    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
         MambaConfig.enable_stochastic_rounding
     )
@@ -1947,16 +1947,11 @@ class EngineArgs:
 
         # Mamba config overrides
         mamba_config = copy.deepcopy(self.mamba_config)
-        if self.mamba_backend is not None:
-            if mamba_config.backend is not None:
-                raise ValueError(
-                    "mamba_backend and mamba_config.backend are mutually exclusive"
-                )
-            # Convert string to enum if needed (CLI parsing returns a string)
-            if isinstance(self.mamba_backend, str):
-                mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
-            else:
-                mamba_config.backend = self.mamba_backend
+        # Convert string to enum if needed (CLI parsing returns a string)
+        if isinstance(self.mamba_backend, str):
+            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
+        else:
+            mamba_config.backend = self.mamba_backend
         if self.enable_mamba_cache_stochastic_rounding:
             mamba_config.enable_stochastic_rounding = (
                 self.enable_mamba_cache_stochastic_rounding

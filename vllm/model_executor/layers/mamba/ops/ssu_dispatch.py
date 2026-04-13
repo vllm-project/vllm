@@ -197,9 +197,6 @@ def initialize_mamba_ssu_backend(mamba_config: MambaConfig) -> None:
     global _mamba_ssu_backend
 
     backend = mamba_config.backend
-    if backend is None:
-        backend = MambaBackendEnum.TRITON
-
     if backend not in _BACKEND_REGISTRY:
         raise ValueError(
             f"Unknown Mamba SSU backend: {backend}. "

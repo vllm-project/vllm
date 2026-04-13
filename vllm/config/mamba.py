@@ -33,8 +33,8 @@ class MambaBackendEnum(Enum, metaclass=_MambaBackendEnumMeta):
 class MambaConfig:
     """Configuration for Mamba SSM backends."""
 
-    backend: MambaBackendEnum | None = None
-    """Mamba SSU backend to use. If None, defaults to triton."""
+    backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    """Mamba SSU backend to use."""
 
     enable_stochastic_rounding: bool = False
     """Enable stochastic rounding when writing SSM state to fp16 cache.
@@ -63,10 +63,10 @@ class MambaConfig:
                     "on NVIDIA CUDA platforms. Please do not specify  "
                     "`--enable-mamba-cache-stochastic-rounding`."
                 )
-            if self.backend in {
-                MambaBackendEnum.TRITON,
-                None,
-            } and not current_platform.is_device_capability_family(100):
+            if (
+                self.backend == MambaBackendEnum.TRITON
+                and not current_platform.is_device_capability_family(100)
+            ):
                 raise ValueError(
                     "Stochastic rounding for Mamba cache with triton backend requires "
                     "compute capability 10.0 (data center Blackwell). The `cvt.rs` "
