@@ -1,6 +1,6 @@
-extern "C" {
-
 #include <Python.h>
+
+extern "C" {
 
 #include <stdbool.h>
 #include <time.h>
