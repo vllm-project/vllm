@@ -276,6 +276,11 @@ def _process_weights_marlin(
         marlin_w2_qweight = ops.marlin_int4_fp8_preprocess(w2_qweight, inplace=False)
         marlin_w13_scales = w13_scales.data * 512
         marlin_w2_scales = w2_scales.data * 512
+    else:
+        marlin_w13_qweight = w13_qweight
+        marlin_w2_qweight = w2_qweight
+        marlin_w13_scales = w13_scales
+        marlin_w2_scales = w2_scales
 
     # --- Process act_order (g_idx) ---
     if quant_config.desc_act:
