@@ -33,16 +33,9 @@ from vllm.triton_utils import tl
 from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.torch_utils import set_random_seed
 
-HAS_SM90 = current_platform.has_device_capability(90)
-HAS_SM100 = current_platform.has_device_capability(100)
-REQUIRES_SM100 = pytest.mark.skipif(
-    not HAS_SM100,
-    reason="Some batch-invariant NVFP4 MoE coverage requires Blackwell (sm100+).",
-)
-
-if not HAS_SM90:
+if not current_platform.has_device_capability(100):
     pytest.skip(
-        reason="Batch-invariant FP4 MoE requires Hopper or newer (sm90+).",
+        reason="Batch-invariant FP4 MoE requires Blackwell or newer (sm100+).",
         allow_module_level=True,
     )
 
@@ -271,7 +264,6 @@ def _run_batch_invariant_nvfp4(
     return output
 
 
-@REQUIRES_SM100
 @pytest.mark.parametrize(
     "topk,apply_router_weight_on_input",
     BATCH_INVARIANT_CASES,
@@ -346,7 +338,6 @@ def test_batch_invariant_nvfp4_moe_matches_cutlass(
         torch.testing.assert_close(fallback_out, cutlass_out, atol=1e-1, rtol=1e-1)
 
 
-@REQUIRES_SM100
 @pytest.mark.parametrize(
     "topk,apply_router_weight_on_input",
     BATCH_INVARIANT_CASES,
@@ -425,7 +416,6 @@ def test_batch_invariant_nvfp4_moe_batch_size_invariance(
     assert torch.equal(out_single[0], out_batch[0])
 
 
-@REQUIRES_SM100
 @torch.inference_mode()
 def test_batch_invariant_nvfp4_moe_all_invalid_routes_return_zero() -> None:
     set_random_seed(31)
@@ -463,7 +453,6 @@ def test_batch_invariant_nvfp4_moe_all_invalid_routes_return_zero() -> None:
     torch.testing.assert_close(out, torch.zeros_like(out), atol=0.0, rtol=0.0)
 
 
-@REQUIRES_SM100
 @torch.inference_mode()
 def test_grouped_matmul_nvfp4_packed_matches_cutlass_reference() -> None:
     set_random_seed(17)
