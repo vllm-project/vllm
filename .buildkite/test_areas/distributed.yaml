@@ -188,7 +188,7 @@ steps:
 - label: Distributed Tests (2 GPUs)(H100)
   timeout_in_minutes: 15
   device: h100
-  optional: true
+  # optional: true
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
