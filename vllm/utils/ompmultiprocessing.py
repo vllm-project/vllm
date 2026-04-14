@@ -151,9 +151,11 @@ class OMPProcessManager:
                     local_dp_rank * world_size : (local_dp_rank + 1) * world_size
                 ]
 
-            assert len(omp_cpuids_list) == self.local_world_size, "Given "
-            f"number of CPU id list {omp_cpuids_list} doesn't match "
-            f"local world size {self.local_world_size}."
+            assert len(omp_cpuids_list) == self.local_world_size, (
+                "Given "
+                f"number of CPU id list {omp_cpuids_list} doesn't match "
+                f"local world size {self.local_world_size}."
+            )
 
             # parse CPU list strings like "5,2-4" to [5, 2, 3, 4]
             self.cpu_lists = [cr_utils.parse_id_list(s) for s in omp_cpuids_list]
