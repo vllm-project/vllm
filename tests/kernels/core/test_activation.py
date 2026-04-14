@@ -234,7 +234,6 @@ def test_activation_cpu(
     elif activation == "quick_gelu":
         x = torch.randn(num_tokens, d, dtype=dtype)
         layer = QuickGELU()
-
     out = layer(x)
     ref_out = layer.forward_native(x)
     torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
