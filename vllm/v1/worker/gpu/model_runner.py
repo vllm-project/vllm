@@ -36,6 +36,9 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
+    initialize_mamba_ssu_backend,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
@@ -360,6 +363,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.attn_backends, self.attn_groups, attn_cg_support = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        initialize_mamba_ssu_backend(self.vllm_config.mamba_config)
         cudagraph_mode = self.compilation_config.resolve_cudagraph_mode_and_sizes(
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
