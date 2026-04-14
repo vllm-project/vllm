@@ -548,7 +548,9 @@ class OpenAIServingRender:
 
         if reasoning_parser is not None:
             tokenizer = renderer.get_tokenizer()
-            request = reasoning_parser(tokenizer).adjust_request(request=request)
+            request = reasoning_parser(
+                tokenizer, model_config=self.model_config
+            ).adjust_request(request=request)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
