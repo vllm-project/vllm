@@ -218,8 +218,11 @@ class CustomAllreduce:
         # end of peer IPC handle blobs (undefined behavior, often misreported
         # as CUDA errors during capture).
         world_size = dist.get_world_size(group=self.group)
-        count_tensor = torch.tensor([len(offset)], dtype=torch.int64)
-        count_list = [torch.zeros(1, dtype=torch.int64) for _ in range(world_size)]
+        # CPU tensors: this group uses the gloo backend; all_gather requires CPU.
+        count_tensor = torch.tensor([len(offset)], dtype=torch.int64, device="cpu")
+        count_list = [
+            torch.zeros(1, dtype=torch.int64, device="cpu") for _ in range(world_size)
+        ]
         dist.all_gather(count_list, count_tensor, group=self.group)
         counts = [int(t.item()) for t in count_list]
         if min(counts) != max(counts):
