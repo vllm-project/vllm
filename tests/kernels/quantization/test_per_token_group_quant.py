@@ -81,7 +81,9 @@ def test_per_token_group_quant_fp8(
     ],
 )
 @pytest.mark.parametrize("poisoned_scales", [False, True])
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA not available")
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+)
 def test_per_token_group_quant_fp8_packed(
     num_tokens, hidden_dim, group_size, poisoned_scales
 ):
