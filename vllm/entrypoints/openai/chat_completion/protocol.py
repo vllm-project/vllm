@@ -645,8 +645,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         # Reject empty tools array, matching OpenAI API behavior
         if data.get("tools") == []:
             raise ValueError(
-                '`tools` must not be an empty array. '
-                'Either provide at least one tool or omit the field entirely.'
+                "`tools` must not be an empty array. "
+                "Either provide at least one tool or omit the field entirely."
             )
 
         # if "tool_choice" is not specified but tools are provided,
