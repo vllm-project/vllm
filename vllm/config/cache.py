@@ -25,6 +25,7 @@ CacheDType = Literal[
     "fp8_inc",
     "fp8_ds_mla",
     "int8_per_token_head",
+    "int4_per_token_head",
     "fp8_per_token_head",
 ]
 MambaDType = Literal["auto", "float32", "float16"]

@@ -44,6 +44,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheSpec,
     KVCacheTensor,
+    KVQuantMode,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowSpec,
@@ -1742,16 +1743,38 @@ def test_get_kv_cache_config_one_worker():
         ],
     )
 
-    # different hidden size that cannot be aligned by using different block size
+    # different hidden size that cannot be aligned by block_size alone, but can
+    # still be unified by padding the smaller AttentionSpec page size.
     kv_cache_specs_hybrid = {
         "layer_1": new_kv_cache_spec(head_size=64),
         "layer_2": new_sliding_window_spec(head_size=96),
     }
-
-    with pytest.raises(NotImplementedError):
-        get_kv_cache_configs(
-            vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
-        )[0]
+    kv_cache_config_hybrid = get_kv_cache_configs(
+        vllm_config, [kv_cache_specs_hybrid], [mem_per_block_per_layer * 2 * 32]
+    )[0]
+    assert kv_cache_config_hybrid == KVCacheConfig(
+        num_blocks=42,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=24576 * 42,
+                shared_by=["layer_1", "layer_2"],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [
+                    "layer_1",
+                ],
+                new_kv_cache_spec(head_size=64, page_size_padded=24576),
+            ),
+            KVCacheGroupSpec(
+                [
+                    "layer_2",
+                ],
+                new_sliding_window_spec(head_size=96),
+            ),
+        ],
+    )
 
     # Test num_gpu_blocks_override
     vllm_config.cache_config.num_gpu_blocks_override = 16
@@ -2165,3 +2188,90 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+def test_unify_kv_cache_spec_page_size_pads_non_divisible_attention_spec():
+    smaller_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=64,
+        dtype=torch.float16,
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+    )
+    larger_spec = SlidingWindowSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=96,
+        dtype=torch.float16,
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+        sliding_window=1024,
+    )
+    assert larger_spec.page_size_bytes > smaller_spec.page_size_bytes
+    assert larger_spec.page_size_bytes % smaller_spec.page_size_bytes != 0
+
+    kv_cache_spec = {
+        "full": smaller_spec,
+        "sliding": larger_spec,
+    }
+
+    unified = kv_cache_utils.unify_kv_cache_spec_page_size(kv_cache_spec)
+
+    assert unified["sliding"] == larger_spec
+    assert unified["full"].block_size == smaller_spec.block_size
+    assert unified["full"].page_size_padded == larger_spec.page_size_bytes
+    assert unified["full"].page_size_bytes == unified["sliding"].page_size_bytes
+    assert unified["full"].real_page_size_bytes == smaller_spec.real_page_size_bytes
+
+
+def test_unify_kv_cache_spec_page_size_rejects_non_attention_padding():
+    attention_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=96,
+        dtype=torch.float16,
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+    )
+    mamba_spec = new_mamba_spec(
+        block_size=16,
+        shapes=((33,),),
+        dtypes=(torch.float16,),
+    )
+    assert attention_spec.page_size_bytes % mamba_spec.page_size_bytes != 0
+
+    with pytest.raises(NotImplementedError):
+        kv_cache_utils.unify_kv_cache_spec_page_size(
+            {
+                "attention": attention_spec,
+                "mamba": mamba_spec,
+            }
+        )
+
+
+def test_int4_page_size_bytes_aligns_inline_scale_payload():
+    from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
+
+    block_size = 16
+    num_kv_heads = 1
+    head_size = 66
+    spec = FullAttentionSpec(
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        dtype=torch.float16,
+        kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+    )
+
+    # Packed INT4 payload uses ceil(head_size / 2) bytes and then aligns the
+    # inline scale carve-out to fp16 boundaries. The page budget adds the
+    # 3 fp16 scale groups on top of that aligned payload.
+    assert spec.real_page_size_bytes == 2 * block_size * num_kv_heads * 34
+    assert spec.page_size_bytes == 2 * block_size * num_kv_heads * (34 + 6)
+
+    shape = TritonAttentionBackend.get_kv_cache_shape(
+        num_blocks=1,
+        block_size=block_size,
+        num_kv_heads=num_kv_heads,
+        head_size=head_size,
+        cache_dtype_str="int4_per_token_head",
+    )
+    assert shape == (1, 2, block_size, num_kv_heads, 40)

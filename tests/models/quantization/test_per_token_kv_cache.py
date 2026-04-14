@@ -4,17 +4,24 @@
 """End-to-end accuracy tests for per-token-head KV cache quantization.
 
 Compares logprobs between a baseline bf16 model and the same model with
-per-token-head quantized KV cache (int8 or fp8) using the Triton attention
+per-token-head quantized KV cache (int8, int4, or fp8) using the Triton attention
 backend.
 
 Run: pytest tests/models/quantization/test_per_token_kv_cache.py -v -s
 """
+
+import os
 
 import pytest
 
 from vllm.platforms import current_platform
 
 from ..utils import check_logprobs_close
+
+DEFAULT_TEST_MODEL = os.getenv(
+    "TEST_PER_TOKEN_KV_CACHE_MODEL",
+    "meta-llama/Llama-3.2-1B-Instruct",
+)
 
 
 @pytest.mark.skipif(
@@ -25,13 +32,14 @@ from ..utils import check_logprobs_close
     "base_model,test_model",
     [
         (
-            "meta-llama/Llama-3.2-1B-Instruct",
-            "meta-llama/Llama-3.2-1B-Instruct",
+            DEFAULT_TEST_MODEL,
+            DEFAULT_TEST_MODEL,
         ),
     ],
 )
 @pytest.mark.parametrize(
-    "kv_cache_dtype", ["int8_per_token_head", "fp8_per_token_head"]
+    "kv_cache_dtype",
+    ["int8_per_token_head", "int4_per_token_head", "fp8_per_token_head"],
 )
 @pytest.mark.parametrize("max_tokens", [4])
 @pytest.mark.parametrize("enforce_eager", [True])
@@ -55,6 +63,9 @@ def test_per_token_head_kv_cache_accuracy(
     Uses calculate_kv_scales (dynamic scale computation) since there are
     no per-token-head calibrated checkpoints available yet.
     """
+    if kv_cache_dtype == "fp8_per_token_head" and not current_platform.supports_fp8():
+        pytest.skip("FP8 per-token-head model tests require FP8-capable hardware.")
+
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
 

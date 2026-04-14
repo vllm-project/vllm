@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from copy import copy, deepcopy
 from dataclasses import dataclass, replace
 from functools import reduce
+from math import prod
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
 
 import numpy as np
@@ -188,6 +189,7 @@ from vllm.v1.worker.cp_utils import (
 )
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
+from vllm.v1.worker.gpu.attn_utils import get_contiguous_strides
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -6581,12 +6583,24 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
-                    kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
-                    )
+                    raw_tensor = kv_cache_raw_tensors[layer_name].view(dtype)
+                    logical_numel = prod(kv_cache_shape)
+                    if raw_tensor.numel() == logical_numel:
+                        raw_tensor = raw_tensor.view(kv_cache_shape)
+                    else:
+                        assert kv_cache_spec.page_size_padded is not None
+                        elems_per_page = (
+                            kv_cache_spec.page_size_bytes // raw_tensor.element_size()
+                        )
+                        logical_elems_per_page = logical_numel // num_blocks
+                        assert logical_elems_per_page <= elems_per_page
+                        contiguous_strides = get_contiguous_strides(kv_cache_shape)
+                        raw_tensor = torch.as_strided(
+                            raw_tensor,
+                            size=kv_cache_shape,
+                            stride=(elems_per_page, *contiguous_strides[1:]),
+                        )
+                    kv_caches[layer_name] = raw_tensor.permute(*inv_order)
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
                     raw_tensor = kv_cache_raw_tensors[layer_name]

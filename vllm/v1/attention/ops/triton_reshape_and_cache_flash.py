@@ -10,8 +10,44 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import INT4_CHANNELS_PER_SCALE
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()
+
+# Gaussian-friendly symmetric int4 codebook normalized to [-1, 1].
+# Indices 0-7 are non-negative and 8-15 are the mirrored signed entries.
+INT4_CODEBOOK_LEVELS = (
+    0.0,
+    0.049726,
+    0.150815,
+    0.257223,
+    0.374146,
+    0.510790,
+    0.688876,
+    1.0,
+    -0.0,
+    -0.049726,
+    -0.150815,
+    -0.257223,
+    -0.374146,
+    -0.510790,
+    -0.688876,
+    -1.0,
+)
+INT4_MAGNITUDE_LEVELS = INT4_CODEBOOK_LEVELS[:8]
+INT4_LEVEL_BOUNDARIES = tuple(
+    0.5 * (INT4_MAGNITUDE_LEVELS[i] + INT4_MAGNITUDE_LEVELS[i + 1])
+    for i in range(len(INT4_MAGNITUDE_LEVELS) - 1)
+)
+(
+    INT4_LEVEL_BOUNDARY_0,
+    INT4_LEVEL_BOUNDARY_1,
+    INT4_LEVEL_BOUNDARY_2,
+    INT4_LEVEL_BOUNDARY_3,
+    INT4_LEVEL_BOUNDARY_4,
+    INT4_LEVEL_BOUNDARY_5,
+    INT4_LEVEL_BOUNDARY_6,
+) = INT4_LEVEL_BOUNDARIES
 
 
 @triton.jit
@@ -244,6 +280,190 @@ _PER_TOKEN_HEAD_QUANT_PARAMS: dict[torch.dtype, tuple[float, float]] = {
 }
 
 
+@triton.jit
+def _int4_gaussian_mag_idx(
+    x_abs,
+    B0: tl.constexpr,
+    B1: tl.constexpr,
+    B2: tl.constexpr,
+    B3: tl.constexpr,
+    B4: tl.constexpr,
+    B5: tl.constexpr,
+    B6: tl.constexpr,
+):
+    idx = (x_abs > B0).to(tl.int32)
+    idx += (x_abs > B1).to(tl.int32)
+    idx += (x_abs > B2).to(tl.int32)
+    idx += (x_abs > B3).to(tl.int32)
+    idx += (x_abs > B4).to(tl.int32)
+    idx += (x_abs > B5).to(tl.int32)
+    idx += (x_abs > B6).to(tl.int32)
+    return idx
+
+
+@triton.jit
+def _reshape_cache_per_token_head_int4(
+    key_ptr,  # [num_tokens, num_kv_heads, head_size]
+    value_ptr,  # [num_tokens, num_kv_heads, head_size_v]
+    key_cache_ptr,  # [num_blocks, block_size, num_kv_heads, packed_head_size]
+    value_cache_ptr,  # [num_blocks, block_size, num_kv_heads, packed_head_size_v]
+    k_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads, num_dim_groups]
+    v_scale_cache_ptr,  # [num_blocks, block_size, num_kv_heads, num_dim_groups]
+    slot_mapping_ptr,  # [num_tokens]
+    stride_key_tok: tl.int64,
+    stride_key_head: tl.int64,
+    stride_val_tok: tl.int64,
+    stride_val_head: tl.int64,
+    stride_kc_blk: tl.int64,
+    stride_kc_slot: tl.int64,
+    stride_kc_head: tl.int64,
+    stride_vc_blk: tl.int64,
+    stride_vc_slot: tl.int64,
+    stride_vc_head: tl.int64,
+    stride_ks_blk: tl.int64,
+    stride_ks_slot: tl.int64,
+    stride_ks_head: tl.int64,
+    stride_ks_group: tl.int64,
+    stride_vs_blk: tl.int64,
+    stride_vs_slot: tl.int64,
+    stride_vs_head: tl.int64,
+    stride_vs_group: tl.int64,
+    block_size: tl.constexpr,
+    head_size: tl.constexpr,
+    head_size_v: tl.constexpr,
+    PACKED_HEAD_SIZE_PADDED: tl.constexpr,
+    NUM_DIM_GROUPS: tl.constexpr,
+    CHANNELS_PER_SCALE: tl.constexpr,
+    INT4_B0: tl.constexpr,
+    INT4_B1: tl.constexpr,
+    INT4_B2: tl.constexpr,
+    INT4_B3: tl.constexpr,
+    INT4_B4: tl.constexpr,
+    INT4_B5: tl.constexpr,
+    INT4_B6: tl.constexpr,
+):
+    tok = tl.program_id(0)
+    head = tl.program_id(1)
+
+    slot = tl.load(slot_mapping_ptr + tok).to(tl.int64)
+    if slot < 0:
+        return
+
+    blk = slot // block_size
+    slot_in_blk = slot % block_size
+
+    pair_offs = tl.arange(0, PACKED_HEAD_SIZE_PADDED)
+    dim0 = pair_offs * 2
+    dim1 = dim0 + 1
+    pairs_per_scale = CHANNELS_PER_SCALE // 2
+
+    k0_mask = dim0 < head_size
+    k1_mask = dim1 < head_size
+    k0 = tl.load(
+        key_ptr + tok * stride_key_tok + head * stride_key_head + dim0,
+        mask=k0_mask,
+        other=0.0,
+    ).to(tl.float32)
+    k1 = tl.load(
+        key_ptr + tok * stride_key_tok + head * stride_key_head + dim1,
+        mask=k1_mask,
+        other=0.0,
+    ).to(tl.float32)
+    k_pair_mask = pair_offs < ((head_size + 1) // 2)
+    k_pair_abs = tl.maximum(tl.abs(k0), tl.abs(k1))
+    k_scale = tl.full([PACKED_HEAD_SIZE_PADDED], 1.0, dtype=tl.float32)
+    for group_idx in tl.static_range(NUM_DIM_GROUPS):
+        group_mask = (
+            (pair_offs >= group_idx * pairs_per_scale)
+            & (pair_offs < (group_idx + 1) * pairs_per_scale)
+            & k_pair_mask
+        )
+        group_absmax = tl.max(tl.where(group_mask, k_pair_abs, 0.0))
+        group_scale = tl.maximum(group_absmax, 1e-6)
+        tl.store(
+            k_scale_cache_ptr
+            + blk * stride_ks_blk
+            + slot_in_blk * stride_ks_slot
+            + head * stride_ks_head
+            + group_idx * stride_ks_group,
+            group_scale.to(tl.float16),
+        )
+        k_scale = tl.where(group_mask, group_scale, k_scale)
+    k_norm0 = tl.where(k0_mask, k0 * (1.0 / k_scale), 0.0)
+    k_norm1 = tl.where(k1_mask, k1 * (1.0 / k_scale), 0.0)
+    k_abs0 = tl.abs(k_norm0)
+    k_abs1 = tl.abs(k_norm1)
+    k_idx0 = _int4_gaussian_mag_idx(
+        k_abs0, INT4_B0, INT4_B1, INT4_B2, INT4_B3, INT4_B4, INT4_B5, INT4_B6
+    ) + 8 * (k_norm0 < 0).to(tl.int32)
+    k_idx1 = _int4_gaussian_mag_idx(
+        k_abs1, INT4_B0, INT4_B1, INT4_B2, INT4_B3, INT4_B4, INT4_B5, INT4_B6
+    ) + 8 * (k_norm1 < 0).to(tl.int32)
+    k_packed = (k_idx0 | (k_idx1 << 4)).to(tl.uint8)
+    tl.store(
+        key_cache_ptr
+        + blk * stride_kc_blk
+        + slot_in_blk * stride_kc_slot
+        + head * stride_kc_head
+        + pair_offs,
+        k_packed,
+        mask=k_pair_mask,
+    )
+
+    v0_mask = dim0 < head_size_v
+    v1_mask = dim1 < head_size_v
+    v0 = tl.load(
+        value_ptr + tok * stride_val_tok + head * stride_val_head + dim0,
+        mask=v0_mask,
+        other=0.0,
+    ).to(tl.float32)
+    v1 = tl.load(
+        value_ptr + tok * stride_val_tok + head * stride_val_head + dim1,
+        mask=v1_mask,
+        other=0.0,
+    ).to(tl.float32)
+    v_pair_mask = pair_offs < ((head_size_v + 1) // 2)
+    v_pair_abs = tl.maximum(tl.abs(v0), tl.abs(v1))
+    v_scale = tl.full([PACKED_HEAD_SIZE_PADDED], 1.0, dtype=tl.float32)
+    for group_idx in tl.static_range(NUM_DIM_GROUPS):
+        group_mask = (
+            (pair_offs >= group_idx * pairs_per_scale)
+            & (pair_offs < (group_idx + 1) * pairs_per_scale)
+            & v_pair_mask
+        )
+        group_absmax = tl.max(tl.where(group_mask, v_pair_abs, 0.0))
+        group_scale = tl.maximum(group_absmax, 1e-6)
+        tl.store(
+            v_scale_cache_ptr
+            + blk * stride_vs_blk
+            + slot_in_blk * stride_vs_slot
+            + head * stride_vs_head
+            + group_idx * stride_vs_group,
+            group_scale.to(tl.float16),
+        )
+        v_scale = tl.where(group_mask, group_scale, v_scale)
+    v_norm0 = tl.where(v0_mask, v0 * (1.0 / v_scale), 0.0)
+    v_norm1 = tl.where(v1_mask, v1 * (1.0 / v_scale), 0.0)
+    v_abs0 = tl.abs(v_norm0)
+    v_abs1 = tl.abs(v_norm1)
+    v_idx0 = _int4_gaussian_mag_idx(
+        v_abs0, INT4_B0, INT4_B1, INT4_B2, INT4_B3, INT4_B4, INT4_B5, INT4_B6
+    ) + 8 * (v_norm0 < 0).to(tl.int32)
+    v_idx1 = _int4_gaussian_mag_idx(
+        v_abs1, INT4_B0, INT4_B1, INT4_B2, INT4_B3, INT4_B4, INT4_B5, INT4_B6
+    ) + 8 * (v_norm1 < 0).to(tl.int32)
+    v_packed = (v_idx0 | (v_idx1 << 4)).to(tl.uint8)
+    tl.store(
+        value_cache_ptr
+        + blk * stride_vc_blk
+        + slot_in_blk * stride_vc_slot
+        + head * stride_vc_head
+        + pair_offs,
+        v_packed,
+        mask=v_pair_mask,
+    )
+
+
 def triton_reshape_and_cache_flash_per_token_head_quant(
     key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
     value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
@@ -312,6 +532,76 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
         HEAD_SIZE_PADDED=head_size_padded,
         QUANT_MAX=quant_max,
         QUANT_MIN=quant_min,
+        num_warps=num_warps,
+    )
+
+
+def triton_reshape_and_cache_flash_int4_per_token_head(
+    key: torch.Tensor,  # [num_tokens, num_kv_heads, head_size]
+    value: torch.Tensor,  # [num_tokens, num_kv_heads, head_size_v]
+    key_cache: torch.Tensor,  # packed key cache
+    value_cache: torch.Tensor,  # packed value cache
+    k_scale_cache: torch.Tensor,  # key scales
+    v_scale_cache: torch.Tensor,  # value scales
+    slot_mapping: torch.Tensor,  # [num_tokens]
+):
+    """Quantize key/value to packed int4 with Gaussian-friendly levels."""
+    assert key_cache.stride(-1) == 1, "INT4 key cache head dimension must be contiguous"
+    assert value_cache.stride(-1) == 1, (
+        "INT4 value cache head dimension must be contiguous"
+    )
+    num_tokens, num_kv_heads, head_size = key.shape
+    head_size_v = value.shape[2]
+    packed_head_size_padded = triton.next_power_of_2(
+        max((head_size + 1) // 2, (head_size_v + 1) // 2)
+    )
+    block_size = key_cache.shape[1]
+    num_dim_groups = k_scale_cache.shape[-1]
+
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        num_warps = 4
+    else:
+        num_warps = min(8, max(1, packed_head_size_padded // 16))
+
+    _reshape_cache_per_token_head_int4[(num_tokens, num_kv_heads)](
+        key_ptr=key,
+        value_ptr=value,
+        key_cache_ptr=key_cache,
+        value_cache_ptr=value_cache,
+        k_scale_cache_ptr=k_scale_cache,
+        v_scale_cache_ptr=v_scale_cache,
+        slot_mapping_ptr=slot_mapping,
+        stride_key_tok=key.stride(0),
+        stride_key_head=key.stride(1),
+        stride_val_tok=value.stride(0),
+        stride_val_head=value.stride(1),
+        stride_kc_blk=key_cache.stride(0),
+        stride_kc_slot=key_cache.stride(1),
+        stride_kc_head=key_cache.stride(2),
+        stride_vc_blk=value_cache.stride(0),
+        stride_vc_slot=value_cache.stride(1),
+        stride_vc_head=value_cache.stride(2),
+        stride_ks_blk=k_scale_cache.stride(0),
+        stride_ks_slot=k_scale_cache.stride(1),
+        stride_ks_head=k_scale_cache.stride(2),
+        stride_ks_group=k_scale_cache.stride(3),
+        stride_vs_blk=v_scale_cache.stride(0),
+        stride_vs_slot=v_scale_cache.stride(1),
+        stride_vs_head=v_scale_cache.stride(2),
+        stride_vs_group=v_scale_cache.stride(3),
+        block_size=block_size,
+        head_size=head_size,
+        head_size_v=head_size_v,
+        PACKED_HEAD_SIZE_PADDED=packed_head_size_padded,
+        NUM_DIM_GROUPS=num_dim_groups,
+        CHANNELS_PER_SCALE=INT4_CHANNELS_PER_SCALE,
+        INT4_B0=INT4_LEVEL_BOUNDARY_0,
+        INT4_B1=INT4_LEVEL_BOUNDARY_1,
+        INT4_B2=INT4_LEVEL_BOUNDARY_2,
+        INT4_B3=INT4_LEVEL_BOUNDARY_3,
+        INT4_B4=INT4_LEVEL_BOUNDARY_4,
+        INT4_B5=INT4_LEVEL_BOUNDARY_5,
+        INT4_B6=INT4_LEVEL_BOUNDARY_6,
         num_warps=num_warps,
     )
 

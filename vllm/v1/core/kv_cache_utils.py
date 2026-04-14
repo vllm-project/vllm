@@ -18,6 +18,7 @@ from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import format_gib
 from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheConfig,
@@ -939,15 +940,23 @@ def unify_kv_cache_spec_page_size(
         else:
             layer_page_size = layer_spec.page_size_bytes
             if max_page_size % layer_page_size != 0:
+                if isinstance(layer_spec, AttentionSpec):
+                    padded_spec: KVCacheSpec = replace(
+                        layer_spec,
+                        page_size_padded=max_page_size,
+                    )
+                    assert padded_spec.page_size_bytes == max_page_size
+                    new_kv_cache_spec[layer_name] = padded_spec
+                    continue
                 raise NotImplementedError(
                     "The page size of the layer is not divisible by the "
                     "maximum page size. Cannot unify by adjusting block_size."
                 )
             ratio = max_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
-            new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == max_page_size
-            new_kv_cache_spec[layer_name] = new_spec
+            resized_spec: KVCacheSpec = replace(layer_spec, block_size=new_block_size)
+            assert resized_spec.page_size_bytes == max_page_size
+            new_kv_cache_spec[layer_name] = resized_spec
     return new_kv_cache_spec
 
 
