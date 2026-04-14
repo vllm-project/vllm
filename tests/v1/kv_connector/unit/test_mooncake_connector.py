@@ -631,6 +631,7 @@ def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
         mock_thread.return_value.is_alive.return_value = False
 
         worker.use_mla = True
+        worker.kv_topo.is_mla = True
 
         # MLA cache tensor: shape[-2] is the block size.
         mla_cache = torch.zeros((2, 16, 96), dtype=torch.float16)
