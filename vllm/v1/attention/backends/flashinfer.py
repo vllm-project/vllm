@@ -1067,11 +1067,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # blocks per prefill request.
                 prefill_seq_lens = seq_lens[prefill_start:]
                 num_blocks_per_req = (prefill_seq_lens + page_size - 1) // page_size
-                paged_kv_indptr_prefill_gpu = torch.zeros(
-                    num_prefills + 1,
-                    dtype=torch.int32,
-                    device=seq_lens.device,
-                )
+                paged_kv_indptr_prefill_gpu = self.paged_kv_indptr.gpu[
+                    prefill_start : num_reqs + 1
+                ]
+                paged_kv_indptr_prefill_gpu[0] = 0
                 torch.cumsum(
                     num_blocks_per_req,
                     dim=0,
