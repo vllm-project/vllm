@@ -237,6 +237,8 @@ async def async_request_openai_completions(
                                 generated_text += text or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
+                                if (pt := usage.get("prompt_tokens")) is not None:
+                                    output.prompt_len = pt
                 if first_chunk_received:
                     output.success = True
                 else:
@@ -358,6 +360,8 @@ async def async_request_openai_chat_completions(
                                 generated_text += content or ""
                             elif usage := data.get("usage"):
                                 output.output_tokens = usage.get("completion_tokens")
+                                if (pt := usage.get("prompt_tokens")) is not None:
+                                    output.prompt_len = pt
 
                             most_recent_timestamp = timestamp
 
