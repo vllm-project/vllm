@@ -17,7 +17,7 @@ use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, CoordinatorMode, HttpListenerMode};
+use vllm_server::{Config, CoordinatorMode, HttpListenerMode, ParserSelection};
 
 use crate::cli::unsupported::UnsupportedArgs;
 use crate::managed_engine::ManagedEngineConfig;
@@ -91,13 +91,15 @@ pub struct SharedRuntimeArgs {
     pub engine_ready_timeout_secs: u64,
 
     /// Select the tool call parser depending on the model that you're using.
-    /// When not specified, the parser is auto-detected from the model.
-    #[arg(long)]
-    pub tool_call_parser: Option<String>,
+    /// Use `auto` to infer from the model or `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub tool_call_parser: ParserSelection,
     /// Select the reasoning parser depending on the model that you're using.
-    /// When not specified, the parser is auto-detected from the model.
-    #[arg(long)]
-    pub reasoning_parser: Option<String>,
+    /// Use `auto` to infer from the model or `none` to disable parsing.
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub reasoning_parser: ParserSelection,
     /// Override the maximum model context length. When set, the frontend uses this value
     /// instead of the model's `max_position_embeddings` from `config.json`.
     #[arg(long)]

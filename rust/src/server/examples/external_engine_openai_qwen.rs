@@ -13,7 +13,7 @@ use futures::StreamExt as _;
 use tokio::sync::oneshot;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, CoordinatorMode, HttpListenerMode, serve};
+use vllm_server::{Config, CoordinatorMode, HttpListenerMode, ParserSelection, serve};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -57,8 +57,8 @@ async fn main() -> Result<()> {
             host: "127.0.0.1".to_string(),
             port,
         },
-        tool_call_parser: None,
-        reasoning_parser: None,
+        tool_call_parser: ParserSelection::Auto,
+        reasoning_parser: ParserSelection::Auto,
         enable_log_requests: false,
         disable_log_stats: false,
     };

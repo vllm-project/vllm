@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::Config;
+use vllm_server::{Config, ParserSelection};
 
 use super::{Cli, Command};
 
@@ -37,8 +37,8 @@ fn serve_args_forward_python_flags_with_separator() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 300,
-                        tool_call_parser: None,
-                        reasoning_parser: None,
+                        tool_call_parser: Auto,
+                        reasoning_parser: Auto,
                         max_model_len: Some(
                             512,
                         ),
@@ -208,8 +208,8 @@ fn frontend_args_accept_json() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 300,
-                        tool_call_parser: None,
-                        reasoning_parser: None,
+                        tool_call_parser: Auto,
+                        reasoning_parser: Auto,
                         max_model_len: None,
                         enable_log_requests: false,
                         disable_log_stats: false,
@@ -242,8 +242,8 @@ fn frontend_args_json_applies_defaults() {
     };
     assert_eq!(args.runtime.model, "Qwen/Qwen3-0.6B");
     assert_eq!(args.runtime.engine_ready_timeout_secs, 300);
-    assert_eq!(args.runtime.tool_call_parser, None);
-    assert_eq!(args.runtime.reasoning_parser, None);
+    assert_eq!(args.runtime.tool_call_parser, ParserSelection::Auto);
+    assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
     assert_eq!(args.runtime.max_model_len, None);
 }
 
@@ -267,12 +267,33 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         panic!("expected frontend args");
     };
     assert_eq!(args.runtime.engine_ready_timeout_secs, 42);
-    assert_eq!(args.runtime.tool_call_parser.as_deref(), Some("hermes"));
     assert_eq!(
-        args.runtime.reasoning_parser.as_deref(),
-        Some("qwen3_thinking")
+        args.runtime.tool_call_parser,
+        ParserSelection::Explicit("hermes".to_string())
+    );
+    assert_eq!(
+        args.runtime.reasoning_parser,
+        ParserSelection::Explicit("qwen3_thinking".to_string())
     );
     assert_eq!(args.runtime.max_model_len, Some(8192));
+}
+
+#[test]
+fn serve_args_accept_none_reasoning_parser() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--reasoning-parser",
+        "none",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.reasoning_parser, ParserSelection::None);
+    assert_eq!(args.runtime.tool_call_parser, ParserSelection::Auto);
 }
 
 #[test]
@@ -562,8 +583,8 @@ fn serve_args_accept_handshake_aliases() {
                     runtime: SharedRuntimeArgs {
                         model: "Qwen/Qwen3-0.6B",
                         engine_ready_timeout_secs: 300,
-                        tool_call_parser: None,
-                        reasoning_parser: None,
+                        tool_call_parser: Auto,
+                        reasoning_parser: Auto,
                         max_model_len: None,
                         enable_log_requests: false,
                         disable_log_stats: false,
@@ -666,8 +687,8 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
                 host: "127.0.0.1",
                 port: 8000,
             },
-            tool_call_parser: None,
-            reasoning_parser: None,
+            tool_call_parser: Auto,
+            reasoning_parser: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
         }
@@ -721,8 +742,8 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
                 host: "127.0.0.1",
                 port: 8000,
             },
-            tool_call_parser: None,
-            reasoning_parser: None,
+            tool_call_parser: Auto,
+            reasoning_parser: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
         }
@@ -791,8 +812,8 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             listener_mode: InheritedFd {
                 fd: 3,
             },
-            tool_call_parser: None,
-            reasoning_parser: None,
+            tool_call_parser: Auto,
+            reasoning_parser: Auto,
             enable_log_requests: false,
             disable_log_stats: false,
         }

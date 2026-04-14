@@ -8,7 +8,7 @@ use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
     ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DynChatRenderer, FinishReason, RenderedPrompt, SamplingParams,
+    ChatToolChoice, DynChatRenderer, FinishReason, ParserSelection, RenderedPrompt, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
@@ -1041,6 +1041,84 @@ async fn chat_collectors_return_structured_message_and_visible_text() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_explicitly_disables_reasoning_parser() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-chat-reasoning-disabled".to_vec();
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            Box::pin(async move {
+                let _ = recv_engine_message(dealer).await;
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        outputs: vec![
+                            request_output(
+                                "chat-reasoning-disabled",
+                                bytes_to_token_ids(b"<think>"),
+                                None,
+                                None,
+                            ),
+                            request_output(
+                                "chat-reasoning-disabled",
+                                bytes_to_token_ids(b"reason "),
+                                None,
+                                None,
+                            ),
+                            request_output(
+                                "chat-reasoning-disabled",
+                                bytes_to_token_ids(b"more</think>"),
+                                None,
+                                None,
+                            ),
+                            request_output(
+                                "chat-reasoning-disabled",
+                                bytes_to_token_ids(b"answer"),
+                                Some(EngineCoreFinishReason::Length),
+                                None,
+                            ),
+                        ],
+                        finished_requests: Some(BTreeSet::from([
+                            "chat-reasoning-disabled".to_string()
+                        ])),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    );
+
+    let backend: Arc<dyn ChatTextBackend> =
+        Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"));
+    let chat = connect_chat_llm_with_ipc(
+        EngineCoreClientConfig::new_single(handshake_address),
+        &ipc,
+        backend,
+    )
+    .await
+    .with_reasoning_parser(ParserSelection::None);
+
+    let message = chat
+        .chat(sample_request("chat-reasoning-disabled"))
+        .await
+        .unwrap()
+        .collect_message()
+        .await
+        .unwrap();
+    assert_eq!(message.message.reasoning(), None);
+    assert_eq!(message.message.text(), "<think>reason more</think>answer");
+    assert_eq!(message.finish_reason, FinishReason::Length);
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    chat.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn chat_stream_parses_tool_calls_automatically() {
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
@@ -1469,7 +1547,9 @@ async fn chat_rejects_unknown_tool_parser_before_engine_request() {
         backend,
     )
     .await
-    .with_tool_call_parser("definitely_missing_tool_parser");
+    .with_tool_call_parser(ParserSelection::Explicit(
+        "definitely_missing_tool_parser".into(),
+    ));
     let error = match chat.chat(sample_tool_request("chat-tool-no-model")).await {
         Ok(_) => panic!("unknown explicit tool parser should fail"),
         Err(error) => error,
@@ -1510,7 +1590,9 @@ async fn chat_rejects_unknown_reasoning_parser_before_engine_request() {
         backend,
     )
     .await
-    .with_reasoning_parser("definitely_missing_reasoning_parser");
+    .with_reasoning_parser(ParserSelection::Explicit(
+        "definitely_missing_reasoning_parser".into(),
+    ));
     let error = match chat.chat(sample_request("chat-reasoning-no-model")).await {
         Ok(_) => panic!("unknown explicit reasoning parser should fail"),
         Err(error) => error,

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use vllm_chat::ParserSelection;
 use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, TransportMode};
 
 /// How the HTTP server obtains its listening socket.
@@ -33,10 +34,10 @@ pub struct Config {
     pub model: String,
     /// HTTP listener setup.
     pub listener_mode: HttpListenerMode,
-    /// Explicit tool call parser name, or `None` for model-based auto-detection.
-    pub tool_call_parser: Option<String>,
-    /// Explicit reasoning parser name, or `None` for model-based auto-detection.
-    pub reasoning_parser: Option<String>,
+    /// Tool-call parser selection.
+    pub tool_call_parser: ParserSelection,
+    /// Reasoning parser selection.
+    pub reasoning_parser: ParserSelection,
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
     /// When `true`, suppress periodic stats logging (throughput, queue depth, cache usage).
@@ -46,10 +47,7 @@ pub struct Config {
 impl Config {
     /// Validate frontend configuration that can be checked before engine startup.
     pub fn validate(&self) -> Result<()> {
-        vllm_chat::validate_parser_overrides(
-            self.tool_call_parser.as_deref(),
-            self.reasoning_parser.as_deref(),
-        )?;
+        vllm_chat::validate_parser_overrides(&self.tool_call_parser, &self.reasoning_parser)?;
 
         Ok(())
     }

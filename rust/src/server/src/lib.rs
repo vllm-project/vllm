@@ -21,6 +21,7 @@ pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use socket2::Socket;
 use tokio::net::TcpListener;
 use tracing::{info, trace};
+pub use vllm_chat::ParserSelection;
 use vllm_chat::{ChatLlm, load_model_backends};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
@@ -58,13 +59,9 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
     let text = TextLlm::new(llm, text_backend);
 
-    let mut chat = ChatLlm::new(text, chat_backend);
-    if let Some(ref name) = config.tool_call_parser {
-        chat = chat.with_tool_call_parser(name);
-    }
-    if let Some(ref name) = config.reasoning_parser {
-        chat = chat.with_reasoning_parser(name);
-    }
+    let chat = ChatLlm::new(text, chat_backend)
+        .with_tool_call_parser(config.tool_call_parser.clone())
+        .with_reasoning_parser(config.reasoning_parser.clone());
 
     Ok(Arc::new(
         AppState::new(config.model.clone(), chat).with_log_requests(config.enable_log_requests),
