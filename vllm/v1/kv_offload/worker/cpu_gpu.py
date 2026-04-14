@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import deque
 from dataclasses import dataclass
 
@@ -9,6 +10,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
 from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
 from vllm.v1.kv_offload.worker.worker import (
@@ -29,37 +31,76 @@ class Transfer:
     num_bytes: int
 
 
-def expand_block_ids(
+def compute_sub_block_ptrs(
     block_ids: np.ndarray,
     block_size_factor: int,
     output: np.ndarray,
+    tensor: torch.Tensor,
     skip_count: int = 0,
 ):
     """
-    Convert a list of block IDs to a list of matching block ids,
-    assuming each block is composed of actual block_size_factor blocks.
-    Outputs to output tensor.
-    The first skip_count blocks will be skipped.
-    Note that skip_count must be less than block_size_factor.
+    Compute byte pointers for sub-blocks of the given block IDs.
 
-    For example, if block_ids = [0, 1, 3] and block_size_factor =  4,
-    then it yields [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15]
-    since 0 maps to [0, 1, 2, 3]
-    1 maps to [4, 5, 6, 7]
-    and 3 maps to [12, 13, 14, 15]
+    Each block in block_ids contains block_size_factor sub-blocks.
+    The pointer for sub-block j of block b is:
+        base_ptr + b * row_stride + j * sub_block_size
+
+    where sub_block_size = tensor.shape[1] // block_size_factor (gpu page size).
+
+    This handles tensors where row_stride != block_size_factor * sub_block_size
+    (e.g. non-contiguous CPU tensors).
+
+    Args:
+        block_ids: array of block IDs at the tensor's native granularity.
+        block_size_factor: number of sub-blocks per block.
+        output: pre-allocated int64 array to write pointers into.
+        tensor: the source or destination tensor.
+        skip_count: sub-blocks to skip in the first block.
     """
     assert skip_count < block_size_factor
 
-    first_range = np.arange(skip_count, block_size_factor)
-    full_range = np.arange(0, block_size_factor)
+    num_sub_blocks = len(output)
+    base_ptr = tensor.data_ptr()
+    row_stride = tensor.stride(0)
 
-    output_idx = 0
-    for i, block_id in enumerate(block_ids):
-        base_block_id = block_id * block_size_factor
-        indices = first_range if i == 0 else full_range
-        output_end_idx = output_idx + len(indices)
-        output[output_idx:output_end_idx] = base_block_id + indices
-        output_idx = output_end_idx
+    if block_size_factor == 1:
+        # Fast path: 1:1 mapping, no sub-block expansion needed.
+        output[:] = base_ptr + block_ids[:num_sub_blocks] * row_stride
+        return
+
+    # Vectorized expansion for block_size_factor > 1.
+    assert tensor.shape[1] % block_size_factor == 0
+    sub_block_size = tensor.shape[1] // block_size_factor
+    sub_offsets = np.arange(block_size_factor, dtype=np.int64) * sub_block_size
+    # (num_blocks, 1) + (1, block_size_factor) -> (num_blocks, block_size_factor)
+    all_ptrs = (
+        base_ptr + block_ids.astype(np.int64)[:, np.newaxis] * row_stride
+    ) + sub_offsets[np.newaxis, :]
+    # Flatten and apply skip_count / truncation
+    flat = all_ptrs.ravel()
+    output[:] = flat[skip_count : skip_count + num_sub_blocks]
+
+
+def pin_mmap_region(region: SharedOffloadRegion) -> None:
+    """Register the entire mmap as CUDA pinned memory via cudaHostRegister."""
+    rank = region.rank
+
+    base_ptr = region._base.data_ptr()
+    result = torch.cuda.cudart().cudaHostRegister(base_ptr, region.total_size_bytes, 0)
+    if result.value != 0:
+        logger.warning(
+            "cudaHostRegister failed for rank=%d (code=%d) — "
+            "transfers will still work but may be slower (unpinned DMA)",
+            rank,
+            result,
+        )
+    else:
+        logger.debug(
+            "cudaHostRegister rank=%d %.2f GB",
+            rank,
+            region.total_size_bytes / 1e9,
+        )
+        region.is_pinned = True
 
 
 class SingleDirectionOffloadingHandler(OffloadingHandler):
@@ -149,13 +190,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
-        # Pre-compute base pointers and block sizes for batch copies.
-        self._src_base_ptrs = np.array(
-            [t.data_ptr() for t in self.src_tensors], dtype=np.int64
-        )
-        self._dst_base_ptrs = np.array(
-            [t.data_ptr() for t in self.dst_tensors], dtype=np.int64
-        )
+        # Pre-compute block sizes for batch copies.
         self._block_size_in_bytes_arr = np.array(
             self.tensor_block_size_in_bytes, dtype=np.int64
         )
@@ -176,17 +211,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
 
         assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
 
-        src_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
-        dst_block_ids = np.empty(dst_sub_block_count, dtype=np.int64)
-        expand_block_ids(
-            src_blocks,
-            self.src_block_size_factor,
-            src_block_ids,
-            skip_count=src_sub_blocks_to_skip,
-        )
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, dst_block_ids)
-
-        # Build flat pointer arrays for all tensors × all block pairs.
         num_pairs = dst_sub_block_count
         num_tensors = len(self.src_tensors)
         total = num_pairs * num_tensors
@@ -198,8 +222,19 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
             start = t_idx * num_pairs
             end = start + num_pairs
-            all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
-            all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
+            compute_sub_block_ptrs(
+                block_ids=src_blocks,
+                block_size_factor=self.src_block_size_factor,
+                output=all_src[start:end],
+                tensor=self.src_tensors[t_idx],
+                skip_count=src_sub_blocks_to_skip,
+            )
+            compute_sub_block_ptrs(
+                block_ids=dst_blocks,
+                block_size_factor=self.dst_block_size_factor,
+                output=all_dst[start:end],
+                tensor=self.dst_tensors[t_idx],
+            )
             all_sizes[start:end] = bsz
 
         batch_src = torch.from_numpy(all_src)
@@ -274,6 +309,16 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             if event is not None:
                 event.synchronize()
 
+    def shutdown(self) -> None:
+        while self._transfers:
+            transfer = self._transfers.popleft()
+            transfer.end_event.synchronize()
+        self._transfer_events.clear()
+        self._stream_pool.clear()
+        self._event_pool.clear()
+        self.src_tensors.clear()
+        self.dst_tensors.clear()
+
 
 class CpuGpuOffloadingHandlers:
     def __init__(
@@ -281,9 +326,14 @@ class CpuGpuOffloadingHandlers:
         kv_caches: CanonicalKVCaches,
         block_size_factor: int,
         num_cpu_blocks: int,
+        mmap_region: SharedOffloadRegion | None = None,
     ):
         pin_memory = is_pin_memory_available()
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
+        self._mmap_region = mmap_region
+        if mmap_region is not None and pin_memory:
+            pin_mmap_region(mmap_region)
+
         gpu_tensors: list[torch.Tensor] = []
         cpu_tensors: list[torch.Tensor] = []
         for kv_cache_tensor in kv_caches.tensors:
@@ -292,12 +342,24 @@ class CpuGpuOffloadingHandlers:
                 (-1, gpu_page_size_bytes)
             )
             cpu_page_size_bytes = gpu_page_size_bytes * block_size_factor
-            cpu_tensor = torch.zeros(
-                (num_cpu_blocks, cpu_page_size_bytes),
-                dtype=torch.int8,
-                device="cpu",
-                pin_memory=pin_memory,
-            )
+
+            if mmap_region is not None:
+                cpu_tensor = mmap_region.create_next_view(cpu_page_size_bytes)
+            else:
+                t0 = time.monotonic()
+                cpu_tensor = torch.zeros(
+                    (num_cpu_blocks, cpu_page_size_bytes),
+                    dtype=torch.int8,
+                    device="cpu",
+                    pin_memory=pin_memory,
+                )
+                logger.debug(
+                    "torch.zeros pinned tensor %d×%d (%.2f GB): %.3f s",
+                    num_cpu_blocks,
+                    cpu_page_size_bytes,
+                    num_cpu_blocks * cpu_page_size_bytes / 1e9,
+                    time.monotonic() - t0,
+                )
 
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
