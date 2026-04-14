@@ -7,6 +7,7 @@ from vllm.kernels.helion.config_manager import (
     ConfigManager,
     ConfigSet,
 )
+from vllm.kernels.helion.ir_ops import register_as_simple_vllm_ir_impl
 from vllm.kernels.helion.register import (
     ConfiguredHelionKernel,
     HelionKernelWrapper,
@@ -26,6 +27,7 @@ __all__ = [
     "HelionKernelWrapper",
     "get_kernel_by_name",
     "get_registered_kernels",
+    "register_as_simple_vllm_ir_impl",
     "register_kernel",
     "vllm_helion_lib",
     # Utilities

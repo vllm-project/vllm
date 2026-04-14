@@ -15,6 +15,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+CUDAGRAPH_PREFERRED_PROVIDERS: frozenset[str] = frozenset({"helion"})
+"""
+Providers that are preferred during CUDA graph execution.
+When not running under a CUDA graph these providers are moved to the end of
+each priority list so that they act as a last-resort fallback rather than the
+first choice.
+"""
+
 
 @config
 class IrOpPriorityConfig:
@@ -30,6 +38,9 @@ class IrOpPriorityConfig:
 
     rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.rms_norm"""
+
+    silu_and_mul_fp8: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.silu_and_mul_fp8"""
 
     def compute_hash(self) -> str:
         """
@@ -50,7 +61,7 @@ class IrOpPriorityConfig:
             name: {
                 provider: IrOp.registry[name].impls[provider].uuid() for provider in p
             }
-            for name, p in asdict(self).items()
+            for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
         return hash_factors(factors)
@@ -65,11 +76,16 @@ class IrOpPriorityConfig:
         return value
 
     @contextlib.contextmanager
-    def set_priority(self):
+    def set_priority(self, cudagraph_active: bool = False):
         """
         Context manager to set the IR op priority for all op members.
         It also imports IR kernel implementations for the current platform
         to ensure all implementations are made available.
+
+        When ``cudagraph_active`` is ``False`` (eager execution), providers
+        listed in :data:`CUDAGRAPH_PREFERRED_PROVIDERS` are moved to the end
+        of each priority list so they act as a last-resort fallback rather
+        than the first choice.
         """
         from vllm.ir.op import IrOp
         from vllm.platforms import current_platform
@@ -82,11 +98,23 @@ class IrOpPriorityConfig:
                 assert op_priority is not None, (
                     f"IR op priority for {field.name} must be set"
                 )
+                if cudagraph_active:
+                    effective_priority = op_priority
+                else:
+                    preferred = [
+                        p for p in op_priority if p in CUDAGRAPH_PREFERRED_PROVIDERS
+                    ]
+                    others = [
+                        p for p in op_priority if p not in CUDAGRAPH_PREFERRED_PROVIDERS
+                    ]
+                    effective_priority = others + preferred
                 logger.debug(
-                    "Setting IR op priority for %s to %s", field.name, op_priority
+                    "Setting IR op priority for %s to %s",
+                    field.name,
+                    effective_priority,
                 )
                 ir_op = IrOp.registry[field.name]
-                stack.enter_context(ir_op.set_priority(op_priority))
+                stack.enter_context(ir_op.set_priority(effective_priority))
 
             yield
 
