@@ -65,7 +65,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_NUM_PROMPTS = 1000
 
 
-@dataclass(frozen=True)
+@dataclass
 class SampleRequest:
     """
     Represents a single inference request for benchmarking.
@@ -2342,29 +2342,10 @@ class SpecBench(CustomDataset):
             random.shuffle(self.data)
 
     def sample(
-        self,
-        tokenizer: TokenizerLike,
-        num_requests: int,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
-        lora_path: str | None = None,
-        max_loras: int | None = None,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
-        skip_chat_template: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         # leverage CustomDataset sample
         return super().sample(
-            tokenizer,
-            num_requests,
-            request_id_prefix=request_id_prefix,
-            no_oversample=no_oversample,
-            lora_path=lora_path,
-            max_loras=max_loras,
-            output_len=output_len,
-            enable_multimodal_chat=enable_multimodal_chat,
-            skip_chat_template=skip_chat_template,
             **kwargs,
         )
 
