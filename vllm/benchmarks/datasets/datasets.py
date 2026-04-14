@@ -1449,7 +1449,7 @@ class TimedTrace(BenchmarkDataset):
             self.vocab = {
                 k: v
                 for k, v in self.vocab.items()
-                if k not in tokenizer.all_special_ids
+                if v not in tokenizer.all_special_ids
             }
             # Create a sorted list of vocab values for deterministic sampling
             self.vocab_values_sorted = sorted(self.vocab.values())
