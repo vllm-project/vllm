@@ -283,7 +283,6 @@ class AriaTextMoELayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             quant_config=quant_config,
-            reduce_results=True,
             prefix=f"{prefix}.experts",
         )
 

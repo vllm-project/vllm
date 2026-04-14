@@ -278,10 +278,6 @@ class FusedMoE(PluggableLayer):
     ):
         super().__init__()
 
-        self._routed_input_transform = routed_input_transform
-        self._routed_output_transform = routed_output_transform
-        self._apply_scale_to_output = apply_scale_to_output
-
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
@@ -581,14 +577,14 @@ class FusedMoE(PluggableLayer):
             layer_name=self.layer_name,
             moe_config=self.moe_config,
             router=self.router,
-            routed_input_transform=self._routed_input_transform,
             gate=gate,
             shared_experts=shared_experts,
             quant_method=self.quant_method,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
-            routed_output_transform=self._routed_output_transform,
-            apply_scale_to_output=self._apply_scale_to_output,
-            routed_scaling_factor=self.routed_scaling_factor,
+            routed_input_transform=routed_input_transform,
+            routed_output_transform=routed_output_transform,
+            apply_scale_to_output=apply_scale_to_output,
+            routed_scaling_factor=routed_scaling_factor,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
