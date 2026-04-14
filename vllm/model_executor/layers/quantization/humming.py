@@ -10,9 +10,13 @@ import torch
 
 from vllm import envs
 from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+    FusedMoEQuantDesc,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
-    FusedMoEConfig,
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
@@ -28,6 +32,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -742,8 +747,53 @@ class HummingMoEMethod(FusedMoEMethodBase):
         locks = torch.zeros(1024, dtype=torch.int32)
         layer.register_buffer("locks", locks)
 
-    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
-        return
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> FusedMoEQuantConfig | None:
+        assert isinstance(self.input_schema, HummingInputSchema)
+        assert isinstance(self.weight_schema, HummingWeightSchema)
+
+        a_dtype = self.input_schema.a_dtype
+        if a_dtype is None or a_dtype.num_bits == 16:
+            a_quant_desc = FusedMoEQuantDesc(dtype=None)
+        else:
+            shape = GroupShape(row=1, col=-1)
+            a_quant_desc = FusedMoEQuantDesc(dtype=str(a_dtype), shape=shape)
+
+        weight_scale_group_size = self.weight_schema.weight_scale_group_size
+        weight_scale_group_size_n = self.weight_schema.weight_scale_group_size_n
+        weight_group_shape = ()
+        if weight_scale_group_size_n > 1:
+            weight_group_shape = (weight_scale_group_size, weight_scale_group_size_n)
+        elif weight_scale_group_size == 0:
+            weight_group_shape = (-1, 1)
+        elif weight_scale_group_size > 0:
+            weight_group_shape = (weight_scale_group_size, 1)
+
+        w1_quant_desc = FusedMoEQuantDesc(
+            dtype=str(self.weight_schema.b_dtype),
+            shape=weight_group_shape,
+            scale=getattr(layer, "w13_weight_scale", None),
+            alpha_or_gscale=getattr(layer, "w13_global_scale", None),
+            zp=getattr(layer, "w13_zero_point", None),
+            bias=getattr(layer, "w13_bias", None),
+        )
+
+        w2_quant_desc = FusedMoEQuantDesc(
+            dtype=str(self.weight_schema.b_dtype),
+            shape=weight_group_shape,
+            scale=getattr(layer, "w2_weight_scale", None),
+            alpha_or_gscale=getattr(layer, "w2_global_scale", None),
+            zp=getattr(layer, "w2_zero_point", None),
+            bias=getattr(layer, "w2_bias", None),
+        )
+
+        return FusedMoEQuantConfig(
+            _a1=a_quant_desc,
+            _a2=a_quant_desc,
+            _w1=w1_quant_desc,
+            _w2=w2_quant_desc,
+        )
 
     def apply_activation(
         self, layer: torch.nn.Module, inputs: torch.Tensor

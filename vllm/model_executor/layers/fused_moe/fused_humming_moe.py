@@ -68,12 +68,18 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.init_humming_moe()
 
         if prepare_finalize is not None:
-            assert quant_method.moe_quant_config is not None
+            max_num_tokens: int | None = None
+            num_dispatchers: int | None = None
+            assert self.is_batched
+            if self.is_batched:
+                max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+                num_dispatchers = prepare_finalize.num_dispatchers()
+
             super().__init__(
                 moe_config=quant_method.moe,
                 quant_config=quant_method.moe_quant_config,
-                max_num_tokens=prepare_finalize.max_num_tokens_per_rank(),
-                num_dispatchers=prepare_finalize.num_dispatchers(),
+                max_num_tokens=max_num_tokens,
+                num_dispatchers=num_dispatchers,
             )
         else:
             assert not self.is_batched
@@ -108,7 +114,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
 
     @property
     def is_batched(self) -> bool:
-        return self.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
+        return self.activation_format() == mk.FusedMoEActivationFormat.BatchedExperts
 
     @staticmethod
     def _supports_quant_scheme(
@@ -161,13 +167,11 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         meta2: HummingLayerMeta = self.layer.humming_metas["w2"]
 
         assert meta1.num_experts == meta2.num_experts
-        assert meta1.top_k == meta2.top_k
 
         num_experts = meta1.num_experts
-        top_k = meta1.top_k
+        top_k = topk_ids.size(1)
         assert w1.size(0) == num_experts
         assert w2.size(0) == num_experts
-        assert topk_ids.size(1) == top_k
 
         if not self.is_batched:
             num_tokens = a1.size(0)
@@ -437,6 +441,7 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ):
+        hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         buffers = self.prepare_buffers(
             workspace1,
             workspace2,
@@ -484,7 +489,7 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
             layer=self.layer,
             inputs=inputs,
             input_scale=input_scale,
-            outputs=buffers["down_output"],
+            outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
             sublayer_name="w2",
             **moe_kwargs2,
         )
@@ -632,6 +637,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ):
         assert expert_tokens_meta is not None
+        hidden_states = hidden_states.view(-1, hidden_states.size(-1))
         valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
         valid_shape_m = math.ceil(valid_shape_m)
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
@@ -680,7 +686,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
             layer=self.layer,
             inputs=inputs,
             input_scale=input_scale,
-            outputs=buffers["down_output"],
+            outputs=buffers["down_output"].view(-1, hidden_states.size(-1)),
             valid_shape_m=valid_shape_m,
             expert_layout=expert_num_tokens,
             compute_config=self.compute_config_str,
