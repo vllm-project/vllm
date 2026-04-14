@@ -191,7 +191,7 @@ class ServingScores(PoolingServing):
         # stage 2: encode docs and return scalar scores from workers.
         await self._flash_late_interaction_encode_docs(ctx)
 
-        return await self._preprocessing_async(self.io_processor, ctx)
+        return await self._postprocessing_async(self.io_processor, ctx)
 
     async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None
