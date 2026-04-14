@@ -18,7 +18,7 @@ pull_request_rules:
 - name: comment-pre-commit-failure
   description: Comment on PR when pre-commit check fails
   conditions:
-    - status-failure=pre-commit
+    - check-failure=pre-commit
     - -closed
     - -draft
   actions:
@@ -51,7 +51,7 @@ pull_request_rules:
 - name: comment-dco-failure
   description: Comment on PR when DCO check fails
   conditions:
-    - status-failure=dco
+    - check-failure=dco
     - -closed
     - -draft
   actions:
@@ -83,8 +83,8 @@ pull_request_rules:
     - or:
       - files~=^examples/.*deepseek.*\.py
       - files~=^tests/.*deepseek.*\.py
-      - files~=^vllm/entrypoints/openai/tool_parsers/.*deepseek.*\.py
       - files~=^vllm/model_executor/models/.*deepseek.*\.py
+      - files~=^vllm/tool_parsers/.*deepseek.*\.py
       - files~=^vllm/reasoning/.*deepseek.*\.py
       - files~=^vllm/transformers_utils/.*deepseek.*\.py
       - title~=(?i)DeepSeek
@@ -110,9 +110,10 @@ pull_request_rules:
     - or:
       - files~=^examples/.*llama.*\.py
       - files~=^tests/.*llama.*\.py
-      - files~=^vllm/entrypoints/openai/tool_parsers/llama.*\.py
       - files~=^vllm/model_executor/models/.*llama.*\.py
-      - files~=^vllm/transformers_utils/configs/.*llama.*\.py
+      - files~=^vllm/reasoning/.*llama.*\.py
+      - files~=^vllm/tool_parsers/.*llama.*\.py
+      - files~=^vllm/transformers_utils/.*llama.*\.py
       - title~=(?i)llama
   actions:
     label:
@@ -132,6 +133,23 @@ pull_request_rules:
     label:
       add:
         - multi-modality
+
+- name: label-mistral
+  description: Automatically apply mistral label
+  conditions:
+    - label != stale
+    - or:
+      - files~=^examples/.*mistral.*\.py
+      - files~=^tests/.*mistral.*\.py
+      - files~=^vllm/model_executor/models/.*mistral.*\.py
+      - files~=^vllm/reasoning/.*mistral.*\.py
+      - files~=^vllm/tool_parsers/.*mistral.*\.py
+      - files~=^vllm/transformers_utils/.*mistral.*\.py
+      - title~=(?i)Mistral
+  actions:
+    label:
+      add:
+        - mistral
 
 - name: label-new-model
   description: Automatically apply new-model label
@@ -167,7 +185,9 @@ pull_request_rules:
       - files~=^examples/.*qwen.*\.py
       - files~=^tests/.*qwen.*\.py
       - files~=^vllm/model_executor/models/.*qwen.*\.py
+      - files~=^vllm/tool_parsers/.*qwen.*\.py
       - files~=^vllm/reasoning/.*qwen.*\.py
+      - files~=^vllm/transformers_utils/.*qwen.*\.py
       - title~=(?i)Qwen
   actions:
     label:
@@ -244,6 +264,7 @@ pull_request_rules:
       - files=\.buildkite/ci_config_intel.yaml
       - files=vllm/model_executor/layers/fused_moe/xpu_fused_moe.py
       - files=vllm/model_executor/kernels/linear/mixed_precision/xpu.py
+      - files=vllm/model_executor/kernels/linear/mxfp8/xpu.py
       - files=vllm/model_executor/kernels/linear/scaled_mm/xpu.py
       - files=vllm/distributed/device_communicators/xpu_communicator.py
       - files=vllm/v1/attention/backends/mla/xpu_mla_sparse.py
@@ -251,6 +272,7 @@ pull_request_rules:
       - files=vllm/v1/worker/xpu_worker.py
       - files=vllm/v1/worker/xpu_model_runner.py
       - files=vllm/_xpu_ops.py
+      - files=vllm/kernels/xpu_ops.py
       - files~=^vllm/lora/ops/xpu_ops
       - files=vllm/lora/punica_wrapper/punica_xpu.py
       - files=vllm/platforms/xpu.py
@@ -258,7 +280,6 @@ pull_request_rules:
       - title~=(?i)XPU
       - title~=(?i)Intel
       - title~=(?i)BMG
-      - title~=(?i)Arc
   actions:
     label:
       add:
@@ -378,17 +399,18 @@ pull_request_rules:
       add:
         - tool-calling
 
-- name: auto-rebase if approved, ready, and 40 commits behind main
+- name: auto-rebase to keep merge candidate within 1 day behind main
   conditions:
     - base = main
     - label=ready
     - "#approved-reviews-by >= 1"
-    - "#commits-behind >= 40"
+    - "#commits-behind >= 50"
+    - "#check-failure = 0"
     - -closed
     - -draft
     - -conflict
   actions:
-    rebase: {}
+    update: {}
 
 - name: ping author on conflicts and add 'needs-rebase' label
   conditions:
