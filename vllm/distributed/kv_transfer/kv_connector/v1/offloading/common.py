@@ -12,21 +12,13 @@ ReqId = str
 
 
 @dataclass
-class StoreJobEntry:
-    """A store job entry bundling request context with transfer spec.
+class TransferJob:
+    """A transfer job bundling request context with transfer spec.
 
-    Keyed by scheduler-assigned job ID in the metadata dict.
+    Used for both loads and stores, keyed by scheduler-assigned job ID.
     The worker reports the job ID back when the transfer finishes,
-    and the scheduler calls complete_store immediately.
+    and the scheduler processes the completion.
     """
-
-    req_id: ReqId
-    transfer_spec: TransferSpec
-
-
-@dataclass
-class LoadJobEntry:
-    """A load job entry bundling request context with transfer spec."""
 
     req_id: ReqId
     transfer_spec: TransferSpec
@@ -35,8 +27,8 @@ class LoadJobEntry:
 @dataclass
 class OffloadingConnectorMetadata(KVConnectorMetadata):
     # Keyed by scheduler-assigned job IDs.
-    reqs_to_load: dict[int, LoadJobEntry]
-    reqs_to_store: dict[int, StoreJobEntry]
+    reqs_to_load: dict[int, TransferJob]
+    reqs_to_store: dict[int, TransferJob]
     reqs_to_flush: set[str] | None = None
 
 
