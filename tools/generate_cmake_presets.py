@@ -128,7 +128,7 @@ def generate_presets(output_path="CMakeUserPresets.json", force_overwrite=False)
 
     presets = {
         "version": 6,
-        # Keep in sync with CMakeLists.txt and requirements/build.txt
+        # Keep in sync with CMakeLists.txt and requirements/build/cuda.txt
         "cmakeMinimumRequired": {"major": 3, "minor": 26, "patch": 1},
         "configurePresets": [configure_preset],
         "buildPresets": [

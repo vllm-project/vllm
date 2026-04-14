@@ -28,6 +28,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import (
     AttentionBackend,
     CommonAttentionMetadata,
@@ -170,7 +171,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         k = k.view(-1, self.num_kv_heads, self.head_size)
         v = v.view(-1, self.num_kv_heads, self.head_size)
         kv_cache_dummy_dep = torch.ops.vllm.unified_kv_cache_update(
-            k, v, self.layer_name
+            k, v, _encode_layer_name(self.layer_name)
         )
         return q, k, v, kv_cache_dummy_dep
 
