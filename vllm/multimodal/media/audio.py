@@ -9,10 +9,13 @@ import numpy.typing as npt
 import pybase64
 import torch
 
+from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 
 from .base import MediaIO
+
+logger = init_logger(__name__)
 
 try:
     import av
@@ -139,19 +142,27 @@ def load_audio(
 ):
     try:
         return load_audio_soundfile(path, sr=sr, mono=mono)
+    except ImportError as exc:
+        # soundfile (or resampy) is not installed — fall through to pyav.
+        # NOTE: this clause must stay BEFORE ``soundfile.LibsndfileError``
+        # because when soundfile is a PlaceholderModule, evaluating
+        # ``soundfile.LibsndfileError`` itself raises ImportError.
+        logger.error("Failed to load audio via soundfile: %r", exc)
     except soundfile.LibsndfileError as exc:
         # Only fall back for known format-detection failures.
         # Re-raise anything else (e.g. corrupt but recognised format).
         if exc.code not in _BAD_SF_CODES:
             raise
-        # soundfile may have advanced the BytesIO seek position before failing;
-        # reset it so PyAV can read from the beginning.
-        if isinstance(path, BytesIO):
-            path.seek(0)
-        try:
-            return load_audio_pyav(path, sr=sr, mono=mono)
-        except Exception as pyav_exc:
-            raise ValueError("Invalid or unsupported audio file.") from pyav_exc
+    # soundfile may have advanced the BytesIO seek position before failing;
+    # reset it so PyAV can read from the beginning.
+    if isinstance(path, BytesIO):
+        path.seek(0)
+    try:
+        return load_audio_pyav(path, sr=sr, mono=mono)
+    except ImportError:
+        raise  # Let PlaceholderModule's message ("install vllm[audio]") propagate.
+    except Exception as pyav_exc:
+        raise ValueError("Invalid or unsupported audio file.") from pyav_exc
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
