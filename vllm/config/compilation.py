@@ -299,14 +299,13 @@ class PassConfig:
         TODO also log the compile ranges for which this is enabled.
         """
         fusion_prefixes = ("fuse_", "enable_")
-        enabled_fusions = []
-        for f in fields(self):
-            if not getattr(self, f.name):
-                continue
-            for prefix in fusion_prefixes:
-                if f.name.startswith(prefix):
-                    enabled_fusions.append(f.name[len(prefix) :])
-                    break
+        enabled_fusions = [
+            f.name[len(prefix):]
+            for f in fields(self)
+            if getattr(self, f.name)
+            for prefix in fusion_prefixes
+            if f.name.startswith(prefix)
+        ]
 
         if enabled_fusions:
             logger.info_once(
