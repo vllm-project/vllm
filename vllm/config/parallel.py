@@ -623,6 +623,18 @@ class ParallelConfig:
         )
 
     @property
+    def use_batched_dp_moe(self) -> bool:
+        return (
+            self.all2all_backend
+            in (
+                "deepep_low_latency",
+                "nixl_ep",
+            )
+            and self.enable_expert_parallel
+            and self.data_parallel_size > 1
+        )
+
+    @property
     def node_rank_within_dp(self) -> int:
         return self.node_rank % self.nnodes_within_dp
 
