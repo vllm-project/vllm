@@ -903,6 +903,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        should_record_tensor: torch.Tensor,
     ) -> None:
         for layer_idx, layer in enumerate(self.moe_layers):
             experts = layer.experts
@@ -914,6 +915,7 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
                 expert_load_view=expert_load_view,
                 logical_to_physical_map=logical_to_physical_map,
                 logical_replica_count=logical_replica_count,
+                should_record_tensor=should_record_tensor,
             )
 
     def update_physical_experts_metadata(

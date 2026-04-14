@@ -7,7 +7,9 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.distributed.eplb.eplb_state import (
+    InitializedEplbLayerState,
+)
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
@@ -41,7 +43,9 @@ class DummyRouter(BaseRouter):
     def routing_method_type(self) -> RoutingMethodType:
         return RoutingMethodType.FUSED_TOPK
 
-    def _compute_routing(self, hidden_states, router_logits, indices_type):
+    def _compute_routing(
+        self, hidden_states: torch.Tensor, router_logits: torch.Tensor, indices_type
+    ):
         topk_ids = torch.tensor([[1, 2], [3, 4]], dtype=torch.int64)
         topk_weights = torch.ones_like(topk_ids, dtype=torch.float32)
         return topk_weights, topk_ids
@@ -51,12 +55,11 @@ class DummyRouter(BaseRouter):
         return topk_ids + 10
 
 
-def _make_router() -> DummyRouter:
+def _make_router(eplb_state=None) -> DummyRouter:
     return DummyRouter(
         top_k=2,
         global_num_experts=16,
-        eplb_state=EplbLayerState(),
-        enable_eplb=False,
+        eplb_state=eplb_state,
         indices_type_getter=None,
     )
 
@@ -81,12 +84,13 @@ def test_base_router_capture_pre_eplb_mapping():
 
 
 def test_base_router_capture_with_eplb_enabled():
-    router = _make_router()
-    router.enable_eplb = True
-    router.eplb_state.expert_load_view = torch.zeros(32, dtype=torch.int64)
-    router.eplb_state.logical_to_physical_map = torch.arange(32).view(32, 1)
-    router.eplb_state.logical_replica_count = torch.ones(32, dtype=torch.int64)
-    router.eplb_state.should_record_tensor = torch.ones((), dtype=torch.bool)
+    initialized_eplb_state = InitializedEplbLayerState(
+        expert_load_view=torch.zeros(32, dtype=torch.int64),
+        logical_to_physical_map=torch.arange(32).view(32, 1),
+        logical_replica_count=torch.ones(32, dtype=torch.int64),
+        should_record_tensor=torch.ones((), dtype=torch.bool),
+    )
+    router = _make_router(eplb_state=initialized_eplb_state)
 
     captured = []
 

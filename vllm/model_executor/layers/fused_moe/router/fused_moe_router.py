@@ -46,3 +46,13 @@ class FusedMoERouter(ABC):
             plain MoE implementations without redundant experts.
         """
         raise NotImplementedError
+
+    @abstractmethod
+    def initialize_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+        should_record_tensor: torch.Tensor,
+    ) -> None:
+        raise NotImplementedError

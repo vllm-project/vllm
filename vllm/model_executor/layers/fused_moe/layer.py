@@ -16,7 +16,10 @@ from vllm.distributed import (
     get_pcp_group,
     get_tensor_model_parallel_world_size,
 )
-from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
+from vllm.distributed.eplb.eplb_state import (
+    EplbState,
+    UninitializedEplbLayerState,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -331,7 +334,6 @@ class FusedMoE(PluggableLayer):
 
         self.enable_eplb = enable_eplb
         # TODO(bnell): should this be owned by router?
-        self.eplb_state = EplbLayerState()
         self.expert_placement_strategy: ExpertPlacementStrategy = (
             vllm_config.parallel_config.expert_placement_strategy
         )
@@ -445,10 +447,10 @@ class FusedMoE(PluggableLayer):
 
         # TODO(bnell): we should not have to create a router if the kernel is
         # monolithic.
+        eplb_state = UninitializedEplbLayerState() if self.enable_eplb else None
         self.router = create_fused_moe_router(
             top_k=top_k,
             global_num_experts=self.global_num_experts,
-            eplb_state=self.eplb_state,
             renormalize=renormalize,
             use_grouped_topk=use_grouped_topk,
             num_expert_group=num_expert_group,
@@ -458,7 +460,7 @@ class FusedMoE(PluggableLayer):
             routed_scaling_factor=routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
-            enable_eplb=enable_eplb,
+            eplb_state=eplb_state,
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
@@ -1487,6 +1489,7 @@ class FusedMoE(PluggableLayer):
         expert_load_view: torch.Tensor,
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
+        should_record_tensor: torch.Tensor,
     ) -> None:
         """
         Register the EPLB state in this layer.
@@ -1494,9 +1497,12 @@ class FusedMoE(PluggableLayer):
         This is used later in forward pass, where we get the expert mapping
         and record the load metrics in `expert_load_view`.
         """
-        self.eplb_state.expert_load_view = expert_load_view[moe_layer_idx]
-        self.eplb_state.logical_to_physical_map = logical_to_physical_map[moe_layer_idx]
-        self.eplb_state.logical_replica_count = logical_replica_count[moe_layer_idx]
+        self.router.initialize_eplb_state(
+            expert_load_view[moe_layer_idx],
+            logical_to_physical_map[moe_layer_idx],
+            logical_replica_count[moe_layer_idx],
+            should_record_tensor,
+        )
 
     def ensure_moe_quant_config_init(self):
         if self.quant_method.moe_quant_config is None:
