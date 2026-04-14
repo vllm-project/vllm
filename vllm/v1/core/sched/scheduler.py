@@ -302,9 +302,6 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
@@ -713,7 +710,10 @@ class Scheduler(SchedulerInterface):
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
                     )
-                    if num_new_tokens == 0:
+                    # NOTE: When load_kv_async=True, num_new_tokens=0 is expected
+                    # because we are only allocating blocks for external KV, not
+                    # for new tokens to compute. Do not break in this case.
+                    if num_new_tokens == 0 and not load_kv_async:
                         break
 
                 # Handles an edge case when P/D Disaggregation
