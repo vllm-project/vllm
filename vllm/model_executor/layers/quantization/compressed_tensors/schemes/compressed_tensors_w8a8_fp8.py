@@ -136,14 +136,14 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 self.is_static_input_scheme
             ]
             weight_quant_key = weight_quant_key_mapping[self.strategy]
-            self.fp8_linear = init_fp8_linear_kernel(
-                activation_quant_key=activation_quant_key,
-                weight_quant_key=weight_quant_key,
-                input_dtype=self.input_dtype,
-                out_dtype=self.out_dtype,
-                weight_shape=(output_size_per_partition, input_size_per_partition),
-                module_name=self.__class__.__name__,
-            )
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            weight_shape=(output_size_per_partition, input_size_per_partition),
+            module_name=self.__class__.__name__,
+        )
 
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
