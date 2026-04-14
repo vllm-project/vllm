@@ -2640,6 +2640,22 @@ def swap_blocks(
     but not both on cpu.
     the block mapping tensor must on cpu.
     """
+    if current_platform.is_xpu():
+        # Fallback for XPU environments since there is an issue swap_blocks
+        # kernel implementation.
+        # Match cache op semantics by addressing flattened fixed-size byte
+        # blocks instead of the first tensor dimension.
+        src_blocks = src.view(torch.int8).reshape(-1, block_size_in_bytes)
+        dst_blocks = dst.view(torch.int8).reshape(-1, block_size_in_bytes)
+
+        src_indices = block_mapping[:, 0].to(device=src_blocks.device)
+        dst_indices = block_mapping[:, 1].to(device=dst_blocks.device)
+        copied_blocks = src_blocks.index_select(0, src_indices).to(
+            device=dst.device, non_blocking=False
+        )
+        dst_blocks.index_copy_(0, dst_indices, copied_blocks)
+        return
+
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
 
 

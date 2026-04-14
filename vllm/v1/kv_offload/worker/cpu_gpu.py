@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec
 from vllm.v1.kv_offload.spec import CanonicalKVCacheRef, CanonicalKVCaches
@@ -23,10 +25,34 @@ logger = init_logger(__name__)
 @dataclass
 class Transfer:
     job_id: int
-    stream: torch.cuda.Stream
+    stream: Any
     start_event: torch.Event
     end_event: torch.Event
     num_bytes: int
+
+
+def _new_stream():
+    if current_platform.is_xpu():
+        return torch.xpu.Stream()
+    return torch.cuda.Stream()
+
+
+def _current_stream():
+    if current_platform.is_xpu():
+        return torch.xpu.current_stream()
+    return torch.cuda.current_stream()
+
+
+def _stream_context(stream):
+    if current_platform.is_xpu():
+        return torch.xpu.stream(stream)
+    return torch.cuda.stream(stream)
+
+
+def _new_event():
+    if current_platform.is_xpu():
+        return torch.Event(enable_timing=True)
+    return torch.Event(enable_timing=True)
 
 
 def expand_block_ids(
@@ -101,7 +127,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         for gpu_tensor, cpu_tensor in zip(gpu_tensors, cpu_tensors):
             assert gpu_tensor.dtype == torch.int8
             assert gpu_tensor.ndim == 2
-            assert gpu_tensor.is_cuda
+            assert gpu_tensor.device.type in ("cuda", "xpu")
             assert cpu_tensor.dtype == torch.int8
             assert cpu_tensor.ndim == 2
             assert cpu_tensor.device.type == "cpu"
@@ -145,20 +171,23 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
         # list of CUDA streams available for re-use
-        self._stream_pool: list[torch.cuda.Stream] = []
+        self._stream_pool: list[Any] = []
         # list of CUDA events available for re-use
         self._event_pool: list[torch.Event] = []
 
         # Pre-compute base pointers and block sizes for batch copies.
-        self._src_base_ptrs = np.array(
-            [t.data_ptr() for t in self.src_tensors], dtype=np.int64
-        )
-        self._dst_base_ptrs = np.array(
-            [t.data_ptr() for t in self.dst_tensors], dtype=np.int64
-        )
-        self._block_size_in_bytes_arr = np.array(
-            self.tensor_block_size_in_bytes, dtype=np.int64
-        )
+        # XPU device addresses can exceed signed int64 range, so skip
+        # pre-computing raw pointers there; XPU uses swap_blocks per tensor.
+        if not current_platform.is_xpu():
+            self._src_base_ptrs = np.array(
+                [t.data_ptr() for t in self.src_tensors], dtype=np.uint64
+            )
+            self._dst_base_ptrs = np.array(
+                [t.data_ptr() for t in self.dst_tensors], dtype=np.uint64
+            )
+            self._block_size_in_bytes_arr = np.array(
+                self.tensor_block_size_in_bytes, dtype=np.uint64
+            )
 
     def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
         src_spec, dst_spec = transfer_spec
@@ -186,50 +215,61 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         )
         expand_block_ids(dst_blocks, self.dst_block_size_factor, dst_block_ids)
 
-        # Build flat pointer arrays for all tensors × all block pairs.
-        num_pairs = dst_sub_block_count
-        num_tensors = len(self.src_tensors)
-        total = num_pairs * num_tensors
+        block_mapping = np.stack((src_block_ids, dst_block_ids), axis=1)
+        block_mapping_tensor = torch.from_numpy(block_mapping)
 
-        all_src = np.empty(total, dtype=np.int64)
-        all_dst = np.empty(total, dtype=np.int64)
-        all_sizes = np.empty(total, dtype=np.int64)
+        # XPU currently uses the per-tensor swap_blocks path.
+        use_batch_swap = not current_platform.is_xpu()
+        if use_batch_swap:
+            # Build flat pointer arrays for all tensors x all block pairs.
+            num_pairs = dst_sub_block_count
+            num_tensors = len(self.src_tensors)
+            total = num_pairs * num_tensors
 
-        for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
-            start = t_idx * num_pairs
-            end = start + num_pairs
-            all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
-            all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
-            all_sizes[start:end] = bsz
+            all_src = np.empty(total, dtype=np.uint64)
+            all_dst = np.empty(total, dtype=np.uint64)
+            all_sizes = np.empty(total, dtype=np.uint64)
 
-        batch_src = torch.from_numpy(all_src)
-        batch_dst = torch.from_numpy(all_dst)
-        batch_sizes = torch.from_numpy(all_sizes)
+            for t_idx, bsz in enumerate(self._block_size_in_bytes_arr):
+                start = t_idx * num_pairs
+                end = start + num_pairs
+                all_src[start:end] = self._src_base_ptrs[t_idx] + src_block_ids * bsz
+                all_dst[start:end] = self._dst_base_ptrs[t_idx] + dst_block_ids * bsz
+                all_sizes[start:end] = bsz
 
-        stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
-        start_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
-        )
-        end_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
-        )
+            batch_src = torch.from_numpy(all_src)
+            batch_dst = torch.from_numpy(all_dst)
+            batch_sizes = torch.from_numpy(all_sizes)
+
+        stream = self._stream_pool.pop() if self._stream_pool else _new_stream()
+        start_event = self._event_pool.pop() if self._event_pool else _new_event()
+        end_event = self._event_pool.pop() if self._event_pool else _new_event()
 
         if self.gpu_to_cpu:
             # wait for model computation to finish before offloading
-            stream.wait_stream(torch.cuda.current_stream())
+            stream.wait_stream(_current_stream())
         if self._transfers:
             last_transfer: Transfer = self._transfers[-1]
             last_event = last_transfer.end_event
             # assure job will start only after the previous one completes
             stream.wait_event(last_event)
-        with torch.cuda.stream(stream):
+        with _stream_context(stream):
             start_event.record(stream)
-            if total > 0:
-                ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)
+            if use_batch_swap:
+                if total > 0:
+                    ops.swap_blocks_batch(batch_src, batch_dst, batch_sizes)
+            else:
+                for src_tensor, dst_tensor, block_size_in_bytes in zip(
+                    self.src_tensors,
+                    self.dst_tensors,
+                    self.tensor_block_size_in_bytes,
+                ):
+                    ops.swap_blocks(
+                        src_tensor,
+                        dst_tensor,
+                        block_size_in_bytes,
+                        block_mapping_tensor,
+                    )
             end_event.record(stream)
 
         self._transfer_events[job_id] = end_event
