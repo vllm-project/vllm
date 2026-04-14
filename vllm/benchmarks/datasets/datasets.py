@@ -34,7 +34,11 @@ from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
-from vllm.benchmarks.shared import get_sampling_params
+from vllm.benchmarks.datasets.shared import (
+    RangeRatio,
+    _resolve_range_ratios,
+    get_sampling_params,
+)
 from vllm.inputs import MultiModalDataDict
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
@@ -532,9 +536,7 @@ class RandomDataset(BenchmarkDataset):
         request_id_prefix: str = "",
         no_oversample: bool = False,
         prefix_len: int = DEFAULT_PREFIX_LEN,
-        range_ratio: float = DEFAULT_RANGE_RATIO,
-        input_range_ratio: float | None = None,
-        output_range_ratio: float | None = None,
+        range_ratio: RangeRatio = DEFAULT_RANGE_RATIO,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
@@ -543,12 +545,7 @@ class RandomDataset(BenchmarkDataset):
         lora_assignment: str = "random",
         **kwargs,
     ) -> list[SampleRequest]:
-        resolved_input_rr = (
-            input_range_ratio if input_range_ratio is not None else range_ratio
-        )
-        resolved_output_rr = (
-            output_range_ratio if output_range_ratio is not None else range_ratio
-        )
+        resolved_input_rr, _ = _resolve_range_ratios(range_ratio)
 
         num_special = int(tokenizer.num_special_tokens_to_add())
         real_input_len = max(0, int(input_len) - num_special)
@@ -560,10 +557,10 @@ class RandomDataset(BenchmarkDataset):
             raise ValueError(
                 "--random-input-len is too small: with tokenizer special "
                 f"tokens {num_special} and "
-                f"--random-input-range-ratio {resolved_input_rr}, "
+                f"input range ratio {resolved_input_rr}, "
                 "the minimum possible total input tokens (prefix + sampled) is "
                 f"{min_total_input}. Increase --random-input-len and/or "
-                "--random-prefix-len, or decrease --random-input-range-ratio "
+                "--random-prefix-len, or decrease the input range ratio "
                 "so that prefix_len + floor(max(0, random_input_len - "
                 "num_special)) * (1 - input_range_ratio) >= 1."
             )
@@ -571,8 +568,7 @@ class RandomDataset(BenchmarkDataset):
         input_lens, output_lens, offsets = get_sampling_params(
             self._rng,
             num_requests,
-            resolved_input_rr,
-            resolved_output_rr,
+            range_ratio,
             input_len,
             output_len,
             tokenizer,
@@ -745,22 +741,13 @@ class RandomDatasetForReranking(RandomDataset):
         request_id_prefix: str = "",
         no_oversample: bool = False,
         prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
-        range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
-        input_range_ratio: float | None = None,
-        output_range_ratio: float | None = None,
+        range_ratio: RangeRatio = RandomDataset.DEFAULT_RANGE_RATIO,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
         is_reranker: bool = True,
         **kwargs,
     ) -> list[SampleRequest]:
-        resolved_input_rr = (
-            input_range_ratio if input_range_ratio is not None else range_ratio
-        )
-        resolved_output_rr = (
-            output_range_ratio if output_range_ratio is not None else range_ratio
-        )
-
         n_sep_tokens = int(is_reranker)
 
         query_len_param = (input_len // 2) - n_sep_tokens if is_reranker else input_len
@@ -768,8 +755,7 @@ class RandomDatasetForReranking(RandomDataset):
         query_lens, _, query_offsets = get_sampling_params(
             self._rng,
             1,
-            resolved_input_rr,
-            resolved_output_rr,
+            range_ratio,
             query_len_param,
             0,
             tokenizer,
@@ -788,8 +774,7 @@ class RandomDatasetForReranking(RandomDataset):
         doc_lens, _, doc_offsets = get_sampling_params(
             self._rng,
             num_requests,
-            resolved_input_rr,
-            resolved_output_rr,
+            range_ratio,
             doc_len_param,
             0,
             tokenizer,
@@ -1166,9 +1151,7 @@ class RandomMultiModalDataset(RandomDataset):
         request_id_prefix: str = "",
         no_oversample: bool = False,
         prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
-        range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
-        input_range_ratio: float | None = None,
-        output_range_ratio: float | None = None,
+        range_ratio: RangeRatio = RandomDataset.DEFAULT_RANGE_RATIO,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
@@ -1185,18 +1168,11 @@ class RandomMultiModalDataset(RandomDataset):
             raise NotImplementedError(
                 "batchsize > 1 is not supported for RandomMultiModalDataset."
             )
-        resolved_input_rr = (
-            input_range_ratio if input_range_ratio is not None else range_ratio
-        )
-        resolved_output_rr = (
-            output_range_ratio if output_range_ratio is not None else range_ratio
-        )
 
         input_lens, output_lens, offsets = get_sampling_params(
             self._rng,
             num_requests,
-            resolved_input_rr,
-            resolved_output_rr,
+            range_ratio,
             input_len,
             output_len,
             tokenizer,
@@ -1658,30 +1634,12 @@ def add_random_dataset_base_args(
     )
     parser_or_group.add_argument(
         "--random-range-ratio",
-        type=float,
-        default=0.0,
+        type=str,
+        default="0.0",
         help="Range ratio for sampling input/output length, "
-        "used only for random sampling. Sets both input and output range "
-        "ratios unless overridden by --random-input-range-ratio or "
-        "--random-output-range-ratio. Must be in [0, 1).",
-    )
-    parser_or_group.add_argument(
-        "--random-input-range-ratio",
-        type=float,
-        default=None,
-        help="Range ratio for sampling input length, used only for random "
-        "sampling. Overrides --random-range-ratio for input lengths. "
-        "Must be in [0, 1). Defines the sampling range "
-        "[input_len * (1 - ratio), input_len * (1 + ratio)].",
-    )
-    parser_or_group.add_argument(
-        "--random-output-range-ratio",
-        type=float,
-        default=None,
-        help="Range ratio for sampling output length, used only for random "
-        "sampling. Overrides --random-range-ratio for output lengths. "
-        "Must be in [0, 1). Defines the sampling range "
-        "[output_len * (1 - ratio), output_len * (1 + ratio)].",
+        "used only for random sampling. A single float applies to both "
+        'ISL and OSL. A JSON dict like \'{"input": 0.3, "output": 0.5}\' '
+        "sets them independently. Values must be in [0, 1).",
     )
     parser_or_group.add_argument(
         "--random-prefix-len",
@@ -1814,9 +1772,24 @@ def add_random_multimodal_dataset_args(
     )
 
 
+def _parse_range_ratio(value: str) -> RangeRatio:
+    """Parse a ``--random-range-ratio`` CLI string.
+
+    Accepts either a plain float (``"0.3"``) or a JSON dict
+    (``'{"input": 0.3, "output": 0.5}'``).
+    """
+    try:
+        return float(value)
+    except ValueError:
+        return json.loads(value)
+
+
 def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
+
+    if hasattr(args, "random_range_ratio") and isinstance(args.random_range_ratio, str):
+        args.random_range_ratio = _parse_range_ratio(args.random_range_ratio)
 
     if args.dataset_name == "custom":
         dataset = CustomDataset(
@@ -2051,8 +2024,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 range_ratio=args.random_range_ratio,
-                input_range_ratio=args.random_input_range_ratio,
-                output_range_ratio=args.random_output_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 no_oversample=args.no_oversample,
@@ -2066,8 +2037,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 prefix_len=args.random_prefix_len,
                 range_ratio=args.random_range_ratio,
-                input_range_ratio=args.random_input_range_ratio,
-                output_range_ratio=args.random_output_range_ratio,
                 input_len=args.random_input_len,
                 output_len=args.random_output_len,
                 base_items_per_request=args.random_mm_base_items_per_request,
@@ -2087,8 +2056,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 num_requests=args.num_prompts,
                 input_len=args.random_input_len,
                 range_ratio=args.random_range_ratio,
-                input_range_ratio=args.random_input_range_ratio,
-                output_range_ratio=args.random_output_range_ratio,
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 is_reranker=not args.no_reranker,

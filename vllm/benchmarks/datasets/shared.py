@@ -13,12 +13,35 @@ from vllm.tokenizers import TokenizerLike
 
 logger = logging.getLogger(__name__)
 
+# Type alias: a single float applies to both ISL and OSL; a dict allows
+# specifying them independently via ``{"input": …, "output": …}``.
+RangeRatio = float | dict[str, float]
+
+
+def _resolve_range_ratios(
+    range_ratio: RangeRatio,
+) -> tuple[float, float]:
+    """Return ``(input_range_ratio, output_range_ratio)`` from *range_ratio*.
+
+    *range_ratio* is either a single float (used for both input and output)
+    or a dict with ``"input"`` and ``"output"`` keys.
+    """
+    if isinstance(range_ratio, dict):
+        try:
+            return float(range_ratio["input"]), float(range_ratio["output"])
+        except KeyError as exc:
+            raise ValueError(
+                "When range_ratio is a dict it must contain 'input' and "
+                f"'output' keys, got: {sorted(range_ratio)}"
+            ) from exc
+    ratio = float(range_ratio)
+    return ratio, ratio
+
 
 def get_sampling_params(
     rng: np.random.Generator,
     num_requests: int,
-    input_range_ratio: float,
-    output_range_ratio: float,
+    range_ratio: RangeRatio,
     input_len: int,
     output_len: int,
     tokenizer: TokenizerLike,
@@ -27,7 +50,10 @@ def get_sampling_params(
     Sample per-request input/output token lengths and vocab offsets.
 
     Lengths are drawn uniformly from integer ranges around the configured
-    means, controlled by ``input_range_ratio`` and ``output_range_ratio``.
+    means, controlled by *range_ratio*.  It may be a single ``float``
+    (applied to both input and output) or a ``dict`` with ``"input"`` and
+    ``"output"`` keys for independent control.
+
     Tokenizer special tokens are subtracted from ``input_len`` before
     computing the sampling interval.
 
@@ -35,6 +61,8 @@ def get_sampling_params(
         (input_lens, output_lens, offsets) – three 1-D ``np.ndarray`` of
         shape ``(num_requests,)``.
     """
+    input_range_ratio, output_range_ratio = _resolve_range_ratios(range_ratio)
+
     if not (0.0 <= input_range_ratio < 1.0):
         raise ValueError("input_range_ratio must be in [0, 1).")
     if not (0.0 <= output_range_ratio < 1.0):

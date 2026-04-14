@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import os
-import tempfile
+from pathlib import Path
 
 import pytest
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-from vllm.benchmarks.create_txt_slices_dataset import create_txt_slices_jsonl
 from vllm.benchmarks.datasets import CustomDataset
+from vllm.benchmarks.datasets.create_txt_slices_dataset import create_txt_slices_jsonl
 
 
 @pytest.fixture(scope="session")
@@ -28,50 +27,42 @@ sunt in culpa qui officia deserunt mollit anim id est laborum.
 
 
 @pytest.mark.benchmark
-def test_create_txt_slices_jsonl(hf_tokenizer: PreTrainedTokenizerBase) -> None:
+def test_create_txt_slices_jsonl(
+    hf_tokenizer: PreTrainedTokenizerBase, tmp_path: Path
+) -> None:
     """Test that create_txt_slices_jsonl produces valid JSONL for CustomDataset."""
-    # Write the text content to a temporary file
-    # Use delete=False for Python 3.10 compatibility (delete_on_close is 3.12+)
-    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as f:
-        f.write(text_content)
-        f.close()
-        txt_path = f.name
+    txt_path = tmp_path / "input.txt"
+    jsonl_path = tmp_path / "input.txt.jsonl"
 
-    jsonl_path = txt_path + ".jsonl"
+    txt_path.write_text(text_content)
 
-    try:
-        create_txt_slices_jsonl(
-            input_path=txt_path,
-            output_path=jsonl_path,
-            tokenizer_name="gpt2",
-            num_prompts=10,
-            input_len=10,
-            output_len=10,
-        )
+    create_txt_slices_jsonl(
+        input_path=str(txt_path),
+        output_path=str(jsonl_path),
+        tokenizer_name="gpt2",
+        num_prompts=10,
+        input_len=10,
+        output_len=10,
+    )
 
-        # Verify the JSONL file is valid and has the expected structure
-        with open(jsonl_path) as jf:
-            records = [json.loads(line) for line in jf]
+    # Verify the JSONL file is valid and has the expected structure
+    records = [json.loads(line) for line in jsonl_path.read_text().splitlines()]
 
-        assert len(records) == 10
-        for record in records:
-            assert "prompt" in record
-            assert "output_tokens" in record
-            assert isinstance(record["prompt"], str)
-            assert record["output_tokens"] == 10
+    assert len(records) == 10
+    for record in records:
+        assert "prompt" in record
+        assert "output_tokens" in record
+        assert isinstance(record["prompt"], str)
+        assert record["output_tokens"] == 10
 
-        # Verify the JSONL file can be loaded by CustomDataset
-        dataset = CustomDataset(dataset_path=jsonl_path)
-        samples = dataset.sample(
-            tokenizer=hf_tokenizer,
-            num_requests=10,
-            output_len=10,
-            skip_chat_template=True,
-        )
+    # Verify the JSONL file can be loaded by CustomDataset
+    dataset = CustomDataset(dataset_path=str(jsonl_path))
+    samples = dataset.sample(
+        tokenizer=hf_tokenizer,
+        num_requests=10,
+        output_len=10,
+        skip_chat_template=True,
+    )
 
-        assert len(samples) == 10
-        assert all(sample.expected_output_len == 10 for sample in samples)
-    finally:
-        os.unlink(txt_path)
-        if os.path.exists(jsonl_path):
-            os.unlink(jsonl_path)
+    assert len(samples) == 10
+    assert all(sample.expected_output_len == 10 for sample in samples)

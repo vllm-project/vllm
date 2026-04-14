@@ -12,7 +12,7 @@ Usage
 -----
 ::
 
-    python -m vllm.benchmarks.create_txt_slices_dataset \\
+    python -m vllm.benchmarks.datasets.create_txt_slices_dataset \\
         --input  sonnet.txt \\
         --output sonnet_dataset.jsonl \\
         --tokenizer gpt2 \\
@@ -39,7 +39,7 @@ import urllib.request
 import numpy as np
 from transformers import AutoTokenizer
 
-from vllm.benchmarks.shared import get_sampling_params
+from vllm.benchmarks.datasets.shared import RangeRatio, get_sampling_params
 
 logger = logging.getLogger(__name__)
 
@@ -61,9 +61,7 @@ def create_txt_slices_jsonl(
     num_prompts: int,
     input_len: int,
     output_len: int,
-    range_ratio: float = 0.0,
-    input_range_ratio: float | None = None,
-    output_range_ratio: float | None = None,
+    range_ratio: RangeRatio = 0.0,
     seed: int = 0,
     trust_remote_code: bool = False,
 ) -> None:
@@ -82,21 +80,13 @@ def create_txt_slices_jsonl(
     if not token_ids:
         raise ValueError("Tokenizing the text produced zero tokens; cannot sample.")
 
-    resolved_input_rr = (
-        input_range_ratio if input_range_ratio is not None else range_ratio
-    )
-    resolved_output_rr = (
-        output_range_ratio if output_range_ratio is not None else range_ratio
-    )
-
     rng_np = np.random.default_rng(seed)
     rng_py = random.Random(seed)
 
     input_lens, output_lens, _ = get_sampling_params(
         rng_np,
         num_prompts,
-        resolved_input_rr,
-        resolved_output_rr,
+        range_ratio,
         input_len,
         output_len,
         tokenizer,
@@ -170,24 +160,12 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--range-ratio",
-        type=float,
-        default=0.0,
-        help="Range ratio for both input and output length sampling "
-        "(default: 0.0). Must be in [0, 1).",
-    )
-    parser.add_argument(
-        "--input-range-ratio",
-        type=float,
-        default=None,
-        help="Range ratio for input length sampling. "
-        "Overrides --range-ratio for inputs.",
-    )
-    parser.add_argument(
-        "--output-range-ratio",
-        type=float,
-        default=None,
-        help="Range ratio for output length sampling. "
-        "Overrides --range-ratio for outputs.",
+        type=str,
+        default="0.0",
+        help="Range ratio for input/output length sampling (default: 0.0). "
+        "A single float applies to both ISL and OSL. "
+        'A JSON dict like \'{"input": 0.3, "output": 0.5}\' sets them '
+        "independently. Values must be in [0, 1).",
     )
     parser.add_argument(
         "--seed",
@@ -205,6 +183,15 @@ def main(argv: list[str] | None = None) -> None:
 
     logging.basicConfig(level=logging.INFO)
 
+    # Parse --range-ratio: try float first, then JSON dict.
+    range_ratio: RangeRatio
+    try:
+        range_ratio = float(args.range_ratio)
+    except ValueError:
+        import json as _json
+
+        range_ratio = _json.loads(args.range_ratio)
+
     create_txt_slices_jsonl(
         input_path=args.input,
         output_path=args.output,
@@ -212,9 +199,7 @@ def main(argv: list[str] | None = None) -> None:
         num_prompts=args.num_prompts,
         input_len=args.input_len,
         output_len=args.output_len,
-        range_ratio=args.range_ratio,
-        input_range_ratio=args.input_range_ratio,
-        output_range_ratio=args.output_range_ratio,
+        range_ratio=range_ratio,
         seed=args.seed,
         trust_remote_code=args.trust_remote_code,
     )
