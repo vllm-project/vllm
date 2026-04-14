@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -232,3 +234,123 @@ def test_activation(
 
     out = torch.empty_like(x)
     opcheck(fn, (out, x))
+
+
+@pytest.mark.parametrize("num_tokens", [7, 83])
+@pytest.mark.parametrize("d", [512])
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@torch.inference_mode()
+def test_swigluoai_and_mul_rocm_no_c_ext(
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+) -> None:
+    """Regression test for ROCm/cuda-alike builds without the custom op."""
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype)
+    empty_c = SimpleNamespace()
+    fake_compilation_config = SimpleNamespace(
+        custom_ops=["all"],
+        enabled_custom_ops=set(),
+        disabled_custom_ops=set(),
+    )
+
+    with (
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_cuda_alike",
+            return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_rocm",
+            return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_xpu",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.custom_op.current_platform.is_rocm",
+            return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.custom_op.current_platform.is_xpu",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.custom_op.get_cached_compilation_config",
+            return_value=fake_compilation_config,
+        ),
+        patch("vllm.model_executor.layers.activation.torch.ops._C", empty_c),
+    ):
+        layer = SwigluOAIAndMul()
+        out = layer(x)
+        ref_out = layer.forward_native(x)
+
+    torch.testing.assert_close(
+        out, ref_out, atol=get_default_atol(out), rtol=get_default_rtol(out)
+    )
+
+
+@pytest.mark.parametrize("num_tokens", [7, 83])
+@pytest.mark.parametrize("d", [512])
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@torch.inference_mode()
+def test_swigluoai_and_mul_xpu_uses_custom_op(
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+) -> None:
+    """Regression test for XPU dispatch when the custom op is present."""
+    x = torch.randn(num_tokens, 2 * d, dtype=dtype)
+    fake_compilation_config = SimpleNamespace(
+        custom_ops=["all"],
+        enabled_custom_ops=set(),
+        disabled_custom_ops=set(),
+    )
+    fake_calls = {"count": 0}
+
+    def fake_swigluoai_and_mul(
+        out: torch.Tensor,
+        inp: torch.Tensor,
+        alpha: float,
+        limit: float,
+    ) -> None:
+        fake_calls["count"] += 1
+        gate, up = inp[..., ::2], inp[..., 1::2]
+        gate = gate.clamp(min=None, max=limit)
+        up = up.clamp(min=-limit, max=limit)
+        glu = gate * torch.sigmoid(gate * alpha)
+        out.copy_((up + 1) * glu)
+
+    fake_c = SimpleNamespace(swigluoai_and_mul=fake_swigluoai_and_mul)
+
+    with (
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_cuda_alike",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.layers.activation.current_platform.is_xpu",
+            return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.custom_op.current_platform.is_rocm",
+            return_value=False,
+        ),
+        patch(
+            "vllm.model_executor.custom_op.current_platform.is_xpu",
+            return_value=True,
+        ),
+        patch(
+            "vllm.model_executor.custom_op.get_cached_compilation_config",
+            return_value=fake_compilation_config,
+        ),
+        patch("vllm.model_executor.layers.activation.torch.ops._C", fake_c),
+    ):
+        layer = SwigluOAIAndMul()
+        out = layer(x)
+        ref_out = layer.forward_native(x)
+
+    assert fake_calls["count"] == 1
+    torch.testing.assert_close(
+        out, ref_out, atol=get_default_atol(out), rtol=get_default_rtol(out)
+    )
