@@ -322,9 +322,8 @@ class LMCacheMPRequestMetadata:
         #   low and silently skip the APC-hit blocks that fall between the
         #   two values, causing under-storing.  Taking the max ensures we
         #   always use the tighter (larger) of the two hit counts.
-        computed_blocks = (
-            tracker.num_scheduled_tokens // vllm_block_size
-            + max(tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks)
+        computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
+            tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
             len(tracker.block_hashes),
