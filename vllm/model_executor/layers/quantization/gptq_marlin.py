@@ -25,7 +25,6 @@ from vllm.model_executor.layers.fused_moe.layer import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.fused_moe.oracle.wna16 import (
-    WNA16MoEBackend,
     convert_to_wna16_moe_kernel_format,
     make_wna16_moe_kernel,
     select_wna16_moe_backend,
@@ -707,6 +706,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             w2=layer.w2_qweight,
             w13_scale=layer.w13_scales,
             w2_scale=layer.w2_scales,
+            w13_g_idx=layer.w13_g_idx,
+            w2_g_idx=layer.w2_g_idx,
+            w13_bias=getattr(layer, "w13_bias", None),
+            w2_bias=getattr(layer, "w2_bias", None),
         )
 
         replace_parameter(layer, "w13_qweight", w13)
@@ -753,15 +756,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         self._setup_kernel(layer)
 
     def _setup_kernel(self, layer: FusedMoE) -> None:
-        """Build the FusedMoEKernel for this layer.
-
-        Skipped when ``gptq_marlin_backend`` is ``NONE`` (e.g. 8-bit weights,
-        which are not supported by the modular Marlin kernel).  In that case
-        ``self.moe_kernel`` stays ``None`` and the legacy
-        ``fused_marlin_moe()`` path is used in ``apply()``.
-        """
-        if self.wna16_moe_backend == WNA16MoEBackend.NONE:
-            return
+        """Build the FusedMoEKernel for this layer."""
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
         if self.moe_quant_config is None:
@@ -773,7 +768,10 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             layer=layer,
             is_k_full=self.is_k_full,
-            desc_act=self.quant_config.desc_act,
+            w13_g_idx=layer.w13_g_idx,
+            w2_g_idx=layer.w2_g_idx,
+            w13_g_idx_sort_indices=layer.w13_g_idx_sort_indices,
+            w2_g_idx_sort_indices=layer.w2_g_idx_sort_indices,
             routing_tables=layer._maybe_init_expert_routing_tables(),
             shared_experts=layer.shared_experts,
         )

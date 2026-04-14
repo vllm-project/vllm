@@ -142,6 +142,10 @@ def select_wna16_moe_backend(
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
+    raise NotImplementedError(
+        "No WNA16 MoE backend supports the deployment configuration."
+    )
+
     return WNA16MoEBackend.NONE, None
 
 
@@ -151,21 +155,15 @@ def make_wna16_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts] | None,
     layer: torch.nn.Module,
     is_k_full: bool,
-    desc_act: bool = False,
+    w13_g_idx: torch.Tensor | None,
+    w2_g_idx: torch.Tensor | None,
+    w13_g_idx_sort_indices: torch.Tensor | None,
+    w2_g_idx_sort_indices: torch.Tensor | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Currently, we only support MarlinExperts and BatchedMarlinExperts
     assert experts_cls in (MarlinExperts, BatchedMarlinExperts)
-
-    w13_g_idx = getattr(layer, "w13_g_idx", None) if desc_act else None
-    w2_g_idx = getattr(layer, "w2_g_idx", None) if desc_act else None
-    w13_g_idx_sort_indices = (
-        getattr(layer, "w13_g_idx_sort_indices", None) if desc_act else None
-    )
-    w2_g_idx_sort_indices = (
-        getattr(layer, "w2_g_idx_sort_indices", None) if desc_act else None
-    )
 
     from vllm.model_executor.layers.fused_moe.all2all_utils import (
         maybe_make_prepare_finalize,
@@ -294,10 +292,6 @@ def _process_weights_marlin(
             w2_g_idx_sort_indices[e] = torch.argsort(w2_g_idx[e]).to(torch.int32)
             w13_sorted_g_idx[e] = w13_g_idx[e][w13_g_idx_sort_indices[e]]
             w2_sorted_g_idx[e] = w2_g_idx[e][w2_g_idx_sort_indices[e]]
-        # replace_parameter(layer, "w13_g_idx", w13_sorted_g_idx)
-        # replace_parameter(layer, "w2_g_idx", w2_sorted_g_idx)
-        # replace_parameter(layer, "w13_g_idx_sort_indices", w13_g_idx_sort_indices)
-        # replace_parameter(layer, "w2_g_idx_sort_indices", w2_g_idx_sort_indices)
     else:
         num_experts = w13_g_idx.shape[0]
         device = w13_g_idx.device
@@ -335,12 +329,6 @@ def _process_weights_marlin(
         quant_config.quant_type.size_bits,
         is_a_8bit=is_a_8bit,
     )
-    # replace_parameter(layer, "w13_qweight", marlin_w13_qweight)
-    # replace_parameter(layer, "w2_qweight", marlin_w2_qweight)
-
-    # Alias for modular kernel (expects w13_weight / w2_weight)
-    # layer.w13_weight = layer.w13_qweight
-    # layer.w2_weight = layer.w2_qweight
 
     # --- Permute scales ---
     marlin_w13_scales = marlin_moe_permute_scales(
@@ -362,8 +350,6 @@ def _process_weights_marlin(
         group_size=quant_config.group_size,
         is_a_8bit=is_a_8bit,
     )
-    # replace_parameter(layer, "w13_scales", marlin_w13_scales)
-    # replace_parameter(layer, "w2_scales", marlin_w2_scales)
 
     if input_dtype == torch.int8:
         if layer.num_groups_w13 > 1:
@@ -406,6 +392,10 @@ def convert_to_wna16_moe_kernel_format(
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    w13_g_idx: torch.Tensor,
+    w2_g_idx: torch.Tensor,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,  # w13_qweight
     torch.Tensor,  # w2_qweight
@@ -444,20 +434,7 @@ def convert_to_wna16_moe_kernel_format(
                 "Marlin WNA16 MoE backend requires GPTQMarlinConfig, got "
                 f"{type(quant_config).__name__}."
             )
-        (
-            w13_qweight,
-            w2_qweight,
-            w13_scales,
-            w2_scales,
-            w13_g_idx,
-            w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            w13_input_global_scale,
-            w2_input_global_scale,
-            w13_bias,
-            w2_bias,
-        ) = _process_weights_marlin(
+        return _process_weights_marlin(
             layer,
             quant_config,
             input_dtype,
@@ -465,25 +442,10 @@ def convert_to_wna16_moe_kernel_format(
             w2,
             w13_scale,
             w2_scale,
-            getattr(layer, "w13_g_idx", None),
-            getattr(layer, "w2_g_idx", None),
-            getattr(layer, "w13_bias", None),
-            getattr(layer, "w2_bias", None),
-        )
-        return (
-            w13_qweight,
-            w2_qweight,
-            w13_scales,
-            w2_scales,
             w13_g_idx,
             w2_g_idx,
-            w13_g_idx_sort_indices,
-            w2_g_idx_sort_indices,
-            w13_input_global_scale,
-            w2_input_global_scale,
             w13_bias,
             w2_bias,
         )
-
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
