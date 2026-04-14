@@ -110,7 +110,7 @@ class BenchmarkDataset(ABC):
         # default seed.
         self.random_seed = random_seed if random_seed is not None else self.DEFAULT_SEED
         self.disable_shuffle = disable_shuffle
-        self.data: Any
+        self.data: Any | None = None
 
     def apply_multimodal_chat_transformation(
         self,
@@ -2253,7 +2253,7 @@ class CustomMMDataset(CustomDataset):
         request_id_prefix: str = "",
         no_oversample: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         # load all data if needed
         self.num_available_samples = len(self.data)
         if num_requests <= 0:
@@ -2983,7 +2983,7 @@ class BlazeditDataset(HuggingFaceDataset):
         min_distance: float = 0.0,
         max_distance: float = 1.0,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         sampled_requests = []
 
