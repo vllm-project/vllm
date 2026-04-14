@@ -12,7 +12,6 @@ import math
 
 import torch
 
-from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 _FP8_E4B15: dict[int, int] = {}
@@ -24,6 +23,7 @@ def _use_fp8_e4b15(device: int = 0) -> int:
         cap = torch.cuda.get_device_capability(device)
         _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
     return _FP8_E4B15[device]
+
 
 # ---------------------------------------------------------------------------
 # Stage 1: Fused TQ score + value accumulation (BLOCK_KV tiled)

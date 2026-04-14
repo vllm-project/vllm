@@ -11,9 +11,7 @@ import torch
 _CPU = torch.device("cpu")
 
 
-def generate_wht_signs(
-    d: int, seed: int, device: torch.device = _CPU
-) -> torch.Tensor:
+def generate_wht_signs(d: int, seed: int, device: torch.device = _CPU) -> torch.Tensor:
     """Generate deterministic random ±1 signs for WHT rotation.
 
     Used with Walsh-Hadamard Transform for per-layer rotation randomization.
