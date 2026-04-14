@@ -175,7 +175,10 @@ class CPUWorker(Worker):
         else:
             consumed_memory = psutil.Process(os.getpid()).memory_info().rss
             requested_memory_for_kv = int(self.requested_cpu_memory - consumed_memory)
-            if requested_memory_for_kv > available_memory:
+            if (
+                requested_memory_for_kv <= 0
+                or requested_memory_for_kv > available_memory
+            ):
                 raise ValueError(
                     f"Available memory on node {cpu_core.numa_node} "
                     f"({format_gib(available_memory)}/"
