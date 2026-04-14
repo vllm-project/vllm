@@ -885,14 +885,14 @@ class FusedMoE(CustomOp):
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         hidden_dim: int,
-        shard_dim: int = -1,
+        shard_dim: int | None = None,
     ) -> torch.Tensor:
         """Narrow expert_data to match loaded_weight for padded dimensions.
 
         When backends (e.g., DeepEP) round up hidden_size, weight parameters
         are larger than checkpoint weights. Narrow the padded hidden dimension
         before copying. Similarly, when padding occurs on the shard
-        (intermediate) dimension (e.g., last TP shard), narrow that dimension
+        (intermediate) dimension (e.g. for MXFP4 GEMM), narrow that dimension
         as well.
 
         Args:
@@ -901,11 +901,11 @@ class FusedMoE(CustomOp):
             hidden_dim: The dimension index corresponding to hidden_size.
                 Must be non-negative.
             shard_dim: The dimension index corresponding to the shard
-                (intermediate) dimension. If negative, shard-dim narrowing
-                is skipped.
+                (intermediate) dimension. Defaults to `None`.
         """
+        dims = (hidden_dim,) if shard_dim is None else (hidden_dim, shard_dim)
         if loaded_weight.ndim > 0:
-            for dim in (hidden_dim, shard_dim):
+            for dim in dims:
                 if (
                     0 <= dim < expert_data.ndim
                     and dim < loaded_weight.ndim
