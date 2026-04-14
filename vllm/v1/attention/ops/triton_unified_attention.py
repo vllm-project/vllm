@@ -1172,24 +1172,9 @@ def unified_attention(
         is_prefill=False,
     )
 
-    # Route both the QK and PV dots through AMD WMMA/MFMA int8 when the
-    # KV cache is int8 per-token-head on ROCm.
-    #
-    # Why this is a win on AMD:
-    #   * RDNA3 (gfx1100) WMMA int8 runs at ~2x the throughput of bf16
-    #     (v_wmma_i32_16x16x16_iu8 vs v_wmma_f32_16x16x16_bf16).
-    #   * CDNA2/CDNA3 (MI2xx/MI3xx) MFMA int8 is also markedly faster
-    #     than the bf16 variant.
-    #   * Keeping K and V in their native int8 layout drops the
-    #     HEAD_SIZE x TILE int8->bf16 casts the original path ran on
-    #     every tile — a cost that scales as O(seqlen^2) during prefill.
-    #   * Q is quantized to int8 once per Q-block outside the tile loop
-    #     (amortized across all tiles); P is quantized per tile but the
-    #     BLOCK_M x TILE cost is small vs the BLOCK_M x TILE x HEAD_SIZE
-    #     int8 WMMA it enables.
-    #
-    # Gated off for NVIDIA: not benchmarked there, keep the existing
-    # bf16 path. Gated off for fp8 modes: int8 WMMA cannot consume fp8.
+    # Route the QK dot through AMD int8 WMMA (~2x bf16 throughput on
+    # RDNA3/CDNA) when the KV cache is int8 per-token-head on ROCm.
+    # Also drops the per-tile int8->bf16 cast on K.
     use_rocm_int8_wmma_qk = (
         kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD and current_platform.is_rocm()
     )
