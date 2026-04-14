@@ -135,10 +135,11 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             self.activation_quant_key = activation_quant_key_mapping[
                 self.is_static_input_scheme
             ]
-            weight_quant_key = weight_quant_key_mapping[self.strategy]
+            self.weight_quant_key = weight_quant_key_mapping[self.strategy]
+
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
-            weight_quant_key=weight_quant_key,
+            weight_quant_key=self.weight_quant_key,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
             weight_shape=(output_size_per_partition, input_size_per_partition),
