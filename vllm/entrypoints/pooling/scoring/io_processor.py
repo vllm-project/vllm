@@ -220,7 +220,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
             scoring_data.data_2, "document", self.model_config
         )
 
-        return self._preprocess_completion_offline(
+        return self._preprocess_cmpl_offline(
             prompts=data_1 + data_2, tok_params=tok_params, prompt_extras=prompt_extras
         )
 
@@ -682,7 +682,7 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
                 for q, d in zip(queries, docs)
             ]
 
-        return self._preprocess_completion_offline(
+        return self._preprocess_cmpl_offline(
             prompts=prompts, tok_params=tok_params, prompt_extras=prompt_extras
         )
 

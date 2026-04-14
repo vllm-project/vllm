@@ -72,7 +72,7 @@ class PoolingIOProcessor:
                 default_template_kwargs=None,
             )
         elif isinstance(request, PoolingCompletionLikeRequest):
-            engine_inputs = self._preprocess_completion_online(
+            engine_inputs = self._preprocess_cmpl_online(
                 request,
                 prompt_input=request.input,
                 prompt_embeds=None,
@@ -82,20 +82,11 @@ class PoolingIOProcessor:
 
         ctx.engine_inputs = engine_inputs
 
-    async def pre_process_online_async(self, ctx: PoolingServeContext):
-        self.pre_process_online(ctx)
-
     def post_process_online(
         self,
         ctx: PoolingServeContext,
     ):
         pass
-
-    async def post_process_online_async(
-        self,
-        ctx: PoolingServeContext,
-    ):
-        self.post_process_online(ctx)
 
     #######################################
     # offline APIs
@@ -109,12 +100,7 @@ class PoolingIOProcessor:
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
-        return self._preprocess_completion_offline(
-            prompts=prompts_seq, tok_params=tok_params
-        )
-
-    async def pre_process_offline_async(self, ctx: OfflineInputsContext):
-        return self.pre_process_offline(ctx)
+        return self._preprocess_cmpl_offline(prompts=prompts_seq, tok_params=tok_params)
 
     def post_process_offline(
         self,
@@ -122,16 +108,10 @@ class PoolingIOProcessor:
     ) -> list[PoolingRequestOutput]:
         return ctx.outputs
 
-    async def post_process_offline_async(
-        self,
-        ctx: OfflineOutputsContext,
-    ) -> list[PoolingRequestOutput]:
-        return self.post_process_offline(ctx)
-
     #######################################
     # helpers
 
-    def _preprocess_completion_online(
+    def _preprocess_cmpl_online(
         self,
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
@@ -209,7 +189,7 @@ class PoolingIOProcessor:
 
         return conversation, [engine_input]
 
-    def _preprocess_completion_offline(
+    def _preprocess_cmpl_offline(
         self,
         prompts: PromptType | Sequence[PromptType],
         tok_params: TokenizeParams,

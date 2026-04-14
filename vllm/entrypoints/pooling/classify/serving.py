@@ -31,7 +31,7 @@ class ServingClassification(PoolingServing):
     def init_io_processor(self, *args, **kwargs) -> ClassifyIOProcessor:
         return ClassifyIOProcessor(*args, **kwargs)
 
-    async def _build_response(
+    def _build_response(
         self,
         ctx: ClassificationServeContext,
     ) -> JSONResponse:
