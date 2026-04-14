@@ -130,7 +130,14 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 p.is_device_capability(90)
                 or p.is_device_capability_family(100)
                 or p.is_device_capability_family(110)
-                or p.is_device_capability_family(120)
+                or p.is_device_capability(120)
+                # NOTE: SM121 (DGX Spark) is excluded because the bf16
+                # unquantized CUTLASS MoE GEMM in flashinfer <= 0.6.7 has no
+                # Relu2 template instantiation and throws "Invalid activation
+                # type" on Nemotron-H. Fixed upstream by
+                # https://github.com/flashinfer-ai/flashinfer/pull/2926
+                # (merged 2026-04-01, not yet in a stable release); lift this
+                # restriction once flashinfer >= 0.6.8 is the minimum.
             )
             and has_flashinfer_cutlass_fused_moe()
         )
