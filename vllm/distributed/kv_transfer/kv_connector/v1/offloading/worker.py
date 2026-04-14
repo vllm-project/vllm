@@ -40,11 +40,13 @@ logger = init_logger(__name__)
 
 
 class _LoadTracker:
-    """Tracks active load jobs on the worker."""
+    """Tracks active and completed load jobs on the worker."""
 
     def __init__(self):
         # job_id -> req_id
         self.active: dict[int, ReqId] = {}
+        # completed job IDs to report via worker metadata
+        self.completed: dict[int, int] = {}
 
     def add(self, job_id: int, req_id: ReqId) -> None:
         self.active[job_id] = req_id
@@ -383,6 +385,7 @@ class OffloadingConnectorWorker:
             # Check if this is a load or store.
             req_id = self._loads.pop(job_id)
             if req_id is not None:
+                self._loads.completed[job_id] = 1
                 finished_recving.add(req_id)
                 continue
 
@@ -409,13 +412,15 @@ class OffloadingConnectorWorker:
         return finished_sending, finished_recving
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
-        """Return completed store job IDs since the last call."""
-        if not self._stores.completed:
+        """Return completed transfer job IDs since the last call."""
+        if not self._stores.completed and not self._loads.completed:
             return None
         meta = OffloadingWorkerMetadata(
             completed_store_jobs=self._stores.completed,
+            completed_load_jobs=self._loads.completed,
         )
         self._stores.completed = {}
+        self._loads.completed = {}
         return meta
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
@@ -436,4 +441,5 @@ class OffloadingConnectorWorker:
         self._stores.by_req.clear()
         self._stores.reqs_waiting.clear()
         self._loads.active.clear()
+        self._loads.completed.clear()
         self.worker.shutdown()

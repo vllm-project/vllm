@@ -33,8 +33,8 @@ logger = init_logger(__name__)
 
 
 @dataclass(slots=True)
-class StoreJobStatus:
-    """Tracks scheduler-side state for a single store job."""
+class TransferJobStatus:
+    """Tracks scheduler-side state for a single transfer job."""
 
     req_id: ReqId
     # Number of TP workers still pending. Starts at num_workers,
@@ -89,6 +89,7 @@ class RequestOffloadState:
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
+    load_jobs: dict[int, set[OffloadKey]] = field(default_factory=dict)
     store_jobs: dict[int, set[OffloadKey]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -144,7 +145,8 @@ class OffloadingConnectorScheduler:
 
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
-        self._store_jobs: dict[int, StoreJobStatus] = {}
+        self._load_jobs: dict[int, TransferJobStatus] = {}
+        self._store_jobs: dict[int, TransferJobStatus] = {}
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -283,6 +285,11 @@ class OffloadingConnectorScheduler:
             req_id=request.request_id,
             transfer_spec=(src_spec, dst_spec),
         )
+        req_status.load_jobs[load_job_id] = set(offload_keys)
+        self._load_jobs[load_job_id] = TransferJobStatus(
+            req_id=request.request_id,
+            pending_count=self.config.num_workers,
+        )
         req_blocks_being_loaded = self._reqs_being_loaded[request.request_id]
         req_blocks_being_loaded.update(offload_keys)
         group_state.next_stored_block_idx = num_blocks
@@ -362,7 +369,7 @@ class OffloadingConnectorScheduler:
 
             job_id = self._generate_job_id()
             req_status.store_jobs[job_id] = set(keys_to_store)
-            self._store_jobs[job_id] = StoreJobStatus(
+            self._store_jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
             )
@@ -420,7 +427,6 @@ class OffloadingConnectorScheduler:
             connector_output (KVConnectorOutput): the worker-side
                 connectors output.
         """
-        # Process per-job store completions via worker metadata.
         meta = connector_output.kv_connector_worker_meta
         assert isinstance(meta, OffloadingWorkerMetadata)
 
@@ -448,6 +454,38 @@ class OffloadingConnectorScheduler:
                 # still returns True, ensuring _free_blocks
                 # waits for finished_sending.
 
+        for job_id, count in meta.completed_load_jobs.items():
+            job_status = self._load_jobs.get(job_id)
+            if job_status is None:
+                continue
+            job_status.pending_count -= count
+            if job_status.pending_count > 0:
+                continue
+
+            # All TP workers reported — job is complete.
+            self._load_jobs.pop(job_id)
+            req_status = self._req_status.get(job_status.req_id)
+            keys = (
+                req_status.load_jobs.pop(job_id, None)
+                if req_status is not None
+                else None
+            )
+            if not keys:
+                keys = self._reqs_being_loaded.get(job_status.req_id)
+            if not keys:
+                continue
+
+            self.manager.complete_load(keys)
+
+            if self._blocks_being_loaded:
+                self._blocks_being_loaded.difference_update(keys)
+
+            remaining = self._reqs_being_loaded.get(job_status.req_id)
+            if remaining is not None:
+                remaining -= keys
+                if not remaining:
+                    self._reqs_being_loaded.pop(job_status.req_id, None)
+
         # Handle request-level completion (for _free_blocks in scheduler).
         for req_id in connector_output.finished_sending or []:
             keys = self._reqs_being_stored.pop(req_id, None)
@@ -456,11 +494,8 @@ class OffloadingConnectorScheduler:
             self._cleanup_store_jobs_for_req(req_id)
 
         for req_id in connector_output.finished_recving or []:
-            keys = self._reqs_being_loaded.pop(req_id, None)
-            if keys:
-                if self._blocks_being_loaded:
-                    self._blocks_being_loaded.difference_update(keys)
-                self.manager.complete_load(keys)
+            if not self._reqs_being_loaded.get(req_id):
+                self._reqs_being_loaded.pop(req_id, None)
 
     def request_finished(
         self,
