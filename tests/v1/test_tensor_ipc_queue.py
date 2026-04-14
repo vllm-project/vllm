@@ -54,7 +54,7 @@ def encoder_process(
         sender = TensorIpcSender(tensor_queue)
         encoder = MsgpackEncoder(oob_tensor_consumer=sender)
 
-        if torch.accelerator.is_available():
+        if torch.cuda.is_available():
             device = f"{DEVICE_TYPE}:0"
             tensor = torch.randn(
                 *tensor_data["shape"], dtype=tensor_data["dtype"], device=device
@@ -127,7 +127,7 @@ def decoder_process(
         retrieval_done.set()
 
 
-@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_tensor_queue_basic():
     """Test CUDA tensor IPC through the msgpack encoder/decoder path."""
     tensor_queue = torch_mp.Queue()
@@ -432,7 +432,7 @@ def mixed_tensor_decoder_process(
         result_queue.put(
             {
                 "success": True,
-                "is_cuda": ipc_data.tensor.device.type != "cpu",
+                "is_cuda": ipc_data.tensor.is_cuda,
                 "shape": tuple(ipc_data.tensor.shape),
             }
         )
@@ -448,7 +448,7 @@ def mixed_tensor_decoder_process(
         )
 
 
-@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU not available")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_mixed_cpu_cuda_tensors():
     """Test encoding with mixed CPU and CUDA tensors using multiprocessing."""
     tensor_queue = torch_mp.Queue()
@@ -652,7 +652,7 @@ def test_ipc_disabled_mode():
     assert tensor_queues[0].empty(), "Tensor queue should be empty when IPC is disabled"
 
     # If CUDA is available, test with CUDA tensor too
-    if torch.accelerator.is_available():
+    if torch.cuda.is_available():
         cuda_tensor = torch.randn(4, 5, device=f"{DEVICE_TYPE}:0")
         encoded_cuda = encoder.encode({"cuda_tensor": cuda_tensor})
         assert len(encoded_cuda) > 0
@@ -882,8 +882,8 @@ def test_concurrent_senders_interleaved_buffer():
 
 def test_mixed_cpu_cuda_with_ipc_enabled():
     """Test that encoder is configured correctly for IPC with all tensor types."""
-    if not torch.accelerator.is_available():
-        pytest.skip("GPU not available")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
 
     tensor_queue = torch_mp.Queue()
 

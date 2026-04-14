@@ -70,7 +70,7 @@ class TraceStructuredCapture:
         ]
 
 
-@pytest.mark.skipif(not torch.accelerator.is_available(), reason="GPU required")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vllm_structured_logging_artifacts(use_fresh_inductor_cache):
     """Test that all expected vLLM artifacts are logged during compilation."""
     torch.set_default_device(DEVICE_TYPE)

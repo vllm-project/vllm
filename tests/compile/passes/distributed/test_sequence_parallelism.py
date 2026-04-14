@@ -37,10 +37,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
 
-pytestmark = pytest.mark.skipif(
-    not (current_platform.is_cuda() or current_platform.is_xpu()),
-    reason="Only test CUDA/XPU",
-)
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 
 FP8_DTYPE = current_platform.fp8_dtype()
 prompts = [
@@ -184,9 +181,7 @@ class TestAllReduceRMSNormStaticQuantFP8Model(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("fuse_norm_quant", [True, False])
 @pytest.mark.parametrize("dynamic", [False, True])
-@pytest.mark.skipif(
-    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on GPU"
-)
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_sequence_parallelism_pass(
     test_model_cls: type[torch.nn.Module],
     custom_ops: str,

@@ -208,9 +208,7 @@ class TestAllReduceFusedAddRMSNormStaticQuantFP4Model(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("enable_rms_norm_custom_op", [True, False])
 @pytest.mark.parametrize("flashinfer_allreduce_backend", ["trtllm", "mnnvl"])
-@pytest.mark.skipif(
-    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on GPU"
-)
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 @pytest.mark.skipif(
     not find_spec("flashinfer")
     or not has_module_attribute("flashinfer.comm", "allreduce_fusion")

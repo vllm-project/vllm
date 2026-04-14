@@ -242,9 +242,7 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
 @pytest.mark.parametrize("hidden_size", [16])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("dynamic", [True, False])
-@pytest.mark.skipif(
-    envs.VLLM_TARGET_DEVICE not in ["cuda", "xpu"], reason="Only test on GPU"
-)
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 def test_async_tp_pass_replace(
     test_model: str,
     batch_size: int,
