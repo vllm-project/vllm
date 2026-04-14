@@ -1053,9 +1053,12 @@ except ImportError:
                 "AITER_MLA backends use aiter kernels instead."
             )
     elif current_platform.is_xpu():
+        from vllm._custom_ops import gather_and_maybe_dequant_cache
         from vllm._xpu_ops import xpu_ops as ops
 
         flash_attn_varlen_func = ops.flash_attn_varlen_func  # type: ignore[no-redef]
+        ops.gather_and_maybe_dequant_cache = gather_and_maybe_dequant_cache
+        is_vllm_fa = True
 
 
 def dynamic_per_batched_tensor_quant(
@@ -1316,6 +1319,13 @@ def use_trtllm_ragged_deepseek_prefill() -> bool:
         return False
 
     return is_deepseek_r1_mla_compatible(vllm_config)
+
+
+@functools.cache
+def use_triton_prefill() -> bool:
+    import vllm.envs as envs
+
+    return MLACommonBackend.get_name() == "TRITON_MLA" and envs.VLLM_ENFORCE_TRITON_ATTN
 
 
 @dataclass
@@ -2193,6 +2203,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
+        if use_triton_prefill():
+            logger.info_once("Using Triton prefill for MLA", scope="local")
+            from vllm.v1.attention.ops.triton_flash_attn_varlen import (
+                flash_attn_varlen_triton,
+            )
+
+            self.flash_attn_varlen_func = flash_attn_varlen_triton
+            # Triton kernel natively supports different D_QK and D_V;
+            # disable V padding to avoid wasting bandwidth and registers.
+            self._pad_v = False
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
