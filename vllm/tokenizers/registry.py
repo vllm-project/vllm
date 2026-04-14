@@ -10,6 +10,7 @@ from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.config import get_config
 from vllm.transformers_utils.gguf_utils import (
     check_gguf_file,
     get_gguf_file_path_from_hf,
@@ -200,6 +201,15 @@ def get_tokenizer(
         revision=revision,
         download_dir=download_dir,
         **kwargs,
+    )
+
+    # Ensure that, if the config were to come from vllm.transformers_utils.config, it is
+    # registered with AutoConfig before the tokenizer is loaded. This is necessary since
+    # tokenizer_cls_.from_pretrained will call AutoConfig.from_pretrained internally.
+    get_config(
+        tokenizer_name,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
     )
 
     if tokenizer_cls == TokenizerLike:
