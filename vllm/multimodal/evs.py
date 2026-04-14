@@ -248,9 +248,7 @@ def recompute_mrope_positions(
         if candidate.numel() > 0:
             return int(candidate[0].item()), 0
         arange = torch.arange(N, device=input_ids.device)
-        media_after = (
-            media_mask & (arange >= num_computed)
-        ).nonzero(as_tuple=True)[0]
+        media_after = (media_mask & (arange >= num_computed)).nonzero(as_tuple=True)[0]
         if media_after.numel() == 0:
             raise IndexError(
                 "recompute_mrope_positions: no vision_start_token_id and no "

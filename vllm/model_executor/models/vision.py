@@ -383,10 +383,13 @@ def run_dp_sharded_mrope_vision_model(
     *,
     rope_type: Literal["rope_3d", "rope_2d"],
     return_aux: bool = False,
-) -> tuple[torch.Tensor, ...] | tuple[
-    tuple[torch.Tensor, ...],
-    tuple[torch.Tensor, ...] | None,
-]:
+) -> (
+    tuple[torch.Tensor, ...]
+    | tuple[
+        tuple[torch.Tensor, ...],
+        tuple[torch.Tensor, ...] | None,
+    ]
+):
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
     first dimension and run the vision model.
@@ -516,25 +519,22 @@ def run_dp_sharded_mrope_vision_model(
                 aux_local = aux_local.unsqueeze(-1)
             if aux_local.dtype != image_embeds_local.dtype:
                 aux_local = aux_local.to(dtype=image_embeds_local.dtype)
-            image_embeds_local = torch.cat(
-                [image_embeds_local, aux_local], dim=-1)
+            image_embeds_local = torch.cat([image_embeds_local, aux_local], dim=-1)
         else:
-            padding_aux = image_embeds_local.new_empty(
-                (*image_embeds_local.shape[:-1], 1))
-            image_embeds_local = torch.cat(
-                [image_embeds_local, padding_aux], dim=-1)
+            padding_aux = image_embeds_local.new_zeros(
+                (*image_embeds_local.shape[:-1], 1)
+            )
+            image_embeds_local = torch.cat([image_embeds_local, padding_aux], dim=-1)
 
     patches_per_output_image = [
-        (patch_size // embed_dim_reduction_factor)
-        for patch_size in patches_per_image
+        (patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image
     ]
 
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
-        padding_size = (
-            max_len_per_rank - current_len, *image_embeds_local.shape[1:])
+        padding_size = (max_len_per_rank - current_len, *image_embeds_local.shape[1:])
         padding = torch.empty(
             padding_size,
             dtype=image_embeds_local.dtype,
@@ -578,9 +578,7 @@ def run_dp_sharded_mrope_vision_model(
                 embed_start += img_patches
             current_idx += count
     final_out = tuple(o for o in original_order_embeddings if o is not None)
-    assert len(final_out) == len(original_order_embeddings), (
-        "Found unassigned outputs"
-    )
+    assert len(final_out) == len(original_order_embeddings), "Found unassigned outputs"
 
     if not return_aux:
         return final_out

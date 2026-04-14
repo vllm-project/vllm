@@ -9,8 +9,10 @@ returned by Flash Attention to reconstruct the attention scores without
 requiring kernel modifications.
 
 Usage:
-    from vllm.model_executor.layers.attention.flash_attn_with_score import flash_attn_varlen_func_with_score
-    
+    from vllm.model_executor.layers.attention.flash_attn_with_score import (
+        flash_attn_varlen_func_with_score,
+    )
+
     output, attention_score = flash_attn_varlen_func_with_score(
         q, k, v,
         cu_seqlens_q=cu_seqlens,
@@ -21,8 +23,8 @@ Usage:
     )
 """
 
-from typing import List, Optional, Tuple, Union
 import torch
+
 from .compute_flash_attn_score_triton import compute_varlen_importance
 
 
@@ -35,30 +37,30 @@ def flash_attn_varlen_func_with_score(
     max_seqlen_q: int,
     max_seqlen_k: int,
     dropout_p: float = 0.0,
-    softmax_scale: Optional[float] = None,
+    softmax_scale: float | None = None,
     causal: bool = False,
-    window_size: Optional[List[int]] = None,
+    window_size: list[int] | None = None,
     softcap: float = 0.0,
-    alibi_slopes: Optional[torch.Tensor] = None,
+    alibi_slopes: torch.Tensor | None = None,
     deterministic: bool = False,
     return_softmax_lse: bool = False,
     return_attention_score: bool = False,
-    out: Optional[torch.Tensor] = None,
+    out: torch.Tensor | None = None,
     # FA3 Only parameters
     scheduler_metadata=None,
     q_descale=None,
     k_descale=None,
     v_descale=None,
     num_splits: int = 0,
-    fa_version: Optional[int] = None,
+    fa_version: int | None = None,
     s_aux=None,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
+) -> torch.Tensor | tuple[torch.Tensor, ...]:
     """
     Flash Attention with optional attention score extraction.
-    
+
     This function wraps flash_attn_varlen_func and adds support for returning
     attention scores by using the logsumexp values to reconstruct them.
-    
+
     Args:
         q: Query tensor, shape [total_q, nheads, head_dim]
         k: Key tensor, shape [total_k, nheads_k, head_dim]
@@ -82,27 +84,27 @@ def flash_attn_varlen_func_with_score(
         num_splits: FA3 number of splits
         fa_version: Flash Attention version (2 or 3)
         s_aux: FA3 auxiliary tensor
-        
+
     Returns:
         If return_attention_score=False and return_softmax_lse=False:
             output: [total_q, nheads, head_dim]
         If return_attention_score=True:
-            (output, attention_score): 
+            (output, attention_score):
                 output: [total_q, nheads, head_dim]
                 attention_score: [total_q, nheads, max_seqlen_k]
         If return_softmax_lse=True:
-            (output, softmax_lse): 
+            (output, softmax_lse):
                 output: [total_q, nheads, head_dim]
                 softmax_lse: [nheads, total_q]
         If both True:
             (output, attention_score, softmax_lse)
-            
+
     Note:
         When return_attention_score=True, this function needs to:
         1. Store q and k tensors temporarily
         2. Request softmax_lse from Flash Attention
         3. Reconstruct attention scores from lse
-        
+
         This may increase memory usage and computation time.
     """
     from vllm.vllm_flash_attn import flash_attn_varlen_func, get_scheduler_metadata
@@ -179,22 +181,24 @@ def flash_attn_varlen_func_with_score(
         flash_kwargs["num_splits"] = num_splits
     if s_aux is not None:
         flash_kwargs["s_aux"] = s_aux
-    
+
     # Run flash attention
     result = flash_attn_varlen_func(q, k, v, **flash_kwargs)
-    
+
     # Parse result
     if need_lse:
         output, softmax_lse = result
     else:
         output = result
         softmax_lse = None
-    
+
     # Compute attention scores if requested
     attention_score = None
     if return_attention_score:
-        attention_score = compute_varlen_importance(q, k, cu_seqlens_q, max_seqlen_q, softmax_lse, softmax_scale)
-    
+        attention_score = compute_varlen_importance(
+            q, k, cu_seqlens_q, max_seqlen_q, softmax_lse, softmax_scale
+        )
+
     # Build return value
     if return_attention_score and return_softmax_lse:
         return output, attention_score, softmax_lse
@@ -204,4 +208,3 @@ def flash_attn_varlen_func_with_score(
         return output, softmax_lse
     else:
         return output
-

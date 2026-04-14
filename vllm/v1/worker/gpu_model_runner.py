@@ -2969,8 +2969,7 @@ class GPUModelRunner(
                     ] |= is_embed
                 mm_embeds_req.append(mm_embeds_item)
 
-            if (self.is_multimodal_pruning_enabled and self.uses_mrope
-                    and mm_embeds_req):
+            if self.is_multimodal_pruning_enabled and self.uses_mrope and mm_embeds_req:
                 assert req_state.mrope_positions is not None
                 should_sync_mrope_positions = True
                 mm_embeds_req, new_mrope_positions, new_delta = (

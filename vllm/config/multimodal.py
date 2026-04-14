@@ -196,9 +196,11 @@ class MultiModalConfig:
     Defaults to "direct_rpc". """
 
     def __post_init__(self):
-        if (self.image_pruning_rate is not None
-                and self.image_pruning_rate > 0.0
-                and not self.extract_vit_attention_score):
+        if (
+            self.image_pruning_rate is not None
+            and self.image_pruning_rate > 0.0
+            and not self.extract_vit_attention_score
+        ):
             self.extract_vit_attention_score = True
 
     @field_validator("limit_per_prompt", mode="before")
@@ -306,7 +308,6 @@ class MultiModalConfig:
         return kwargs | dict(inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):
-        return ((self.video_pruning_rate is not None
-                 and self.video_pruning_rate > 0)
-                or (self.image_pruning_rate is not None
-                    and self.image_pruning_rate > 0.0))
+        return (
+            self.video_pruning_rate is not None and self.video_pruning_rate > 0
+        ) or (self.image_pruning_rate is not None and self.image_pruning_rate > 0.0)

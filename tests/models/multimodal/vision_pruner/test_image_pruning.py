@@ -22,20 +22,22 @@ def qwen_chat_template(*query):
     )
 
 
-IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    qwen_chat_template(IMAGE_PLACEHOLDER,
-                       "What is the biggest text in this image?"),
-    "cherry_blossom":
-    qwen_chat_template(IMAGE_PLACEHOLDER,
-                       "What season is shown? Reply in one sentence."),
-})
+IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": qwen_chat_template(
+            IMAGE_PLACEHOLDER, "What is the biggest text in this image?"
+        ),
+        "cherry_blossom": qwen_chat_template(
+            IMAGE_PLACEHOLDER, "What season is shown? Reply in one sentence."
+        ),
+    }
+)
 
 
 # ===================================================================
 # Qwen2.5-VL image pruning tests
 # ===================================================================
-# 
+#
 QWEN2_5_VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 
 
@@ -45,8 +47,12 @@ QWEN2_5_VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_qwen2_5_vl_image_pruning_single(
-    vllm_runner, image_assets, model,
-    image_pruning_rate, dtype, max_tokens,
+    vllm_runner,
+    image_assets,
+    model,
+    image_pruning_rate,
+    dtype,
+    max_tokens,
 ) -> None:
     """Test image pruning with a single image input on Qwen2.5-VL."""
     images = [image_assets[0].pil_image]
@@ -64,8 +70,7 @@ def test_qwen2_5_vl_image_pruning_single(
         runner_kwargs["image_pruning_rate"] = image_pruning_rate
 
     with vllm_runner(model, **runner_kwargs) as vllm_model:
-        outputs = vllm_model.generate_greedy(
-            prompts, max_tokens, images=images)
+        outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)
 
     assert len(outputs) == 1
     output_ids, output_text = outputs[0]
@@ -80,8 +85,12 @@ def test_qwen2_5_vl_image_pruning_single(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_qwen2_5_vl_image_pruning_batched(
-    vllm_runner, image_assets, model,
-    image_pruning_rate, dtype, max_tokens,
+    vllm_runner,
+    image_assets,
+    model,
+    image_pruning_rate,
+    dtype,
+    max_tokens,
 ) -> None:
     """Test image pruning with batched image inputs on Qwen2.5-VL."""
     images = [asset.pil_image for asset in image_assets]
@@ -97,8 +106,7 @@ def test_qwen2_5_vl_image_pruning_batched(
         tensor_parallel_size=1,
         image_pruning_rate=image_pruning_rate,
     ) as vllm_model:
-        outputs = vllm_model.generate_greedy(
-            prompts, max_tokens, images=images)
+        outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)
 
     assert len(outputs) == 2
     for output_ids, output_text in outputs:
@@ -112,7 +120,11 @@ def test_qwen2_5_vl_image_pruning_batched(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_qwen2_5_vl_pruning_reduces_tokens(
-    vllm_runner, image_assets, model, dtype, max_tokens,
+    vllm_runner,
+    image_assets,
+    model,
+    dtype,
+    max_tokens,
 ) -> None:
     """Verify that pruning produces shorter outputs than no pruning
     when max_tokens is large enough (smoke test for token reduction)."""
@@ -130,7 +142,8 @@ def test_qwen2_5_vl_pruning_reduces_tokens(
         tensor_parallel_size=1,
     ) as vllm_model:
         outputs_no_prune = vllm_model.generate_greedy(
-            prompts, max_tokens, images=images)
+            prompts, max_tokens, images=images
+        )
 
     # Run with aggressive pruning (prune 70% of tokens)
     with vllm_runner(
@@ -143,8 +156,7 @@ def test_qwen2_5_vl_pruning_reduces_tokens(
         tensor_parallel_size=1,
         image_pruning_rate=0.7,
     ) as vllm_model:
-        outputs_pruned = vllm_model.generate_greedy(
-            prompts, max_tokens, images=images)
+        outputs_pruned = vllm_model.generate_greedy(prompts, max_tokens, images=images)
 
     # Both should produce valid output
     assert len(outputs_no_prune[0][1]) > 0
@@ -164,8 +176,12 @@ QWEN3_VL_MODELS = ["Qwen/Qwen3-VL-2B-Instruct"]
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_qwen3_vl_image_pruning_single(
-    vllm_runner, image_assets, model,
-    image_pruning_rate, dtype, max_tokens,
+    vllm_runner,
+    image_assets,
+    model,
+    image_pruning_rate,
+    dtype,
+    max_tokens,
 ) -> None:
     """Test image pruning with a single image input on Qwen3-VL."""
     images = [image_assets[0].pil_image]
@@ -183,8 +199,7 @@ def test_qwen3_vl_image_pruning_single(
         runner_kwargs["image_pruning_rate"] = image_pruning_rate
 
     with vllm_runner(model, **runner_kwargs) as vllm_model:
-        outputs = vllm_model.generate_greedy(
-            prompts, max_tokens, images=images)
+        outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)
 
     assert len(outputs) == 1
     output_ids, output_text = outputs[0]
@@ -199,8 +214,12 @@ def test_qwen3_vl_image_pruning_single(
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_qwen3_vl_image_pruning_batched(
-    vllm_runner, image_assets, model,
-    image_pruning_rate, dtype, max_tokens,
+    vllm_runner,
+    image_assets,
+    model,
+    image_pruning_rate,
+    dtype,
+    max_tokens,
 ) -> None:
     """Test image pruning with batched image inputs on Qwen3-VL."""
     images = [asset.pil_image for asset in image_assets]
@@ -216,8 +235,7 @@ def test_qwen3_vl_image_pruning_batched(
         tensor_parallel_size=1,
         image_pruning_rate=image_pruning_rate,
     ) as vllm_model:
-        outputs = vllm_model.generate_greedy(
-            prompts, max_tokens, images=images)
+        outputs = vllm_model.generate_greedy(prompts, max_tokens, images=images)
 
     assert len(outputs) == 2
     for output_ids, output_text in outputs:
