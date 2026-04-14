@@ -5,4 +5,8 @@ from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
 
 
 class ClassifyIOProcessor(PoolingIOProcessor):
-    name = "classification"
+    name = "classify"
+
+
+class TokenClassifyIOProcessor(PoolingIOProcessor):
+    name = "token_classify"

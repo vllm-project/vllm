@@ -21,6 +21,10 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     is_eplb_enabled = parallel_config.enable_eplb
     async_eplb = parallel_config.eplb_config.use_async
     is_deepep_ll = parallel_config.all2all_backend == "deepep_low_latency"
+    is_nccl_based_eplb_communicator = parallel_config.eplb_config.communicator in (
+        "torch_nccl",
+        "pynccl",
+    )
 
     # Override NCCL_MAX_CTAS to avoid hangs when using async EPLB with the
     # DeepEP low-latency backend.
@@ -39,7 +43,13 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     # Limiting NCCL occupancy via NCCL_MAX_CTAS leaves space for the DeepEP
     # cooperative kernel to launch and complete, breaking the deadlock.
     # See: https://github.com/deepseek-ai/DeepEP/issues/496
-    if is_data_parallel and is_eplb_enabled and is_deepep_ll and async_eplb:
+    if (
+        is_data_parallel
+        and is_eplb_enabled
+        and is_deepep_ll
+        and async_eplb
+        and is_nccl_based_eplb_communicator
+    ):
         current_value_str = os.getenv("NCCL_MAX_CTAS")
 
         if current_value_str and current_value_str.isdigit():
@@ -49,6 +59,7 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
         os.environ["NCCL_MAX_CTAS"] = str(override_value)
         logger.info_once(
             f"EPLB: Setting NCCL_MAX_CTAS={override_value} "
-            "for expert parallel with EPLB and deepep_low_latency backend",
+            "for expert parallel with NCCL-based EPLB communicator and "
+            "deepep_low_latency backend",
             scope="global",
         )

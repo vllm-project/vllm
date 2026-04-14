@@ -30,8 +30,7 @@ from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.config import ModelConfig, SpeechToTextConfig
-from vllm.inputs import TokensPrompt
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -47,7 +46,7 @@ if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalFeatureSpec
     from vllm.multimodal.registry import _ProcessorFactories
     from vllm.sequence import IntermediateTensors
-    from vllm.v1.worker.gpu.mm.encoder_cudagraph_defs import (
+    from vllm.v1.worker.encoder_cudagraph_defs import (
         EncoderCudaGraphCaptureInputs,
         EncoderCudaGraphConfig,
         EncoderCudaGraphReplayBuffers,
@@ -363,7 +362,9 @@ class SupportsMultiModal(Protocol):
             # to ensure that any external configuration requiring offset tracking,
             # e.g., LoRA, are applied correctly regardless of whether or not
             # we have multimodal tokens.
-            in_vocab_ids = input_ids.masked_fill(is_multimodal, 0)
+            in_vocab_ids = input_ids.masked_fill(
+                is_multimodal.to(device=input_ids.device, non_blocking=True), 0
+            )
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
@@ -1097,6 +1098,12 @@ class SupportsTranscription(Protocol):
     :meth:`get_language_token_ids`.
     """
 
+    no_space_languages: ClassVar[set[str]] = {"ja", "zh"}
+    """
+    Languages that don't need a space between words.
+    For example, Japanese (ja) and Chinese (zh) don't need a space between words.
+    """
+
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
         # language codes in supported_languages
@@ -1517,6 +1524,13 @@ class SupportsEncoderCudaGraph(Protocol):
 
     def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig": ...
 
+    def get_input_modality(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> str:
+        """Return the modality of the inputs."""
+        ...
+
     def get_encoder_cudagraph_budget_range(
         self,
         vllm_config: "VllmConfig",
@@ -1529,7 +1543,7 @@ class SupportsEncoderCudaGraph(Protocol):
           (e.g. max_num_batched_tokens)
 
         Used when ``encoder_cudagraph_token_budgets`` and/or
-        ``encoder_cudagraph_max_images_per_batch`` are not explicitly
+        ``encoder_cudagraph_max_vision_items_per_batch`` are not explicitly
         specified by the user.
         """
         ...
@@ -1583,6 +1597,7 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         token_budget: int,
         max_batch_size: int,
+        max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> "EncoderCudaGraphCaptureInputs":
@@ -1593,6 +1608,7 @@ class SupportsEncoderCudaGraph(Protocol):
         self,
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
+        max_frames_per_batch: int,
     ) -> "EncoderCudaGraphReplayBuffers":
         """Compute buffer values from actual batch inputs for replay."""
         ...
