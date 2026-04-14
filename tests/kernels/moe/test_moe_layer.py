@@ -26,6 +26,7 @@ from tests.kernels.moe.utils import TestMLP, make_test_weights, moe_quantize_wei
 from vllm.config import (
     CompilationConfig,
     ParallelConfig,
+    SchedulerConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -53,7 +54,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_two_sided,
 )
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_nixl_ep
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import (
     init_workspace_manager,
@@ -62,12 +63,12 @@ from vllm.v1.worker.workspace import (
 
 fp8_dtype = torch.float8_e4m3fn  # current_platform.fp8_dtype
 
-# Note: some M and K should be big enough to exercise DP chunking + DeepEP.
 SHAPE_COMBOS = [
     (1, 128, 256),
     (32, 512, 512),
     (222, 1024, 2048),
 ]
+MAX_M = max([x[0] for x in SHAPE_COMBOS])
 
 NUM_EXPERTS = [8, 64]
 TOP_KS = [2, 6]
@@ -120,7 +121,6 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
 }
 
 # Map from backend -> (DP/EP support, DP support, TP support)
-# TODO: add EPLB support?
 BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool]] = {
     "allgather_reducescatter":     (True,  True,  True),
     "mori":                        (True, False, False),
@@ -377,7 +377,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         )
 
     # routed_input_transform + quantization + high hidden dimensions
-    # TODO: Disable >= 2048 due to insane errors.
+    # TODO: Disable >= 2048 for now due to insane errors.
     if (
         config.use_routed_input_transform
         and config.quantization is not None
@@ -1717,9 +1717,6 @@ def test_moe_layer(
 
     verbosity = pytestconfig.getoption("verbose")
 
-    test_env = dict()
-    test_env["VLLM_MOE_DP_CHUNK_SIZE"] = "128"
-    monkeypatch.setenv("VLLM_MOE_DP_CHUNK_SIZE", "128")
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
@@ -1744,7 +1741,11 @@ def test_moe_layer(
     compilation_config.pass_config.fuse_allreduce_rms = False  # for now
 
     vllm_config = VllmConfig(
-        parallel_config=parallel_config, compilation_config=compilation_config
+        parallel_config=parallel_config,
+        compilation_config=compilation_config,
+        scheduler_config=SchedulerConfig.default_factory(
+            max_num_batched_tokens=next_power_of_2(MAX_M)
+        ),
     )
 
     test_configs = generate_valid_test_configs(
@@ -1772,7 +1773,7 @@ def test_moe_layer(
             world_size,
             _parallel_worker,
             vllm_config,
-            test_env,
+            None,
             test_configs,
             verbosity,
         )
