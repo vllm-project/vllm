@@ -59,7 +59,7 @@ Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph
 !!! note
     Video CUDA graphs are automatically disabled when EVS (Efficient Video Sampling) pruning is enabled, since EVS makes the token count data-dependent and incompatible with CUDA graph capture.
 
-    Currently, we only support image-only or video-only inputs when enabling CUDA graph, mixed inputs (image + video) are not supported yet (we will work on it in the near future).
+    Currently, we only support image-only or video-only inputs when enabling CUDA graph, mixed inputs (image + video) are not supported yet (we will work on it in the near future). Thus, it's recommended to turn off the image modality by `--limit-mm-per-prompt '{"image": 0}'` for video-only inputs.
 
 ## Model integration via `SupportsEncoderCudaGraph`
 
@@ -95,8 +95,8 @@ Three fields in `CompilationConfig` control encoder CUDA Graphs:
 
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
 * `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture as power-of-2 levels. User-provided values override auto-inference.
-* `encoder_cudagraph_max_mm_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
-* `encoder_cudagraph_max_frames_per_batch` (`int`, default `0`) — maximum number of video frames per batch during capture. If 0 (default), auto-inferred as `encoder_cudagraph_max_mm_items_per_batch * 2` (to be optimized).
+* `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
+* `encoder_cudagraph_max_frames_per_batch` (`int`, default `0`) — maximum number of video frames per batch during capture. If 0 (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * 2` (to be optimized).
 
 ## Usage guide
 
@@ -113,7 +113,7 @@ With explicit budgets:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
-  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824], "encoder_cudagraph_max_mm_items_per_batch": 8}'
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824], "encoder_cudagraph_max_vision_items_per_batch": 8}'
 ```
 
 Python example:
@@ -125,7 +125,7 @@ compilation_config = {
     "cudagraph_mm_encoder": True,
     # Optional: override auto-inferred budgets
     # "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824],
-    # "encoder_cudagraph_max_mm_items_per_batch": 8,
+    # "encoder_cudagraph_max_vision_items_per_batch": 8,
 }
 
 model = vllm.LLM(
@@ -142,6 +142,7 @@ Enable encoder CUDA Graphs via `compilation_config`:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
+  --limit-mm-per-prompt '{"image": 0}' \
   --compilation-config '{"cudagraph_mm_encoder": true}'
 ```
 
@@ -149,7 +150,8 @@ With explicit budgets:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
-  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824], "encoder_cudagraph_max_mm_items_per_batch": 8, "encoder_cudagraph_max_frames_per_batch": 64}'
+  --limit-mm-per-prompt '{"image": 0}' \
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824], "encoder_cudagraph_max_vision_items_per_batch": 8, "encoder_cudagraph_max_frames_per_batch": 64}'
 ```
 
 Python example:
@@ -161,12 +163,13 @@ compilation_config = {
     "cudagraph_mm_encoder": True,
     # Optional: override auto-inferred budgets
     # "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824],
-    # "encoder_cudagraph_max_mm_items_per_batch": 8,
+    # "encoder_cudagraph_max_vision_items_per_batch": 8,
     # "encoder_cudagraph_max_frames_per_batch": 64,
 }
 
 model = vllm.LLM(
     model="Qwen/Qwen3-VL-32B",
+    limit_mm_per_prompt='{"image": 0}',
     compilation_config=compilation_config,
 )
 ```

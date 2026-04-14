@@ -67,7 +67,7 @@ class EncoderCudaGraphManager:
 
         comp_config = vllm_config.compilation_config
         user_budgets = comp_config.encoder_cudagraph_token_budgets
-        user_max_mm_items = comp_config.encoder_cudagraph_max_mm_items_per_batch
+        user_max_mm_items = comp_config.encoder_cudagraph_max_vision_items_per_batch
         user_max_frames = comp_config.encoder_cudagraph_max_frames_per_batch
 
         if user_budgets and user_max_mm_items > 0:
