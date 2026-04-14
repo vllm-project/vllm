@@ -56,6 +56,7 @@ async def test_async_llm_delete(
         ):
             pass
     del async_llm
+    # TODO: remove gc.collect() when we have https://github.com/huggingface/huggingface_hub/pull/4092
     gc.collect()
 
     # Confirm all the processes are cleaned up.
