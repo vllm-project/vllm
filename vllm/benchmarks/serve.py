@@ -439,7 +439,7 @@ def calculate_metrics(
                         ).input_ids
                     )
             actual_output_lens.append(output_len)
-            total_input += input_requests[i].prompt_len
+            total_input += outputs[i].prompt_len
             tpot = 0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
