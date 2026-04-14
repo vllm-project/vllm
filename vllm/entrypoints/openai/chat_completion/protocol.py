@@ -637,6 +637,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
+        # Reject empty tools array, matching OpenAI API behavior
+        if isinstance(data.get("tools"), list) and len(data["tools"]) == 0:
+            raise ValueError(
+                '`tools` must not be an empty array. '
+                'Either provide at least one tool or omit the field entirely.'
+            )
+
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
         if "tool_choice" not in data and data.get("tools"):
@@ -662,18 +669,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     'Only named tools, "none", "auto" or "required" '
                     "are supported."
                 )
-
-            # if tool_choice is "required" but the "tools" list is empty,
-            # override the data to behave like "none" to align with
-            # OpenAI’s behavior.
-            if (
-                data["tool_choice"] == "required"
-                and isinstance(data["tools"], list)
-                and len(data["tools"]) == 0
-            ):
-                data["tool_choice"] = "none"
-                del data["tools"]
-                return data
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
