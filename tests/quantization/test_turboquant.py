@@ -48,24 +48,24 @@ PRESET_EXPECTED = {
         key_mse_bits=4, value_quant_bits=4,
         mse_bits=4, n_centroids=16, centroid_bits=4,
         norm_correction=True,
-        key_packed_size=68, value_packed_size=68,
-        slot_size=136, slot_size_aligned=136,
+        key_packed_size=66, value_packed_size=68,
+        slot_size=134, slot_size_aligned=134,
     ),
     "turboquant_k3v4_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=4,
         mse_bits=3, n_centroids=8, centroid_bits=3,
         norm_correction=True,
-        key_packed_size=52, value_packed_size=68,
-        slot_size=120, slot_size_aligned=120,
+        key_packed_size=50, value_packed_size=68,
+        slot_size=118, slot_size_aligned=118,
     ),
     "turboquant_3bit_nc": dict(
         key_fp8=False, key_quant_bits=3,
         key_mse_bits=3, value_quant_bits=3,
         mse_bits=3, n_centroids=8, centroid_bits=3,
         norm_correction=True,
-        key_packed_size=52, value_packed_size=52,
-        slot_size=104, slot_size_aligned=104,
+        key_packed_size=50, value_packed_size=52,
+        slot_size=102, slot_size_aligned=102,
     ),
 }
 # fmt: on
@@ -287,6 +287,57 @@ class TestLloydMax:
         assert centroids.dtype == torch.float32
         assert boundaries.dtype == torch.float32
 
+    @pytest.mark.parametrize("bits", [3, 4])
+    def test_centroids_match_scipy_reference(self, bits):
+        """Verify _trapz(n=200) centroids match scipy.integrate.quad reference.
+
+        This ensures our scipy-free trapezoid integration doesn't silently
+        drift from the published Lloyd-Max quality.
+        """
+        pytest.importorskip("scipy")
+        from scipy.integrate import quad
+
+        d = 128
+        sigma2 = 1.0 / d
+        sigma = math.sqrt(sigma2)
+
+        def pdf(x):
+            return (1.0 / math.sqrt(2 * math.pi * sigma2)) * math.exp(
+                -x * x / (2 * sigma2)
+            )
+
+        n_levels = 2**bits
+        lo, hi = -3.5 * sigma, 3.5 * sigma
+        ref_centroids = [lo + (hi - lo) * (i + 0.5) / n_levels for i in range(n_levels)]
+        for _ in range(200):
+            boundaries = [
+                (ref_centroids[i] + ref_centroids[i + 1]) / 2.0
+                for i in range(n_levels - 1)
+            ]
+            edges = [lo * 3] + boundaries + [hi * 3]
+            new_centroids = []
+            for i in range(n_levels):
+                a, b = edges[i], edges[i + 1]
+                num, _ = quad(lambda x: x * pdf(x), a, b)
+                den, _ = quad(pdf, a, b)
+                new_centroids.append(num / den if den > 1e-15 else ref_centroids[i])
+            if (
+                max(abs(new_centroids[i] - ref_centroids[i]) for i in range(n_levels))
+                < 1e-10
+            ):
+                break
+            ref_centroids = new_centroids
+
+        # Compare our _trapz centroids against scipy reference
+        our_centroids, _ = solve_lloyd_max(d, bits)
+        ref_t = torch.tensor(ref_centroids, dtype=torch.float32)
+        max_err = (our_centroids - ref_t).abs().max().item()
+        # _trapz(n=200) has ~O(h^2) error vs adaptive quad; 1e-3 is tight
+        # enough to catch regression while allowing trapezoid approximation.
+        assert max_err < 1e-3, (
+            f"d={d}, bits={bits}: max centroid error vs scipy = {max_err:.2e}"
+        )
+
 
 # ============================================================================
 # Rotation matrix tests (GPU required)
@@ -295,12 +346,26 @@ class TestLloydMax:
 CUDA_AVAILABLE = torch.cuda.is_available()
 
 from vllm.model_executor.layers.quantization.turboquant.quantizer import (
-    generate_rotation_matrix,
+    generate_wht_signs,
 )
+
+
+def generate_rotation_matrix(d: int, seed: int, device: str = "cpu") -> torch.Tensor:
+    """Haar-distributed random orthogonal matrix via QR (test/benchmark only)."""
+    gen = torch.Generator(device="cpu")
+    gen.manual_seed(seed)
+    G = torch.randn(d, d, generator=gen, device="cpu", dtype=torch.float32)
+    Q, R = torch.linalg.qr(G)
+    diag_sign = torch.sign(torch.diag(R))
+    diag_sign[diag_sign == 0] = 1.0
+    Q = Q * diag_sign.unsqueeze(0)
+    return Q.to(device)
 
 
 @pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
 class TestRotationMatrix:
+    """Tests for the QR-based rotation (standalone benchmarks only)."""
+
     @pytest.mark.parametrize("dim", [64, 96, 128, 256])
     def test_rotation_matrix_shape_and_orthogonal(self, dim):
         Pi = generate_rotation_matrix(dim, seed=42, device="cuda")
@@ -325,3 +390,183 @@ class TestRotationMatrix:
         Pi = generate_rotation_matrix(128, seed=42, device="cuda")
         det = torch.linalg.det(Pi)
         assert abs(abs(det.item()) - 1.0) < 1e-4
+
+
+# ============================================================================
+# WHT rotation tests (serving path: generate_wht_signs + _build_hadamard)
+# ============================================================================
+
+
+def _build_hadamard(d: int, device: str = "cpu") -> torch.Tensor:
+    """Reproduce the serving-path Hadamard construction."""
+    H = torch.tensor([[1.0]])
+    while H.shape[0] < d:
+        H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
+    return (H / math.sqrt(d)).to(torch.device(device))
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+class TestWHTRotation:
+    """Tests for the WHT rotation actually used in serving."""
+
+    @pytest.mark.parametrize("dim", [64, 128, 256])
+    def test_wht_orthonormal(self, dim):
+        """signs * H must be orthonormal: (signs*H) @ (signs*H)^T = I."""
+        signs = generate_wht_signs(dim, seed=42, device="cuda")
+        H = _build_hadamard(dim, "cuda")
+        PiT = (signs.unsqueeze(1) * H).contiguous()
+        eye = PiT @ PiT.T
+        assert torch.allclose(eye, torch.eye(dim, device="cuda"), atol=1e-5), (
+            f"WHT rotation not orthonormal for dim={dim}"
+        )
+
+    @pytest.mark.parametrize("dim", [64, 128, 256])
+    def test_wht_self_inverse(self, dim):
+        """PiT should be self-inverse: PiT @ PiT = I (up to sign flip)."""
+        signs = generate_wht_signs(dim, seed=42, device="cuda")
+        H = _build_hadamard(dim, "cuda")
+        PiT = (signs.unsqueeze(1) * H).contiguous()
+        Pi = PiT.T.contiguous()
+        # Pi @ PiT should be identity (rotation then inverse)
+        result = Pi @ PiT
+        assert torch.allclose(result, torch.eye(dim, device="cuda"), atol=1e-5), (
+            f"WHT rotation not self-inverse for dim={dim}"
+        )
+
+    def test_wht_signs_deterministic(self):
+        """Same seed must produce identical signs."""
+        s1 = generate_wht_signs(128, seed=42)
+        s2 = generate_wht_signs(128, seed=42)
+        assert torch.equal(s1, s2)
+
+    def test_wht_signs_different_seeds(self):
+        """Different seeds must produce different signs."""
+        s1 = generate_wht_signs(128, seed=42)
+        s2 = generate_wht_signs(128, seed=99)
+        assert not torch.equal(s1, s2)
+
+    def test_wht_signs_are_pm1(self):
+        """All sign values must be exactly +1 or -1."""
+        signs = generate_wht_signs(128, seed=42)
+        assert torch.all(signs.abs() == 1.0)
+
+
+# ============================================================================
+# Store → Decode round-trip test (GPU + Triton required)
+# ============================================================================
+
+
+@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+class TestStoreDecodeRoundTrip:
+    """End-to-end: store KV into TQ cache, decode, compare vs fp16 ref."""
+
+    @pytest.mark.parametrize(
+        "preset",
+        ["turboquant_k8v4", "turboquant_4bit_nc"],
+    )
+    def test_single_token_roundtrip(self, preset):
+        """Store 1 token, decode with query=key, check attention output.
+
+        For a single token with query=key, attention output should equal
+        the value (softmax over single key = 1.0). Quantization error
+        means we check cosine similarity rather than exact equality.
+        """
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            solve_lloyd_max,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
+        D = 128
+        Hk = 4  # num_kv_heads
+        Hq = 4  # num_q_heads (no GQA for simplicity)
+        B = 1  # single token
+        block_size = 16
+        num_blocks = 1
+
+        device = torch.device("cuda")
+
+        # Generate rotation
+        signs = generate_wht_signs(D, seed=42, device=device)
+        H = _build_hadamard(D, "cuda")
+        PiT = (signs.unsqueeze(1) * H).contiguous().float()
+        Pi = PiT.T.contiguous()
+
+        # Generate centroids
+        centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+
+        # Random K, V
+        torch.manual_seed(123)
+        key = torch.randn(B, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(B, Hk, D, device=device, dtype=torch.float16)
+
+        # Allocate KV cache
+        padded_slot = cfg.slot_size_aligned
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            Hk,
+            padded_slot,
+            device=device,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.tensor([0], device=device, dtype=torch.int32)
+
+        # Store
+        triton_turboquant_store(
+            key,
+            value,
+            kv_cache,
+            slot_mapping,
+            PiT,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+        )
+
+        # Decode: use key as query so attention = softmax([1]) * V = V
+        query = key.expand(B, Hq, D).contiguous().to(torch.float16)
+        block_table = torch.tensor([[0]], device=device, dtype=torch.int32)
+        seq_lens = torch.tensor([1], device=device, dtype=torch.int32)
+
+        output = triton_turboquant_decode_attention(
+            query=query,
+            kv_cache=kv_cache,
+            block_table=block_table,
+            seq_lens=seq_lens,
+            Pi=Pi,
+            centroids=centroids,
+            scale=1.0 / math.sqrt(D),
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+            norm_correction=cfg.norm_correction,
+            PiT=PiT,
+            max_num_kv_splits=4,
+        )
+
+        # With single KV, output should approximate the stored value.
+        # Check per-head cosine similarity > threshold.
+        out_fp32 = output.float()
+        val_fp32 = value.expand(B, Hq, D).float()
+        for h in range(Hq):
+            cos_sim = torch.nn.functional.cosine_similarity(
+                out_fp32[0, h].unsqueeze(0),
+                val_fp32[0, h].unsqueeze(0),
+            ).item()
+            # FP8 keys should be very accurate; MSE keys have more error
+            threshold = 0.95 if cfg.key_fp8 else 0.85
+            assert cos_sim > threshold, (
+                f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
+            )

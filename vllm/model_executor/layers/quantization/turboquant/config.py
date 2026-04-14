@@ -109,12 +109,11 @@ class TurboQuantConfig:
         TQ mode:
           - MSE indices: ceil(head_dim * key_mse_bits / 8) bytes
           - vec_norm:     2 bytes (float16)
-          - res_norm:     2 bytes (float16)
         """
         if self.key_fp8:
             return self.head_dim  # 1 byte per element
         mse_bytes = math.ceil(self.head_dim * self.key_mse_bits / 8)
-        norm_bytes = 4  # 2x float16
+        norm_bytes = 2  # vec_norm fp16
         return mse_bytes + norm_bytes
 
     @property

@@ -1634,12 +1634,13 @@ class EngineArgs:
         # TurboQuant: auto-skip first/last 2 layers (boundary protection).
         # These layers are most sensitive to quantization error.
         # Users can add extra layers via --kv-cache-dtype-skip-layers.
-        # Disabled for hybrid models (attn+mamba) — mixed page sizes break
-        # the required page size unification.
-        if (
-            resolved_cache_dtype.startswith("turboquant_")
-            and not model_config.is_hybrid
-        ):
+        if resolved_cache_dtype.startswith("turboquant_"):
+            if model_config.is_hybrid:
+                raise NotImplementedError(
+                    "TurboQuant KV cache is not supported for hybrid "
+                    "(attention + Mamba) models. Boundary layer protection "
+                    "requires uniform attention layers."
+                )
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )
@@ -1954,6 +1955,19 @@ class EngineArgs:
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
             )
+
+        # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
+        # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
+        if resolved_cache_dtype.startswith("turboquant_"):
+            if attention_config.flash_attn_version is None or (
+                attention_config.flash_attn_version >= 3
+            ):
+                logger.warning(
+                    "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                    "Overriding flash_attn_version to 2. To silence this "
+                    "warning, pass --attention-config.flash_attn_version=2"
+                )
+                attention_config.flash_attn_version = 2
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)

@@ -15,22 +15,15 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-_FP8_E4B15: int | None = None
+_FP8_E4B15: dict[int, int] = {}
 
 
 def _use_fp8_e4b15(device: int = 0) -> int:
-    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0.
-    On non-CUDA platforms (e.g. XPU), always returns 0 (use e4nv format).
-    """
-    global _FP8_E4B15
-    if _FP8_E4B15 is None:
-        if current_platform.is_cuda_alike():
-            cap = torch.cuda.get_device_capability(device)
-            _FP8_E4B15 = 1 if cap < (8, 9) else 0
-        else:
-            _FP8_E4B15 = 0
-    return _FP8_E4B15
-
+    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
+    if device not in _FP8_E4B15:
+        cap = torch.cuda.get_device_capability(device)
+        _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
+    return _FP8_E4B15[device]
 
 # ---------------------------------------------------------------------------
 # Stage 1: Fused TQ score + value accumulation (BLOCK_KV tiled)
@@ -340,7 +333,6 @@ def _tq_full_dequant_kv(
     VQB: tl.constexpr,
     VAL_DATA_BYTES: tl.constexpr,
     MSE_BITS: tl.constexpr,
-    N_CENTROIDS: tl.constexpr,
     KEY_FP8: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NORM_CORRECTION: tl.constexpr = 0,
@@ -386,8 +378,8 @@ def _tq_full_dequant_kv(
         mse_raw1 = tl.load(
             KV_cache_ptr + slot_base + mse_byte_idx + 1, mask=d_mask, other=0
         ).to(tl.int32)
-        raw16 = mse_raw0 | (mse_raw1 << 8)
-        mse_idx = (raw16 >> mse_bit_shift) & mse_umask
+        raw16_key = mse_raw0 | (mse_raw1 << 8)
+        mse_idx = (raw16_key >> mse_bit_shift) & mse_umask
 
         k_mse = tl.load(Centroids_ptr + mse_idx, mask=d_mask, other=0.0)
 
@@ -435,8 +427,8 @@ def _tq_full_dequant_kv(
         val_raw1 = tl.load(
             KV_cache_ptr + val_base + val_byte_idx + 1, mask=d_mask, other=0
         ).to(tl.int32)
-        raw16 = val_raw0 | (val_raw1 << 8)
-        v_idx = ((raw16 >> val_bit_shift) & 0x7).to(tl.float32)
+        raw16_val = val_raw0 | (val_raw1 << 8)
+        v_idx = ((raw16_val >> val_bit_shift) & 0x7).to(tl.float32)
 
         sc_base = val_base + VAL_DATA_BYTES
         sc_lo = tl.load(KV_cache_ptr + sc_base).to(tl.uint16)

@@ -4,9 +4,8 @@
 
 Two kernels:
 1. _tq_fused_store_fp8: FP8 key scatter + value uniform quantization.
-2. _tq_fused_store_mse: Fused bucketize + centroid gather + residual norm
-   + MSE index packing + value quantization (eliminates 4 PyTorch kernel
-   launches vs the old pack-only approach).
+2. _tq_fused_store_mse: Fused binary-search bucketize + MSE index
+   packing + value quantization.
 
 The launcher `triton_turboquant_store` selects the appropriate kernel.
 """
@@ -35,6 +34,7 @@ def _store_quantized_value(
     KPS: tl.constexpr,
     VQB: tl.constexpr,
     VAL_DATA_BYTES: tl.constexpr,
+    BLOCK_D: tl.constexpr,
     BLOCK_VAL: tl.constexpr,
     BLOCK_GRP: tl.constexpr,
 ):
@@ -103,25 +103,16 @@ def _store_quantized_value(
         v_scale = (val_max - val_min) / 15.0
         v_scale = tl.where(v_scale > 1e-8, v_scale, 1e-8)
 
-        val_offs = tl.arange(0, BLOCK_VAL)
+        # Quantize all D elements from register (no re-load)
+        q_all = tl.minimum(
+            tl.maximum(((val_vec - val_min) / v_scale + 0.5).to(tl.int32), 0), 15
+        )
+        # Reshape to pairs and pack two 4-bit values per byte
+        q_pairs = tl.reshape(q_all, [BLOCK_D // 2, 2])
+        shifts_4 = tl.arange(0, 2) * 4
+        packed_val = tl.sum((q_pairs & 0xF) << shifts_4[None, :], axis=1).to(tl.uint8)
+        val_offs = tl.arange(0, BLOCK_D // 2)
         val_mask = val_offs < VAL_DATA_BYTES
-        v0 = tl.load(
-            Value_ptr + base + val_offs * 2,
-            mask=val_mask & (val_offs * 2 < D),
-            other=val_min,
-        )
-        v1 = tl.load(
-            Value_ptr + base + val_offs * 2 + 1,
-            mask=val_mask & (val_offs * 2 + 1 < D),
-            other=val_min,
-        )
-        q0 = tl.minimum(
-            tl.maximum(((v0 - val_min) / v_scale + 0.5).to(tl.int32), 0), 15
-        )
-        q1 = tl.minimum(
-            tl.maximum(((v1 - val_min) / v_scale + 0.5).to(tl.int32), 0), 15
-        )
-        packed_val = (q0 | (q1 << 4)).to(tl.uint8)
         tl.store(
             KV_cache_ptr + slot_base + val_cache_offset + val_offs,
             packed_val,
@@ -175,7 +166,7 @@ def _tq_fused_store_fp8(
     BLOCK_GRP: tl.constexpr = 16,
     FP8_E4B15: tl.constexpr = 0,  # 1 = e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
 ):
-    """FP8 key cast+scatter + value uniform quantization: one program per (token, head)."""
+    """FP8 key cast+scatter + value uniform quantization."""
     pid = tl.program_id(0)
     token_idx = pid // H
     head_idx = pid % H
@@ -214,13 +205,14 @@ def _tq_fused_store_fp8(
         KPS=KPS,
         VQB=VQB,
         VAL_DATA_BYTES=VAL_DATA_BYTES,
+        BLOCK_D=BLOCK_D,
         BLOCK_VAL=BLOCK_VAL,
         BLOCK_GRP=BLOCK_GRP,
     )
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Fused MSE store: bucketize + centroid gather + residual norm + pack
+# Fused MSE store: bucketize + MSE index pack + norm store + value pack
 # (eliminates 4 PyTorch kernel launches per layer vs pack-only kernel)
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -232,7 +224,6 @@ def _tq_fused_store_mse(
     Norms_ptr,  # [NH] float32 — key vector norms (||k||)
     Value_ptr,  # [NH, D] float32 — raw values
     # Quantization tables
-    Centroids_ptr,  # [n_centroids] float32
     Midpoints_ptr,  # [n_centroids-1] float32
     # Cache and indexing
     KV_cache_ptr,  # [total_bytes] uint8 (flattened view)
@@ -261,9 +252,8 @@ def _tq_fused_store_mse(
 ):
     """Fused MSE quantize + pack + store.
 
-    Performs bucketize, centroid gather, residual norm, MSE index packing,
-    and value quantization in one kernel — eliminates 4 PyTorch kernel
-    launches (bucketize, gather, subtract, norm) per layer vs pack-only.
+    Performs binary-search bucketize, MSE index packing, norm storage,
+    and value quantization in one kernel.
     """
     pid = tl.program_id(0)
     token_idx = pid // H
@@ -282,19 +272,24 @@ def _tq_fused_store_mse(
     d_offs = tl.arange(0, BLOCK_D)
     d_mask = d_offs < D
 
-    # ── 1. INLINE BUCKETIZE ──────────────────────────────────────────
+    # ── 1. BINARY SEARCH BUCKETIZE ───────────────────────────────────
+    # Midpoints are sorted (N_CENTROIDS-1 values); binary search finds
+    # insertion point in MSE_BITS iterations vs N_CENTROIDS-1 for linear.
     y_vec = tl.load(Y_ptr + base + d_offs, mask=d_mask, other=0.0)
-    idx = tl.zeros([BLOCK_D], dtype=tl.int32)
-    for i in range(N_CENTROIDS - 1):
-        mid_val = tl.load(Midpoints_ptr + i)
-        idx += tl.where(y_vec >= mid_val, 1, 0)
+    lo = tl.zeros([BLOCK_D], dtype=tl.int32)
+    hi = tl.full([BLOCK_D], N_CENTROIDS - 1, dtype=tl.int32)
+    for _ in range(MSE_BITS):
+        mid = (lo + hi) >> 1
+        # Clamp to valid midpoint index [0, N_CENTROIDS-2] for load safety;
+        # the search result (lo) is still correct since converged lanes
+        # don't change.
+        safe_mid = tl.minimum(mid, N_CENTROIDS - 2)
+        mid_val = tl.load(Midpoints_ptr + safe_mid, mask=d_mask, other=0.0)
+        lo = tl.where(y_vec >= mid_val, mid + 1, lo)
+        hi = tl.where(y_vec >= mid_val, hi, mid)
+    idx = tl.minimum(lo, N_CENTROIDS - 1)
 
-    # ── 2. CENTROID GATHER + RESIDUAL NORM ────────────────────────────
-    centroid_vals = tl.load(Centroids_ptr + idx, mask=d_mask, other=0.0)
-    residual = y_vec - centroid_vals
-    gamma = tl.sqrt(tl.sum(tl.where(d_mask, residual * residual, 0.0), axis=0))
-
-    # ── 3. PACK MSE INDICES from register idx ─────────────────────────
+    # ── 2. PACK MSE INDICES from register idx ─────────────────────────
     if MSE_BITS == 4:
         idx_pairs = tl.reshape(idx, [BLOCK_D // 2, 2])
         shifts_4 = tl.arange(0, 2) * 4
@@ -316,7 +311,7 @@ def _tq_fused_store_mse(
         tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 1, b1, mask=grp_mask)
         tl.store(KV_cache_ptr + slot_base + grp_offs * 3 + 2, b2, mask=grp_mask)
 
-    # ── 4. STORE NORMS (vec_norm + gamma as fp16) ─────────────────────
+    # ── 3. STORE vec_norm (fp16, 2 bytes) ─────────────────────────────
     norm_offset = MSE_BYTES
 
     vn_f16 = tl.load(Norms_ptr + pid).to(tl.float16)
@@ -326,14 +321,7 @@ def _tq_fused_store_mse(
         KV_cache_ptr + slot_base + norm_offset + 1, ((vn_u16 >> 8) & 0xFF).to(tl.uint8)
     )
 
-    gm_f16 = gamma.to(tl.float16)
-    gm_u16 = gm_f16.to(tl.uint16, bitcast=True)
-    tl.store(KV_cache_ptr + slot_base + norm_offset + 2, (gm_u16 & 0xFF).to(tl.uint8))
-    tl.store(
-        KV_cache_ptr + slot_base + norm_offset + 3, ((gm_u16 >> 8) & 0xFF).to(tl.uint8)
-    )
-
-    # ── 5. VALUE QUANTIZE + PACK ──────────────────────────────────────
+    # ── 4. VALUE QUANTIZE + PACK ──────────────────────────────────────
     _store_quantized_value(
         Value_ptr,
         KV_cache_ptr,
@@ -345,6 +333,7 @@ def _tq_fused_store_mse(
         KPS=KPS,
         VQB=VQB,
         VAL_DATA_BYTES=VAL_DATA_BYTES,
+        BLOCK_D=BLOCK_D,
         BLOCK_VAL=BLOCK_VAL,
         BLOCK_GRP=BLOCK_GRP,
     )
@@ -361,19 +350,16 @@ def triton_turboquant_store(
     kv_cache: torch.Tensor,  # [num_blocks, block_size, Hk, padded_slot] uint8
     slot_mapping: torch.Tensor,  # [N] int32
     PiT: torch.Tensor,  # [D, D] float32
-    centroids: torch.Tensor,  # [n_centroids] float32
     midpoints: torch.Tensor,  # [n_centroids-1] float32
     mse_bits: int,
     key_packed_size: int,
     value_quant_bits: int,
     key_fp8: bool = False,
 ):
-    """Launch TQ store kernel — FP8 uses _tq_fused_store_fp8, MSE uses _tq_fused_store_mse."""
+    """Launch TQ store kernel (FP8 or MSE path)."""
     N, H, D = key.shape
     NH = N * H
     block_size = kv_cache.shape[1]
-    num_kv_heads = kv_cache.shape[2]
-    padded_slot = kv_cache.shape[3]
     BLOCK_D = triton.next_power_of_2(D)
     mse_bytes = math.ceil(D * mse_bits / 8)
     n_centroids = 2**mse_bits
@@ -382,10 +368,10 @@ def triton_turboquant_store(
 
     BLOCK_VAL = triton.next_power_of_2(val_data_bytes)
 
-    # Cache strides
-    stride_block = block_size * num_kv_heads * padded_slot
-    stride_pos = num_kv_heads * padded_slot
-    stride_head = padded_slot
+    # Cache strides (element_size=1 for uint8, so stride in bytes = stride())
+    stride_block = kv_cache.stride(0)
+    stride_pos = kv_cache.stride(1)
+    stride_head = kv_cache.stride(2)
 
     block_grp = triton.next_power_of_2(D // 8) if D >= 8 else 1
 
@@ -425,17 +411,16 @@ def triton_turboquant_store(
     k_flat = key.float().reshape(NH, D)
     norms = k_flat.norm(dim=1, keepdim=True)
     x_hat = k_flat / (norms + 1e-8)
-    y = (x_hat @ PiT).contiguous()
+    y = x_hat @ PiT
 
     v_flat = value.float().reshape(NH, D)
 
-    # Fused kernel: bucketize + centroid gather + residual norm + pack
+    # Fused kernel: bucketize + MSE index pack + norm store + value pack
     grid = (NH,)
     _tq_fused_store_mse[grid](
         y,
         norms.squeeze(1),
         v_flat,
-        centroids,
         midpoints,
         kv_cache.view(-1),
         slot_mapping,
