@@ -164,23 +164,44 @@ class LoRAModelManager:
 
         lm_prefix = self.mm_mapping.language_model[0]
         self.punica_wrapper_mapping[lm_prefix] = llm_punica_wrapper
-        if self.lora_config.enable_tower_connector_lora:
-            self.supports_tower_connector_lora = self.supports_mm and hasattr(
-                self.model, "get_num_mm_encoder_tokens"
-            )
-        if not self.supports_tower_connector_lora:
+
+        # First, determine if the model supports tower connector LoRA.
+        self.supports_tower_connector_lora = self.supports_mm and hasattr(
+            self.model, "get_num_mm_encoder_tokens"
+        )
+
+        # Then, handle the case where the feature is disabled in the config.
+        if not self.lora_config.enable_tower_connector_lora:
+            if self.supports_tower_connector_lora:
+                logger.info(
+                    "%s supports adding LoRA to the tower modules. If needed, "
+                    "please set `enable_tower_connector_lora=True`.",
+                    self.model.__class__.__name__,
+                )
+            self.supports_tower_connector_lora = False
             return
 
+        # After this point, the feature is enabled in the config.
+        # Now check if it's supported by the model.
+        if not self.supports_tower_connector_lora:
+            # Enabled but not supported: log warning and return.
+            logger.warning(
+                "LoRA with tower connector is enabled, but the model %s "
+                "does not support it. This will be ignored.",
+                self.model.__class__.__name__,
+            )
+            return
+
+        # Check if initialize the language model only.
         if (
             vllm_config.model_config.multimodal_config
             and vllm_config.model_config.multimodal_config.language_model_only
         ):
-            if self.supports_tower_connector_lora:
-                logger.warning(
-                    "Disabling `enable_tower_connector_lora` because the multimodal "
-                    "model is configured to initialize the language model only."
-                )
-                self.supports_tower_connector_lora = False
+            logger.warning(
+                "Disabling `enable_tower_connector_lora` because the multimodal "
+                "model is configured to initialize the language model only."
+            )
+            self.supports_tower_connector_lora = False
             return
 
         logger.warning(
@@ -269,6 +290,9 @@ class LoRAModelManager:
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
                 module.reset_lora(index)
+                logger.debug(
+                    "No LoRA weights found for module %s, skipping.", module_name
+                )
                 continue
 
             module.set_lora(
@@ -276,7 +300,7 @@ class LoRAModelManager:
                 module_lora.lora_a,
                 module_lora.lora_b,
             )
-
+            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
         return True
 
     def _deactivate_adapter(self, lora_id: int):
@@ -346,8 +370,8 @@ class LoRAModelManager:
             punica_wrapper = self._get_punica_wrapper(module_name)
             if punica_wrapper is None:
                 logger.warning(
-                    "Regarding %s, vLLM currently only supports adding LoRA to"
-                    " language model, %s will be ignored.",
+                    "Regarding %s, no matching PunicaWrapper "
+                    "is found; %s will be ignored.",
                     self.model.__class__.__name__,
                     module_name,
                 )

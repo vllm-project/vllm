@@ -10,10 +10,13 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .prefix_prefill import context_attention_fwd
+
+logger = init_logger(__name__)
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
@@ -411,6 +414,10 @@ def chunked_prefill_paged_decode(
             use_interleaved_v_cache=use_interleaved_v_cache,
         )
     else:
+        logger.warning_once(
+            "Cannot use ROCm custom paged attention kernel,"
+            " falling back to Triton implementation."
+        )
         real_block_size = value_cache.shape[3]
         # The standard model directly uses the original block_size.
         # Non-standard 544 uses 32 to accommodate integer division logic.

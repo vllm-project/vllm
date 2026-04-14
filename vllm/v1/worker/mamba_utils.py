@@ -67,6 +67,8 @@ class MambaCopyBuffers:
     src_ptrs: CpuGpuBuffer
     dst_ptrs: CpuGpuBuffer
     sizes: CpuGpuBuffer
+    mamba_group_ids: list[int]
+    mamba_spec: MambaSpec
     offset: int = 0
 
     @classmethod
@@ -77,7 +79,7 @@ class MambaCopyBuffers:
         copy_funcs: tuple[MambaStateCopyFunc, ...],
         make_buffer: Callable[..., CpuGpuBuffer],
     ) -> "MambaCopyBuffers":
-        mamba_group_ids, _ = get_mamba_groups(kv_cache_config)
+        mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
         entries_per_req = sum(
             len(kv_cache_config.kv_cache_groups[gid].layer_names)
             for gid in mamba_group_ids
@@ -87,6 +89,8 @@ class MambaCopyBuffers:
             src_ptrs=make_buffer(n, dtype=torch.int64),
             dst_ptrs=make_buffer(n, dtype=torch.int64),
             sizes=make_buffer(n, dtype=torch.int32),
+            mamba_group_ids=mamba_group_ids,
+            mamba_spec=mamba_spec,
         )
 
 
@@ -115,7 +119,7 @@ def collect_mamba_copy_meta(
         layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
         for layer_name in layer_names:
             attention = forward_context[layer_name]
-            kv_caches: list[torch.Tensor] = attention.kv_cache[0]
+            kv_caches: list[torch.Tensor] = attention.kv_cache
             for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
                 copy_spec = state_copy_func(
                     state, block_ids, src_block_idx, accept_token_bias + 1
@@ -155,7 +159,8 @@ def preprocess_mamba(
     Copy the mamba state of previous step to the last
     (1 + num_speculative_blocks) block.
     """
-    mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+    mamba_group_ids = copy_bufs.mamba_group_ids
+    mamba_spec = copy_bufs.mamba_spec
     num_speculative_blocks = mamba_spec.num_speculative_blocks
     # TODO(Chen): we need to optimize this function a lot
     assert cache_config.enable_prefix_caching
@@ -231,8 +236,8 @@ def postprocess_mamba(
     num_scheduled_tokens_dict = scheduler_output.num_scheduled_tokens
     scheduled_spec_decode_tokens_dict = scheduler_output.scheduled_spec_decode_tokens
     num_accepted_tokens_cpu = input_batch.num_accepted_tokens_cpu
-    # NOTE: can be optimized as this function always returns the same result
-    mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+    mamba_group_ids = copy_bufs.mamba_group_ids
+    mamba_spec = copy_bufs.mamba_spec
     copy_bufs.offset = 0
     for i, req_id in enumerate(input_batch.req_ids):
         req_state = requests[req_id]
@@ -266,45 +271,3 @@ def postprocess_mamba(
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(copy_bufs)
-
-
-def update_accepted_tokens_for_prefill_as_decode(
-    input_batch: GPUInputBatch,
-    prefill_as_decode_num_tokens: CpuGpuBuffer,
-    num_accepted_tokens_gpu: torch.Tensor,
-    scheduler_output: SchedulerOutput,
-    decode_qlen_threshold: int | None,
-    num_reqs: int,
-):
-    """
-    Adjusts num_accepted_tokens for prefill chunks processed via the decode path.
-    This ensures subsequent iterations read from the correct sequential state slot
-    instead of the default prefill slot 0. Not used by GDN attention, which manually
-    separates short prefills and short decodes when building the attention metadata.
-    """
-    any_is_prefill = False
-    for i in range(num_reqs):
-        num_computed = input_batch.num_computed_tokens_cpu[i]
-        num_prompt = input_batch.num_prompt_tokens[i]
-        is_prefill = num_computed < num_prompt
-        req_id = input_batch.req_ids[i]
-        query_len = scheduler_output.num_scheduled_tokens[req_id]
-
-        if is_prefill:
-            classified_as_decode = (
-                decode_qlen_threshold is not None and query_len <= decode_qlen_threshold
-            )
-            num_tokens = query_len if classified_as_decode else 1
-            any_is_prefill = True
-        else:
-            num_tokens = -1
-        prefill_as_decode_num_tokens.np[i] = num_tokens
-
-    # We can skip the GPU transfer if there aren't any values to update
-    if any_is_prefill:
-        prefill_as_decode_num_tokens.copy_to_gpu(num_reqs)
-        num_accepted_tokens_gpu[:num_reqs] = torch.where(
-            prefill_as_decode_num_tokens.gpu[:num_reqs] != -1,
-            prefill_as_decode_num_tokens.gpu[:num_reqs],
-            num_accepted_tokens_gpu[:num_reqs],
-        )

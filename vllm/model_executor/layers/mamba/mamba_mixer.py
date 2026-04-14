@@ -24,6 +24,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
+    is_conv_state_dim_first,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -35,7 +36,12 @@ from vllm.model_executor.layers.mamba.ops.mamba_ssm import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backends.mamba1_attn import Mamba1AttentionMetadata
 
 
@@ -227,7 +233,7 @@ class MambaMixer(MambaBase, PluggableLayer):
         torch.ops.vllm.mamba_mixer(
             hidden_states,
             output,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
     def forward_impl(self, hidden_states: torch.Tensor, output: torch.Tensor):
@@ -267,9 +273,12 @@ class MambaMixer(MambaBase, PluggableLayer):
             query_start_loc_p = attn_metadata.query_start_loc_p
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
-            self_kv_cache = self.kv_cache[forward_context.virtual_engine]
-            conv_state = self_kv_cache[0].transpose(-1, -2)
-            ssm_state = self_kv_cache[1]
+            conv_state = (
+                self.kv_cache[0]
+                if is_conv_state_dim_first()
+                else self.kv_cache[0].transpose(-1, -2)
+            )
+            ssm_state = self.kv_cache[1]
             has_initial_states_p = attn_metadata.has_initial_states_p
             cu_chunk_seqlen_p = attn_metadata.cu_chunk_seqlen_p
             last_chunk_indices_p = attn_metadata.last_chunk_indices_p
@@ -428,6 +437,8 @@ class MambaMixer(MambaBase, PluggableLayer):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=scan_outputs_d,
+                enable_stochastic_rounding=self.cache_config.enable_mamba_cache_stochastic_rounding,
+                cache_philox_rounds=self.cache_config.mamba_cache_philox_rounds,
             )
             scan_outputs_d = scan_outputs_d.transpose(0, 1)
 
@@ -509,8 +520,9 @@ def split_batch_to_prefill_and_decode(
 def mamba_mixer(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self.forward_impl(hidden_states=hidden_states, output=output)
@@ -519,7 +531,7 @@ def mamba_mixer(
 def mamba_mixer_fake(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     return
 

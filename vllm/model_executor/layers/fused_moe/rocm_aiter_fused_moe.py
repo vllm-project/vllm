@@ -10,6 +10,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
+    FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
@@ -24,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kMxfp4Static,
 )
 
 
@@ -185,6 +187,7 @@ def rocm_aiter_fused_experts(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    moe_config: FusedMoEConfig,
     activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
     expert_map: torch.Tensor | None = None,
@@ -201,6 +204,8 @@ def rocm_aiter_fused_experts(
         activation_method = ActivationMethod.SILU
     elif activation == MoEActivation.GELU:
         activation_method = ActivationMethod.GELU
+    elif activation == MoEActivation.SWIGLUOAI:
+        activation_method = rocm_aiter_ops.get_aiter_activation_type("swiglu")
     else:
         raise ValueError(f"Unsupported activation: {activation}")
 
@@ -247,8 +252,8 @@ def rocm_aiter_fused_experts(
 
     else:
         quant_method = QuantMethod.NO.value
-        # quark moe for mxfp4 w_dtype mxfp4 a_dtype
-        if quant_config.use_mxfp4_w4a4:
+        # mxfp4: both w4a4 (quark) and w4a16 (oracle CK) use BLOCK_1X32
+        if quant_config.use_mxfp4_w4a4 or quant_config.use_mxfp4_w4a16:
             quant_method = QuantMethod.BLOCK_1X32.value
         # w8a8 block-scaled
         if quant_config.block_shape is not None and quant_config.use_fp8_w8a8:
@@ -273,6 +278,17 @@ def rocm_aiter_fused_experts(
                 "Only support topk=1 when `apply_router_weight_on_input` is True"
             )
 
+        # Compute padding on-the-fly for CK MXFP4 kernels
+        hidden_pad = 0
+        intermediate_pad = 0
+        assert moe_config.hidden_dim_unpadded is not None
+        assert moe_config.intermediate_size_per_partition_unpadded is not None
+        hidden_pad = hidden_states.shape[1] - moe_config.hidden_dim_unpadded
+        intermediate_pad = (
+            moe_config.intermediate_size_per_partition
+            - moe_config.intermediate_size_per_partition_unpadded
+        )
+
         return rocm_aiter_ops.fused_moe(
             hidden_states,
             w1,
@@ -289,13 +305,22 @@ def rocm_aiter_fused_experts(
             doweight_stage1=apply_router_weight_on_input,
             num_local_tokens=num_local_tokens,
             output_dtype=output_dtype,
+            hidden_pad=hidden_pad,
+            intermediate_pad=intermediate_pad,
+            bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
+            bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
         )
 
 
 class AiterExperts(mk.FusedMoEExpertsModular):
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return True
+        # When paired with MoRI, the prepare/finalize handles FP8
+        # quantization during dispatch to reduce network traffic,
+        # so we should not defer input quantization.
+        # Otherwise, AITER fused MoE kernels handle input quantization
+        # internally via a single fused kernel.
+        return not self.moe_config.use_mori_kernels
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -314,21 +339,31 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TODO(rob): AITER also supports MXFP4, which is not
-        # yet supported via an Oracle. Once it is, we will add
-        # MXFP4 to this list.
         SUPPORTED_W_A = [
             (None, None),
             (kFp8Static128BlockSym, kFp8Dynamic128Sym),
             (kFp8StaticTensorSym, kFp8StaticTensorSym),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
             (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+            (kMxfp4Static, None),
         ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        if (weight_key, activation_key) not in SUPPORTED_W_A:
+            return False
+        # CK MXFP4 MoE kernels are only supported on gfx950.
+        if weight_key == kMxfp4Static:
+            from vllm.platforms.rocm import on_gfx950
+
+            if not on_gfx950():
+                return False
+        return True
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [MoEActivation.SILU, MoEActivation.GELU]
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -397,6 +432,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_map=expert_map,
             quant_config=self.quant_config,
+            moe_config=self.moe_config,
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
