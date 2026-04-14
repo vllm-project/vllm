@@ -115,7 +115,17 @@ class EagleSpeculator:
             cudagraph_mode,
             self.num_speculative_steps + 1,
         )
-        # Initialize cudagraph manager for draft generation (draft positions > 0).
+
+        # PIECEWISE cudagraphs are not supported for eagle draft decodes.
+        # PIECEWISE pads num_tokens to the next capture size without padding
+        # num_reqs, which can cause attention backends to read past the
+        # valid per-request metadata (e.g. FlashInfer's kv_indptr buffer).
+        if cudagraph_mode.decode_mode() == CUDAGraphMode.FULL:
+            cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        else:
+            cudagraph_mode = CUDAGraphMode.NONE
+
+        # Initialize cudagraph manager for draft decodes (draft positions > 0).
         self.decode_cudagraph_manager = EagleCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -366,11 +376,8 @@ class EagleSpeculator:
 
         # Capture the decode draft generation loop (model forward +
         # compute_logits + gumbel_sample + update_eagle_inputs, for
-        # each step).
-        # For FULL graphs, the entire multi-step loop is recorded as
-        # one graph. For PIECEWISE, only the model's compiled regions
-        # are captured, and the rest (compute_logits, gumbel_sample,
-        # update_eagle_inputs) runs eagerly.
+        # each step). For FULL graphs, the entire multi-step loop is
+        # recorded as one graph.
         assert self.decode_cudagraph_manager is not None
         self.decode_cudagraph_manager.capture(
             self.generate_draft,
