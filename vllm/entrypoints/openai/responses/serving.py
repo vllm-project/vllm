@@ -1575,11 +1575,13 @@ class OpenAIServingResponses(OpenAIServing):
                     previous_delta_messages = []
                 if delta_message.tool_calls and delta_message.tool_calls[0].function:
                     tool_call = delta_message.tool_calls[0]
+                    tool_call_function = tool_call.function
                     if (
                         current_tool_call_index is not None
                         and tool_call.index is not None
                         and tool_call.index != current_tool_call_index
-                        and tool_call.function.name is not None
+                        and tool_call_function is not None
+                        and tool_call_function.name is not None
                     ):
                         # From one tool call to another, finalize the previous
                         # function-call item before opening the next one.
@@ -1624,7 +1626,7 @@ class OpenAIServingResponses(OpenAIServing):
                         previous_delta_messages = []
                         current_output_index += 1
                         current_item_id = random_uuid()
-                        current_tool_call_name = tool_call.function.name
+                        current_tool_call_name = tool_call_function.name
                         current_tool_call_id = f"call_{random_uuid()}"
                         current_tool_call_index = tool_call.index
                         yield _increment_sequence_number_and_return(
