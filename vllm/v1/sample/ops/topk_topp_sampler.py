@@ -244,7 +244,7 @@ class TopKTopPSampler(nn.Module):
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if generators:
-            logger.debug_once(
+            logger.warning_once(
                 "xpu kernel topk_topp_sampler does not support "
                 "per-request generators. Falling back to "
                 "PyTorch-native implementation."
