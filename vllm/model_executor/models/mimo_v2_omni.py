@@ -24,8 +24,10 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.multimodal import MULTIMODAL_REGISTRY
 
 from .interfaces import (
+    MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -34,8 +36,72 @@ from .qwen2_5_vl import (
     Qwen2_5_VisionMLP,
     Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionPatchMerger,
+    Qwen2_5_VLDummyInputsBuilder,
+    Qwen2_5_VLImageEmbeddingInputs,
+    Qwen2_5_VLImageInputs,
+    Qwen2_5_VLImagePixelInputs,
+    Qwen2_5_VLMultiModalProcessor,
+    Qwen2_5_VLProcessingInfo,
+    Qwen2_5_VLVideoEmbeddingInputs,
+    Qwen2_5_VLVideoInputs,
+    Qwen2_5_VLVideoPixelInputs,
 )
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
+
+
+class Mimo_VLVisionConfig(PretrainedConfig):
+    model_type = "mimovl"
+    base_config_key = "vision_config"
+
+    def __init__(
+        self,
+        depth=28,
+        hidden_size=1280,
+        hidden_act="silu",
+        intermediate_size=4608,
+        num_heads=32,
+        in_channels=3,
+        patch_size=16,
+        spatial_merge_size=2,
+        temporal_patch_size=2,
+        tokens_per_second=2,
+        window_size=128,
+        out_hidden_size=2048,
+        fullatt_block_indexes=[7, 15, 23, 31],
+        initializer_range=0.02,
+        kv_channels=64,  # HACK
+        qk_channels=64,
+        num_query_groups=4,
+        num_key_value_heads=8,
+        vit_window_attn_types=None,
+        visual_token_window_size=64,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.depth = depth
+        self.hidden_size = hidden_size
+        self.hidden_act = hidden_act
+        self.intermediate_size = intermediate_size
+        self.num_heads = num_heads
+        # Support GQA: if num_key_value_heads is not provided, default to num_heads (MHA)
+        if num_key_value_heads is None:
+            num_key_value_heads = num_heads
+        self.num_key_value_heads = num_key_value_heads
+        self.in_channels = in_channels
+        self.patch_size = patch_size
+        self.spatial_merge_size = spatial_merge_size
+        self.temporal_patch_size = temporal_patch_size
+        self.tokens_per_second = tokens_per_second
+        self.window_size = window_size
+        self.fullatt_block_indexes = fullatt_block_indexes
+        self.out_hidden_size = out_hidden_size
+        self.initializer_range = initializer_range
+        self.kv_channels = kv_channels
+        self.qk_channels = qk_channels
+        self.num_query_groups = num_query_groups
+        self.vit_window_attn_types = vit_window_attn_types or [-1] * depth
+        self.visual_token_window_size = visual_token_window_size
 
 
 class MiMoVisionMLP(Qwen2_5_VisionMLP):
@@ -328,7 +394,7 @@ class MiMoVisionTransformer(nn.Module):
             patch_size=vision_cfg.patch_size,
             temporal_patch_size=vision_cfg.temporal_patch_size,
             in_channels=vision_cfg.in_channels,
-            embed_dim=vision_cfg.hidden_size,
+            hidden_size=vision_cfg.hidden_size,
         )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
@@ -577,13 +643,43 @@ class MiMoVisionTransformer(nn.Module):
         return loaded_params
 
 
+class MiMoV2OmniProcessingInfo(Qwen2_5_VLProcessingInfo):
+    def get_hf_config(self):
+        config = self.ctx.get_hf_config()
+        if isinstance(config.vision_config, dict):
+            config.vision_config = Mimo_VLVisionConfig.from_dict(config.vision_config)
+        return config
+
+
+@MULTIMODAL_REGISTRY.register_processor(
+    Qwen2_5_VLMultiModalProcessor,
+    info=MiMoV2OmniProcessingInfo,
+    dummy_inputs=Qwen2_5_VLDummyInputsBuilder,
+)
 class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+    # To ensure correct weight loading and mapping.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            # mapping for new names in checkpoint saved after transformers v4.52
+            "model.language_model.": "language_model.model.",
+            "model.visual.": "visual.",
+            # mapping for original checkpoint
+            "lm_head.": "language_model.lm_head.",
+            "model.": "language_model.model.",
+        }
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         # Omni ViT/Audio Encoder BF16
+        vision_config = (
+            Mimo_VLVisionConfig.from_dict(config.vision_config)
+            if isinstance(config.vision_config, dict)
+            else config.vision_config
+        )
         self.visual = MiMoVisionTransformer(
-            config.vision_config,
+            vision_config,
             norm_eps=getattr(vllm_config, "rms_norm_eps", 1e-6),
             quant_config=None,
             prefix=maybe_prefix("visual", prefix),
@@ -591,6 +687,195 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # self.audio_config = config.audio_config
         # self.audio_encoder = MimoAudioEncoder(self.audio_config)
         self.language_model = MiMoV2FlashForCausalLM(
-            vllm_config=vllm_config.with_hf_config(config.text_config),
+            vllm_config=vllm_config,
             prefix=maybe_prefix("language_model", prefix),
         )
+
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
+        )
+
+    def _parse_and_validate_image_input(
+        self, **kwargs: object
+    ) -> Qwen2_5_VLImageInputs | None:
+        pixel_values = kwargs.pop("pixel_values", None)
+        image_embeds = kwargs.pop("image_embeds", None)
+        image_grid_thw = kwargs.pop("image_grid_thw", None)
+
+        if pixel_values is None and image_embeds is None:
+            return None
+
+        if pixel_values is not None:
+            return Qwen2_5_VLImagePixelInputs(
+                type="pixel_values",
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+            )
+
+        if image_embeds is not None:
+            return Qwen2_5_VLImageEmbeddingInputs(
+                type="image_embeds",
+                image_embeds=image_embeds,
+                image_grid_thw=image_grid_thw,
+            )
+
+    def _parse_and_validate_video_input(
+        self, **kwargs: object
+    ) -> Qwen2_5_VLVideoInputs | None:
+        pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_embeds = kwargs.pop("video_embeds", None)
+        video_grid_thw = kwargs.pop("video_grid_thw", None)
+        second_per_grid_ts = kwargs.pop("second_per_grid_ts", None)
+
+        if pixel_values_videos is None and video_embeds is None:
+            return None
+
+        if pixel_values_videos is not None:
+            return Qwen2_5_VLVideoPixelInputs(
+                type="pixel_values_videos",
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+            )
+
+        if video_embeds is not None:
+            return Qwen2_5_VLVideoEmbeddingInputs(
+                type="video_embeds",
+                video_embeds=video_embeds,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+            )
+
+    def _process_image_input(
+        self, image_input: Qwen2_5_VLImageInputs
+    ) -> tuple[torch.Tensor, ...]:
+        grid_thw = image_input["image_grid_thw"]
+        assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+
+        if image_input["type"] == "image_embeds":
+            image_embeds = image_input["image_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values = image_input["pixel_values"]
+            # if self.use_data_parallel:
+            #     return run_dp_sharded_vision_model(
+            #         self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+            #     )
+            # else:
+            #     image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+            image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+
+        # Split concatenated embeddings for each image item.
+        merge_size = self.visual.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        return image_embeds.split(sizes)
+
+    def _process_video_input(
+        self, video_input: Qwen2_5_VLVideoInputs
+    ) -> tuple[torch.Tensor, ...]:
+        grid_thw = video_input["video_grid_thw"]
+        assert grid_thw.ndim == 2
+        grid_thw_list = grid_thw.tolist()
+
+        if video_input["type"] == "video_embeds":
+            video_embeds = video_input["video_embeds"].type(self.visual.dtype)
+        else:
+            pixel_values_videos = video_input["pixel_values_videos"]
+            # if self.use_data_parallel:
+            #     return run_dp_sharded_vision_model(
+            #         self.visual,
+            #         pixel_values_videos,
+            #         grid_thw_list,
+            #         rope_type="rope_3d",
+            #     )
+            # else:
+            #     video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
+            video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
+
+        # Split concatenated embeddings for each video item.
+        merge_size = self.visual.spatial_merge_size
+        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        return video_embeds.split(sizes)
+
+    def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
+        mm_input_by_modality = {}
+
+        # Preserve the order of modalities if there are multiple of them
+        # from the order of kwargs.
+        for input_key in kwargs:
+            if (
+                input_key in ("pixel_values", "image_embeds")
+                and "image" not in mm_input_by_modality
+            ):
+                mm_input_by_modality["image"] = self._parse_and_validate_image_input(
+                    **kwargs
+                )
+            if (
+                input_key in ("pixel_values_videos", "video_embeds")
+                and "video" not in mm_input_by_modality
+            ):
+                mm_input_by_modality["video"] = self._parse_and_validate_video_input(
+                    **kwargs
+                )
+        return mm_input_by_modality
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
+        if not mm_input_by_modality:
+            return []
+
+        # The result multimodal_embeddings is tuple of tensors, with each
+        # tensor correspoending to a multimodal data item (image or video).
+        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+
+        # NOTE: It is important to iterate over the keys in this dictionary
+        # to preserve the order of the modalities.
+        for modality in mm_input_by_modality:
+            multimodal_input = mm_input_by_modality[modality]
+            if modality == "image":
+                image_embeddings = self._process_image_input(multimodal_input)
+                multimodal_embeddings += tuple(image_embeddings)
+            if modality == "video":
+                video_embeddings = self._process_video_input(multimodal_input)
+                multimodal_embeddings += tuple(video_embeddings)
+        return multimodal_embeddings
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | IntermediateTensors:
+        """Run forward pass for Qwen2.5-VL.
+
+        Args:
+            input_ids: Flattened (concatenated) input_ids corresponding to a
+                batch.
+            positions: Flattened (concatenated) position ids corresponding to a
+                batch. **NOTE**: If mrope is enabled (default setting for
+                Qwen2.5-VL opensource models), the shape will be `(3, seq_len)`,
+                otherwise it will be `(seq_len,).
+        """
+
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+
+        hidden_states = self.language_model.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return self.language_model.compute_logits(hidden_states)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self, skip_prefixes=["audio_encoder."])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
