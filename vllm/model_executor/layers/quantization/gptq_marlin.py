@@ -214,7 +214,7 @@ class GPTQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         can_convert = cls.is_gptq_marlin_compatible(hf_quant_cfg)
 
@@ -907,7 +907,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         return fused_marlin_moe(
             x,
             layer.w13_qweight,

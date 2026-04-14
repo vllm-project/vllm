@@ -30,7 +30,7 @@ from vllm.entrypoints.pooling.pooling.protocol import (
 )
 from vllm.entrypoints.pooling.scoring.protocol import ScoringRequest, ScoringResponse
 from vllm.entrypoints.pooling.scoring.typing import ScoringData
-from vllm.inputs import EngineInput
+from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
 
 PoolingCompletionLikeRequest: TypeAlias = (
@@ -69,9 +69,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     raw_request: Request | None = None
     model_name: str
     request_id: str
+    pooling_params: PoolingParams | list[PoolingParams]
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    pooling_params: PoolingParams | list[PoolingParams] | None = None
     engine_inputs: Sequence[EngineInput] | None = None
     prompt_request_ids: list[str] | None = None
     intermediates: Any | None = None
@@ -83,16 +83,25 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    ## for bi-encoder & late-interaction
+    n_queries: int | None = None
+
+    ## for IOProcessorResponse
+    response: Any | None = None
+
+    ## for flash-late-interaction
+    query_final_res_batch: list[PoolingRequestOutput] | None = None
+
 
 @dataclass
 class OfflineInputsContext:
-    prompts: PromptType | Sequence[PromptType] | ScoringData
-    pooling_params: PoolingParams | list[PoolingParams] | None = None
+    prompts: PromptType | Sequence[PromptType] | DataPrompt | ScoringData
+    pooling_params: PoolingParams | Sequence[PoolingParams]
     tokenization_kwargs: dict[str, Any] | None = None
     chat_template: str | None = None
 
     ## for bi-encoder & late-interaction
-    offset: int | None = None
+    n_queries: int | None = None
 
 
 @dataclass
@@ -100,4 +109,4 @@ class OfflineOutputsContext:
     outputs: list[PoolingRequestOutput]
 
     ## for bi-encoder & late-interaction
-    offset: int | None = None
+    n_queries: int | None = None

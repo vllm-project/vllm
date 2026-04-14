@@ -8,7 +8,7 @@ import functools
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
 from typing import (
@@ -70,7 +70,7 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
@@ -112,6 +112,7 @@ from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
+    from vllm.config.quantization import OnlineQuantizationConfigArgs
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
@@ -401,6 +402,7 @@ class EngineArgs:
     max_cudagraph_capture_size: int | None = get_field(
         CompilationConfig, "max_cudagraph_capture_size"
     )
+    ir_op_priority: IrOpPriorityConfig = get_field(KernelConfig, "ir_op_priority")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -414,6 +416,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    numa_bind: bool = ParallelConfig.numa_bind
+    numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
+    numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -482,6 +487,7 @@ class EngineArgs:
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
+    quantization_config: "dict[str, Any] | OnlineQuantizationConfigArgs | None" = None
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -657,6 +663,15 @@ class EngineArgs:
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
             )
+        if isinstance(self.ir_op_priority, dict):
+            self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
+
+        from vllm.config.quantization import resolve_online_quant_config
+
+        self.quantization_config = resolve_online_quant_config(
+            self.quantization, self.quantization_config
+        )
+
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -848,6 +863,13 @@ class EngineArgs:
         parallel_group.add_argument(
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
+        )
+        parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
+        parallel_group.add_argument(
+            "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
+        )
+        parallel_group.add_argument(
+            "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1293,6 +1315,7 @@ class EngineArgs:
             title="KernelConfig",
             description=KernelConfig.__doc__,
         )
+        kernel_group.add_argument("--ir-op-priority", **kernel_kwargs["ir_op_priority"])
         kernel_group.add_argument(
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
@@ -1426,6 +1449,7 @@ class EngineArgs:
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
+            quantization_config=self.quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
@@ -1567,7 +1591,7 @@ class EngineArgs:
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context, model_config
         )
-
+        self._set_default_reasoning_config_args()
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1812,6 +1836,9 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            numa_bind=self.numa_bind,
+            numa_bind_nodes=self.numa_bind_nodes,
+            numa_bind_cpus=self.numa_bind_cpus,
         )
 
         speculative_config = self.create_speculative_config(
@@ -1916,6 +1943,22 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
+
+        # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
+        for op_name, op_priority in asdict(self.ir_op_priority).items():
+            # Empty means unset
+            if not op_priority:
+                continue
+
+            # Priority cannot be set 2x for the same op
+            if getattr(kernel_config.ir_op_priority, op_name):
+                raise ValueError(
+                    f"Op priority for {op_name} specified via both ir_op_priority "
+                    f"and KernelConfig.ir_op_priority, only one allowed at a time."
+                )
+
+            # Set the attribute
+            setattr(kernel_config.ir_op_priority, op_name, op_priority)
 
         load_config = self.create_load_config()
 
@@ -2189,6 +2232,13 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
+
+    def _set_default_reasoning_config_args(self):
+        if not self.reasoning_parser:
+            return
+        if self.reasoning_config is None:
+            self.reasoning_config = ReasoningConfig()
+        self.reasoning_config.reasoning_parser = self.reasoning_parser
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,

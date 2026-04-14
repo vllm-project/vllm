@@ -3,7 +3,7 @@
 
 # This lists cover the "core" components of vLLM that require careful review
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg @BoyuanFeng @vadiklyutiy
-/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery
+/vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery @xuechendi
 /vllm/lora @jeejeelee
 /vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
@@ -13,6 +13,9 @@
 /vllm/model_executor/layers/rotary_embedding.py @vadiklyutiy
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/layers/batch_invariant.py @yewentao256 
+/vllm/ir @ProExpertProg
+/vllm/kernels/ @ProExpertProg @tjtanaa
+/vllm/kernels/helion @ProExpertProg @zou3519
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
 /vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
@@ -74,6 +77,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /tests/entrypoints @DarkLight1337 @robertgshaw2-redhat @aarnphm @NickLucche
 /tests/evals @mgoin @vadiklyutiy
 /tests/kernels @mgoin @tlrmchlsmth @WoosukKwon @yewentao256
+/tests/kernels/ir @ProExpertProg @tjtanaa
 /tests/models @DarkLight1337 @ywang96
 /tests/multimodal @DarkLight1337 @ywang96 @NickLucche
 /tests/quantization @mgoin @robertgshaw2-redhat @yewentao256 @pavanimajety
@@ -116,16 +120,16 @@ mkdocs.yaml @hmellor
 /tools/pre_commit @hmellor
 
 # CPU
-/vllm/v1/worker/cpu* @bigPYJ1151
+/vllm/v1/worker/cpu* @bigPYJ1151 @xuechendi
 /csrc/cpu @bigPYJ1151
-/vllm/platforms/cpu.py @bigPYJ1151
+/vllm/platforms/cpu.py @bigPYJ1151 @xuechendi
 /cmake/cpu_extension.cmake @bigPYJ1151
-/docker/Dockerfile.cpu @bigPYJ1151
+/docker/Dockerfile.cpu @bigPYJ1151 @xuechendi
 
 # Intel GPU
-/vllm/v1/worker/xpu* @jikunshang
-/vllm/platforms/xpu.py @jikunshang
-/docker/Dockerfile.xpu @jikunshang
+/vllm/v1/worker/xpu* @jikunshang @xuechendi
+/vllm/platforms/xpu.py @jikunshang @xuechendi
+/docker/Dockerfile.xpu @jikunshang @xuechendi
 
 # Nemotron-specific files
 /vllm/model_executor/models/*nemotron* @tomeras91
