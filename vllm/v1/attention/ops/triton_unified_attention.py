@@ -335,15 +335,15 @@ def kernel_unified_attention_2d(
         )
 
         # K : (HEAD_SIZE, TILE_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None] & tile_mask[None, :],
-            other=0.0,
-        )
         if QK_INT8_WMMA:
             # Keep K in int8; pair with the int8-quantized Q for a WMMA int8
-            # dot. Load the per-token-head k_scale separately and apply it
-            # post-dot fused with softmax_scale and q_scale.
+            # dot. Use an integer `other` to avoid implicit promotion of the
+            # int8 load to float, which would break the int8 tl.dot.
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0,
+            )
             K = K_load
             scale_idx = (
                 physical_block_idx * stride_ks_blk
@@ -354,6 +354,11 @@ def kernel_unified_attention_2d(
                 k_scale_cache_ptr + scale_idx, mask=tile_mask, other=1.0
             )
         else:
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & tile_mask[None, :],
+                other=0.0,
+            )
             K, k_token_head_scales = _prepare_kv_tile(
                 K_load,
                 Q,
@@ -371,14 +376,14 @@ def kernel_unified_attention_2d(
             )
 
         # V : (TILE_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :] & tile_mask[:, None],
-            other=0.0,
-        )
         if PV_INT8_WMMA:
-            # Keep V in int8; pair with an int8-quantized P (computed per
-            # tile after softmax) for a WMMA int8 PV dot.
+            # Keep V in int8; see K path above — `other` must stay integer
+            # to avoid unintended type promotion of the int8 load.
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0,
+            )
             V = V_load
             scale_idx_v = (
                 physical_block_idx * stride_vs_blk
@@ -389,6 +394,11 @@ def kernel_unified_attention_2d(
                 v_scale_cache_ptr + scale_idx_v, mask=tile_mask, other=1.0
             )
         else:
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & tile_mask[:, None],
+                other=0.0,
+            )
             V, v_token_head_scales = _prepare_kv_tile(
                 V_load,
                 Q,
