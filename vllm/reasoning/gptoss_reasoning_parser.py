@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
@@ -113,12 +113,13 @@ class GptOssReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         # The pattern window covers the end-of-reasoning marker itself.
         # We add len(delta_ids) so that under speculative decoding (where
         # a single step can accept many tokens) the entire accepted chunk
         # is always inside the scan region.
+        delta_ids = tuple(delta_ids)
         pattern_len = (
             len(self.reasoning_end_token_ids_prefix)
             + self.reasoning_max_num_between_tokens
