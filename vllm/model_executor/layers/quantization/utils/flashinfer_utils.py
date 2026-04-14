@@ -265,6 +265,48 @@ def align_fp4_moe_weights_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_intermediate
 
 
+def align_trtllm_fp4_moe_hidden_dim_for_fi(
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    min_alignment: int = 256,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    num_experts, gate_up_dim, packed_hidden_size = w13.shape
+    hidden_size = packed_hidden_size * 2
+    padded_hidden_size = round_up(hidden_size, min_alignment)
+
+    if padded_hidden_size == hidden_size:
+        return w13, w13_scale, w2, w2_scale, hidden_size
+
+    logger.warning_once(
+        "Padding hidden size from %d to %d for TRTLLM NVFP4 MoE weights. "
+        "This requires activation slicing at runtime and may cause "
+        "performance degradation.",
+        hidden_size,
+        padded_hidden_size,
+        scope="local",
+    )
+
+    padded_w13 = w13.new_zeros((num_experts, gate_up_dim, padded_hidden_size // 2))
+    padded_w13[:, :, :packed_hidden_size] = w13
+
+    padded_w13_scale = w13_scale.new_zeros(
+        (num_experts, gate_up_dim, padded_hidden_size // 16)
+    )
+    padded_w13_scale[:, :, : w13_scale.shape[2]] = w13_scale
+
+    padded_w2 = w2.new_zeros((num_experts, padded_hidden_size, w2.shape[2]))
+    padded_w2[:, : w2.shape[1], :] = w2
+
+    padded_w2_scale = w2_scale.new_zeros(
+        (num_experts, padded_hidden_size, w2_scale.shape[2])
+    )
+    padded_w2_scale[:, : w2_scale.shape[1], :] = w2_scale
+
+    return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_hidden_size
+
+
 def align_fp8_moe_weights_for_fi(
     w13: torch.Tensor, w2: torch.Tensor, is_act_and_mul: bool, min_alignment: int = 16
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
