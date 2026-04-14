@@ -52,7 +52,9 @@ DECODER_TP_SIZE=${DECODER_TP_SIZE:-1}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.7}
 BLOCK_SIZE=${BLOCK_SIZE:-16}
 
-GIT_ROOT=$(git rev-parse --show-toplevel)
+# Resolve the repository root from the script location instead of `.git`.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+GIT_ROOT="${GIT_ROOT:-$(cd -- "${SCRIPT_DIR}/../../../.." && pwd -P)}"
 
 SMI_BIN=$(which nvidia-smi || which rocm-smi || echo "")
 

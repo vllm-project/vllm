@@ -14,9 +14,9 @@ from vllm.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 
-from ..inputs import MultiModalDataDict
 from .context import BaseProcessingInfo
 from .inputs import ProcessorInputs
 
