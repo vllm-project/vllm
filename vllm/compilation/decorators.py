@@ -507,6 +507,16 @@ def _support_torch_compile(
                 hash_key,
             )
 
+            # Hash-level dir; shared across ranks on the same node.
+            self.compilation_config.local_cache_dir = cache_dir
+            inductor_cache = os.path.join(cache_dir, "inductor_cache")
+            os.makedirs(inductor_cache, exist_ok=True)
+            # Process-wide: post-load execution, CUDA-graph capture, and later
+            # autotune/recompile all need to write under {hash}/inductor_cache/.
+            # Unconditional because torch's cache_dir() may have pre-filled the
+            # /tmp default during import, making setdefault a no-op.
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
+
             rank = self.vllm_config.parallel_config.rank
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
             cache_dir = os.path.join(cache_dir, f"rank_{rank}_{dp_rank}")
