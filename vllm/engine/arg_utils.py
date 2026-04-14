@@ -45,6 +45,7 @@ from vllm.config import (
     KVTransferConfig,
     LoadConfig,
     LoRAConfig,
+    MambaConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -72,6 +73,7 @@ from vllm.config.cache import (
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -416,6 +418,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    numa_bind: bool = ParallelConfig.numa_bind
+    numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
+    numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -575,6 +580,7 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
@@ -607,10 +613,12 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+
+    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
-        CacheConfig.enable_mamba_cache_stochastic_rounding
+        MambaConfig.enable_stochastic_rounding
     )
-    mamba_cache_philox_rounds: int = CacheConfig.mamba_cache_philox_rounds
+    mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -652,6 +660,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.mamba_config, dict):
+            self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
@@ -822,6 +832,22 @@ class EngineArgs:
             "--attention-backend", **attention_kwargs["backend"]
         )
 
+        # Mamba arguments
+        mamba_kwargs = get_kwargs(MambaConfig)
+        mamba_group = parser.add_argument_group(
+            title="MambaConfig",
+            description=MambaConfig.__doc__,
+        )
+        mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_group.add_argument(
+            "--enable-mamba-cache-stochastic-rounding",
+            **mamba_kwargs["enable_stochastic_rounding"],
+        )
+        mamba_group.add_argument(
+            "--mamba-cache-philox-rounds",
+            **mamba_kwargs["stochastic_rounding_philox_rounds"],
+        )
+
         # Structured outputs arguments
         structured_outputs_kwargs = get_kwargs(StructuredOutputsConfig)
         structured_outputs_group = parser.add_argument_group(
@@ -860,6 +886,13 @@ class EngineArgs:
         parallel_group.add_argument(
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
+        )
+        parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
+        parallel_group.add_argument(
+            "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
+        )
+        parallel_group.add_argument(
+            "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -1039,13 +1072,6 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
-        )
-        cache_group.add_argument(
-            "--enable-mamba-cache-stochastic-rounding",
-            **cache_kwargs["enable_mamba_cache_stochastic_rounding"],
-        )
-        cache_group.add_argument(
-            "--mamba-cache-philox-rounds", **cache_kwargs["mamba_cache_philox_rounds"]
         )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
@@ -1578,10 +1604,7 @@ class EngineArgs:
 
         self._check_feature_supported()
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
-        self._set_default_max_num_seqs_and_batched_tokens_args(
-            usage_context, model_config
-        )
-
+        self._set_default_reasoning_config_args()
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1615,8 +1638,6 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
-            enable_mamba_cache_stochastic_rounding=self.enable_mamba_cache_stochastic_rounding,
-            mamba_cache_philox_rounds=self.mamba_cache_philox_rounds,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
@@ -1826,11 +1847,20 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            numa_bind=self.numa_bind,
+            numa_bind_nodes=self.numa_bind_nodes,
+            numa_bind_cpus=self.numa_bind_cpus,
         )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
+        )
+
+        self._set_default_max_num_seqs_and_batched_tokens_args(
+            usage_context,
+            model_config,
+            parallel_config,
         )
 
         assert self.max_num_batched_tokens is not None, (
@@ -1916,6 +1946,22 @@ class EngineArgs:
             # Reuse the validator to handle "auto" and string-to-enum conversion
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
+            )
+
+        # Mamba config overrides
+        mamba_config = copy.deepcopy(self.mamba_config)
+        # Convert string to enum if needed (CLI parsing returns a string)
+        if isinstance(self.mamba_backend, str):
+            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
+        else:
+            mamba_config.backend = self.mamba_backend
+        if self.enable_mamba_cache_stochastic_rounding:
+            mamba_config.enable_stochastic_rounding = (
+                self.enable_mamba_cache_stochastic_rounding
+            )
+        if self.mamba_cache_philox_rounds:
+            mamba_config.stochastic_rounding_philox_rounds = (
+                self.mamba_cache_philox_rounds
             )
 
         # Kernel config overrides
@@ -2016,6 +2062,7 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
@@ -2220,10 +2267,18 @@ class EngineArgs:
             )
             self.enable_prefix_caching = False
 
+    def _set_default_reasoning_config_args(self):
+        if not self.reasoning_parser:
+            return
+        if self.reasoning_config is None:
+            self.reasoning_config = ReasoningConfig()
+        self.reasoning_config.reasoning_parser = self.reasoning_parser
+
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
         usage_context: UsageContext | None,
         model_config: ModelConfig,
+        parallel_config: ParallelConfig,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
@@ -2235,10 +2290,15 @@ class EngineArgs:
         orig_max_num_seqs = self.max_num_seqs
 
         if self.max_num_batched_tokens is None:
-            self.max_num_batched_tokens = default_max_num_batched_tokens.get(
-                usage_context,
-                SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            )
+            if parallel_config.use_batched_dp_moe:
+                self.max_num_batched_tokens = (
+                    SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
+                )
+            else:
+                self.max_num_batched_tokens = default_max_num_batched_tokens.get(
+                    usage_context,
+                    SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                )
 
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs.get(
