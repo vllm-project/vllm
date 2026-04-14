@@ -69,7 +69,6 @@ class SharedExperts:
         self._moe_config = moe_config
         self._quant_method = quant_method
         self._reduce_results = reduce_results
-        self._use_dp_chunking = moe_config.moe_parallel_config.use_dp_chunking
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
@@ -110,7 +109,6 @@ class SharedExperts:
 
         should_run_shared_in_aux_stream = (
             current_platform.is_cuda()
-            and not self._use_dp_chunking
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD
