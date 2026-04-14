@@ -537,6 +537,7 @@ class Platform:
         if model_config.use_mla:
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
+                num_q_heads=model_config.get_num_attention_heads(parallel_config),
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,
@@ -545,6 +546,7 @@ class Platform:
         else:
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
+                num_q_heads=model_config.get_num_attention_heads(parallel_config),
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
                 head_size=model_config.get_head_size(),
                 dtype=kv_cache_dtype,

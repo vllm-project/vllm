@@ -596,9 +596,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
-        self.num_qo_heads = self.model_config.get_num_attention_heads(
-            self.vllm_config.parallel_config
-        )
+        self.num_qo_heads = self.kv_cache_spec.num_q_heads
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size
@@ -698,17 +696,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
             else [kv_cache_spec]
         )
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
         has_trtllm_support: bool = len(kv_specs) > 0
         for spec in kv_specs:
             if not isinstance(spec, AttentionSpec):
-                # FlashInfer only applies to attention, so we don't consider other types
-                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
                 continue
             if not can_use_trtllm_attention(
-                num_qo_heads=num_qo_heads,
+                num_qo_heads=spec.num_q_heads,
                 num_kv_heads=spec.num_kv_heads,
             ):
                 has_trtllm_support = False

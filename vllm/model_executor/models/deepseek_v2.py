@@ -601,6 +601,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return MLAAttentionSpec(  # Only has one vector instead of K + V
             block_size=self.cache_config.block_size,
+            num_q_heads=1,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,

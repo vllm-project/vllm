@@ -220,6 +220,7 @@ class StaticSinkAttention(Attention, CustomOp):
 
         return SinkFullAttentionSpec(
             block_size=self.block_size,
+            num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             head_size_v=self.head_size_v,

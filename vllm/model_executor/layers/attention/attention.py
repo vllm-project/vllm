@@ -603,6 +603,7 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             return SlidingWindowSpec(
                 block_size=block_size,
+                num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
@@ -629,6 +630,7 @@ class Attention(nn.Module, AttentionLayerBase):
         else:
             return FullAttentionSpec(
                 block_size=block_size,
+                num_q_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 head_size_v=self.head_size_v,

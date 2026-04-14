@@ -1193,6 +1193,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
             if isinstance(spec, SlidingWindowSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=spec.block_size,
+                    num_q_heads=spec.num_q_heads,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
@@ -1202,6 +1203,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
             elif isinstance(spec, ChunkedLocalAttentionSpec):
                 kv_cache_spec[layer_name] = FullAttentionSpec(
                     block_size=spec.block_size,
+                    num_q_heads=spec.num_q_heads,
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,

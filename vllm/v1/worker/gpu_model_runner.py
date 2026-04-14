@@ -6841,6 +6841,7 @@ class GPUModelRunner(
             if attn_module.attn_type == AttentionType.ENCODER_ONLY:
                 attn_spec: AttentionSpec = EncoderOnlyAttentionSpec(
                     block_size=block_size,
+                    num_q_heads=attn_module.num_heads,
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=self.kv_cache_dtype,

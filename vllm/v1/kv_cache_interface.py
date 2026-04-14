@@ -112,6 +112,7 @@ class KVCacheSpec:
 
 @dataclass(frozen=True, kw_only=True)
 class AttentionSpec(KVCacheSpec):
+    num_q_heads: int
     num_kv_heads: int
     head_size: int
     dtype: torch.dtype
@@ -212,6 +213,7 @@ class FullAttentionSpec(AttentionSpec):
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
+            num_q_heads=specs[0].num_q_heads,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
@@ -301,6 +303,7 @@ class MLAAttentionSpec(FullAttentionSpec):
         )
         return cls(
             block_size=specs[0].block_size,
+            num_q_heads=specs[0].num_q_heads,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             dtype=specs[0].dtype,
@@ -432,6 +435,7 @@ class SinkFullAttentionSpec(FullAttentionSpec):
         )
         merged_spec = cls(
             block_size=specs[0].block_size,
+            num_q_heads=specs[0].num_q_heads,
             num_kv_heads=specs[0].num_kv_heads,
             head_size=specs[0].head_size,
             head_size_v=specs[0].head_size_v,
