@@ -181,7 +181,7 @@ def test_cuda_tensor_queue_basic():
         f"{decoder_result.get('traceback', '')}"
     )
     assert decoder_result["matches_expected"], "Tensor shape mismatch"
-    assert DEVICE_TYPE in decoder_result["device"], "Tensor not on GPU device"
+    assert "cuda" in decoder_result["device"], "Tensor not on CUDA device"
     assert decoder_result["label"] == "cuda-msgpack"
 
 
