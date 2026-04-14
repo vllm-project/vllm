@@ -629,6 +629,11 @@ def _prepare_eagle_inputs_kernel(
             block = i + tl.arange(0, BLOCK_SIZE)
             mask = block < max_num_reqs
             tl.store(eagle_seq_lens_ptr + block, 0, mask=mask)
+        # Pad last_token_indices for CUDA graphs.
+        for i in range(num_reqs, max_num_reqs, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < max_num_reqs
+            tl.store(last_token_indices_ptr + block, 0, mask=mask)
 
 
 def prepare_eagle_inputs(
