@@ -657,11 +657,10 @@ class VllmConfig:
             and self.kv_transfer_config.kv_connector == "ExampleHiddenStatesConnector"
             and self.scheduler_config.enable_chunked_prefill
         ):
-            logger.warning_once(
-                "ExampleHiddenStatesConnector does not support chunked "
-                "prefill. Disabling chunked prefill.",
+            raise ValueError(
+                "ExampleHiddenStatesConnector does not support chunked prefill. "
+                "Please disable chunked prefill (--no-enable-chunked-prefill)."
             )
-            self.scheduler_config.enable_chunked_prefill = False
 
         # KV offloading is only activated when kv_offloading_size is set.
         if (kv_offloading_size := self.cache_config.kv_offloading_size) is None:

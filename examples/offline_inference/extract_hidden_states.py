@@ -9,12 +9,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
     example_hidden_states_connector,
 )
 
+# NOTE: If changing the interface of the ExampleHiddenStatesConnector, please also
+# update the benchmark in benchmarks/benchmark_hidden_state_extraction.py
+# and the docs in docs/features/speculative_decoding/extract_hidden_states.md
+
 # Example: Using the custom "extract_hidden_states" speculator method and
 # ExampleHiddenStatesConnector to extract and save hidden states from vllm
 
 with tempfile.TemporaryDirectory() as tmpdirname:
     llm = LLM(
         model="Qwen/Qwen3-8B",  # Your target model
+        enable_chunked_prefill=False,  # required
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
