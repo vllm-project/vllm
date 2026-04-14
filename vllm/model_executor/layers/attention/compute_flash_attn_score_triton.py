@@ -70,9 +70,7 @@ def _compute_key_importance_varlen_kernel(
     for start_m in range(0, seq_len, BLOCK_M):
         offs_m = start_m + tl.arange(0, BLOCK_M)
 
-        q_mask = (offs_m[:, None] < seq_len) & (
-            offs_d[None, :] < ACTUAL_HEAD_DIM
-        )
+        q_mask = (offs_m[:, None] < seq_len) & (offs_d[None, :] < ACTUAL_HEAD_DIM)
         q_ptrs = q_base_ptr + (
             offs_m[:, None] * stride_q_tok + offs_d[None, :] * stride_q_d
         )
@@ -129,9 +127,7 @@ def compute_varlen_importance(
     if softmax_scale is None:
         softmax_scale = 1.0 / (head_dim**0.5)
 
-    out_score = torch.zeros(
-        (total_tokens,), dtype=torch.float32, device=q.device
-    )
+    out_score = torch.zeros((total_tokens,), dtype=torch.float32, device=q.device)
 
     BLOCK_M = 128
     BLOCK_N = 64
