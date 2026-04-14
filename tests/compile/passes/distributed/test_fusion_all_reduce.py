@@ -577,7 +577,7 @@ def _run_fused_allreduce_norm_group_quant_test(
     from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used
 
     device = torch.device(f"cuda:{local_rank}")
-    torch.accelerator.set_device(device)
+    torch.accelerator.set_device_index(device)
     dist.init_process_group(
         backend="nccl",
         init_method="tcp://localhost:12399",
