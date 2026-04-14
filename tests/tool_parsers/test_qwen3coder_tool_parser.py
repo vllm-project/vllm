@@ -1013,6 +1013,30 @@ def test_malformed_xml_no_gt_delimiter(qwen3_tool_parser):
     assert all(tc is not None for tc in result.tool_calls)
 
 
+def test_malformed_parameter_no_gt_delimiter(qwen3_tool_parser):
+    """Regression: malformed <parameter=...> without '>' must not crash and
+    valid parameters in the same call should still be parsed."""
+    # The first parameter is malformed (truncated, no '>' separator).
+    # The second parameter is well-formed.
+    model_output = (
+        "<tool_call>\n"
+        "<function=get_current_weather>\n"
+        "<parameter=truncated_param_no_gt"
+        "<parameter=city>Dallas</parameter>\n"
+        "</function>\n"
+        "</tool_call>"
+    )
+
+    request = ChatCompletionRequest(model=MODEL, messages=[])
+    result = qwen3_tool_parser.extract_tool_calls(model_output, request=request)
+    assert result.tools_called
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].function.name == "get_current_weather"
+    args = json.loads(result.tool_calls[0].function.arguments)
+    # Malformed parameter is skipped, valid one is preserved
+    assert args == {"city": "Dallas"}
+
+
 def test_none_tool_calls_filtered(qwen3_tool_parser):
     """Regression: None tool calls filtered from output (PR #36774)."""
     model_output = (

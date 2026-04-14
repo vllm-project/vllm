@@ -233,7 +233,18 @@ class Qwen3CoderToolParser(ToolParser):
         parameters = function_call_str[end_index + 1 :]
         param_dict = {}
         for match_text in self.tool_call_parameter_regex.findall(parameters):
-            idx = match_text.index(">")
+            idx = match_text.find(">")
+            # Skip malformed parameters missing the name>value separator
+            # (e.g. truncated output) so other valid parameters can still
+            # be parsed.
+            if idx == -1:
+                logger.warning(
+                    "Skipping malformed parameter without '>' separator "
+                    "in tool call for function '%s': %r",
+                    function_name,
+                    match_text,
+                )
+                continue
             param_name = match_text[:idx]
             param_value = str(match_text[idx + 1 :])
             # Remove prefix and trailing \n
