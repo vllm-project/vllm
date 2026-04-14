@@ -16,6 +16,7 @@ from vllm.outputs import PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
+from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingServingBase
 from ..factories import init_pooling_io_processors
 from ..typing import AnyPoolingRequest, PoolingServeContext
@@ -26,10 +27,6 @@ from ..utils import (
     get_json_response_cls,
 )
 from .protocol import (
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.base.serving import PoolingServingBase
-from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
-from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
     PoolingBytesResponse,
     PoolingRequest,

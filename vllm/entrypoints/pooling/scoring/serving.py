@@ -90,7 +90,7 @@ class ServingScores(PoolingServing):
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
             )
         else:
-            raise NotImplementedError("")
+            raise ValueError(f"Invalid {self.request_id_prefix} request type")
 
     def _request_output_to_score_response(
         self,
