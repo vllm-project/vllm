@@ -122,6 +122,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import as_list
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
@@ -321,6 +322,37 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="previous_response_id",
             )
+        # Validate tool_choice when tool parsing is required but unavailable
+        if request.tools and request.tool_choice != "none":
+            tool_parser_cls = self.parser.tool_parser_cls if self.parser else None
+            tokenizer = self.renderer.get_tokenizer()
+            tool_parsing_unavailable = (
+                tool_parser_cls is None
+                and not is_mistral_tokenizer(tokenizer)
+                and not self.use_harmony
+            )
+            if tool_parsing_unavailable:
+                if request.tool_choice == "auto" and not self.enable_auto_tools:
+                    return self.create_error_response(
+                        err_type="invalid_request_error",
+                        message=(
+                            '"auto" tool choice requires '
+                            "--enable-auto-tool-choice and "
+                            "--tool-call-parser to be set"
+                        ),
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        param="tool_choice",
+                    )
+                elif request.tool_choice != "auto":
+                    return self.create_error_response(
+                        err_type="invalid_request_error",
+                        message=(
+                            f'tool_choice="{request.tool_choice}" requires '
+                            "--tool-call-parser to be set"
+                        ),
+                        status_code=HTTPStatus.BAD_REQUEST,
+                        param="tool_choice",
+                    )
         return None
 
     async def create_responses(

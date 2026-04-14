@@ -928,3 +928,97 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+# Minimal function tool dict, mirrors GET_WEATHER_SCHEMA used in other tests.
+_FUNCTION_TOOL = {
+    "type": "function",
+    "name": "get_weather",
+    "description": "Get the current weather.",
+    "parameters": {
+        "type": "object",
+        "properties": {"location": {"type": "string"}},
+        "required": ["location"],
+        "additionalProperties": False,
+    },
+    "strict": True,
+}
+
+
+class TestToolChoiceValidation:
+    """Test that _validate_create_responses_input rejects tool_choice settings
+    that require a tool parser when none is configured, mirroring the 400
+    behaviour of the Chat Completions endpoint."""
+
+    @pytest.fixture
+    def serving_no_tool_parser(self):
+        """OpenAIServingResponses with no tool parser and no harmony model."""
+        engine_client = MagicMock()
+        model_config = MagicMock()
+        model_config.max_model_len = 4096
+        model_config.hf_config.model_type = "llama"  # non-harmony
+        model_config.get_diff_sampling_param.return_value = {}
+        engine_client.model_config = model_config
+        engine_client.input_processor = MagicMock()
+        engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
+
+        return OpenAIServingResponses(
+            engine_client=engine_client,
+            models=MagicMock(),
+            openai_serving_render=MagicMock(),
+            request_logger=None,
+            chat_template=None,
+            chat_template_content_format="auto",
+            # No tool_parser, no enable_auto_tools → tool parsing unavailable.
+            enable_auto_tools=False,
+            tool_parser=None,
+        )
+
+    def test_auto_tool_choice_without_tool_parser_returns_error(
+        self, serving_no_tool_parser
+    ):
+        """tool_choice='auto' with tools but no --tool-call-parser → 400."""
+        request = ResponsesRequest(
+            input="What's the weather?",
+            tools=[_FUNCTION_TOOL],
+            tool_choice="auto",
+        )
+        error = serving_no_tool_parser._validate_create_responses_input(request)
+        assert error is not None
+        assert "auto" in error.error.message
+        assert "--tool-call-parser" in error.error.message
+
+    def test_required_tool_choice_without_tool_parser_returns_error(
+        self, serving_no_tool_parser
+    ):
+        """tool_choice='required' with tools but no --tool-call-parser → 400."""
+        request = ResponsesRequest(
+            input="What's the weather?",
+            tools=[_FUNCTION_TOOL],
+            tool_choice="required",
+        )
+        error = serving_no_tool_parser._validate_create_responses_input(request)
+        assert error is not None
+        assert "required" in error.error.message
+        assert "--tool-call-parser" in error.error.message
+
+    def test_none_tool_choice_skips_validation(self, serving_no_tool_parser):
+        """tool_choice='none' should never require a tool parser."""
+        request = ResponsesRequest(
+            input="Hello",
+            tools=[_FUNCTION_TOOL],
+            tool_choice="none",
+        )
+        error = serving_no_tool_parser._validate_create_responses_input(request)
+        assert error is None
+
+    def test_empty_tools_skips_validation(self, serving_no_tool_parser):
+        """No tools provided → validation should be skipped entirely."""
+        request = ResponsesRequest(
+            input="Hello",
+            tools=[],
+            tool_choice="auto",
+        )
+        error = serving_no_tool_parser._validate_create_responses_input(request)
+        assert error is None
