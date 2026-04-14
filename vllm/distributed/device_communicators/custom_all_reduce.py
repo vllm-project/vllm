@@ -213,6 +213,22 @@ class CustomAllreduce:
     def register_graph_buffers(self):
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
         logger.info("Registering %d cuda graph addresses", len(offset))
+        # CUDA graph capture must execute the same number of custom all-reduce
+        # ops on every rank; otherwise register_graph_buffers indexes past the
+        # end of peer IPC handle blobs (undefined behavior, often misreported
+        # as CUDA errors during capture).
+        world_size = dist.get_world_size(group=self.group)
+        count_tensor = torch.tensor([len(offset)], dtype=torch.int64)
+        count_list = [torch.zeros(1, dtype=torch.int64) for _ in range(world_size)]
+        dist.all_gather(count_list, count_tensor, group=self.group)
+        counts = [int(t.item()) for t in count_list]
+        if min(counts) != max(counts):
+            raise RuntimeError(
+                "Custom all-reduce CUDA graph buffer count mismatch across TP "
+                f"ranks: {counts}. Tensor-parallel ranks must run identical "
+                "all-reduce patterns during graph capture. Workaround: launch "
+                "with --disable-custom-all-reduce."
+            )
         # We cannot directly use `dist.all_gather_object` here
         # because it is incompatible with `gloo` backend under inference mode.
         # see https://github.com/pytorch/pytorch/issues/126032 for details.
