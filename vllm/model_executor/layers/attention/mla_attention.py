@@ -2534,13 +2534,18 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
             )
 
-            # To Do: Use epilogue of kv_b_proj to generate fp8 kv_nope.
-            if use_fp8_prefill:
-                kv_nope = kv_nope.to(prefill_metadata.q_data_type)
-                k_pe = k_pe.to(prefill_metadata.q_data_type)
             k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
+            # Ensure k_pe matches k_nope dtype before concat;
+            # flashinfer_concat_mla_k only supports BF16/FP16.
+            if use_fp8_prefill and k_pe.dtype != k_nope.dtype:
+                k_pe = k_pe.to(k_nope.dtype)
             k = self._concat_k_nope_k_pe(k_nope, k_pe)
+
+            # Cast to FP8 after concat (aligned with forward_mha's order)
+            if use_fp8_prefill:
+                k = k.to(prefill_metadata.q_data_type)
+                v = v.to(prefill_metadata.q_data_type)
 
             attn_output, attn_softmax_lse = self._run_prefill_context_chunk(
                 prefill=prefill_metadata,
