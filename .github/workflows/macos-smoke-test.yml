@@ -50,6 +50,7 @@ jobs:
             --load-format=dummy \
             --hf-overrides '{"num_hidden_layers": 2}' \
             --enforce-eager \
+            --gpu-memory-utilization=0.5 \
             --port 8000 &
 
           SERVER_PID=$!
