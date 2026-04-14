@@ -296,13 +296,14 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
         model_config: PretrainedConfig | None = None,
         decorate: bool = True,
     ) -> bool:
-        del decorate
         merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
         if not isinstance(source_layer, merged_cls) or len(packed_modules_list) != 2:
             return False
 
         tp_size = getattr(source_layer, "tp_size", 1)
         if type(source_layer) is merged_cls:
+            if not decorate:
+                return True
             return not lora_config.fully_sharded_loras or tp_size == 1
 
         # Only support effectively unsharded subclasses here. Sharded

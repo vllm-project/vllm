@@ -75,7 +75,7 @@ def get_lora_id():
 
 # Order matters here: more specific wrappers must be checked before generic
 # merged/column-parallel wrappers in from_layer().
-_all_lora_classes: set[type[BaseLayerWithLoRA]] = {
+_all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -92,7 +92,7 @@ _all_lora_classes: set[type[BaseLayerWithLoRA]] = {
     RowParallelLinearWithShardedLoRA,
     FusedMoEWithLoRA,
     FusedMoE3DWithLoRA,
-}
+)
 
 
 def is_moe_model(model: nn.Module) -> bool:

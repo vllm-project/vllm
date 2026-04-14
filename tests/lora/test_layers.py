@@ -1395,6 +1395,44 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         f"for 2 packed modules, got {type(selected_layer_merged).__name__}"
     )
 
+    fully_sharded_tp_lora_config = LoRAConfig(
+        max_loras=8,
+        max_lora_rank=16,
+        lora_dtype=torch.float16,
+        fully_sharded_loras=True,
+    )
+    fully_sharded_tp_layer = MergedColumnParallelLinear(
+        4096, [2048, 2048], bias=False, params_dtype=torch.float16
+    )
+    fully_sharded_tp_layer.tp_size = 2
+
+    assert not MergedColumnParallelLinearWithLoRA.can_replace_layer(
+        source_layer=fully_sharded_tp_layer,
+        lora_config=fully_sharded_tp_lora_config,
+        packed_modules_list=packed_modules_two,
+    ), "Generic merged wrapper should reject fully sharded TP layers"
+
+    assert MergedColumnParallelLinearWithShardedLoRA.can_replace_layer(
+        source_layer=fully_sharded_tp_layer,
+        lora_config=fully_sharded_tp_lora_config,
+        packed_modules_list=packed_modules_two,
+    ), "Sharded merged wrapper should remain eligible for fully sharded TP layers"
+
+    selected_fully_sharded_tp_layer = from_layer(
+        fully_sharded_tp_layer,
+        max_loras=8,
+        lora_config=fully_sharded_tp_lora_config,
+        packed_modules_list=packed_modules_two,
+    )
+    assert isinstance(
+        selected_fully_sharded_tp_layer,
+        MergedColumnParallelLinearWithShardedLoRA,
+    ), (
+        "from_layer should select MergedColumnParallelLinearWithShardedLoRA "
+        "for fully sharded TP merged layers, got "
+        f"{type(selected_fully_sharded_tp_layer).__name__}"
+    )
+
     # Case 5: DeepSeek's fused_qkv_a_proj should reuse the generic merged
     # wrapper while preserving its custom base forward path.
     deepseek_fused_layer = DeepSeekV2FusedQkvAProjLinear(
