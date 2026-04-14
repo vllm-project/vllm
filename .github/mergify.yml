@@ -278,7 +278,6 @@ pull_request_rules:
       - title~=(?i)XPU
       - title~=(?i)Intel
       - title~=(?i)BMG
-      - title~=(?i)Arc
   actions:
     label:
       add:
