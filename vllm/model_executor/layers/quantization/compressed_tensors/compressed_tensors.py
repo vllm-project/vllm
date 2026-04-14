@@ -209,7 +209,8 @@ class CompressedTensorsConfig(QuantizationConfig):
             "Linear" not in self.target_scheme_map
             or "FusedMoE" in self.target_scheme_map
         ):
-            self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+            return
+        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
