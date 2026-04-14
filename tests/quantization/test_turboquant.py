@@ -10,9 +10,16 @@ import math
 import pytest
 import torch
 
+from vllm.model_executor.layers.quantization.turboquant.centroids import (
+    get_centroids,
+    solve_lloyd_max,
+)
 from vllm.model_executor.layers.quantization.turboquant.config import (
     TQ_PRESETS,
     TurboQuantConfig,
+)
+from vllm.model_executor.layers.quantization.turboquant.quantizer import (
+    generate_wht_signs,
 )
 from vllm.utils.math_utils import next_power_of_2
 
@@ -197,11 +204,6 @@ class TestTurboQuantConfig:
 # Centroids tests (CPU-only)
 # ============================================================================
 
-from vllm.model_executor.layers.quantization.turboquant.centroids import (
-    get_centroids,
-    solve_lloyd_max,
-)
-
 
 class TestCentroids:
     @pytest.mark.parametrize("bits,expected_n", [(2, 4), (3, 8), (4, 16)])
@@ -344,10 +346,6 @@ class TestLloydMax:
 # ============================================================================
 
 CUDA_AVAILABLE = torch.cuda.is_available()
-
-from vllm.model_executor.layers.quantization.turboquant.quantizer import (
-    generate_wht_signs,
-)
 
 
 def generate_rotation_matrix(d: int, seed: int, device: str = "cpu") -> torch.Tensor:

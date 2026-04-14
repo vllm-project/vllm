@@ -19,35 +19,14 @@ Per-head per-position slot layout:
 import functools
 import math
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
 
 from vllm.config import get_current_vllm_config
-from vllm.triton_utils import triton
-from vllm.v1.attention.ops.triton_turboquant_decode import (
-    _tq_full_dequant_kv,
-    _use_fp8_e4b15,
-    triton_turboquant_decode_attention,
-)
-from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
-
-# Continuation prefill: for small continuation chunks (q_len ≤ threshold),
-# use the TQ decode kernel directly instead of full-dequant + flash_attn.
-# do_kv_cache_update already stored all tokens to TQ cache, so the decode
-# kernel can read them efficiently. This avoids O(cached_len) dequant work
-# per continuation, eliminating the O(N²/chunk_size) collapse at long context.
-_CONTINUATION_DECODE_THRESHOLD = 128
-
 from vllm.config.cache import CacheDType
-from vllm.v1.attention.backends.fa_utils import (
-    is_flash_attn_varlen_func_available,
-)
-
-_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
-if _HAS_FLASH_ATTN:
-    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+from vllm.triton_utils import triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -59,7 +38,27 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends.fa_utils import (
+    is_flash_attn_varlen_func_available,
+)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.attention.ops.triton_turboquant_decode import (
+    _tq_full_dequant_kv,
+    _use_fp8_e4b15,
+    triton_turboquant_decode_attention,
+)
+from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
+
+_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
+if _HAS_FLASH_ATTN:
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+# Continuation prefill: for small continuation chunks (q_len ≤ threshold),
+# use the TQ decode kernel directly instead of full-dequant + flash_attn.
+# do_kv_cache_update already stored all tokens to TQ cache, so the decode
+# kernel can read them efficiently. This avoids O(cached_len) dequant work
+# per continuation, eliminating the O(N²/chunk_size) collapse at long context.
+_CONTINUATION_DECODE_THRESHOLD = 128
 
 
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
@@ -207,6 +206,7 @@ class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
         # With reorder_batch_threshold=1, the model runner guarantees
         # decodes come first in the batch. split_decodes_and_prefills
         # finds the boundary (operates on CPU tensors — no GPU sync).
+        assert self.reorder_batch_threshold is not None
         num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
             cam, decode_threshold=self.reorder_batch_threshold
         )
@@ -298,12 +298,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # Precompute midpoints for threshold-based quantization
             c_sorted, _ = c.sort()
             layer._tq_midpoints = (c_sorted[:-1] + c_sorted[1:]) / 2
-            # Decode buffers are lazily allocated on first decode call.
-            # With fixed NUM_KV_SPLITS (cudagraph mode), the first warmup
-            # allocates them and subsequent captures reuse via buf_holder.
-            layer._tq_mid_o_buf = None
-            layer._tq_output_buf = None
-            layer._tq_lse_buf = None
+            # Decode buffers (_tq_mid_o_buf, _tq_output_buf, _tq_lse_buf)
+            # are pre-allocated via register_buffer in Attention.__init__
+            # and moved to GPU by model.to(device) — no allocation needed
+            # here.  The memory profiler sees them before KV cache sizing.
             layer._tq_cached = True
 
     def do_kv_cache_update(
@@ -363,12 +361,14 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         q = query[:N].view(N, self.num_heads, self.head_size)
 
-        # Get TQ buffers, ensure on device (one-time migration)
+        # Get TQ buffers, ensure on device (one-time migration).
+        # Use Any-typed alias for dynamic _tq_* attrs set by _ensure_on_device.
+        tq_layer: Any = layer
         device = q.device
-        self._ensure_on_device(layer, device)
-        Pi = layer._tq_Pi
-        PiT = layer._tq_PiT
-        centroids = layer._tq_centroids
+        self._ensure_on_device(tq_layer, device)
+        Pi = tq_layer._tq_Pi
+        PiT = tq_layer._tq_PiT
+        centroids = tq_layer._tq_centroids
 
         # Compute attention (KV cache was already updated by do_kv_cache_update)
         # With reorder_batch_threshold=1, decodes come first in the batch.
@@ -470,7 +470,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         value: torch.Tensor,  # (N, Hk, D)
         kv_cache: torch.Tensor,  # (num_blocks, block_size, Hk, slot_size)
         slot_mapping: torch.Tensor,
-        layer: "AttentionLayer",
+        layer: Any,
     ):
         """Quantize + store via fused Triton kernel."""
         triton_turboquant_store(
@@ -499,7 +499,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         Pi: torch.Tensor,
         centroids: torch.Tensor,
         PiT: torch.Tensor | None = None,
-        layer: "AttentionLayer | None" = None,
+        layer: Any = None,
     ) -> torch.Tensor:
         N, Hq, D = query.shape
 
@@ -637,7 +637,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
     def _continuation_prefill(
         self,
-        layer: AttentionLayer,
+        layer: Any,
         query: torch.Tensor,  # (q_len, Hq, D)
         key_chunk: torch.Tensor,  # (q_len, Hk, D)
         val_chunk: torch.Tensor,  # (q_len, Hk, D)
@@ -661,7 +661,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         mse_bytes = self._mse_bytes
         val_data_bytes = self._val_data_bytes
-        n_centroids = self._n_centroids
 
         # Dequant cached K/V from TQ cache
         # Allocate slightly over to align to block_size for the grid.

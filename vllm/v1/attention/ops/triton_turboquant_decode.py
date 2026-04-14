@@ -9,10 +9,14 @@ Supports FP8 (E4M3) keys, 3-bit and 4-bit uniform quantized values.
 """
 
 import math
+from typing import Any
 
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.triton_decode_attention import (
+    _fwd_kernel_stage2,
+)
 
 _FP8_E4B15: dict[int, int] = {}
 
@@ -448,9 +452,6 @@ def _tq_full_dequant_kv(
 # ---------------------------------------------------------------------------
 # Stage 2: Reuse from triton_decode_attention.py
 # ---------------------------------------------------------------------------
-from vllm.v1.attention.ops.triton_decode_attention import (
-    _fwd_kernel_stage2,
-)
 
 # ---------------------------------------------------------------------------
 # Launcher — cached constants + fused GEMM
@@ -494,7 +495,7 @@ def triton_turboquant_decode_attention(
     mid_o_buf: torch.Tensor | None = None,
     output_buf: torch.Tensor | None = None,
     lse_buf: torch.Tensor | None = None,
-    buf_holder: object | None = None,
+    buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).

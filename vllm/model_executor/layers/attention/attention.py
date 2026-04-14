@@ -437,6 +437,31 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self._tq_config = tq_config
 
+        # Pre-allocate decode intermediate buffers so model.to(device) moves
+        # them to GPU *before* the memory profiler runs.  Without this the
+        # profiler gives all free memory to KV cache blocks and the first
+        # decode OOMs when these buffers are lazily allocated.
+        _vllm_cfg = get_current_vllm_config()
+        B = _vllm_cfg.scheduler_config.max_num_seqs
+        Hq = self.num_heads
+        S = _vllm_cfg.attention_config.tq_max_kv_splits_for_cuda_graph
+        D = head_size
+        self.register_buffer(
+            "_tq_mid_o_buf",
+            torch.empty(B, Hq, S, D + 1, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tq_output_buf",
+            torch.empty(B, Hq, D, dtype=torch.float32),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_tq_lse_buf",
+            torch.empty(B, Hq, dtype=torch.float32),
+            persistent=False,
+        )
+
     def forward(
         self,
         query: torch.Tensor,

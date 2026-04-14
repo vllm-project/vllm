@@ -1958,16 +1958,16 @@ class EngineArgs:
 
         # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
         # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
-        if resolved_cache_dtype.startswith("turboquant_"):
-            if attention_config.flash_attn_version is None or (
-                attention_config.flash_attn_version >= 3
-            ):
-                logger.warning(
-                    "TurboQuant is not yet compatible with FlashAttention >= 3. "
-                    "Overriding flash_attn_version to 2. To silence this "
-                    "warning, pass --attention-config.flash_attn_version=2"
-                )
-                attention_config.flash_attn_version = 2
+        if resolved_cache_dtype.startswith("turboquant_") and (
+            attention_config.flash_attn_version is None
+            or attention_config.flash_attn_version >= 3
+        ):
+            logger.warning(
+                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "Overriding flash_attn_version to 2. To silence this "
+                "warning, pass --attention-config.flash_attn_version=2"
+            )
+            attention_config.flash_attn_version = 2
 
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
