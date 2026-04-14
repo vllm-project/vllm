@@ -524,9 +524,7 @@ def kernel_unified_attention_2d(
             P_v_f32 = P * v_token_head_scales[None, :]
             p_absmax = tl.max(P_v_f32, axis=1)  # P_v_f32 >= 0
             p_scale = tl.maximum(p_absmax * (1.0 / 127.0), 1e-6)
-            P_v_q = tl.clamp(
-                P_v_f32 * (1.0 / p_scale)[:, None], 0.0, 127.0
-            ).to(tl.int8)
+            P_v_q = tl.clamp(P_v_f32 * (1.0 / p_scale)[:, None], 0.0, 127.0).to(tl.int8)
             pv_i32 = tl.dot(P_v_q, V, out_dtype=tl.int32)
             acc += pv_i32.to(tl.float32) * p_scale[:, None]
         elif KV_QUANT_MODE >= 2:
@@ -1183,8 +1181,7 @@ def unified_attention(
     # Gated off for NVIDIA: not benchmarked there, keep the existing
     # bf16 path. Gated off for fp8 modes: int8 WMMA cannot consume fp8.
     use_rocm_int8_wmma_qk = (
-        kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD
-        and current_platform.is_rocm()
+        kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD and current_platform.is_rocm()
     )
 
     # Launch the 2D kernel if
