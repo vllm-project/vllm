@@ -8,7 +8,6 @@ from typing import Literal, cast, get_args, overload
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
@@ -19,7 +18,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -214,8 +213,8 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 
 
 # --8<-- [start:fused_moe]
-@CustomOp.register("fused_moe")
-class FusedMoE(CustomOp):
+@PluggableLayer.register("fused_moe")
+class FusedMoE(PluggableLayer):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
@@ -479,7 +478,7 @@ class FusedMoE(CustomOp):
             in_dtype=moe_in_dtype,
             moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+            max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
@@ -842,7 +841,10 @@ class FusedMoE(CustomOp):
         if shard_id == "w2":
             hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
             expert_data = self._narrow_expert_data_for_padding(
-                expert_data, loaded_weight, hidden_dim=hidden_dim
+                expert_data,
+                loaded_weight,
+                hidden_dim=hidden_dim,
+                shard_dim=shard_dim,
             )
             expert_data.copy_(loaded_weight)
         elif shard_id in ("w1", "w3"):
@@ -882,29 +884,33 @@ class FusedMoE(CustomOp):
         expert_data: torch.Tensor,
         loaded_weight: torch.Tensor,
         hidden_dim: int,
+        shard_dim: int | None = None,
     ) -> torch.Tensor:
-        """Narrow expert_data hidden dim to match loaded_weight for padded
-        hidden_size.
+        """Narrow expert_data to match loaded_weight for padded dimensions.
 
         When backends (e.g., DeepEP) round up hidden_size, weight parameters
         are larger than checkpoint weights. Narrow the padded hidden dimension
-        before copying.
+        before copying. Similarly, when padding occurs on the shard
+        (intermediate) dimension (e.g. for MXFP4 GEMM), narrow that dimension
+        as well.
 
         Args:
             expert_data: The (possibly padded) parameter tensor to narrow.
             loaded_weight: The checkpoint weight tensor with original size.
             hidden_dim: The dimension index corresponding to hidden_size.
                 Must be non-negative.
+            shard_dim: The dimension index corresponding to the shard
+                (intermediate) dimension. Defaults to `None`.
         """
-        if (
-            loaded_weight.ndim > 0
-            and 0 <= hidden_dim < expert_data.ndim
-            and hidden_dim < loaded_weight.ndim
-            and expert_data.shape[hidden_dim] > loaded_weight.shape[hidden_dim]
-        ):
-            expert_data = expert_data.narrow(
-                hidden_dim, 0, loaded_weight.shape[hidden_dim]
-            )
+        dims = (hidden_dim,) if shard_dim is None else (hidden_dim, shard_dim)
+        if loaded_weight.ndim > 0:
+            for dim in dims:
+                if (
+                    0 <= dim < expert_data.ndim
+                    and dim < loaded_weight.ndim
+                    and expert_data.shape[dim] > loaded_weight.shape[dim]
+                ):
+                    expert_data = expert_data.narrow(dim, 0, loaded_weight.shape[dim])
         return expert_data
 
     def _load_w13(
@@ -946,7 +952,10 @@ class FusedMoE(CustomOp):
             expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data, loaded_weight, hidden_dim=hidden_dim
+            expert_data,
+            loaded_weight,
+            hidden_dim=hidden_dim,
+            shard_dim=shard_dim,
         )
         expert_data.copy_(loaded_weight)
 
@@ -979,7 +988,10 @@ class FusedMoE(CustomOp):
         # w2, down_proj: Load into only logical weight of w2.
         hidden_dim = self._get_hidden_dim(shard_dim, expert_data.ndim)
         expert_data = self._narrow_expert_data_for_padding(
-            expert_data, loaded_weight, hidden_dim=hidden_dim
+            expert_data,
+            loaded_weight,
+            hidden_dim=hidden_dim,
+            shard_dim=shard_dim,
         )
         expert_data.copy_(loaded_weight)
 
@@ -1063,7 +1075,7 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
+        if self.quant_config and self.quant_config.get_name() == "gpt_oss_mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
@@ -1520,7 +1532,7 @@ class FusedMoE(CustomOp):
         """
         return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1535,13 +1547,6 @@ class FusedMoE(CustomOp):
         return (
             self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
-
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(hidden_states, router_logits)
 
     @classmethod
     def make_expert_params_mapping(
