@@ -12,11 +12,8 @@
 #else
   #include <hip/hip_fp8.h>
 
-  #if HIP_FP8_TYPE_OCP
 typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
-  #else
-typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3;
-  #endif
+typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3_fnuz;
 #endif
 
 #include "libtorch_stable/quantization/vectorization.cuh"
@@ -86,10 +83,13 @@ __device__ __forceinline__ float ComputeGroupScale(
 }
 
 template <typename T, typename DST_DTYPE>
-__device__ __forceinline__ void QuantizeGroup(
-    const T* __restrict__ smem_group, DST_DTYPE* __restrict__ group_output,
-    const int group_size, const int lane_id, const int threads_per_group,
-    const float y_s, const float min_8bit, const float max_8bit) {
+__device__ __forceinline__
+    std::enable_if_t<!std::is_same_v<DST_DTYPE, __nv_fp8_e4m3> &&
+                     !std::is_same_v<DST_DTYPE, __nv_fp8_e4m3_fnuz>>
+    QuantizeGroup(const T* __restrict__ smem_group,
+                  DST_DTYPE* __restrict__ group_output, const int group_size,
+                  const int lane_id, const int threads_per_group,
+                  const float y_s, const float min_8bit, const float max_8bit) {
   constexpr int vec_size = 16 / sizeof(T);
 
   // quantize shared -> global 8-bit
@@ -101,6 +101,33 @@ __device__ __forceinline__ void QuantizeGroup(
   vllm::vectorize_with_alignment<vec_size>(
       smem_group,         // in (shared)
       group_output,       // out (global quant tensor)
+      group_size,         // elements
+      lane_id,            // tid
+      threads_per_group,  // stride
+      scalar_op_quant);   // scalar handler
+}
+
+template <typename T, typename DST_DTYPE>
+__device__ __forceinline__
+    std::enable_if_t<std::is_same_v<DST_DTYPE, __nv_fp8_e4m3> ||
+                     std::is_same_v<DST_DTYPE, __nv_fp8_e4m3_fnuz>>
+    QuantizeGroup(const T* __restrict__ smem_group,
+                  DST_DTYPE* __restrict__ group_output, const int group_size,
+                  const int lane_id, const int threads_per_group,
+                  const float y_s, const float min_8bit, const float max_8bit) {
+  constexpr int vec_size = 16 / sizeof(T);
+
+  // quantize shared -> global 8-bit
+  auto* out_bytes = reinterpret_cast<uint8_t*>(group_output);
+  auto scalar_op_quant = [&] __device__(uint8_t& dst, const T& src) {
+    float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
+    dst = __hip_cvt_float_to_fp8(q, __nv_fp8_e4m3::__default_saturation,
+                                 __nv_fp8_e4m3::__default_interpret);
+  };
+
+  vllm::vectorize_with_alignment<vec_size>(
+      smem_group,         // in (shared)
+      out_bytes,          // out (global quant tensor)
       group_size,         // elements
       lane_id,            // tid
       threads_per_group,  // stride
@@ -253,7 +280,9 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
+        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
+          LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
+        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
         } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_KERNEL(scalar_t, int8_t);
@@ -412,7 +441,9 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit_packed", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
+        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
+          LAUNCH_PACKED_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
+        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_PACKED_KERNEL(scalar_t, __nv_fp8_e4m3);
         } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_PACKED_KERNEL(scalar_t, int8_t);
