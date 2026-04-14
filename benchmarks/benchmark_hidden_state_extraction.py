@@ -98,7 +98,12 @@ def run_baseline(
             **extra_args,
             "profiler_config": _make_profiler_config(profile_dir),
         }
-    llm = LLM(model=model, enable_prefix_caching=False, **extra_args)
+    llm = LLM(
+        model=model,
+        enable_prefix_caching=False,
+        enable_chunked_prefill=False,
+        **extra_args,
+    )
     sampling_params = SamplingParams(max_tokens=1)
     prompt_inputs = [{"prompt_token_ids": p} for p in prompts]
 
@@ -199,6 +204,8 @@ async def _run_extraction_async(
         model=model,
         enable_prefix_caching=False,
         enable_chunked_prefill=False,
+        max_num_batched_tokens=40960,
+        max_model_len=40960,
         speculative_config={
             "method": "extract_hidden_states",
             "num_speculative_tokens": 1,
@@ -332,7 +339,7 @@ def main():
     parser.add_argument("--skip-baseline", action="store_true")
     parser.add_argument("--skip-extract", action="store_true")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
-    parser.add_argument("--max-num-batched-tokens", type=int, default=8192)
+    parser.add_argument("--max-num-batched-tokens", type=int, default=None)
     parser.add_argument("--max-cudagraph-capture-size", type=int, default=None)
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--enforce-eager", action="store_true")
@@ -358,10 +365,16 @@ def main():
 
     extra_args = {
         "gpu_memory_utilization": args.gpu_memory_utilization,
-        "max_num_batched_tokens": args.max_num_batched_tokens,
     }
     if args.max_model_len is not None:
         extra_args["max_model_len"] = args.max_model_len
+    if args.max_num_batched_tokens is not None:
+        extra_args["max_num_batched_tokens"] = args.max_num_batched_tokens
+        if args.max_model_len and args.max_num_batched_tokens < args.max_model_len:
+            raise ValueError(
+                "max_num_batched_tokens must be >= max_model_len since chunked prefill"
+                " is not supported by hidden state extraction."
+            )
     if args.enforce_eager:
         extra_args["enforce_eager"] = True
     if args.load_format is not None:

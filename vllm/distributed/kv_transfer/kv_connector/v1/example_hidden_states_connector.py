@@ -174,7 +174,16 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         # the default stream (model forward). Thread pool for disk writes.
         self._copy_stream: torch.cuda.Stream | None = None  # lazy init
         self._executor = ThreadPoolExecutor(
-            max_workers=self._kv_transfer_config.get_from_extra_config("num_writer_threads", 8), thread_name_prefix="vllm-hs-save"
+            max_workers=self._kv_transfer_config.get_from_extra_config(
+                "num_writer_threads", 8
+            ),
+            thread_name_prefix="vllm-hs-save",
+        )
+        # Whether to use a filesystem lock when writing files to shared storage.
+        # This is necessary for online transfer clients to avoid incomplete reads,
+        # but can be disabled for offline tasks that run tasks in batches to completion
+        self.use_lock = self._kv_transfer_config.get_from_extra_config(
+            "use_synchronization_lock", True
         )
         # (tensors_dict, copy_done_event, filename, req_id) queued by
         # save_kv_layer, submitted to thread pool by wait_for_save.
@@ -213,17 +222,23 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         done.  Because ``wait_for_save`` runs before the worker returns
         output to the scheduler, the lock file is guaranteed to exist
         (and be held) by the time the client receives the path.
+
+        The lock can be disabled via the "use_synchronization_lock" extra config.
         """
         for tensors, event, filename, req_id in self._pending_copies:
             prior = self._req_futures.get(req_id)
             assert prior is None, "Found another KV transfer request with same req_id!"
 
-            # Create/open the lock file and acquire an exclusive lock.
-            # The lock is held by this fd; the thread worker will close
-            # the fd after writing, which releases the lock.
-            lock_path = filename + ".lock"
-            lock_fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
-            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            lock_fd = None
+            if self.use_lock:
+                # Create/open the lock file and acquire an exclusive lock.
+                # The lock is held by this fd; the thread worker will close
+                # the fd after writing, which releases the lock.
+                lock_path = filename + ".lock"
+                lock_fd = os.open(
+                    lock_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644
+                )
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
 
             future = self._executor.submit(
                 self._write_tensors, tensors, event, filename, lock_fd
@@ -250,7 +265,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         tensors: dict[str, torch.Tensor],
         event: torch.cuda.Event,
         filename: str,
-        lock_fd: int,
+        lock_fd: int | None,
     ) -> None:
         """Thread worker: wait for async DtoH copy, write to disk, release lock.
 
@@ -262,7 +277,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             event.synchronize()
             torch.save(tensors, filename)
         finally:
-            os.close(lock_fd)  # releases LOCK_EX
+            if lock_fd is not None:
+                os.close(lock_fd)  # releases LOCK_EX
 
     def save_kv_layer(
         self,
