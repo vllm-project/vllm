@@ -129,9 +129,7 @@ class EagleSpeculator:
         self.decode_cudagraph_manager = EagleCudaGraphManager(
             self.vllm_config,
             self.device,
-            # Only use FULL graph mode, if available, because draft decodes
-            # only consist of a single token.
-            cudagraph_mode.decode_mode(),
+            cudagraph_mode,
             decode_query_len=1,
         )
         # Share a single pool between prefill and decode since they never
