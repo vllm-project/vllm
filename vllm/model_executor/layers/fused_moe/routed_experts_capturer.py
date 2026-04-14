@@ -97,7 +97,7 @@ class RoutedExpertsCapturer:
                     f"for dp_rank={self.dp_rank})"
                 )
 
-        if layer_id >= self._device_buffer.shape[1]:
+        if layer_id >= self.device_buffer.shape[1]:
             return
 
         self.device_buffer[:token_num_per_dp, layer_id, :] = topk_ids[
