@@ -1136,6 +1136,7 @@ def unified_attention(
     block_local_block_size = -1
     if sliding_window_val > 0 and block_local_lookback > -1:
         block_local_block_size = sliding_window_val // (block_local_lookback + 1)
+        assert block_local_block_size > 0, "sliding_window must be > block_local_lookback+1"
     elif sliding_window_val <= 0:
         block_local_lookback = -1
 
