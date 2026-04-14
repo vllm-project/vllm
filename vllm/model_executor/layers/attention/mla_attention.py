@@ -1443,6 +1443,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 scope="local",
             )
             return model_dtype
+        elif (
+            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
+            and backend_supports_prefill_query_quantization()
+        ):
+            logger.warning_once(
+                "FP8 KV cache is enabled but prefill queries are not "
+                "quantized to FP8. For long-context workloads (ISL >= 4K), "
+                "enabling FP8 prefill attention can significantly optimize "
+                "prefill latency. To enable, add: "
+                '--attention-config \'{"use_prefill_query_quantization"'
+                ": true}'",
+                scope="local",
+            )
 
         return model_dtype
 
