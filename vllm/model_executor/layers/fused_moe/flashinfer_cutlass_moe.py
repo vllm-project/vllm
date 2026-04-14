@@ -54,7 +54,6 @@ def _iter_slot_mapping_tensors(slot_mapping):
 
 
 def _mask_padded_rows_for_flashinfer_moe(
-    hidden_states: torch.Tensor,
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
 ) -> None:
@@ -62,7 +61,7 @@ def _mask_padded_rows_for_flashinfer_moe(
         return
 
     ctx = get_forward_context()
-    num_rows = hidden_states.shape[0]
+    num_rows = topk_ids.shape[0]
     pad_rows = None
     for slot_mapping in _iter_slot_mapping_tensors(ctx.slot_mapping):
         if (
@@ -110,6 +109,14 @@ def is_valid_flashinfer_cutlass_fused_moe(
 
 
 class FlashInferExperts(mk.FusedMoEExpertsModular):
+    def preprocess_inputs_before_prepare(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
+        _mask_padded_rows_for_flashinfer_moe(topk_ids, topk_weights)
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.quant_config.use_nvfp4_w4a4:
             layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -414,12 +421,6 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             a1q_scale = None
             fc1_expert_weights = w1
             fc2_expert_weights = w2
-
-        _mask_padded_rows_for_flashinfer_moe(
-            hidden_states=hidden_states,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
-        )
 
         _ = flashinfer_cutlass_fused_moe(
             input=hidden_states,

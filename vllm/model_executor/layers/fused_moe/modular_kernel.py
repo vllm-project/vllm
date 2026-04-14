@@ -858,6 +858,20 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     ) -> None:
         apply_moe_activation(activation, output, input)
 
+    def preprocess_inputs_before_prepare(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> None:
+        """
+        Backend-specific hook to mutate routing inputs before prepare/finalize.
+
+        This runs before any prepare-time quantization or token redistribution,
+        so implementations that need the original row layout can use it.
+        """
+        return
+
     @abstractmethod
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
         raise NotImplementedError
@@ -1352,6 +1366,12 @@ class FusedMoEKernelModularImpl:
         local_num_experts = w1.size(0)
         if global_num_experts == -1:
             global_num_experts = local_num_experts
+
+        self.fused_experts.preprocess_inputs_before_prepare(
+            hidden_states,
+            topk_ids,
+            topk_weights,
+        )
 
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
