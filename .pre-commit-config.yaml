@@ -237,6 +237,12 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: check-rocm-docker-config
+    name: Validate ROCm Docker base-image and arch compatibility
+    entry: python tools/pre_commit/check_rocm_docker_config.py
+    language: python
+    files: ^docker/Dockerfile\.rocm_base$
+    pass_filenames: false
   - id: attention-backend-docs
     name: Check attention backend documentation is up to date
     entry: python tools/pre_commit/generate_attention_backend_docs.py --check
