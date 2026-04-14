@@ -196,7 +196,7 @@ vllm bench mm-processor \
   --num-prompts 3000 --num-warmups 300 \
   --max-model-len 32768 --seed 42 \
   --mm-encoder-attn-backend FLASH_ATTN \
-  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096, 4864], "encoder_cudagraph_max_images_per_batch": 8}'
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096, 4864], "encoder_cudagraph_max_vision_items_per_batch": 8}'
 ```
 
 ### Multi-GPU (4x GB200, TP=4, DP=4)
@@ -221,7 +221,7 @@ vllm bench mm-processor \
   --max-model-len 8192 --seed 42 \
   --mm-encoder-attn-backend FLASHINFER \
   --tensor-parallel-size 4 --mm-encoder-tp-mode data \
-  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096, 4864], "encoder_cudagraph_max_images_per_batch": 8}'
+  --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [512, 1024, 1536, 2048, 2560, 3072, 3584, 4096, 4864], "encoder_cudagraph_max_vision_items_per_batch": 8}'
 ```
 
 !!! note
