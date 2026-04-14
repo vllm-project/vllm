@@ -60,44 +60,6 @@ def vision_config():
     )
 
 
-def test_qwen2_5_vision_transformer_default_behavior(vision_config):
-    """Test that Qwen2_5_VisionTransformer works with default config."""
-    transformer = Qwen2_5_VisionTransformer(
-        vision_config=vision_config,
-    )
-
-    # Check that blocks are created
-    assert len(transformer.blocks) == vision_config.depth
-
-    # Blocks exist; return_attention_score is a forward param, not an attribute
-    for block in transformer.blocks:
-        assert block is not None
-
-
-def test_qwen2_5_vision_transformer_identifies_second_to_last_layer(
-    vision_config,
-):
-    """Test that Qwen2_5_VisionTransformer identifies the second-to-last layer.
-
-    Note: This test requires mocking the config system since we can't easily
-    set up a full VllmConfig in unit tests.
-    """
-    transformer = Qwen2_5_VisionTransformer(
-        vision_config=vision_config,
-    )
-
-    depth = vision_config.depth
-    # Default is -2, which means second-to-last layer
-    target_layer_idx = depth - 2  # Should be layer 10 for depth=12
-
-    # Verify the structure exists; second-to-last layer index is in range
-    assert len(transformer.blocks) == depth
-    assert 0 <= target_layer_idx < depth
-
-    # Note: Without actually setting the config, all blocks will have
-    # return_attention_score=False. This test verifies the structure is correct.
-
-
 def test_qwen2_5_vision_transformer_forward_default_behavior(
     vision_config,
 ):

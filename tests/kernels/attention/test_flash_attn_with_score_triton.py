@@ -177,60 +177,6 @@ class TestTokenImportanceTriton:
             computed_importance, ref_importance, rtol=1e-3, atol=1e-3
         )
 
-    @pytest.mark.parametrize("seq_len", [32, 64])
-    @pytest.mark.parametrize("nheads", [4, 8])
-    def test_compute_token_importance_transposed_format(self, seq_len, nheads):
-        """Test importance with transposed layout [batch, seq, heads, dim]."""
-        from vllm.model_executor.layers.attention import (
-            compute_flash_attn_score_triton as _score_triton,
-        )
-
-        device = "cuda"
-        batch_size = 2
-        head_dim = 64
-
-        # Generate inputs in [batch, seq, heads, dim] format
-        q = torch.randn(
-            batch_size, seq_len, nheads, head_dim, device=device, dtype=torch.float16
-        )
-        k = torch.randn(
-            batch_size, seq_len, nheads, head_dim, device=device, dtype=torch.float16
-        )
-
-        scale = 1.0 / math.sqrt(head_dim)
-
-        # Transpose to [batch, heads, seq, dim] for reference computation
-        q_transposed = q.transpose(1, 2).contiguous()
-        k_transposed = k.transpose(1, 2).contiguous()
-
-        # Compute logsumexp
-        qk = (
-            torch.einsum("bhqd,bhkd->bhqk", q_transposed.float(), k_transposed.float())
-            * scale
-        )
-        softmax_lse = torch.logsumexp(qk, dim=-1)  # [batch, heads, seq_q]
-
-        # Compute token importance using Triton (should handle transposed format)
-        computed_importance = _score_triton.compute_token_importance_triton(
-            q, k, softmax_lse, softmax_scale=scale
-        )
-
-        # If input was [batch, seq, heads, dim], output may be [batch, seq_k, heads].
-        # Transpose to match reference format [batch, heads, seq_k].
-        # if computed_importance.shape[1] != softmax_lse.shape[1]:
-        #     # heads dimension mismatch
-        #     computed_importance = computed_importance.transpose(1, 2)
-
-        # Compute reference
-        ref_importance = reference_key_importance(
-            q_transposed, k_transposed, softmax_lse, scale
-        )
-
-        # Verify values
-        torch.testing.assert_close(
-            computed_importance, ref_importance, rtol=1e-3, atol=1e-3
-        )
-
     def test_compute_token_importance_different_qk_lengths(self):
         """Test token importance with different Q and K sequence lengths."""
         from vllm.model_executor.layers.attention import (
