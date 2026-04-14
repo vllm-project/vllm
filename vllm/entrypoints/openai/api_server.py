@@ -498,8 +498,7 @@ async def init_render_app_state(
 def _check_port_available(addr: tuple[str, int]) -> None:
     """Check if the given port is already in use by another process.
 
-    Raises RuntimeError if the port is occupied, so the server fails fast
-    instead of silently sharing the port due to SO_REUSEPORT in upstream vllm.
+    Raises RuntimeError if the port is occupied, so the server fails fast.
     """
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
