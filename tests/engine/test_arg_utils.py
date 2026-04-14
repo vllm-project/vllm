@@ -598,8 +598,7 @@ def test_strip_json_number_underscores(input_json, expected):
 
 def test_dataclass_json_with_underscored_numbers():
     """Underscored numeric literals in JSON config args are accepted."""
-    kwargs = get_kwargs(NestedConfig)
-    parse_fn = kwargs["field"]["type"]
+    kwargs = get_kwargs(DummyConfig)
+    parse_fn = kwargs["nested_config"]["type"]
     result = parse_fn('{"field": 1_000}')
-    # assert result == NestedConfig(field=1000)
-    print(result, type(result))
+    assert result == NestedConfig(1000)  # type: ignore[call-arg]
