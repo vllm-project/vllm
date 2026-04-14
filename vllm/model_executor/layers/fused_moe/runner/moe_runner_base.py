@@ -309,7 +309,7 @@ class MoERunnerBase(MoERunner):
         protection.
 
         When apply_scale_to_output is True, scales the fused expert output
-        by routed_scaling_factor. For FP16, avoids overflow by dividing
+        by routed_scaling_factor. For FP16, avoid overflow by dividing
         shared_output by the scale instead (the decoder layer compensates
         with matching divisions).
         """
@@ -562,7 +562,7 @@ class MoERunnerBase(MoERunner):
         # Apply transform for routed experts (e.g., latent projection
         # for latent MoE)
         hidden_states, shared_experts_input = self.apply_routed_input_transform(
-            hidden_states,
+            hidden_states
         )
 
         hidden_states, og_hidden_dim = self._maybe_pad_hidden_states(
