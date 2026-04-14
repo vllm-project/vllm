@@ -470,7 +470,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             truncate_prompt_tokens=truncate_prompt_tokens,
             truncation_side=truncation_side,
         )
-        return self._preprocess_completion_online(
+        return self._preprocess_cmpl_online(
             proxy, prompt_input=proxy.input, prompt_embeds=None
         )
 
@@ -579,7 +579,7 @@ class JinaRankingTokenEmbedIOProcessor(
                 query=text_prompts[-1], docs=text_prompts[:-1]
             )
 
-            engine_inputs = self._preprocess_completion_online(
+            engine_inputs = self._preprocess_cmpl_online(
                 request,
                 prompt_input=prompt_input,
                 prompt_embeds=None,
