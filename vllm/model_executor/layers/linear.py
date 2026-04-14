@@ -918,12 +918,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 else:
                     # When weights are already fused on disk (e.g. Phi-3's
                     # gate_up_proj), there is only a single scale for the
-                    # entire fused matrix.  Narrow the param (shape [N]) to
-                    # [1] so only slot 0 is written, matching the checkpoint.
-                    param.data = param.data.narrow(0, 0, 1)
-                    param.load_merged_column_weight(
-                        loaded_weight=loaded_weight, shard_id=0
-                    )
+                    # entire fused matrix. Fill all slots with this scale
+                    # to ensure that any subsequent reduction (like .max())
+                    # works correctly while preserving the parameter shape.
+                    for idx in range(param.data.shape[0]):
+                        param.load_merged_column_weight(
+                            loaded_weight=loaded_weight, shard_id=idx
+                        )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
