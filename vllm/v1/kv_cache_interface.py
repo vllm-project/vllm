@@ -555,5 +555,11 @@ class KVCacheConfig:
         return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
 
     @property
+    def has_mla_layers(self) -> bool:
+        return any(
+            isinstance(g.kv_cache_spec, MLAAttentionSpec) for g in self.kv_cache_groups
+        )
+
+    @property
     def needs_kv_cache_zeroing(self) -> bool:
-        return self.has_mamba_layers
+        return self.has_mamba_layers or self.has_mla_layers
