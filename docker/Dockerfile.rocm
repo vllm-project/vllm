@@ -263,24 +263,24 @@ ARG DEEPEP_NIC="cx7"
 ENV ROCSHMEM_DIR=/opt/rocshmem
 
 RUN git clone ${ROCSHMEM_REPO} \
- && cd rocm-systems \
- && git checkout ${ROCSHMEM_BRANCH} \
- && mkdir -p projects/rocshmem/build \
- && cd projects/rocshmem/build \
- && cmake .. \
+    && cd rocm-systems \
+    && git checkout ${ROCSHMEM_BRANCH} \
+    && mkdir -p projects/rocshmem/build \
+    && cd projects/rocshmem/build \
+    && cmake .. \
     -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
     -DROCM_PATH=/opt/rocm \
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
     -DUSE_EXTERNAL_MPI=OFF \
- && make -j \
- && make install
+    && make -j \
+    && make install
 
 # Build DeepEP wheel.
 # DeepEP looks for rocshmem at ROCSHMEM_DIR.
 RUN git clone ${DEEPEP_REPO} \
- && cd DeepEP \
- && git checkout ${DEEPEP_BRANCH} \
- && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
+    && cd DeepEP \
+    && git checkout ${DEEPEP_BRANCH} \
+    && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
@@ -500,7 +500,7 @@ RUN case "$(which python3)" in \
     *) ;; esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --upgrade huggingface-hub[cli,hf_transfer] scipy
+    uv pip install --system --upgrade 'huggingface-hub[cli,hf_transfer]' scipy
 
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
