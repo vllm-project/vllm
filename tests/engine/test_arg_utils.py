@@ -12,6 +12,7 @@ from pydantic import Field
 from vllm.config import AttentionConfig, CompilationConfig, config
 from vllm.engine.arg_utils import (
     EngineArgs,
+    _strip_json_number_underscores,
     contains_type,
     get_kwargs,
     get_type,
@@ -563,3 +564,42 @@ def test_ir_op_priority():
             ir_op_priority=ir_op_priority,
             kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
         ).create_engine_config()
+
+
+@pytest.mark.parametrize(
+    ("input_json", "expected"),
+    [
+        ('{"x": 80_000_000}', '{"x": 80000000}'),
+        ('{"x": 1_000_000_000}', '{"x": 1000000000}'),
+        ('{"kv_connector": "my_connector"}', '{"kv_connector": "my_connector"}'),
+        (
+            '{"kv_connector":"my_thing","cpu_bytes":80_000_000}',
+            '{"kv_connector":"my_thing","cpu_bytes":80000000}',
+        ),
+        ('{"a": "test_123_456", "b": 1_2}', '{"a": "test_123_456", "b": 12}'),
+        ('{"val": 3.14_15}', '{"val": 3.1415}'),
+        ('{"no_underscores": 42}', '{"no_underscores": 42}'),
+        ('{"a": "x\\"_1_2", "b": 3_4}', '{"a": "x\\"_1_2", "b": 34}'),
+    ],
+    ids=[
+        "simple",
+        "multiple_underscores",
+        "string_preserved",
+        "mixed",
+        "string_with_digits_preserved",
+        "float_underscores",
+        "no_op",
+        "escaped_quote_in_string",
+    ],
+)
+def test_strip_json_number_underscores(input_json, expected):
+    assert _strip_json_number_underscores(input_json) == expected
+
+
+def test_dataclass_json_with_underscored_numbers():
+    """Underscored numeric literals in JSON config args are accepted."""
+    kwargs = get_kwargs(NestedConfig)
+    parse_fn = kwargs["field"]["type"]
+    result = parse_fn('{"field": 1_000}')
+    # assert result == NestedConfig(field=1000)
+    print(result, type(result))

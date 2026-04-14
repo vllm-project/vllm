@@ -254,6 +254,19 @@ def _maybe_add_docs_url(cls: Any) -> str:
     return f"\n\nAPI docs: https://docs.vllm.ai/en/{version}/api/vllm/config/#vllm.config.{cls.__name__}"
 
 
+def _strip_json_number_underscores(val: str) -> str:
+    """Strip Python-style underscores from numeric literals in a JSON string.
+
+    E.g. ``'{"x": 80_000_000}'`` becomes ``'{"x": 80000000}'``.
+    Only touches characters outside of JSON string values so that
+    keys like ``"my_key"`` are not modified.
+    """
+    parts = re.split(r'("(?:[^"\\]|\\.)*")', val)
+    for i in range(0, len(parts), 2):  # even indices = outside strings
+        parts[i] = re.sub(r"(?<=\d)_(?=\d)", "", parts[i])
+    return "".join(parts)
+
+
 @functools.lru_cache(maxsize=30)
 def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     # Save time only getting attr docs if we're generating help text
@@ -299,6 +312,7 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
 
             def parse_dataclass(val: str, cls=dataclass_cls) -> Any:
                 try:
+                    val = _strip_json_number_underscores(val)
                     return TypeAdapter(cls).validate_json(val)
                 except ValidationError as e:
                     raise argparse.ArgumentTypeError(repr(e)) from e
