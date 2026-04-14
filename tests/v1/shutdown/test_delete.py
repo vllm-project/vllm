@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test that we handle a startup Error and shutdown."""
 
-import gc
-
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
@@ -56,8 +54,6 @@ async def test_async_llm_delete(
         ):
             pass
     del async_llm
-    # TODO: remove gc.collect() when we have https://github.com/huggingface/huggingface_hub/pull/4092
-    gc.collect()
 
     # Confirm all the processes are cleaned up.
     wait_for_gpu_memory_to_clear(
@@ -104,7 +100,7 @@ def test_llm_delete(
                 "Hello my name is", sampling_params=SamplingParams(max_tokens=1)
             )
         del llm
-        gc.collect()
+
         # Confirm all the processes are cleaned up.
         wait_for_gpu_memory_to_clear(
             devices=list(range(tensor_parallel_size)),

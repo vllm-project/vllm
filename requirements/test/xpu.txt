@@ -146,7 +146,7 @@ httpx==0.28.1
     #   datasets
     #   huggingface-hub
     #   schemathesis
-huggingface-hub==1.10.1
+huggingface-hub==1.10.2
     # via
     #   accelerate
     #   datasets
