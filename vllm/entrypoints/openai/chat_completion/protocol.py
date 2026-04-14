@@ -637,8 +637,13 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def check_tool_usage(cls, data):
+        if isinstance(data, ValueError):
+            raise data
+        if not isinstance(data, dict):
+            return data
+
         # Reject empty tools array, matching OpenAI API behavior
-        if isinstance(data.get("tools"), list) and len(data["tools"]) == 0:
+        if data.get("tools") == []:
             raise ValueError(
                 '`tools` must not be an empty array. '
                 'Either provide at least one tool or omit the field entirely.'
