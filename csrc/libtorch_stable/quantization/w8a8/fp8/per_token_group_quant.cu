@@ -10,6 +10,14 @@
 #ifndef USE_ROCM
   #include <cuda_fp8.h>
 #else
+  #if defined(NDEBUG)
+    #undef NDEBUG
+    #include <assert.h>
+    #define UNREACHABLE_CODE assert(false);
+    #define NDEBUG
+  #else
+    #define UNREACHABLE_CODE assert(false);
+  #endif
   #include <hip/hip_fp8.h>
 
 typedef __hip_fp8_e4m3 __nv_fp8_e4m3;
@@ -22,30 +30,17 @@ typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3_fnuz;
 #include "libtorch_stable/torch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
-  if constexpr (WARP_SIZE == 32) {
 #ifdef USE_ROCM
-    const auto mask = threadIdx.x % 32 >= 16 ? 0x00000000'ffff0000ull
-                                             : 0x00000000'0000ffffull;
+  const auto mask = threadIdx.x % 32 >= 16 ? 0xffff0000ull : 0x0000ffffull;
 #else
-    const auto mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
+  const auto mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
 #endif
 
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
-    return val;
-  } else {
-    const auto mask = threadIdx.x % 64 >= 32 ? 0xffffffff'00000000ull
-                                             : 0x00000000'ffffffffull;
-
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 16));
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
-    val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
-    return val;
-  }
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
+  val = fmaxf(val, __shfl_xor_sync(mask, val, 1));
+  return val;
 }
 
 template <typename T, bool SCALE_UE8M0>
@@ -84,8 +79,10 @@ __device__ __forceinline__ float ComputeGroupScale(
 
 template <typename T, typename DST_DTYPE>
 __device__ __forceinline__
+#ifdef USE_ROCM
     std::enable_if_t<!std::is_same_v<DST_DTYPE, __nv_fp8_e4m3> &&
                      !std::is_same_v<DST_DTYPE, __nv_fp8_e4m3_fnuz>>
+#endif
     QuantizeGroup(const T* __restrict__ smem_group,
                   DST_DTYPE* __restrict__ group_output, const int group_size,
                   const int lane_id, const int threads_per_group,
@@ -107,6 +104,15 @@ __device__ __forceinline__
       scalar_op_quant);   // scalar handler
 }
 
+// On ROCm both fn and fnuz implementations would need to be compiled into
+// the fat binary, because the host is compiled once and needs to dispatch
+// in runtime.
+// The default constructor and conversion operators exist on the __device__
+// only for the current supported type, the other is only available on
+// __host__. So we're using the explicit conversion and avoiding the
+// future use of vec_n_t<__nv_fp8_e4m3[_funz]> as one of them will always
+// be unavailable
+#ifdef USE_ROCM
 template <typename T, typename DST_DTYPE>
 __device__ __forceinline__
     std::enable_if_t<std::is_same_v<DST_DTYPE, __nv_fp8_e4m3> ||
@@ -116,8 +122,16 @@ __device__ __forceinline__
                   const int lane_id, const int threads_per_group,
                   const float y_s, const float min_8bit, const float max_8bit) {
   constexpr int vec_size = 16 / sizeof(T);
+  if constexpr (std::is_same_v<DST_DTYPE, __nv_fp8_e4m3>) {
+  #if !(HIP_FP8_TYPE_OCP)
+    UNREACHABLE_CODE
+  #endif
+  } else {
+  #if HIP_FP8_TYPE_OCP
+    UNREACHABLE_CODE
+  #endif
+  }
 
-  // quantize shared -> global 8-bit
   auto* out_bytes = reinterpret_cast<uint8_t*>(group_output);
   auto scalar_op_quant = [&] __device__(uint8_t& dst, const T& src) {
     float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
@@ -133,6 +147,7 @@ __device__ __forceinline__
       threads_per_group,  // stride
       scalar_op_quant);   // scalar handler
 }
+#endif
 
 template <typename T, typename DST_DTYPE, bool IS_COLUMN_MAJOR = false,
           bool SCALE_UE8M0 = false, typename scale_packed_t = float>
@@ -280,10 +295,12 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
-          LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
-        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
+        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3);
+#ifdef USE_ROCM
+        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
+          LAUNCH_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
+#endif
         } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_KERNEL(scalar_t, int8_t);
         }
@@ -441,10 +458,12 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
 
   VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "per_token_group_quant_8bit_packed", ([&] {
-        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
-          LAUNCH_PACKED_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
-        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
+        if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fn) {
           LAUNCH_PACKED_KERNEL(scalar_t, __nv_fp8_e4m3);
+#ifdef USE_ROCM
+        } else if (dst_type == torch::headeronly::ScalarType::Float8_e4m3fnuz) {
+          LAUNCH_PACKED_KERNEL(scalar_t, __nv_fp8_e4m3_fnuz);
+#endif
         } else if (dst_type == torch::headeronly::ScalarType::Char) {
           LAUNCH_PACKED_KERNEL(scalar_t, int8_t);
         } else {
