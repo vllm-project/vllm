@@ -39,7 +39,7 @@ import urllib.request
 import numpy as np
 from transformers import AutoTokenizer
 
-from vllm.benchmarks.datasets.shared import RangeRatio, get_sampling_params
+from vllm.benchmarks.datasets.utils import RangeRatio, get_sampling_params
 
 logger = logging.getLogger(__name__)
 

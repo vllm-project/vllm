@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from vllm.benchmarks.datasets.shared import get_sampling_params
+from vllm.benchmarks.datasets.utils import get_sampling_params
 from vllm.tokenizers import TokenizerLike
 
 

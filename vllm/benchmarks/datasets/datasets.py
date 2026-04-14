@@ -34,7 +34,7 @@ from huggingface_hub import snapshot_download
 from PIL import Image
 from typing_extensions import deprecated
 
-from vllm.benchmarks.datasets.shared import (
+from vllm.benchmarks.datasets.utils import (
     RangeRatio,
     _resolve_range_ratios,
     get_sampling_params,

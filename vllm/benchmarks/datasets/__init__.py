@@ -40,7 +40,7 @@ from vllm.benchmarks.datasets.datasets import (
     process_video,
     zeta_prompt,
 )
-from vllm.benchmarks.datasets.shared import RangeRatio
+from vllm.benchmarks.datasets.utils import RangeRatio
 
 __all__ = [
     "DEFAULT_NUM_PROMPTS",
