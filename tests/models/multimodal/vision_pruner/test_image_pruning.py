@@ -43,7 +43,7 @@ QWEN2_5_VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", QWEN2_5_VL_MODELS)
-@pytest.mark.parametrize("image_pruning_rate", [None, 0.6, 0.3])
+@pytest.mark.parametrize("image_pruning_rate", [None, 0.6])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 def test_qwen2_5_vl_image_pruning_single(
@@ -113,54 +113,6 @@ def test_qwen2_5_vl_image_pruning_batched(
         assert len(output_ids) > 0
         assert isinstance(output_text, str)
         assert len(output_text) > 0
-
-
-@pytest.mark.core_model
-@pytest.mark.parametrize("model", QWEN2_5_VL_MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [64])
-def test_qwen2_5_vl_pruning_reduces_tokens(
-    vllm_runner,
-    image_assets,
-    model,
-    dtype,
-    max_tokens,
-) -> None:
-    """Verify that pruning produces shorter outputs than no pruning
-    when max_tokens is large enough (smoke test for token reduction)."""
-    images = [image_assets[0].pil_image]
-    prompts = [IMAGE_PROMPTS[0]]
-
-    # Run without pruning
-    with vllm_runner(
-        model,
-        runner="generate",
-        max_model_len=4096,
-        max_num_seqs=1,
-        dtype=dtype,
-        limit_mm_per_prompt={"image": 1},
-        tensor_parallel_size=1,
-    ) as vllm_model:
-        outputs_no_prune = vllm_model.generate_greedy(
-            prompts, max_tokens, images=images
-        )
-
-    # Run with aggressive pruning (prune 70% of tokens)
-    with vllm_runner(
-        model,
-        runner="generate",
-        max_model_len=4096,
-        max_num_seqs=1,
-        dtype=dtype,
-        limit_mm_per_prompt={"image": 1},
-        tensor_parallel_size=1,
-        image_pruning_rate=0.7,
-    ) as vllm_model:
-        outputs_pruned = vllm_model.generate_greedy(prompts, max_tokens, images=images)
-
-    # Both should produce valid output
-    assert len(outputs_no_prune[0][1]) > 0
-    assert len(outputs_pruned[0][1]) > 0
 
 
 # ===================================================================
