@@ -937,6 +937,38 @@ class VllmConfig:
             )
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
+        # async tp is built on top of sequence parallelism and requires it.
+        pass_config = self.compilation_config.pass_config
+        if pass_config.fuse_gemm_comms:
+            pass_config.enable_sp = True
+        if pass_config.enable_sp:
+            if self.parallel_config.tensor_parallel_size == 1:
+                logger.warning("Sequence Parallelism requires TP>1, disabling")
+                pass_config.enable_sp = False
+                pass_config.fuse_gemm_comms = False
+            else:
+                if pass_config.sp_min_token_num is None:
+                    from vllm.compilation.passes.fusion.sequence_parallelism import (
+                        get_sequence_parallelism_threshold,
+                    )
+
+                    tp_size = self.parallel_config.tensor_parallel_size
+                    hidden_size = self.model_config.get_hidden_size()
+                    assert isinstance(self.model_config.dtype, torch.dtype)
+                    element_size = self.model_config.dtype.itemsize
+                    pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
+                        hidden_size, tp_size, element_size
+                    )
+
+                if pass_config.sp_min_token_num is None:
+                    logger.warning(
+                        "Model hidden_size too small for the SP "
+                        "threshold heuristic, disabling. To force SP, "
+                        "set pass_config.sp_min_token_num manually."
+                    )
+                    pass_config.enable_sp = False
+                    pass_config.fuse_gemm_comms = False
+
         from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
 
         if HAS_OPAQUE_TYPE:
@@ -1016,6 +1048,8 @@ class VllmConfig:
             else:
                 self.compilation_config.cudagraph_num_of_warmups = 1
 
+            self._set_cudagraph_sizes()
+
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1072,6 +1106,11 @@ class VllmConfig:
 
         if envs.VLLM_USE_V2_MODEL_RUNNER:
             self._validate_v2_model_runner()
+
+        # Re-compute compile ranges after platform-specific config updates
+        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
+        self._set_compile_ranges()
+
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
             self.parallel_config.data_parallel_size
@@ -1082,13 +1121,6 @@ class VllmConfig:
             all2all_backend=self.parallel_config.all2all_backend,
             data_parallel_size=effective_dp_size,
         )
-        self._finalize_sequence_parallelism_config()
-
-        # Re-compute compile ranges after platform-specific config updates
-        # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
-        # and after finalizing splitting_ops / sequence parallelism state.
-        self._set_compile_ranges()
-        self._set_cudagraph_sizes()
 
         if self.compilation_config.pass_config.enable_sp:
             # With pipeline parallelism, native rms norm tracing errors due to
@@ -1289,59 +1321,6 @@ class VllmConfig:
             for size in possible_sizes
             if size % self.parallel_config.tensor_parallel_size == 0
         ]
-
-    def _finalize_sequence_parallelism_config(self) -> None:
-        # async tp is built on top of sequence parallelism and requires it.
-        pass_config = self.compilation_config.pass_config
-        if pass_config.fuse_gemm_comms:
-            pass_config.enable_sp = True
-        if not pass_config.enable_sp:
-            return
-
-        if self.parallel_config.tensor_parallel_size == 1:
-            logger.warning("Sequence Parallelism requires TP>1, disabling")
-            pass_config.enable_sp = False
-            pass_config.fuse_gemm_comms = False
-            return
-
-        # SP is only supported when compiling the whole graph (fullgraph).
-        # Piecewise compilation is not supported because the residual tensor
-        # gets split across TP ranks, causing size mismatches at subgraph
-        # boundaries.
-        if (
-            not self.compilation_config.use_inductor_graph_partition
-            and self.compilation_config.splitting_ops
-        ):
-            logger.warning(
-                "Sequence parallelism is only supported when compiling the "
-                "whole graph. Disabling SP and async TP because this "
-                "configuration uses piecewise compilation."
-            )
-            pass_config.enable_sp = False
-            pass_config.fuse_gemm_comms = False
-            return
-
-        if pass_config.sp_min_token_num is None:
-            from vllm.compilation.passes.fusion.sequence_parallelism import (
-                get_sequence_parallelism_threshold,
-            )
-
-            tp_size = self.parallel_config.tensor_parallel_size
-            hidden_size = self.model_config.get_hidden_size()
-            assert isinstance(self.model_config.dtype, torch.dtype)
-            element_size = self.model_config.dtype.itemsize
-            pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
-                hidden_size, tp_size, element_size
-            )
-
-        if pass_config.sp_min_token_num is None:
-            logger.warning(
-                "Model hidden_size too small for the SP "
-                "threshold heuristic, disabling. To force SP, "
-                "set pass_config.sp_min_token_num manually."
-            )
-            pass_config.enable_sp = False
-            pass_config.fuse_gemm_comms = False
 
     def _set_max_num_scheduled_tokens(self):
         """

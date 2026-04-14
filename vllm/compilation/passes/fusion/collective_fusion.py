@@ -408,6 +408,10 @@ class AsyncTPPass(VllmPatternMatcherPass):
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         # This pass is applied on top of the sequence parallelism pass,
         # which is only supported in fullgraph compilation mode.
+        assert (
+            self.compilation_config.use_inductor_graph_partition
+            or not self.compilation_config.splitting_ops
+        ), "AsyncTPPass requires full-graph compilation"
         return True
 
     @VllmInductorPass.time_and_log

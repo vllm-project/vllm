@@ -418,6 +418,11 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         - min_token_num is None (SP disabled for this device/config)
         - The compile range starts below the minimum token threshold
         """
+        assert (
+            self.compilation_config.use_inductor_graph_partition
+            or not self.compilation_config.splitting_ops
+        ), "SequenceParallelismPass requires full-graph compilation"
+
         # min_token_num is None when SP is disabled for this device/config
         # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)
         if self.min_token_num is None:

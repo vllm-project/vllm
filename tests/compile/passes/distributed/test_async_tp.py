@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -19,6 +21,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.utils import Range
 from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_reduce_scatter,
@@ -285,6 +288,19 @@ def test_async_tp_pass_replace(
         )
 
     run_torch_spawn(async_tp_pass_on_test_model, num_processes)
+
+
+def test_async_tp_pass_requires_full_graph_compilation():
+    async_tp_pass = object.__new__(AsyncTPPass)
+    async_tp_pass.compilation_config = SimpleNamespace(
+        use_inductor_graph_partition=False,
+        splitting_ops=["vllm::unified_attention_with_output"],
+    )
+
+    with pytest.raises(
+        AssertionError, match="AsyncTPPass requires full-graph compilation"
+    ):
+        async_tp_pass.is_applicable_for_range(Range(start=8, end=8))
 
 
 def async_tp_pass_on_test_model(

@@ -520,7 +520,7 @@ def is_residual_scattered_for_sp(
 
     The residual tensor is scattered across tensor parallel ranks when sequence
     parallelism and tensor parallelism is enabled. SP is only supported in
-    fullgraph compilation mode, so when enabled, residuals are always scattered.
+    full-graph compilation mode.
     """
     if not vllm_config.compilation_config.pass_config.enable_sp:
         return False
@@ -529,6 +529,11 @@ def is_residual_scattered_for_sp(
 
     if tp == 1:
         return False
+
+    assert (
+        vllm_config.compilation_config.use_inductor_graph_partition
+        or not vllm_config.compilation_config.splitting_ops
+    ), "Sequence parallelism requires full-graph compilation"
 
     # When sequence parallelism is enabled, we always pad num_input_tokens
     # to be a multiple of tensor_parallel_size (tp) earlier.
