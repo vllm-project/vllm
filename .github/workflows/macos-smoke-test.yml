@@ -45,12 +45,12 @@ jobs:
       - name: Smoke test vllm serve
         run: |
           # Start server in background
+          VLLM_CPU_KVCACHE_SPACE=1 \
           vllm serve Qwen/Qwen3-0.6B \
             --max-model-len=2K \
             --load-format=dummy \
             --hf-overrides '{"num_hidden_layers": 2}' \
             --enforce-eager \
-            --gpu-memory-utilization=0.5 \
             --port 8000 &
 
           SERVER_PID=$!
