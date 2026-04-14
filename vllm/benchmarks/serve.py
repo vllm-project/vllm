@@ -293,7 +293,7 @@ async def get_request(
     delay_ts = []
 
     # if the traces have timing info then:
-    if self_timed == False:
+    if not self_timed:
         for request_index, request in enumerate(input_requests):
             current_request_rate = _get_current_request_rate(
                 ramp_up_strategy,
@@ -341,7 +341,8 @@ async def get_request(
         for request_index, request in enumerate(input_requests):
             # this is cumulative running ts, from which sleep is calculated later
             delay_ts.append(request.timestamp)
-            # TODO: there is no notion of RPS here, may be we can calculate from the trace
+            # TODO: there is no notion of RPS here, may be we can calculate
+            # from the trace.
             request_rates.append(0.0)
 
     start_ts = time.time()
@@ -784,7 +785,7 @@ async def benchmark(
             print("Profiler started")
 
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
-    if self_timed == False:
+    if not self_timed:
         if ramp_up_strategy is not None:
             print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
             print(
@@ -1454,7 +1455,8 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "--self-timed",
         action="store_true",
         default=False,
-        help="Use timing information from the traces instead of the configuration",
+        help="Use timing information from the traces instead of the configuration."
+        "This is useful when replaying traces faithfully based on their timestamps.",
     )
     parser.add_argument(
         "--percentile-metrics",

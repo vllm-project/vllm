@@ -1412,8 +1412,8 @@ class TimedTrace(BenchmarkDataset):
         np.random.seed(self.random_seed)
 
         # Set parameters with defaults from timed_trace_group arguments
-        self.chunk_size = int(kwargs.get("chunk_hash_size"))
-        self.sec_multiplier = float(kwargs.get("sec_multiplier"))
+        self.chunk_size = int(kwargs.get("chunk_hash_size", 16))
+        self.sec_multiplier = float(kwargs.get("sec_multiplier", 1))
         self.label_ts = str(kwargs.get("label_timestamp"))
         self.label_input_length = str(kwargs.get("label_input_length"))
         self.label_output_length = str(kwargs.get("label_output_length"))
@@ -1439,7 +1439,9 @@ class TimedTrace(BenchmarkDataset):
         with open(self.dataset_path) as f:
             self.data = f.readlines()
 
-    def _sample_token(self, num_tokens: int, tokenizer: TokenizerLike, seed: int | None = None) -> list[int]:
+    def _sample_token(
+        self, num_tokens: int, tokenizer: TokenizerLike, seed: int | None = None
+    ) -> list[int]:
         # Initialize vocab only if it doesn't exist yet
         if not hasattr(self, "vocab"):
             self.vocab = tokenizer.get_vocab()
@@ -1458,7 +1460,7 @@ class TimedTrace(BenchmarkDataset):
             sampled_token_ids = rng.choices(self.vocab_values_sorted, k=num_tokens)
         else:
             sampled_token_ids = random.choices(self.vocab_values_sorted, k=num_tokens)
-        
+
         return sampled_token_ids
 
     def _expand_prompt(
@@ -1694,8 +1696,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=16,
         help=(
             "Each hash tokens, if present, represent how many token "
-            "hashes. For example in Moonshot traces it is 512, while "
-            "Alibaba has 16."
+            "hashes. For example in the Moonshot traces it is 512, while "
+            "the Qwen/Alibaba has 16."
         ),
     )
     timed_trace_group.add_argument(
@@ -1704,32 +1706,34 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         default=1,
         help=(
             "What multiplier to use when converting timestamps to "
-            "seconds. We will multiply timestamps by this."
+            "seconds. We will multiply timestamps by this. For example"
+            "if the timestamps are in milliseconds, then pass 0.001."
+            "If they are already in seconds, then the default 1 is sufficient."
         ),
     )
     timed_trace_group.add_argument(
         "--label-timestamp",
         type=str,
         default="timestamp",
-        help="What label to use to index the timestamp in the trace.",
+        help="What json label to use to index the timestamp in the trace.",
     )
     timed_trace_group.add_argument(
         "--label-input-length",
         type=str,
         default="input_length",
-        help=("What label to use to index the input length field in the trace."),
+        help=("What json label to use to index the input length field in the trace."),
     )
     timed_trace_group.add_argument(
         "--label-output-length",
         type=str,
         default="output_length",
-        help=("What label to use to index the output length field in the trace."),
+        help=("What json label to use to index the output length field in the trace."),
     )
     timed_trace_group.add_argument(
         "--label-hash-ids",
         type=str,
         default="hash_ids",
-        help=("What label to use to index the hash ids for the input prompts."),
+        help=("What json label to use to index the hash ids for the input prompts."),
     )
 
     blazedit_group = parser.add_argument_group("blazedit dataset options")
