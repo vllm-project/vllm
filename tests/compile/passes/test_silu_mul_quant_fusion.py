@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
     kFp8Dynamic128Sym,
+    kFp8Dynamic64Sym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -229,6 +230,26 @@ CUDA_KERNELS = [
     PerTensorTorchFP8ScaledMMLinearKernel,
 ]
 TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+def test_activation_quant_fusion_pass_skips_block_quant_on_rocm():
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            custom_ops=["none"],
+            backend="eager",
+            pass_config=PassConfig(fuse_act_quant=True),
+        ),
+    )
+
+    assert kFp8Dynamic128Sym not in QUANT_OPS
+    assert kFp8Dynamic64Sym not in QUANT_OPS
+
+    with set_current_vllm_config(config):
+        fusion_pass = ActivationQuantFusionPass(config)
+
+    assert fusion_pass.patterns is not None
 
 
 @pytest.mark.parametrize("num_tokens", [32, 64])
