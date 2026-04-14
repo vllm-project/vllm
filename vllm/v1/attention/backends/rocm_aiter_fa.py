@@ -30,9 +30,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
-from vllm.v1.attention.backends.rocm_aiter_fa_utils import (
-    should_use_unified_decode_fallback,
-)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -1209,9 +1206,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 # For smaller head sizes or sliding window attention,
                 # fall back to the unified_attention triton kernel which
                 # handles both correctly.
-                use_unified_attention = should_use_unified_decode_fallback(
-                    head_size=self.head_size,
-                    sliding_window=self.sliding_window,
+                _MIN_HEAD_SIZE_FOR_LL4MI = 64
+                use_unified_attention = (
+                    self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
+                    or self.sliding_window[0] != -1
                 )
 
                 if use_unified_attention:
