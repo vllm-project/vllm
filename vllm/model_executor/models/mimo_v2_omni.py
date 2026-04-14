@@ -204,7 +204,7 @@ class MiMoVisionAttention(nn.Module):
         k: torch.Tensor,
         v: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        max_seqlen: int,
+        max_seqlen: torch.Tensor,
     ) -> torch.Tensor:
         """Window attention via flash_attn_varlen_func with window_size."""
         from vllm.vllm_flash_attn import flash_attn_varlen_func
@@ -231,7 +231,7 @@ class MiMoVisionAttention(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
-        max_seqlen: int,
+        max_seqlen: torch.Tensor,
         full_attn: bool = True,
     ) -> torch.Tensor:
         """
@@ -351,7 +351,7 @@ class MiMoVisionBlock(nn.Module):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
-        max_seqlen: int,
+        max_seqlen: torch.Tensor,
         full_attn: bool = True,
     ) -> torch.Tensor:
         # x: [seq_len, batch=1, dim]
@@ -561,7 +561,7 @@ class MiMoVisionTransformer(nn.Module):
                 seqlens.cumsum(dim=0).to(device=x.device, dtype=torch.int32),
             ]
         )
-        max_seqlen = int(seqlens.max().item())
+        max_seqlen = seqlens.max()
 
         # Precompute col-based window index for type=1 (col SWA) layers
         window_index_1d_col = self.get_window_index_1d(grid_thw, col=True).to(
@@ -877,5 +877,5 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_encoder."])
+        loader = AutoWeightsLoader(self, skip_prefixes=["audio_encoder.", "speech_embeddings."])
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

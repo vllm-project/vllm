@@ -595,6 +595,13 @@ class MiMoV2Model(nn.Module):
 
             if expert_matched:
                 continue
+            # Support fused qkv_proj checkpoint (Pro format)
+            if "qkv_proj" in name:
+                if name in params_dict:
+                    param = params_dict[name]
+                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
+                    default_weight_loader(param, loaded_weight)
+                continue
 
             stacked_matched = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
