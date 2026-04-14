@@ -5,7 +5,6 @@ import json
 from collections.abc import Generator
 
 import pytest
-from transformers import AutoConfig
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -19,15 +18,8 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tool_parsers.step3p5_tool_parser import Step3p5ToolParser
-from vllm.transformers_utils.configs.step3p5 import Step3p5Config
 
 MODEL = "stepfun-ai/Step-3.5-Flash"
-
-# Register vLLM's Step3p5Config so that AutoTokenizer.from_pretrained loads
-# the config as Step3p5Config (which defines max_position_embeddings) instead
-# of a generic PretrainedConfig, avoiding an AttributeError with
-# transformers >= 5.
-AutoConfig.register("step3p5", Step3p5Config, exist_ok=True)
 
 
 @pytest.fixture(scope="module")
