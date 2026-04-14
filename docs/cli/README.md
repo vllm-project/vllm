@@ -130,6 +130,42 @@ vllm bench serve \
     --num-prompts  5
 ```
 
+Use `--eval.*` to run [lm_eval](https://github.com/EleutherAI/lm-evaluation-harness) accuracy scoring in the same pass, producing a merged JSONL report with accuracy, performance, and environment data:
+
+```bash
+vllm bench serve \
+    --model meta-llama/Meta-Llama-3-8B-Instruct \
+    --host localhost --port 8000 \
+    --eval.tasks gsm8k \
+    --eval.num_samples 1024 --eval.num_fewshot 8 \
+    --eval.max_tokens 512 \
+    --eval.output results.jsonl
+```
+
+Supported `--eval.*` keys:
+
+- `eval.tasks` (required) — comma-separated lm_eval task names, e.g. `gsm8k,hellaswag`.
+- `eval.num_samples` (alias: `eval.limit`) — cap the number of samples per task. Default: full task dataset.
+- `eval.num_fewshot` — number of few-shot examples. Default: task default. Pass `0` for zero-shot.
+- `eval.max_tokens` — cap the per-request `max_tokens` sent to the server. Mirrors `lm_eval --gen_kwargs max_tokens=N`. Default: the task's own `max_gen_toks` (256 if unset).
+- `eval.output` — JSONL output path. Default: `eval_results/<model>.jsonl`.
+
+For accuracy parity with a real `lm_eval` baseline, also pass `--max-concurrency N` (matching the value of `lm_eval`'s `num_concurrent`) so both clients put the same number of in-flight requests on the server.
+
+Each run appends a JSON line with this structure:
+
+```json
+{
+  "metadata":    { "run_id": "...", "model": "...", "tasks": "...",
+                   "bench_type": "serve", "base_url": "...", "timestamp": "..." },
+  "accuracy":    { "gsm8k": { "exact_match,strict-match": 0.78, ... } },
+  "performance": { "request_throughput": 84.7, "output_throughput": 8494.1,
+                   "mean_ttft_ms": 4214.9, "mean_tpot_ms": 55.5, ... },
+  "environment": { "system_info": {...}, "pytorch_info": {...},
+                   "cuda_gpu_info": {...}, "vllm_info": {...}, ... }
+}
+```
+
 See [vllm bench serve](./bench/serve.md) for the full reference of all available arguments.
 
 ### throughput

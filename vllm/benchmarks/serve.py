@@ -839,6 +839,14 @@ async def benchmark(
             req_lora_module = next(lora_modules)
             req_model_id, req_model_name = req_lora_module, req_lora_module
 
+        # Merge per-sample extra_body (e.g. LMEvalDataset's stop sequences,
+        # max_tokens override, seed) over the global extra_body. Per-sample
+        # keys win. Most datasets leave `request.extra_body` as None.
+        if request.extra_body is not None:
+            req_extra_body = {**(extra_body or {}), **request.extra_body}
+        else:
+            req_extra_body = extra_body
+
         request_func_input = RequestFuncInput(
             model=req_model_id,
             model_name=req_model_name,
@@ -850,7 +858,7 @@ async def benchmark(
             multi_modal_content=mm_content,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
-            extra_body=extra_body,
+            extra_body=req_extra_body,
             request_id=request_id,
         )
         tasks.append(
@@ -1626,6 +1634,10 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Generate a matplotlib figure with dataset statistics showing "
         "prompt tokens, output tokens, and combined token distributions.",
     )
+
+    from vllm.eval.runner import add_eval_args
+
+    add_eval_args(parser)
 
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
