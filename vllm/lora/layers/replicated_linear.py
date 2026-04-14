@@ -9,7 +9,6 @@ from transformers import PretrainedConfig
 from vllm.config.lora import LoRAConfig
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import ReplicatedLinear
-from vllm.platforms import current_platform
 
 from .base_linear import BaseLinearLayerWithLoRA
 
@@ -48,31 +47,10 @@ class ReplicatedLinearWithLoRA(BaseLinearLayerWithLoRA):
         return output, output_bias
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        # Use the base layer's forward to preserve any subclass-specific
-        # behavior (e.g., specialized router kernels and output dtype handling).
-        base_output = self.base_layer(x)
-        output = base_output[0] if isinstance(base_output, tuple) else base_output
-
-        original_shape = output.shape if output.ndim == 3 else None
-        if x.ndim == 3 and output.ndim == 3:
-            output = output.flatten(0, 1)
-            x = x.flatten(0, 1)
-
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output,
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            1.0,
-            self.output_slices,
-        )
-        if not current_platform.can_update_inplace():
-            output = lora_output
-
-        if original_shape is not None:
-            output = output.reshape(original_shape)
-
-        return output
+        # ReplicatedLinear subclasses such as GateLinear override forward() to
+        # dispatch custom kernels and/or adjust the output dtype. Apply LoRA on
+        # top of the actual base-layer output instead of bypassing that path.
+        return self._apply_base_forward(x)
 
     # ReplicatedLinear should always be replaced, regardless of the fully
     # sharded LoRAs setting, because it is, by definition, copied per GPU.

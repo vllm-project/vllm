@@ -296,6 +296,9 @@ def _lora_expand(
         launch_pdl=use_gdc,
     )
 
+    if expand_output is not output_tensor:
+        output_tensor.copy_(expand_output)
+
     return
 
 

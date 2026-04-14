@@ -27,6 +27,7 @@ from vllm.lora.model_manager import (
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager, WorkerLoRAManager
+from vllm.model_executor.layers.fused_moe import GateLinear
 from vllm.platforms import current_platform
 
 from .utils import create_peft_lora
@@ -158,6 +159,26 @@ def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy
     )
 
 
+def test_wrap_gate_linear(default_vllm_config, dist_init, dummy_model):
+    model = dummy_model
+    model.add_module("router_gate", GateLinear(10, 4, bias=False))
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("router_gate"), ReplicatedLinearWithLoRA
+    )
+
+
 def test_skip_unsupported_matched_modules(default_vllm_config, dist_init, dummy_model):
     class UnsupportedContainer(nn.Module):
         def __init__(self):
@@ -183,6 +204,34 @@ def test_skip_unsupported_matched_modules(default_vllm_config, dist_init, dummy_
     # Should not crash and should keep unsupported matched modules unchanged.
     assert isinstance(manager.model.get_submodule("unsupported.dense1"), nn.Linear)
     assert "unsupported.dense1" not in manager.modules
+
+
+def test_target_modules_fail_closed_on_unsupported_matched_modules(
+    default_vllm_config, dist_init, dummy_model
+):
+    class UnsupportedContainer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense1 = nn.Linear(10, 10, bias=False)
+
+    model = dummy_model
+    model.add_module("unsupported", UnsupportedContainer())
+
+    with pytest.raises(ValueError, match="unsupported.dense1"):
+        LoRAModelManager(
+            model,
+            1,
+            1,
+            1,
+            LoRAConfig(
+                max_lora_rank=8,
+                max_cpu_loras=8,
+                max_loras=8,
+                lora_dtype=DEFAULT_DTYPE,
+                target_modules=["dense1"],
+            ),
+            torch.device(DEVICES[0]),
+        )
 
 
 def test_get_dummy_lora_warmup_rank_for_fully_sharded_moe():

@@ -275,52 +275,17 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
 
-    @classmethod
-    @_not_fully_sharded_can_replace
-    def can_replace_layer(
-        cls,
-        source_layer: nn.Module,
-        lora_config: LoRAConfig,
-        packed_modules_list: list,
-        model_config: PretrainedConfig | None = None,
-    ) -> bool:
-        return (
-            isinstance(source_layer, MergedColumnParallelLinear)
-            and len(packed_modules_list) == 2
-        )
-
-
-class DeepSeekV2FusedQkvAProjLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
-    """LoRA wrapper for DeepSeek's fused qkv_a_proj custom merged linear.
-
-    This layer has a custom forward path in the base layer. Preserve that
-    behavior and add the LoRA delta on top of the base layer's actual output.
-    """
-
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-        base_output = self.base_layer(x)
-        output = base_output[0] if isinstance(base_output, tuple) else base_output
-
-        original_shape = output.shape if output.ndim == 3 else None
-        if x.ndim == 3 and output.ndim == 3:
-            output = output.flatten(0, 1)
-            x = x.flatten(0, 1)
-
-        lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
-            output,
-            x,
-            self.lora_a_stacked,
-            self.lora_b_stacked,
-            1.0,
-            self.output_slices,
-        )
-        if not current_platform.can_update_inplace():
-            output = lora_output
-
-        if original_shape is not None:
-            output = output.reshape(original_shape)
-
-        return output
+        merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
+        # Effectively unsharded subclasses can safely reuse their custom
+        # forward() implementation before applying the LoRA delta.
+        if (
+            self.tp_size == 1
+            and type(self.base_layer) is not merged_cls
+            and type(self.base_layer).forward is not merged_cls.forward
+        ):
+            return self._apply_base_forward(x)
+        return _mcp_apply(x, bias, self)
 
     @classmethod
     def can_replace_layer(
@@ -329,18 +294,21 @@ class DeepSeekV2FusedQkvAProjLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         lora_config: LoRAConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
+        decorate: bool = True,
     ) -> bool:
-        return (
-            any(
-                layer_cls.__name__ == "DeepSeekV2FusedQkvAProjLinear"
-                for layer_cls in type(source_layer).mro()
-            )
-            and len(packed_modules_list) == 2
-            and (
-                not lora_config.fully_sharded_loras
-                or getattr(source_layer, "tp_size", 1) == 1
-            )
-        )
+        del decorate
+        merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
+        if not isinstance(source_layer, merged_cls) or len(packed_modules_list) != 2:
+            return False
+
+        tp_size = getattr(source_layer, "tp_size", 1)
+        if type(source_layer) is merged_cls:
+            return not lora_config.fully_sharded_loras or tp_size == 1
+
+        # Only support effectively unsharded subclasses here. Sharded
+        # subclasses may have custom communication semantics that the generic
+        # merged-column LoRA path does not know how to preserve.
+        return tp_size == 1
 
 
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):

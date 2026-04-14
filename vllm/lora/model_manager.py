@@ -438,15 +438,20 @@ class LoRAModelManager:
                 )
 
             # Some matched modules can be unsupported by LoRA wrappers
-            # (e.g. subclasses with specialized forward behavior). Skip them
-            # instead of asserting.
+            # (e.g. subclasses with specialized forward behavior).
             if not isinstance(new_module, BaseLayerWithLoRA):
-                logger.debug_once(
-                    "LoRA is not supported for module %s (%s). It will be ignored.",
-                    module_name,
-                    type(module).__name__,
-                    scope="local",
+                error_msg = (
+                    "LoRA target module "
+                    f"{module_name} ({type(module).__name__}) matched the "
+                    "deployment configuration but could not be wrapped by any "
+                    "LoRA layer implementation."
                 )
+                if self.lora_config.target_modules is not None:
+                    raise ValueError(
+                        f"{error_msg} target_modules="
+                        f"{sorted(self.lora_config.target_modules)}"
+                    )
+                logger.warning_once("%s It will be ignored.", error_msg)
                 continue
             self.register_module(module_name, new_module)
 
