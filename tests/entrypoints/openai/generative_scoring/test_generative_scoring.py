@@ -77,7 +77,6 @@ def _create_mock_engine():
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
-    mock_engine.io_processor = MagicMock()
 
     # renderer is accessed by OpenAIServing.__init__ and serving.py
     mock_renderer = MagicMock()
