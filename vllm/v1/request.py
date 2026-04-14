@@ -291,17 +291,23 @@ class Request:
         self,
         start_token_id: int,
         end_token_id: int,
-    ) -> None:
+    ) -> int | None:
         """Count all tokens within thinking markers (e.g. <think>...</think>)
         in the output, including the markers themselves.
+
+        Returns the index of the first reasoning token in the output, or
+        ``None`` if no reasoning tokens are found.
 
         Uses a depth counter so nested spans are handled safely. Only
         single-token start/end markers are supported for now.
         """
         count = 0
         depth = 0
-        for tid in self._output_token_ids:
+        first_idx: int | None = None
+        for i, tid in enumerate(self._output_token_ids):
             if tid == start_token_id:
+                if first_idx is None:
+                    first_idx = i
                 depth += 1
                 count += 1
             elif tid == end_token_id and depth > 0:
@@ -310,6 +316,7 @@ class Request:
             elif depth > 0:
                 count += 1
         self.num_reasoning_tokens = count
+        return first_idx
 
     def __lt__(self, other: "Request") -> bool:
         """

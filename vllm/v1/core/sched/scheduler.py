@@ -1865,20 +1865,26 @@ class Scheduler(SchedulerInterface):
         if not start_ids or not end_ids:
             return 0
 
-        # Count reasoning tokens in the output using the start/end markers.
-        request.update_reasoning_token_count(start_ids[0], end_ids[0])
-        if request.num_reasoning_tokens == 0:
+        # Count reasoning tokens and find the first occurrence.
+        first_reasoning_idx = request.update_reasoning_token_count(
+            start_ids[0], end_ids[0]
+        )
+        if request.num_reasoning_tokens == 0 or first_reasoning_idx is None:
             return 0
 
-        # All output tokens (thinking + answer) occupy blocks after the
-        # prompt prefix.  Answer tokens after thinking have mismatched
-        # RoPE positions and cannot be reused either, so we evict all
-        # post-prompt blocks.
-        num_prompt_blocks = request.num_prompt_tokens // self.block_size
+        # Evict blocks starting from the one containing the first
+        # reasoning token.  Output tokens before <think> have correct
+        # RoPE positions and are reusable in multi-turn.  Tokens at or
+        # after reasoning have mismatched positions if reasoning is
+        # stripped in subsequent turns.
+        first_evict_block_idx = (
+            (request.num_prompt_tokens + first_reasoning_idx)
+            // self.block_size
+        )
         num_total_blocks = (
             (request.num_tokens + self.block_size - 1) // self.block_size
         )
-        return max(0, num_total_blocks - num_prompt_blocks)
+        return max(0, num_total_blocks - first_evict_block_idx)
 
     @property
     def pause_state(self) -> PauseState:

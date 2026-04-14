@@ -102,37 +102,58 @@ class TestReasoningTokenCount:
         return req
 
     def test_simple_thinking_block(self):
-        """Count tokens in <think>...</think>."""
+        """Count tokens in <think>...</think> and return first index."""
         # <think>=50, </think>=51, normal tokens are anything else
         req = self._make_request([50, 100, 101, 102, 51, 200, 201])
-        req.update_reasoning_token_count(start_token_id=50, end_token_id=51)
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
         # <think>(50) + 100 + 101 + 102 + </think>(51) = 5 tokens
         assert req.num_reasoning_tokens == 5
+        assert first_idx == 0
 
     def test_no_thinking_tokens(self):
-        """No thinking markers -> 0 reasoning tokens."""
+        """No thinking markers -> 0 reasoning tokens, None index."""
         req = self._make_request([200, 201, 202])
-        req.update_reasoning_token_count(start_token_id=50, end_token_id=51)
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
         assert req.num_reasoning_tokens == 0
+        assert first_idx is None
 
     def test_all_thinking(self):
         """Entire output is thinking."""
         req = self._make_request([50, 100, 101, 51])
-        req.update_reasoning_token_count(start_token_id=50, end_token_id=51)
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
         assert req.num_reasoning_tokens == 4
+        assert first_idx == 0
 
     def test_nested_thinking(self):
         """Nested thinking blocks should be handled by depth counter."""
         req = self._make_request([50, 100, 50, 101, 51, 102, 51, 200])
-        req.update_reasoning_token_count(start_token_id=50, end_token_id=51)
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
         # All of [50, 100, 50, 101, 51, 102, 51] = 7 tokens are thinking
         assert req.num_reasoning_tokens == 7
+        assert first_idx == 0
 
     def test_empty_output(self):
-        """Empty output -> 0 reasoning tokens."""
+        """Empty output -> 0 reasoning tokens, None index."""
         req = self._make_request([])
-        req.update_reasoning_token_count(start_token_id=50, end_token_id=51)
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
         assert req.num_reasoning_tokens == 0
+        assert first_idx is None
+
+    def test_thinking_starts_mid_output(self):
+        """Thinking tokens starting after some answer tokens."""
+        # Output: [200, 201, <think>, 100, 101, </think>]
+        req = self._make_request([200, 201, 50, 100, 101, 51])
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
+        # 4 reasoning tokens: <think>(50), 100, 101, </think>(51)
+        assert req.num_reasoning_tokens == 4
+        # First reasoning token is at output index 2
+        assert first_idx == 2
 
     def test_unmatched_end_token(self):
         """End token without start should be ignored."""
