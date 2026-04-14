@@ -13,6 +13,7 @@ from vllm.profiler.wrapper import TorchProfilerWrapper
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
+from vllm.v1.worker.worker_base import CompilationTimes
 
 logger = init_logger(__name__)
 
@@ -104,12 +105,15 @@ class CPUWorker(Worker):
     def determine_available_memory(self) -> int:
         return self.cache_config.cpu_kvcache_space_bytes or 0
 
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
         self.model_runner.warming_up_model()
-        return self.compilation_config.compilation_time
+        return CompilationTimes(
+            language_model=self.compilation_config.compilation_time,
+            encoder=self.compilation_config.encoder_compilation_time,
+        )
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None):
         if self.profiler is None:

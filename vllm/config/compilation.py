@@ -710,6 +710,8 @@ class CompilationConfig:
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
+    encoder_compilation_time: float = field(default=0.0, init=False)
+    """time taken for multimodal encoder compilation"""
 
     static_forward_context: dict[str, Any] = field(default_factory=dict, init=False)
     """Per-model forward context
@@ -756,6 +758,7 @@ class CompilationConfig:
             "local_cache_dir",
             "traced_files",
             "compilation_time",
+            "encoder_compilation_time",
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
@@ -775,6 +778,7 @@ class CompilationConfig:
             "enabled_custom_ops": True,
             "disabled_custom_ops": True,
             "compilation_time": True,
+            "encoder_compilation_time": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
