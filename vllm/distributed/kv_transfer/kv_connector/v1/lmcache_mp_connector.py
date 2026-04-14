@@ -309,14 +309,25 @@ class LMCacheMPRequestMetadata:
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
         #
-        # Why computed_blocks includes num_lmcache_hit_blocks:
+        # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
         #
-        # Include lmcache-hit blocks so that the upper bound
-        # matches num_stored_blocks (which already covers
-        # them). Hit blocks are NOT re-stored.
-        computed_blocks = (
-            tracker.num_scheduled_tokens // vllm_block_size
-            + tracker.num_lmcache_hit_blocks
+        # Both values represent a prefix of blocks whose KV data is already
+        # available (either from vLLM APC or from LMCache), so they must NOT
+        # be summed (that would double-count the overlapping prefix).
+        #
+        # * num_lmcache_hit_blocks: LMCache-hit blocks are already counted in
+        #   num_stored_blocks (set during lookup), so they must be included
+        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        # * num_vllm_hit_blocks: LMCache stores in units of chunks (N blocks),
+        #   so num_lmcache_hit_blocks is rounded DOWN to the nearest chunk
+        #   boundary.  When vLLM APC hits more blocks than that rounded value
+        #   (e.g. APC=44 blocks, LMCache=32 blocks after chunk alignment),
+        #   using only num_lmcache_hit_blocks would set the upper bound too
+        #   low and silently skip the APC-hit blocks that fall between the
+        #   two values, causing under-storing.  Taking the max ensures we
+        #   always use the tighter (larger) of the two hit counts.
+        computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
+            tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
             len(tracker.block_hashes),
