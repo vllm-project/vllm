@@ -173,11 +173,33 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    image_pruning_rate: float | None = Field(default=None, ge=0.0, lt=1.0)
+    """Sets pruning rate for image token pruning based on attention scores.
+    Value sits in range [0, 1), where 0.6 means prune 60% of image tokens.
+    None or 0.0 means no pruning.
+    """
+    extract_vit_attention_score: bool = False
+    """Enable extraction of attention scores from ViT (Vision Transformer)
+    layers. When enabled, the attention scores from the specified layer will
+    be returned along with the model output. This is useful for visual token
+    compression schemes. Automatically enabled when image_pruning_rate > 0.
+    """
+    vit_attention_score_layer_index: int = -2
+    """Layer index from which to extract attention scores. Negative indices
+    count from the end (e.g., -2 means the second-to-last layer).
+    Only effective when extract_vit_attention_score is True.
+    """
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
     - "torch_shm": Use torch.multiprocessing shared memory for zero-copy IPC
     Defaults to "direct_rpc". """
+
+    def __post_init__(self):
+        if (self.image_pruning_rate is not None
+                and self.image_pruning_rate > 0.0
+                and not self.extract_vit_attention_score):
+            self.extract_vit_attention_score = True
 
     @field_validator("limit_per_prompt", mode="before")
     @classmethod
@@ -284,4 +306,7 @@ class MultiModalConfig:
         return kwargs | dict(inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):
-        return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+        return ((self.video_pruning_rate is not None
+                 and self.video_pruning_rate > 0)
+                or (self.image_pruning_rate is not None
+                    and self.image_pruning_rate > 0.0))

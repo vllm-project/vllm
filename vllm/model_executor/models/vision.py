@@ -382,7 +382,11 @@ def run_dp_sharded_mrope_vision_model(
     grid_thw_list: list[list[int]],
     *,
     rope_type: Literal["rope_3d", "rope_2d"],
-) -> tuple[torch.Tensor, ...]:
+    return_aux: bool = False,
+) -> tuple[torch.Tensor, ...] | tuple[
+    tuple[torch.Tensor, ...],
+    tuple[torch.Tensor, ...] | None,
+]:
     """Run a vision model with data parallelism (DP) sharding.
     The function will shard the input image tensor on the
     first dimension and run the vision model.
@@ -396,8 +400,11 @@ def run_dp_sharded_mrope_vision_model(
                    Different rope types have different dimension to do ViT.
                    "rope_3d" for 3D rope (e.g., Qwen2.5-VL)
                    "rope_2d" for 2D rope (e.g., Kimi-VL)
+        return_aux: Whether to return auxiliary outputs (e.g. attention
+            scores) when the vision model returns a tuple.
     Returns:
-        torch.Tensor: Output image embeddings
+        If return_aux=False: tuple of per-item output embeddings.
+        If return_aux=True: (per-item embeddings, per-item aux | None).
 
     Example:
         ```
@@ -469,12 +476,16 @@ def run_dp_sharded_mrope_vision_model(
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
 
+    aux_local: torch.Tensor | None = None
+
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
         if pixel_values_local.shape[0] > 0:
             image_embeds_local = vision_model(
                 pixel_values_local, torch.tensor(local_grid_thw_list)
             )
+            if isinstance(image_embeds_local, tuple):
+                image_embeds_local, aux_local = image_embeds_local
             if isinstance(image_embeds_local, list):
                 image_embeds_local = torch.cat(image_embeds_local, dim=0)
         else:
@@ -487,6 +498,8 @@ def run_dp_sharded_mrope_vision_model(
     else:
         if pixel_values_local.shape[0] > 0:
             image_embeds_local = vision_model(pixel_values_local, local_grid_thw_list)
+            if isinstance(image_embeds_local, tuple):
+                image_embeds_local, aux_local = image_embeds_local
         else:
             # Handle empty case
             image_embeds_local = torch.empty(
@@ -495,27 +508,38 @@ def run_dp_sharded_mrope_vision_model(
                 dtype=pixel_values.dtype,
             )
 
+    # When return_aux, concatenate aux (1D scores) with embeddings along the
+    # last dimension so only ONE all_gather is needed.
+    if return_aux:
+        if aux_local is not None:
+            if aux_local.ndim == 1:
+                aux_local = aux_local.unsqueeze(-1)
+            if aux_local.dtype != image_embeds_local.dtype:
+                aux_local = aux_local.to(dtype=image_embeds_local.dtype)
+            image_embeds_local = torch.cat(
+                [image_embeds_local, aux_local], dim=-1)
+        else:
+            padding_aux = image_embeds_local.new_empty(
+                (*image_embeds_local.shape[:-1], 1))
+            image_embeds_local = torch.cat(
+                [image_embeds_local, padding_aux], dim=-1)
+
+    patches_per_output_image = [
+        (patch_size // embed_dim_reduction_factor)
+        for patch_size in patches_per_image
+    ]
+
     # Pad the output based on max_len_per_rank
     # for tensor_model_parallel_all_gather to work
     current_len = image_embeds_local.shape[0]
     if current_len < max_len_per_rank:
-        padding_size = max_len_per_rank - current_len
-        if rope_type == "rope_2d":
-            padding = torch.empty(
-                (
-                    padding_size,
-                    image_embeds_local.shape[1],
-                    image_embeds_local.shape[2],
-                ),
-                dtype=image_embeds_local.dtype,
-                device=image_embeds_local.device,
-            )
-        else:
-            padding = torch.empty(
-                (padding_size, image_embeds_local.shape[1]),
-                dtype=image_embeds_local.dtype,
-                device=image_embeds_local.device,
-            )
+        padding_size = (
+            max_len_per_rank - current_len, *image_embeds_local.shape[1:])
+        padding = torch.empty(
+            padding_size,
+            dtype=image_embeds_local.dtype,
+            device=image_embeds_local.device,
+        )
         image_embeds_local_padded = torch.cat([image_embeds_local, padding], dim=0)
     else:
         image_embeds_local_padded = image_embeds_local
@@ -531,10 +555,6 @@ def run_dp_sharded_mrope_vision_model(
             grouped_pixel_values_len[rank] // embed_dim_reduction_factor
         )
         rank_embeddings.append(gathered_embeds[start_idx:end_idx])
-
-    patches_per_output_image = [
-        (patch_size // embed_dim_reduction_factor) for patch_size in patches_per_image
-    ]
 
     # Reconstruct embeddings in the original order
     original_order_embeddings = [None] * len(grid_thw_list)
@@ -557,13 +577,17 @@ def run_dp_sharded_mrope_vision_model(
                 ]
                 embed_start += img_patches
             current_idx += count
-    out_embeddings = tuple(
-        embed for embed in original_order_embeddings if embed is not None
+    final_out = tuple(o for o in original_order_embeddings if o is not None)
+    assert len(final_out) == len(original_order_embeddings), (
+        "Found unassigned outputs"
     )
-    assert len(out_embeddings) == len(original_order_embeddings), (
-        "Found unassigned embeddings"
-    )
-    return out_embeddings
+
+    if not return_aux:
+        return final_out
+
+    out_embeddings = tuple(t[..., :-1] for t in final_out)
+    out_aux = tuple(t[..., -1] for t in final_out)
+    return out_embeddings, out_aux
 
 
 def get_llm_pos_ids_for_vision(

@@ -47,6 +47,7 @@ from vllm.compilation.decorators import (
     support_torch_compile,
 )
 from vllm.config import VllmConfig
+from vllm.config.multimodal import MultiModalConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
@@ -64,6 +65,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
+)
+from vllm.model_executor.layers.attention.visual_token_pruning import (
+    prune_visual_tokens_dominant_only,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
@@ -367,7 +371,8 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         sequence_lengths: torch.Tensor,  # Only used for FlashInfer CuDNN backend
-    ) -> torch.Tensor:
+        return_attention_score: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
@@ -402,20 +407,47 @@ class Qwen2_5_VisionAttention(nn.Module):
         else:
             q, k, v = qkv.unbind(dim=2)
 
-        context_layer = self.attn(
-            query=q,
-            key=k,
-            value=v,
-            cu_seqlens=cu_seqlens,
-            max_seqlen=max_seqlen,
-            sequence_lengths=sequence_lengths,
-        )
+        attention_score = None
+        if return_attention_score and self.attn.is_flash_attn_backend:
+            from vllm.model_executor.layers.attention.flash_attn_with_score import (
+                flash_attn_varlen_func_with_score,
+            )
+
+            q_3d = einops.rearrange(q, "b s h d -> (b s) h d")
+            k_3d = einops.rearrange(k, "b s h d -> (b s) h d")
+            v_3d = einops.rearrange(v, "b s h d -> (b s) h d")
+
+            context_layer, attention_score = flash_attn_varlen_func_with_score(
+                q_3d, k_3d, v_3d,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen.item(),
+                max_seqlen_k=max_seqlen.item(),
+                dropout_p=0.0,
+                causal=False,
+                return_attention_score=True,
+            )
+            context_layer = einops.rearrange(
+                context_layer, "(b s) h d -> b s h d", b=batch_size
+            )
+        else:
+            context_layer = self.attn(
+                query=q,
+                key=k,
+                value=v,
+                cu_seqlens=cu_seqlens,
+                max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
+            )
 
         context_layer = einops.rearrange(
             context_layer, "b s h d -> s b (h d)", b=batch_size
         ).contiguous()
 
         output, _ = self.proj(context_layer)
+
+        if attention_score is not None:
+            return output, attention_score
         return output
 
 
@@ -577,6 +609,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         vision_config: Qwen2_5_VLVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -588,6 +621,21 @@ class Qwen2_5_VisionTransformer(nn.Module):
         self.hidden_size = vision_config.hidden_size
         self.num_heads = vision_config.num_heads
         self.out_hidden_size = vision_config.out_hidden_size
+
+        self.extract_vit_attention_score = (
+            multimodal_config.extract_vit_attention_score
+            if multimodal_config is not None
+            else False
+        )
+        if self.extract_vit_attention_score:
+            layer_index = (
+                multimodal_config.vit_attention_score_layer_index
+                if multimodal_config is not None
+                else -2
+            )
+            self.vit_attention_score_layer_index = (
+                layer_index if layer_index >= 0 else depth + layer_index
+            )
 
         # args for get_window_index_thw
         self.window_size = vision_config.window_size
@@ -851,6 +899,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         hidden_states = hidden_states.unsqueeze(1)
 
+        attention_score = None
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
@@ -859,13 +908,24 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 cu_seqlens_now = cu_window_seqlens
                 max_seqlen_now = max_seqlen_window
 
-            hidden_states = blk(
+            need_score = (
+                self.extract_vit_attention_score
+                and layer_num == self.vit_attention_score_layer_index
+            )
+
+            blk_result = blk(
                 hidden_states,
                 cu_seqlens=cu_seqlens_now,
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
+                return_attention_score=need_score,
             )
+
+            if isinstance(blk_result, tuple):
+                hidden_states, attention_score = blk_result
+            else:
+                hidden_states = blk_result
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
         # for long visual tokens sequences.
@@ -875,6 +935,12 @@ class Qwen2_5_VisionTransformer(nn.Module):
         # adapter
         hidden_states = self.merger(hidden_states)
         hidden_states = hidden_states[reverse_indices, :]
+
+        if attention_score is not None:
+            score = attention_score.view(
+                -1, self.spatial_merge_unit).mean(dim=1)
+            score = score[reverse_indices]
+            return hidden_states, score
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1127,6 +1193,7 @@ class Qwen2_5_VLForConditionalGeneration(
         self.vllm_config = vllm_config
         self.multimodal_config = multimodal_config
         self.video_pruning_rate = multimodal_config.video_pruning_rate
+        self.image_pruning_rate = multimodal_config.image_pruning_rate
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
@@ -1136,6 +1203,7 @@ class Qwen2_5_VLForConditionalGeneration(
                 vision_config=config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=self.quant_config,
+                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1203,26 +1271,51 @@ class Qwen2_5_VLForConditionalGeneration(
 
     def _process_image_input(
         self, image_input: Qwen2_5_VLImageInputs
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...] | None]:
         grid_thw = image_input["image_grid_thw"]
         assert grid_thw.ndim == 2
         grid_thw_list = grid_thw.tolist()
+        attention_score = None
 
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
             pixel_values = image_input["pixel_values"]
             if self.use_data_parallel:
-                return run_dp_sharded_mrope_vision_model(
-                    self.visual, pixel_values, grid_thw_list, rope_type="rope_3d"
+                need_attention_score = (
+                    self.image_pruning_rate is not None
+                    and self.image_pruning_rate > 0.0
                 )
+                if need_attention_score:
+                    embeds, scores = run_dp_sharded_mrope_vision_model(
+                        self.visual, pixel_values, grid_thw_list,
+                        rope_type="rope_3d",
+                        return_aux=True,
+                    )
+                    if scores is None:
+                        return embeds, None
+                    return embeds, scores
+                embeds = run_dp_sharded_mrope_vision_model(
+                    self.visual, pixel_values, grid_thw_list,
+                    rope_type="rope_3d"
+                )
+                return embeds, None
             else:
-                image_embeds = self.visual(pixel_values, grid_thw=grid_thw_list)
+                visual_output = self.visual(
+                    pixel_values, grid_thw=grid_thw_list)
+                if isinstance(visual_output, tuple):
+                    image_embeds, attention_score = visual_output
+                else:
+                    image_embeds = visual_output
 
-        # Split concatenated embeddings for each image item.
         merge_size = self.visual.spatial_merge_size
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return image_embeds.split(sizes)
+        embeds_split = image_embeds.split(sizes)
+        scores_split = (
+            attention_score.split(sizes)
+            if attention_score is not None else None
+        )
+        return embeds_split, scores_split
 
     def _postprocess_image_embeds_evs(
         self,
@@ -1254,6 +1347,29 @@ class Qwen2_5_VLForConditionalGeneration(
             image_embeds_out.append(emb)
         image_embeds_split = image_embeds_out
         return tuple(image_embeds_split)
+
+    def _postprocess_image_embeds_attn_prune(
+        self,
+        image_embeds_split: tuple[torch.Tensor, ...],
+        scores_split: tuple[torch.Tensor, ...],
+        image_input: Qwen2_5_VLImageInputs,
+    ) -> tuple[torch.Tensor, ...]:
+        """Prune image tokens by attention score and append mrope positions."""
+        merge_size = self.visual.spatial_merge_size
+        grid_thw = image_input["image_grid_thw"]
+        grid_thw_list = grid_thw.tolist()
+        result = []
+        for emb, score, size in zip(
+            image_embeds_split, scores_split, grid_thw_list
+        ):
+            pruned_emb, keep_indices = prune_visual_tokens_dominant_only(
+                emb, score, pruning_rate=self.image_pruning_rate
+            )
+            positions = compute_mrope_for_media(size, merge_size).to(emb.device)
+            positions = positions[keep_indices]
+            pruned_emb = torch.cat([pruned_emb, positions], dim=1)
+            result.append(pruned_emb)
+        return tuple(result)
 
     def _process_video_input(
         self, video_input: Qwen2_5_VLVideoInputs
@@ -1432,12 +1548,17 @@ class Qwen2_5_VLForConditionalGeneration(
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                image_embeddings = self._process_image_input(multimodal_input)
-                if self.is_multimodal_pruning_enabled:
-                    image_embeddings = self._postprocess_image_embeds_evs(
-                        image_embeddings, multimodal_input
-                    )
-                multimodal_embeddings += tuple(image_embeddings)
+                embeds_split, scores_split = self._process_image_input(
+                    multimodal_input)
+                if (self.image_pruning_rate is not None
+                        and self.image_pruning_rate > 0.0
+                        and scores_split is not None):
+                    embeds_split = self._postprocess_image_embeds_attn_prune(
+                        embeds_split, scores_split, multimodal_input)
+                elif self.is_multimodal_pruning_enabled:
+                    embeds_split = self._postprocess_image_embeds_evs(
+                        embeds_split, multimodal_input)
+                multimodal_embeddings += tuple(embeds_split)
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 if self.is_multimodal_pruning_enabled:
