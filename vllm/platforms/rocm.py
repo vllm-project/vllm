@@ -412,9 +412,17 @@ class RocmPlatform(Platform):
         "gguf",
         "quark",
         "mxfp4",
+        "mxfp8",
         "torchao",
         "bitsandbytes",
+        "modelopt",
         "modelopt_fp4",
+        "modelopt_mxfp8",
+        "modelopt_mixed",
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "online",
+        "gpt_oss_mxfp4",
     ]
 
     @classmethod
