@@ -514,28 +514,42 @@ def all_reduce_fusion_pass_on_test_model(
         del all_reduce_fusion_pass
 
 
+_GROUP_QUANT_FP8_PACKED_CASES = [
+    # (num_tokens, hidden_dim, group_size)
+    (4, 7168, 128),
+    (1, 7168, 128),
+    (3, 7168, 128),
+    (4, 640, 128),
+    (4, 768, 128),
+    (4, 384, 128),
+    (1, 384, 128),
+    (3, 640, 128),
+    (64, 7168, 128),
+    (128, 14336, 128),
+    (127, 7168, 128),
+    (253, 640, 128),
+    (1, 256, 128),
+    (4, 7168, 64),
+    (1, 7168, 64),
+    (4, 640, 64),
+    (3, 768, 64),
+    (3, 640, 64),
+    (4, 768, 8),
+    (4, 768, 16),
+    (4, 768, 12),
+    (3, 768, 6),
+    (4, 768, 4),
+    (4, 768, 48),
+    (4, 960, 48),
+    (3, 768, 24),
+    (512, 768, 48),
+    (4, 7168, 512),
+    (4, 4096, 256),
+    (3, 4096, 512),
+]
+
+
 @multi_gpu_test(num_gpus=2)
-@pytest.mark.parametrize(
-    "num_tokens,hidden_dim,group_size",
-    [
-        (4, 7168, 128),
-        (1, 7168, 128),
-        (3, 7168, 128),
-        (4, 640, 128),
-        (4, 768, 128),
-        (4, 384, 128),
-        (1, 384, 128),
-        (3, 640, 128),
-        (64, 7168, 128),
-        (128, 14336, 128),
-        (127, 7168, 128),
-        (253, 640, 128),
-        (4, 7168, 64),
-        (1, 7168, 64),
-        (4, 640, 64),
-        (3, 768, 64),
-    ],
-)
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
 @pytest.mark.skipif(
     not find_spec("flashinfer")
@@ -543,31 +557,30 @@ def all_reduce_fusion_pass_on_test_model(
     or not has_module_attribute("flashinfer.comm", "create_allreduce_fusion_workspace"),
     reason="flashinfer allreduce_fusion not available",
 )
-def test_fused_allreduce_norm_group_quant_fp8_packed(
-    num_tokens, hidden_dim, group_size
-):
+def test_fused_allreduce_norm_group_quant_fp8_packed():
     """Test the flashinfer fused allreduce+RMSNorm+group-quant kernel by
     extracting norm_out from the fused kernel and comparing the fused
     quant_out / scale_out against per_token_group_quant_fp8_packed_for_deepgemm
-    applied to that same norm_out."""
+    applied to that same norm_out.
+
+    All shape combos run inside a single process group spawn to avoid
+    per-case process startup + NCCL init overhead."""
     from vllm.utils.deep_gemm import is_deep_gemm_supported
 
     if not is_deep_gemm_supported():
         pytest.skip("DeepGEMM not supported on this platform")
 
     torch.multiprocessing.spawn(
-        _run_fused_allreduce_norm_group_quant_test,
-        args=(2, num_tokens, hidden_dim, group_size),
+        _run_fused_allreduce_norm_group_quant_batch,
+        args=(2, _GROUP_QUANT_FP8_PACKED_CASES),
         nprocs=2,
     )
 
 
-def _run_fused_allreduce_norm_group_quant_test(
+def _run_fused_allreduce_norm_group_quant_batch(
     local_rank: int,
     world_size: int,
-    num_tokens: int,
-    hidden_dim: int,
-    group_size: int,
+    cases: list,
 ):
     import flashinfer.comm as flashinfer_comm
     import torch.distributed as dist
@@ -591,89 +604,107 @@ def _run_fused_allreduce_norm_group_quant_test(
             return  # skip silently in subprocess
 
         dtype = torch.bfloat16
+        max_tokens = max(c[0] for c in cases)
+        max_hidden = max(c[1] for c in cases)
         workspace = flashinfer_comm.create_allreduce_fusion_workspace(
             backend="trtllm",
             world_size=world_size,
             rank=local_rank,
-            max_token_num=num_tokens,
-            hidden_dim=hidden_dim,
+            max_token_num=max_tokens,
+            hidden_dim=max_hidden,
             dtype=dtype,
             comm_backend=TorchDistBackend(),
         )
 
-        groups_per_row = hidden_dim // group_size
-        k_num_packed = (groups_per_row + 3) // 4
-        tma_aligned_mn = ((num_tokens + 3) // 4) * 4
+        for num_tokens, hidden_dim, group_size in cases:
+            # Recreate workspace if current one is too small
+            if not workspace.is_buffer_size_sufficient(
+                world_size, num_tokens, hidden_dim, dtype
+            ):
+                workspace.destroy()
+                workspace = flashinfer_comm.create_allreduce_fusion_workspace(
+                    backend="trtllm",
+                    world_size=world_size,
+                    rank=local_rank,
+                    max_token_num=num_tokens,
+                    hidden_dim=hidden_dim,
+                    dtype=dtype,
+                    comm_backend=TorchDistBackend(),
+                )
 
-        torch.manual_seed(42 + local_rank)
-        allreduce_in = (
-            torch.randn(num_tokens, hidden_dim, dtype=dtype, device=device) * 8
-        )
-        residual_in = (
-            torch.randn(num_tokens, hidden_dim, dtype=dtype, device=device) * 8
-        )
-        rms_gamma = torch.randn(hidden_dim, dtype=dtype, device=device)
+            groups_per_row = hidden_dim // group_size
+            k_num_packed = (groups_per_row + 3) // 4
+            tma_aligned_mn = ((num_tokens + 3) // 4) * 4
 
-        # Use kARResidualRMSNormOutPerTokenGroupFP8PackedQuant so that
-        # norm_out is written to a separate buffer we can feed to the
-        # standalone quant kernel for comparison.
-        residual_out = torch.empty_like(allreduce_in)
-        norm_out = torch.empty_like(allreduce_in)
-        quant_out = torch.empty(
-            num_tokens,
-            hidden_dim,
-            dtype=torch.float8_e4m3fn,
-            device=device,
-        )
-        scale_out = torch.empty_strided(
-            (num_tokens, k_num_packed),
-            (1, tma_aligned_mn),
-            dtype=torch.int32,
-            device=device,
-        )
+            torch.manual_seed(42 + local_rank)
+            allreduce_in = (
+                torch.randn(num_tokens, hidden_dim, dtype=dtype, device=device) * 8
+            )
+            residual_in = (
+                torch.randn(num_tokens, hidden_dim, dtype=dtype, device=device) * 8
+            )
+            rms_gamma = torch.randn(hidden_dim, dtype=dtype, device=device)
 
-        flashinfer_comm.allreduce_fusion(
-            input=allreduce_in,
-            workspace=workspace,
-            pattern=(
-                flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormOutPerTokenGroupFP8PackedQuant
-            ),
-            residual_in=residual_in,
-            residual_out=residual_out,
-            norm_out=norm_out,
-            quant_out=quant_out,
-            scale_out=scale_out,
-            rms_gamma=rms_gamma,
-            rms_eps=1e-5,
-            block_quant_group_size=group_size,
-            fp32_acc=True,
-            use_oneshot=True,
-        )
-        torch.accelerator.synchronize()
+            residual_out = torch.empty_like(allreduce_in)
+            norm_out = torch.empty_like(allreduce_in)
+            quant_out = torch.empty(
+                num_tokens,
+                hidden_dim,
+                dtype=torch.float8_e4m3fn,
+                device=device,
+            )
+            scale_out = torch.empty_strided(
+                (num_tokens, k_num_packed),
+                (1, tma_aligned_mn),
+                dtype=torch.int32,
+                device=device,
+            )
 
-        # Reference: apply standalone packed quant to the fused norm_out.
-        ref_q, ref_s = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
-            norm_out,
-            group_size=group_size,
-            use_ue8m0=True,
-        )
+            flashinfer_comm.allreduce_fusion(
+                input=allreduce_in,
+                workspace=workspace,
+                pattern=(
+                    flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormOutPerTokenGroupFP8PackedQuant
+                ),
+                residual_in=residual_in,
+                residual_out=residual_out,
+                norm_out=norm_out,
+                quant_out=quant_out,
+                scale_out=scale_out,
+                rms_gamma=rms_gamma,
+                rms_eps=1e-5,
+                block_quant_group_size=group_size,
+                fp32_acc=True,
+                use_oneshot=True,
+            )
+            torch.accelerator.synchronize()
 
-        # Quantized activations must match exactly.
-        assert torch.equal(quant_out, ref_q), (
-            f"quant_out mismatch: "
-            f"{(quant_out != ref_q).sum().item()}/{ref_q.numel()} differ"
-        )
+            # Reference: apply standalone packed quant to the fused norm_out.
+            ref_q, ref_s = fp8_utils.per_token_group_quant_fp8_packed_for_deepgemm(
+                norm_out,
+                group_size=group_size,
+                use_ue8m0=True,
+            )
 
-        # Packed scales must match exactly.
-        num_scale_elems = num_tokens + (k_num_packed - 1) * tma_aligned_mn
-        fused_s = torch.as_strided(scale_out, (num_scale_elems,), (1,))
-        ref_s_flat = torch.as_strided(ref_s, (num_scale_elems,), (1,))
-        assert torch.equal(fused_s, ref_s_flat), (
-            f"scale_out mismatch: "
-            f"{(fused_s != ref_s_flat).sum().item()}/{num_scale_elems} differ"
-        )
+            # Quantized activations must match exactly.
+            assert torch.equal(quant_out, ref_q), (
+                f"[tokens={num_tokens}, hidden={hidden_dim}, gs={group_size}] "
+                f"quant_out mismatch: "
+                f"{(quant_out != ref_q).sum().item()}/{ref_q.numel()} differ"
+            )
+
+            # Packed scales must match exactly.
+            num_scale_elems = num_tokens + (k_num_packed - 1) * tma_aligned_mn
+            fused_s = torch.as_strided(scale_out, (num_scale_elems,), (1,))
+            ref_s_flat = torch.as_strided(ref_s, (num_scale_elems,), (1,))
+            assert torch.equal(fused_s, ref_s_flat), (
+                f"[tokens={num_tokens}, hidden={hidden_dim}, gs={group_size}] "
+                f"scale_out mismatch: "
+                f"{(fused_s != ref_s_flat).sum().item()}/{num_scale_elems} differ"
+            )
+
+            dist.barrier(group=group)
 
     finally:
-        dist.barrier(group=group)
         workspace.destroy()
         dist.destroy_process_group(group=group)
