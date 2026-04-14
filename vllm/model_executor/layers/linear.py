@@ -1137,12 +1137,14 @@ class QKVParallelLinear(ColumnParallelLinear):
             if isinstance(param, PerTensorScaleParameter):
                 # When weights are already fused on disk (e.g. Phi-3's
                 # qkv_proj), there is only a single scale for the entire
-                # fused matrix.  Narrow the param (shape [3]) to [1] so
-                # only slot 0 is written, matching the checkpoint.
-                param.data = param.data.narrow(0, 0, 1)
-                param.load_qkv_weight(
-                    loaded_weight=loaded_weight, shard_id=0, tp_rank=self.tp_rank
-                )
+                # fused matrix. Fill all slots (q, k, v) with this scale
+                # to ensure that any subsequent reduction (like .max())
+                # works correctly while preserving the parameter shape.
+                for idx in range(param.data.shape[0]):
+                    param.load_qkv_weight(
+                        loaded_weight=loaded_weight, shard_id=idx,
+                        tp_rank=self.tp_rank
+                    )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
                 param.load_qkv_weight(loaded_weight=loaded_weight, tp_rank=self.tp_rank)
