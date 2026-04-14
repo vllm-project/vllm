@@ -243,6 +243,13 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if generators:
+            logger.debug_once(
+                "xpu kernel topk_topp_sampler does not support "
+                "per-request generators. Falling back to "
+                "PyTorch-native implementation."
+            )
+            return self.forward_native(logits, generators, k, p)
         random_sampled = torch.empty(
             logits.shape[0], dtype=torch.int64, device=logits.device
         )
@@ -253,10 +260,11 @@ class TopKTopPSampler(nn.Module):
         ):
             logits_to_return = torch.empty_like(logits)
 
-        if len(generators) != logits.shape[0]:
-            generator = torch.xpu.default_generators[logits.device.index]
-        else:
-            generator = generators[logits.device.index]
+        assert len(generators) != logits.shape[0], (
+            "xpu kernel topk_topp_sampler does not support batch-wise generators."
+        )
+        generator = torch.xpu.default_generators[logits.device.index]
+
         state = generator.get_state()
         seed, offset = state.view(torch.int64)
         seeds = torch.tensor(
