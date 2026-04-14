@@ -5,6 +5,7 @@
 import torch
 from torch import nn
 
+import vllm.ir.ops
 from vllm.config import CacheConfig, ModelConfig, get_current_vllm_config
 from vllm.distributed import (
     divide,
@@ -30,7 +31,6 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
-from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
 from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_state_update
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
@@ -101,67 +101,56 @@ class Mixer2RMSNormGated(CustomOp):
         #      Each rank computes a local sum of squares followed by AllReduce
         #   2. tp_size divides n_groups
         #      Each rank only reduces within its local group(s).
-        #      No collective ops necessary.
+        #      No collective ops necessary (use IR op directly).
         #   3. The general case can be pretty complicated so we AllGather
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
-        x = x * nn.functional.silu(gate.to(torch.float32))
         if not self.use_rms_norm:
-            return x.to(input_dtype)
+            return (x * nn.functional.silu(gate.to(torch.float32))).to(input_dtype)
 
         if self.n_groups == 1:
             if self.tp_size > 1:
                 # Compute local sum and then reduce to obtain global sum
+                x = x * nn.functional.silu(gate.to(torch.float32))
                 local_sums = x.pow(2).sum(dim=-1, keepdim=True)
                 global_sums = tensor_model_parallel_all_reduce(local_sums)
-                # Calculate the variance
                 count = self.tp_size * x.shape[-1]
                 variance = global_sums / count
-
+                x = x * torch.rsqrt(variance + self.variance_epsilon)
+                return (self.weight * x).to(input_dtype)
             else:
-                variance = x.pow(2).mean(-1, keepdim=True)
-            x = x * torch.rsqrt(variance + self.variance_epsilon)
+                # No TP collective needed: use IR op
+                return vllm.ir.ops.mixer2_rms_norm_gated(
+                    x, gate, self.weight, self.variance_epsilon
+                )
         else:
             redundant_tp: bool = self.n_groups % self.tp_size != 0
             if redundant_tp:
                 # To handle the general case, redundantly apply the variance
+                x = x * nn.functional.silu(gate.to(torch.float32))
                 x = tensor_model_parallel_all_gather(x, -1)
-
-            *prefix_dims, hidden_dim = x.shape
-            group_count = hidden_dim // self.group_size
-            x_grouped = x.view(*prefix_dims, group_count, self.group_size)
-            variance = x_grouped.pow(2).mean(-1, keepdim=True)
-            x_grouped = x_grouped * torch.rsqrt(variance + self.variance_epsilon)
-            x = x_grouped.view(*prefix_dims, hidden_dim)
-
-            if redundant_tp:
+                *prefix_dims, hidden_dim = x.shape
+                group_count = hidden_dim // self.group_size
+                x_grouped = x.view(*prefix_dims, group_count, self.group_size)
+                variance = x_grouped.pow(2).mean(-1, keepdim=True)
+                x_grouped = x_grouped * torch.rsqrt(variance + self.variance_epsilon)
+                x = x_grouped.view(*prefix_dims, hidden_dim)
                 start = self.per_rank_hidden_size * self.tp_rank
                 end = start + self.per_rank_hidden_size
                 x = x[..., start:end]
-
-        return self.weight * x.to(input_dtype)
+                return (self.weight * x).to(input_dtype)
+            else:
+                # n_groups % tp_size == 0: local grouped RMSNorm, use IR op
+                return vllm.ir.ops.mixer2_rms_norm_gated(
+                    x, gate, self.weight, self.variance_epsilon, self.group_size
+                )
 
     def forward_cuda(
         self,
         x: torch.Tensor,
         gate: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        input_dtype = x.dtype
-        if not self.use_rms_norm:
-            # Keep gate in float32 for numerical stability during silu
-            return x * nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
-
-        if ((self.n_groups % self.tp_size) != 0) or self.n_groups != 1:
-            return self.forward_native(x, gate)
-
-        return rms_norm_gated(
-            x,
-            self.weight.data,
-            bias=None,
-            z=gate,
-            eps=self.variance_epsilon,
-            norm_before_gate=False,
-        )
+        return self.forward_native(x, gate)
 
 
 def mamba_v2_sharded_weight_loader(

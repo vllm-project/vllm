@@ -8,8 +8,7 @@ import torch
 from vllm.triton_utils import tl, triton
 
 
-@triton.heuristics({"HAS_BIAS": lambda args: args["B"] is not None})
-@triton.heuristics({"HAS_Z": lambda args: args["Z"] is not None})
+@torch.library.wrap_triton
 @triton.jit
 def _layer_norm_fwd_1pass_kernel(
     X,  # pointer to the input
@@ -135,6 +134,8 @@ def _layer_norm_fwd(
             group_size,
             eps,
             BLOCK_N=BLOCK_N,
+            HAS_BIAS=bias is not None,
+            HAS_Z=z is not None,
             NORM_BEFORE_GATE=norm_before_gate,
             IS_RMS_NORM=is_rms_norm,
             num_warps=num_warps,
