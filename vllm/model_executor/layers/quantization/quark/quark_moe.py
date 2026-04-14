@@ -1502,9 +1502,9 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
         layer.w2_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
 
         # FIXME warp need to be adjusted based on batch size
-        # only apply to  batched mode
+        # only apply to batched mode
         if self.moe.use_ep:
-            num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
+            num_warps = 4 if self.moe.max_num_tokens <= 512 else 8
         else:
             num_warps = 8
 

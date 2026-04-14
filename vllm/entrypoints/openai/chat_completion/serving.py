@@ -68,11 +68,11 @@ from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
+from vllm.parser.abstract_parser import Parser
 from vllm.reasoning import ReasoningParser
 from vllm.renderers import ChatParams
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
@@ -131,6 +131,12 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_auto_tools: bool = enable_auto_tools
         self.tool_parser = ParserManager.get_tool_parser(
             tool_parser_name=tool_parser,
+            enable_auto_tools=enable_auto_tools,
+            model_name=self.model_config.model,
+        )
+        self.parser_cls = ParserManager.get_parser(
+            tool_parser_name=tool_parser,
+            reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
         )
@@ -216,13 +222,12 @@ class OpenAIServingChat(OpenAIServing):
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
+        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
+            request.chat_template_kwargs,
+            self.default_chat_template_kwargs,
+        )
         reasoning_parser: ReasoningParser | None = None
         if self.reasoning_parser_cls:
-            # Pass the same chat template kwargs as used in tokenization
-            chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-                request.chat_template_kwargs,
-                self.default_chat_template_kwargs,
-            )
             reasoning_parser = self.reasoning_parser_cls(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
@@ -338,6 +343,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request_metadata,
                 reasoning_parser,
+                chat_template_kwargs=chat_template_kwargs,
             )
 
         return await self.chat_completion_full_generator(
@@ -505,6 +511,7 @@ class OpenAIServingChat(OpenAIServing):
         tokenizer: TokenizerLike,
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
+        chat_template_kwargs: dict[str, Any] | None = None,
     ) -> AsyncGenerator[str, None]:
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
@@ -549,29 +556,29 @@ class OpenAIServingChat(OpenAIServing):
         if tool_choice_auto or reasoning_parser:
             # These are only required in "auto" tool choice case
             all_previous_token_ids = [[] for _ in range(num_choices)]
-            # For reasoning parser and tool call all enabled
-            added_content_delta_arr = [False] * num_choices
             reasoning_end_arr = [False] * num_choices
             prompt_is_reasoning_end_arr: list[bool | None] = [None] * num_choices
         else:
             all_previous_token_ids = None
 
-        # Prepare the tool parser if it's needed
         try:
-            if tool_choice_auto and self.tool_parser:
+            if self.parser_cls is not None:
                 if tokenizer is None:
                     raise ValueError(
                         "Tokenizer not available when `skip_tokenizer_init=True`"
                     )
-
-                tool_parsers: list[ToolParser | None] = [
-                    self.tool_parser(tokenizer, request.tools)
+                parsers: list[Parser | None] = [
+                    self.parser_cls(
+                        tokenizer,
+                        request.tools,
+                        chat_template_kwargs=chat_template_kwargs,
+                    )
                     for _ in range(num_choices)
                 ]
             else:
-                tool_parsers = [None] * num_choices
+                parsers = [None] * num_choices
         except Exception as e:
-            logger.exception("Error in tool parser creation.")
+            logger.exception("Error in parser creation.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
             yield "data: [DONE]\n\n"
@@ -675,7 +682,8 @@ class OpenAIServingChat(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index
-                    tool_parser = tool_parsers[i]
+                    parser = parsers[i]
+                    tool_parser = parser.tool_parser if parser is not None else None
 
                     if (
                         reasoning_parser
@@ -903,109 +911,16 @@ class OpenAIServingChat(OpenAIServing):
                                 history_tool_call_cnt += 1
                                 tools_streamed[i] = True
 
-                    # handle streaming deltas for tools with "auto" tool choice
-                    # and reasoning parser
-                    elif tool_choice_auto and reasoning_parser:
-                        assert tool_parser is not None
-                        assert added_content_delta_arr is not None
-                        assert reasoning_end_arr is not None
-                        output_token_ids = as_list(output.token_ids)
-                        if not reasoning_end_arr[i]:
-                            # When encountering think end id in prompt_token_ids
-                            # i.e {"enable_thinking": False},
-                            # set reasoning status to end.
-                            if prompt_is_reasoning_end_arr[i]:
-                                reasoning_end_arr[i] = True
-                                current_token_ids = output_token_ids
-                                # Don't update current_text, keep it as is from delta
-                            else:
-                                delta_message = (
-                                    reasoning_parser.extract_reasoning_streaming(
-                                        previous_text,
-                                        current_text,
-                                        delta_text,
-                                        previous_token_ids,
-                                        current_token_ids,
-                                        output_token_ids,
-                                    )
-                                )
-
-                                # When encountering think end id in delta_token_ids,
-                                # set reasoning status to end.
-                                # Remove the text and token ids related
-                                # to 'reasoning'.
-                                if reasoning_parser.is_reasoning_end(output_token_ids):
-                                    reasoning_end_arr[i] = True
-                                    current_token_ids = (
-                                        reasoning_parser.extract_content_ids(
-                                            output_token_ids
-                                        )
-                                    )
-                                    if delta_message and delta_message.content:
-                                        current_text = delta_message.content
-                                        delta_message.content = None
-                                    else:
-                                        current_text = ""
-
-                        # handle tool calls only after reasoning is done,
-                        if reasoning_end_arr[i]:
-                            delta_token_ids = output_token_ids
-                            # First time to tool call,
-                            # add the remaining text and token ids
-                            # to delta from previous
-                            if not added_content_delta_arr[i]:
-                                added_content_delta_arr[i] = True
-                                previous_text = ""
-                                previous_token_ids = []
-                                delta_text = current_text
-                                delta_token_ids = current_token_ids
-
-                            delta_message = tool_parser.extract_tool_calls_streaming(
-                                previous_text=previous_text,
-                                current_text=current_text,
-                                delta_text=delta_text,
-                                previous_token_ids=previous_token_ids,
-                                current_token_ids=current_token_ids,
-                                delta_token_ids=delta_token_ids,
-                                request=request,
-                            )
-                            if delta_message and delta_message.tool_calls:
-                                tools_streamed[i] = True
-                    # when only tool calls
-                    elif tool_choice_auto:
-                        assert tool_parser is not None
-                        delta_message = tool_parser.extract_tool_calls_streaming(
-                            previous_text=previous_text,
-                            current_text=current_text,
+                    elif parser is not None:
+                        delta_message = parser.parse_delta(
                             delta_text=delta_text,
-                            previous_token_ids=previous_token_ids,
-                            current_token_ids=current_token_ids,
-                            delta_token_ids=output.token_ids,
+                            delta_token_ids=as_list(output.token_ids),
                             request=request,
+                            prompt_token_ids=res.prompt_token_ids,
                         )
                         if delta_message and delta_message.tool_calls:
                             tools_streamed[i] = True
-
-                    # when only reasoning
-                    elif reasoning_parser:
-                        # When encountering think end id in prompt_token_ids
-                        # i.e {"enable_thinking": False},
-                        # set reasoning status to end.
-                        # Route all generated tokens as content directly.
-                        if prompt_is_reasoning_end_arr[i]:
-                            delta_message = DeltaMessage(content=delta_text)
-                        else:
-                            delta_message = (
-                                reasoning_parser.extract_reasoning_streaming(
-                                    previous_text,
-                                    current_text,
-                                    delta_text,
-                                    previous_token_ids,
-                                    current_token_ids,
-                                    output.token_ids,
-                                )
-                            )
-                    # handle streaming just a content delta
+                    # handle streaming just a content delta (no parsers)
                     else:
                         delta_message = DeltaMessage(content=delta_text)
 
