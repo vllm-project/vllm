@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
-from typing import Any
 
 import torch
 from compressed_tensors.quantization import QuantizationArgs, QuantizationStrategy
@@ -62,8 +61,23 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         self.input_dtype = get_current_vllm_config().model_config.dtype
         self.is_static_input_scheme = is_static_input_scheme
         self.weight_block_size = self.weight_quant.block_structure
-        self.fp8_linear: Any = None
-        self.w8a8_block_fp8_linear: Any = None
+
+        if self.weight_block_size is not None:
+            self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
+            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
+            assert not self.is_static_input_scheme
+            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
+            self.weight_quant_key = create_fp8_quant_key(
+                static=True, group_shape=GroupShape(*self.weight_block_size)
+            )
+            self.activation_quant_key = create_fp8_quant_key(
+                static=False, group_shape=self.act_q_group_shape
+            )
+        else:
+            self.activation_quant_key = activation_quant_key_mapping[
+                self.is_static_input_scheme
+            ]
+            self.weight_quant_key = weight_quant_key_mapping[self.strategy]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -119,23 +133,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         if self.is_static_input_scheme:
             input_scale = create_fp8_input_scale(output_partition_sizes, weight_loader)
             layer.register_parameter("input_scale", input_scale)
-
-        if self.weight_block_size is not None:
-            self.cutlass_block_fp8_supported = cutlass_block_fp8_supported()
-            self.use_aiter_and_is_supported = rocm_aiter_ops.is_linear_fp8_enabled()
-            assert not self.is_static_input_scheme
-            self.act_q_group_shape = GroupShape(1, self.weight_block_size[0])
-            self.weight_quant_key = create_fp8_quant_key(
-                static=True, group_shape=GroupShape(*self.weight_block_size)
-            )
-            self.activation_quant_key = create_fp8_quant_key(
-                static=False, group_shape=self.act_q_group_shape
-            )
-        else:
-            self.activation_quant_key = activation_quant_key_mapping[
-                self.is_static_input_scheme
-            ]
-            self.weight_quant_key = weight_quant_key_mapping[self.strategy]
 
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
