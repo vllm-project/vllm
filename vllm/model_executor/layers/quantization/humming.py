@@ -578,7 +578,7 @@ class HummingLinearMethod(LinearMethodBase):
             torch_dtype=layer.param_dtype,
         )
 
-        # preprocess weight for inference 
+        # preprocess weight for inference
         HummingMethod.transform_humming_layer(layer)
 
         # compute_config: kernel configs that do not directly affect weights
