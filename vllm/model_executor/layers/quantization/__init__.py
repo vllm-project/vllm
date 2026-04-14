@@ -39,7 +39,7 @@ QuantizationMethods = Literal[
     # shorthand for creating a more complicated online quant config object
     "fp8_per_tensor",
     "fp8_per_block",
-    "int8_per_channel",
+    "int8_per_channel_weight_only",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 

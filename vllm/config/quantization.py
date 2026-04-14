@@ -21,7 +21,7 @@ class OnlineQuantScheme(Enum):
 
     # int8, weight-only per-channel quantization for MoE expert weights.
     # Linear layers remain unquantized.
-    INT8_PER_CHANNEL = "int8_per_channel"
+    INT8_PER_CHANNEL_WEIGHT_ONLY = "int8_per_channel_weight_only"
 
     # TODO(future PRs): add more online quant schemes here: mxfp8, etc
 

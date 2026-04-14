@@ -102,7 +102,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
 
             linear_scheme = self.args.linear_scheme_override or self.args.global_scheme
-            if linear_scheme == OnlineQuantScheme.INT8_PER_CHANNEL:
+            if linear_scheme == OnlineQuantScheme.INT8_PER_CHANNEL_WEIGHT_ONLY:
                 logger.warning_once(
                     "INT8 online quantization only quantizes MoE expert "
                     "weights. linear layers remain in full precision."
@@ -121,7 +121,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
             moe_scheme = self.args.moe_scheme_override or self.args.global_scheme
-            if moe_scheme == OnlineQuantScheme.INT8_PER_CHANNEL:
+            if moe_scheme == OnlineQuantScheme.INT8_PER_CHANNEL_WEIGHT_ONLY:
                 return Int8OnlineMoEMethod(layer=layer)
             elif moe_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
                 return Fp8PerBlockOnlineMoEMethod(layer=layer)
