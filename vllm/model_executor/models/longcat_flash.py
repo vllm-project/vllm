@@ -46,7 +46,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import FusedMoE, ZeroExpertFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -292,12 +292,10 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        assert config.zero_expert_num is not None
         assert config.zero_expert_type is not None
-        self.experts = ZeroExpertFusedMoE(
-            zero_expert_num=config.zero_expert_num,
+        self.experts = FusedMoE(
             zero_expert_type=config.zero_expert_type,
-            router=self.router,
+            e_score_correction_bias=self.router.e_score_correction_bias,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
@@ -332,7 +330,7 @@ class LongcatMoe(nn.Module):
             hidden_states_padded.to(self.router_params_dtype)
         )
 
-        # ZeroExpertFusedMoE handles routing memoization and zero expert computation
+        # FusedMoE handles routing memoization and zero expert computation
         # internally. Pass full router_logits (including zero experts) so that
         # zero experts can be properly identified in routing.
         final_hidden_states = self.experts(
