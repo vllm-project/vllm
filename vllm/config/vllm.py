@@ -47,7 +47,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config, replace
+from .utils import DeferredFieldsMixin, SupportsHash, config, replace
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -965,6 +965,12 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+
+        # Initialize deferred fields in PassConfig
+        if isinstance(self.compilation_config.pass_config, DeferredFieldsMixin):
+            self.compilation_config.pass_config.initialize_deferred_fields(self)
+            self.compilation_config.pass_config.validate_deferred_fields_initialized()
+
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "

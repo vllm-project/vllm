@@ -6,13 +6,15 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
 from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
+    Deferred,
+    DeferredFieldsMixin,
     Range,
     config,
     get_hash_factors,
@@ -104,7 +106,7 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-class PassConfig:
+class PassConfig(DeferredFieldsMixin):
     """Configuration for custom Inductor passes.
 
     This is separate from general `CompilationConfig` so that inductor passes
@@ -117,35 +119,46 @@ class PassConfig:
     improper state.
     """
 
-    # New flags
-    fuse_norm_quant: bool = None  # type: ignore[assignment]
+    # Deferred annotation for fields initialized during VllmConfig post_init
+
+    # Fields below use Deferred(False) as a last-resort fallback that fires
+    # only when neither the user nor the optimization-level table
+    # (OPTIMIZATION_LEVEL_TO_CONFIG in vllm.py) has supplied a value.
+    # In practice, most of these fields are covered by the optimization-level
+    # table, so Deferred(False) rarely triggers for them.  The exceptions are
+    # fuse_attn_quant (absent from optimization levels 0 and 1) and
+    # fuse_minimax_qk_norm (absent from all optimizati
+    # on levels), where Deferred(False) provides the only default.
+
+    fuse_norm_quant: Annotated[bool | None, Deferred(False)] = None
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = None  # type: ignore[assignment]
+    fuse_act_quant: Annotated[bool | None, Deferred(False)] = None
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = None  # type: ignore[assignment]
+    fuse_attn_quant: Annotated[bool | None, Deferred(False)] = None
     """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool = None  # type: ignore[assignment]
+    enable_sp: Annotated[bool | None, Deferred(False)] = None
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool = None  # type: ignore[assignment]
+    fuse_gemm_comms: Annotated[bool | None, Deferred(False)] = None
     """Enable async TP."""
-    fuse_allreduce_rms: bool = None  # type: ignore[assignment]
+    fuse_allreduce_rms: Annotated[bool | None, Deferred(False)] = None
     """Enable flashinfer allreduce fusion."""
-    fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
+    fuse_minimax_qk_norm: Annotated[bool | None, Deferred(False)] = None
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool = None  # type: ignore[assignment]
+    fuse_act_padding: Annotated[bool | None, Deferred(False)] = None
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
+    fuse_mla_dual_rms_norm: Annotated[bool | None, Deferred(False)] = None
     """Fuse paired q/kv RMS norms in MLA attention."""
-    fuse_rope_kvcache: bool = None  # type: ignore[assignment]
+    fuse_rope_kvcache: Annotated[bool | None, Deferred(False)] = None
     """Fuse the QK rope + KV cache ops."""
+
+    enable_qk_norm_rope_fusion: bool = False
+    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     rope_kvcache_fusion_max_token_num: int = 256
     """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
@@ -217,25 +230,6 @@ class PassConfig:
         """
 
         return hash_factors(get_hash_factors(self, set()))
-
-    @field_validator(
-        "fuse_norm_quant",
-        "fuse_act_quant",
-        "fuse_attn_quant",
-        "enable_sp",
-        "fuse_gemm_comms",
-        "fuse_allreduce_rms",
-        "fuse_act_padding",
-        "fuse_mla_dual_rms_norm",
-        "fuse_rope_kvcache",
-        mode="wrap",
-    )
-    @classmethod
-    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
-        """Skip validation if the value is `None` when initialisation is delayed."""
-        if value is None:
-            return value
-        return handler(value)
 
     def __post_init__(self) -> None:
         # Handle deprecation and defaults
