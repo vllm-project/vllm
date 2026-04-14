@@ -352,9 +352,23 @@ class DeepseekV2MoE(nn.Module):
                 self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
             )
 
+        # DP padding mask — assigned by model runner when DP > 1.
+        # Pre-allocated buffer of shape (max_num_tokens, 1); contents
+        # updated each step (1.0 for real tokens, 0.0 for padding).
+        self._dp_padding_mask: torch.Tensor | None = None
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
+
+        # Zero out DP padding tokens so they don't contaminate real
+        # tokens through expert routing / EP all-to-all dispatch.
+        # Use torch.where instead of multiplication because NaN * 0 = NaN
+        # (IEEE 754), so padding tokens with NaN from attention would
+        # propagate into expert kernels and corrupt FP4 block scales.
+        if self._dp_padding_mask is not None:
+            mask = self._dp_padding_mask[:num_tokens].bool()
+            hidden_states = torch.where(mask, hidden_states, 0.0)
 
         # Chunk the hidden states so they aren't replicated across TP ranks.
         # This avoids duplicate computation in self.experts.
