@@ -245,7 +245,10 @@ set_gencode_flags_for_srcs(
   CUDA_ARCHS "${CUDA_ARCHS}")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
-  message(STATUS "Enabling cumem allocator extension.")
+  if(DEFINED ENV{VLLM_SKIP_CUMEM_ALLOCATOR} AND NOT "$ENV{VLLM_SKIP_CUMEM_ALLOCATOR}" STREQUAL "")
+    message(STATUS "Skipping cumem allocator extension due to VLLM_SKIP_CUMEM_ALLOCATOR.")
+  else()
+    message(STATUS "Enabling cumem allocator extension.")
   if(VLLM_GPU_LANG STREQUAL "CUDA")
     # link against cuda driver library
     list(APPEND CUMEM_LIBS CUDA::cuda_driver)
@@ -273,6 +276,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     LIBRARIES ${CUMEM_LIBS}
     USE_SABI 3.8
     WITH_SOABI)
+  endif()
 endif()
 
 #
@@ -1229,5 +1233,9 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
     include(cmake/external_projects/qutlass.cmake)
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
+  if(DEFINED ENV{VLLM_SKIP_FLASH_ATTN} AND NOT "$ENV{VLLM_SKIP_FLASH_ATTN}" STREQUAL "")
+    message(STATUS "Skipping vllm-flash-attn due to VLLM_SKIP_FLASH_ATTN.")
+  else()
     include(cmake/external_projects/vllm_flash_attn.cmake)
+  endif()
 endif ()
