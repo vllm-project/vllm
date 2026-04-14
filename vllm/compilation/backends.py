@@ -265,6 +265,7 @@ class CompilerManager:
         compile_range: Range,
         graph_index: int = 0,
         num_graphs: int = 1,
+        is_encoder: bool = False,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -282,7 +283,10 @@ class CompilerManager:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
-                compilation_config.compilation_time += elapsed
+                if is_encoder:
+                    compilation_config.encoder_compilation_time += elapsed
+                else:
+                    compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
@@ -387,7 +391,10 @@ class CompilerManager:
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
-            compilation_config.compilation_time += elapsed
+            if is_encoder:
+                compilation_config.encoder_compilation_time += elapsed
+            else:
+                compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
@@ -516,16 +523,31 @@ def _decompose_size_nodes(graph: fx.GraphModule) -> None:
                     )
 
         # Replace size node in each user's args.
-        # Dynamo always passes size as a direct arg: view(clone, size)
-        # → view(clone, d0, d1, ...)
         for user in list(node.users):
-            new_args = []
-            for arg in user.args:
-                if arg is node:
-                    new_args.extend(dims)
-                else:
-                    new_args.append(arg)
-            user.args = tuple(new_args)
+            if (
+                user.op == "call_function"
+                and user.target is operator.getitem
+                and len(user.args) == 2
+                and user.args[0] is node
+            ):
+                # getitem(size, idx) → replace with dims[idx] directly.
+                idx = user.args[1]
+                assert isinstance(idx, int), (
+                    f"Expected literal int index for getitem on size(), "
+                    f"got {type(idx).__name__}: {idx}"
+                )
+                user.replace_all_uses_with(dims[idx])
+                graph.graph.erase_node(user)
+            else:
+                # User consumes the full size tuple (e.g. view(clone, size))
+                # → view(clone, d0, d1, ...)
+                new_args = []
+                for arg in user.args:
+                    if arg is node:
+                        new_args.extend(dims)
+                    else:
+                        new_args.append(arg)
+                user.args = tuple(new_args)
         graph.graph.erase_node(node)
 
 
@@ -1115,7 +1137,10 @@ class VllmBackend:
         logger.info_once(
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
-        self.compilation_config.compilation_time += dynamo_time
+        if self.is_encoder:
+            self.compilation_config.encoder_compilation_time += dynamo_time
+        else:
+            self.compilation_config.compilation_time += dynamo_time
 
         # Record Dynamo time in tracing if available
         start_time = int(torch_compile_start_time * 1e9)
