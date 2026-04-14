@@ -25,13 +25,12 @@ typedef hipMemAccessDesc CUmemAccessDesc;
   #define CU_MEM_ALLOCATION_TYPE_PINNED hipMemAllocationTypePinned
   #define CU_MEM_LOCATION_TYPE_DEVICE hipMemLocationTypeDevice
   #define CU_MEM_ACCESS_FLAGS_PROT_READWRITE hipMemAccessFlagsProtReadWrite
-  #define CU_MEM_ALLOC_GRANULARITY_MINIMUM hipMemAllocationGranularityMinimum
-
-  // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__TYPES.html
+  #define CU_MEM_ACCESS_FLAGS_PROT_NONE hipMemAccessFlagsProtNone
   #define CU_MEM_ALLOCATION_COMP_NONE 0x0
+#endif
 
 // Error Handling
-// https://docs.nvidia.com/cuda/archive/11.4.4/cuda-driver-api/group__CUDA__ERROR.html
+
 CUresult cuGetErrorString(CUresult hipError, const char** pStr) {
   *pStr = hipGetErrorString(hipError);
   return CUDA_SUCCESS;
@@ -57,8 +56,23 @@ CUresult cuDevicePrimaryCtxRetain(CUcontext* ctx, CUdevice dev) {
   return hipDevicePrimaryCtxRetain(ctx, dev);
 }
 
+CUresult cuCtxGetDevice(CUdevice* device) {
+  hipDevice_t hip_dev;
+  hipError_t err = hipCtxGetDevice(&hip_dev);
+  if (err == hipSuccess) {
+    *device = (CUdevice)hip_dev;
+  }
+  return err;
+}
+
 // Virtual Memory Management
 // https://docs.nvidia.com/cuda/cuda-driver-api/group__CUDA__VA.html
+#ifndef CU_MEM_ALLOC_GRANULARITY_MINIMUM
+  #define CU_MEM_ALLOC_GRANULARITY_MINIMUM hipMemAllocationGranularityMinimum
+#endif
+#ifndef CU_MEM_ALLOCATION_COMP_NONE
+  #define CU_MEM_ALLOCATION_COMP_NONE 0x0
+#endif
 CUresult cuMemAddressFree(CUdeviceptr ptr, size_t size) {
   return hipMemAddressFree(ptr, size);
 }
@@ -100,10 +114,15 @@ CUresult cuMemUnmap(CUdeviceptr ptr, size_t size) {
 }
 }  // extern "C"
 
-#else
+#ifndef USE_ROCM
 ////////////////////////////////////////
 // Import CUDA headers for NVIDIA GPUs
 ////////////////////////////////////////
   #include <cuda_runtime_api.h>
   #include <cuda.h>
+#else
+  #ifndef CU_MEM_ALLOC_GRANULARITY_MINIMUM
+    #define CU_MEM_ALLOC_GRANULARITY_MINIMUM hipMemAllocationGranularityMinimum
+  #endif
+  #define CU_MEM_ALLOCATION_COMP_NONE 0x0
 #endif

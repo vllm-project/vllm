@@ -54,7 +54,7 @@ extern "C" {
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 
-#include <sys/types.h>
+#include <unistd.h>
 
 char error_msg[10240];  // 10KB buffer to store error messages
 CUresult no_error = CUresult(0);
@@ -83,13 +83,7 @@ static PyObject* g_python_free_callback = nullptr;
 // Helper functions:
 
 void ensure_context(unsigned long long device) {
-  CUcontext pctx;
-  CUDA_CHECK(cuCtxGetCurrent(&pctx));
-  if (!pctx) {
-    // Ensure device context.
-    CUDA_CHECK(cuDevicePrimaryCtxRetain(&pctx, device));
-    CUDA_CHECK(cuCtxSetCurrent(pctx));
-  }
+  CUDA_CHECK(hipSetDevice(device));
 }
 
 void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
@@ -109,18 +103,16 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
 
 #ifndef USE_ROCM
   int flag = 0;
-  CUresult rdma_result = cuDeviceGetAttribute(
+  CUDA_CHECK(cuDeviceGetAttribute(
       &flag, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED,
-      device);
-  if (rdma_result == CUDA_SUCCESS &&
-      flag) {  // support GPUDirect RDMA if possible
+      device));
+  if (flag) {  // support GPUDirect RDMA if possible
     prop.allocFlags.gpuDirectRDMACapable = 1;
   }
   int fab_flag = 0;
-  CUresult fab_result = cuDeviceGetAttribute(
-      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device);
-  if (fab_result == CUDA_SUCCESS &&
-      fab_flag) {  // support fabric handle if possible
+  CUDA_CHECK(cuDeviceGetAttribute(
+      &fab_flag, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_FABRIC_SUPPORTED, device));
+  if (fab_flag) {  // support fabric handle if possible
     prop.requestedHandleTypes = CU_MEM_HANDLE_TYPE_FABRIC;
   }
 #endif
@@ -157,6 +149,11 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
       return;
     }
   }
+  CUmemAccessDesc accessDesc = {};
+  accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+  accessDesc.location.id = device;
+  accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+
   unsigned long long allocated_size = 0;
   for (auto i = 0; i < num_chunks; ++i) {
     void* map_addr = (void*)((uintptr_t)d_mem + allocated_size);
@@ -177,19 +174,17 @@ void create_and_map(unsigned long long device, ssize_t size, CUdeviceptr d_mem,
     }
     allocated_size += chunk_sizes[i];
   }
-#endif
 
-  CUmemAccessDesc accessDesc = {};
-  accessDesc.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
-  accessDesc.location.id = device;
-  accessDesc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
-
-  CUDA_CHECK(cuMemSetAccess(d_mem, size, &accessDesc, 1));
-  if (error_code != 0) {
-    return;
+  CUresult access_res = cuMemSetAccess(d_mem, size, &accessDesc, 1);
+  if (access_res != no_error) {
+    fprintf(stderr,
+            "ROCm SetAccess warning (ignored): d_mem=%p, size=%llu, device=%d, "
+            "err=%d\n",
+            (void*)d_mem, (unsigned long long)size, (int)device,
+            (int)access_res);
   }
-  // std::cout << "create_and_map: device=" << device << ", size=" << size << ",
-  // d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
+#endif
+  hipDeviceSynchronize();
 }
 
 void unmap_and_release(unsigned long long device, ssize_t size,
@@ -232,16 +227,20 @@ void unmap_and_release(unsigned long long device, ssize_t size,
     }
   }
 
-  // ROCm workaround: hipMemRelease does not return physical VRAM to the
-  // free pool while the virtual-address reservation is still held.
-  // Cycling cuMemAddressFree → cuMemAddressReserve (at the same address)
-  // forces the driver to actually release the physical pages while keeping
-  // the same VA available for a later create_and_map.
   if (first_error == no_error) {
     first_error = cuMemAddressFree(d_mem, size);
     if (first_error == no_error) {
+      CUmemAllocationProp prop = {};
+      prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+      prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+      prop.location.id = device;
+      size_t granularity = 0;
+      cuMemGetAllocationGranularity(&granularity, &prop,
+                                    CU_MEM_ALLOC_GRANULARITY_MINIMUM);
       CUdeviceptr d_mem_new = 0;
-      first_error = cuMemAddressReserve(&d_mem_new, size, 0, d_mem, 0);
+      usleep(1000);  // Wait for physical memory to be released to the OS
+      first_error =
+          cuMemAddressReserve(&d_mem_new, size, granularity, d_mem, 0);
       if (first_error == no_error && d_mem_new != d_mem) {
         cuMemAddressFree(d_mem_new, size);
         snprintf(error_msg, sizeof(error_msg),
@@ -258,6 +257,7 @@ void unmap_and_release(unsigned long long device, ssize_t size,
     CUDA_CHECK(first_error);
   }
 #endif
+  hipDeviceSynchronize();
 }
 
 PyObject* create_tuple_from_c_integers(unsigned long long a,
@@ -319,6 +319,7 @@ PyObject* create_tuple_from_c_mixed(unsigned long long a, unsigned long long b,
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void* my_malloc(ssize_t size, int device, CUstream stream) {
+  error_code = no_error;
   ensure_context(device);
 
   // first allocation, align the size, and reserve an address, and also allocate
@@ -450,6 +451,7 @@ void* my_malloc(ssize_t size, int device, CUstream stream) {
 
 // use CUstream instead of cudaStream_t, to avoid including cuda_runtime_api.h
 void my_free(void* ptr, ssize_t size, int device, CUstream stream) {
+  error_code = no_error;
   // get memory handle from the pointer
   if (!g_python_free_callback) {
     std::cerr << "ERROR: g_python_free_callback not set.\n";
@@ -586,6 +588,7 @@ static PyObject* py_init_module(PyObject* self, PyObject* args) {
 }
 
 static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
+  error_code = no_error;
   if (!args || !PyTuple_Check(args) || PyTuple_Size(args) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
     return nullptr;
@@ -684,6 +687,7 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 }
 
 static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
+  error_code = no_error;
   if (!args || !PyTuple_Check(args) || PyTuple_Size(args) != 4) {
     PyErr_SetString(PyExc_TypeError, "Expected a tuple of size 4");
     return nullptr;
