@@ -8,6 +8,7 @@ from torch.nn import Module
 from torch.utils._python_dispatch import TorchDispatchMode
 
 import vllm.envs as envs
+import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -374,9 +375,9 @@ class Fp8LinearMethod(LinearMethodBase):
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
-            weight_shape=layer.weight.shape,
             module_name=self.__class__.__name__,
         )
 
@@ -395,8 +396,6 @@ class Fp8LinearMethod(LinearMethodBase):
         # TODO(rob): refactor block quant into separate class.
         if self.block_quant:
             assert not self.act_q_static
-
-            self.fp8_linear.process_weights_after_loading(layer)
 
         # If checkpoint not serialized fp8, quantize the weights.
         else:
@@ -527,9 +526,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
         self.fp8_linear = init_fp8_linear_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
             input_dtype=self.input_dtype,
             out_dtype=self.out_dtype,
-            weight_shape=layer.weight.shape,
             module_name=self.__class__.__name__,
         )
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
@@ -833,7 +832,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def maybe_make_prepare_finalize(
         self,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    ) -> Any:
+    ) -> mk.FusedMoEPrepareAndFinalizeModular | None:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
             "logic. This function should not be called."
