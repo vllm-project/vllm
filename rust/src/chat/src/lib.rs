@@ -19,12 +19,14 @@ pub use event::{
     AssistantToolCall, ChatEvent,
 };
 use futures::{StreamExt, TryStreamExt as _};
-pub use renderers::{ChatRenderer, DynChatRenderer, ReasoningParserInit, RenderedPrompt};
+pub use reasoning::{ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory};
+pub use renderers::{ChatRenderer, DynChatRenderer, RenderedPrompt};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
+use tracing::info;
 pub use vllm_llm::FinishReason;
 
 mod backend;
@@ -32,13 +34,12 @@ pub mod backends;
 mod error;
 mod event;
 mod output;
+mod reasoning;
 mod renderers;
 mod request;
 mod stream;
 
-use reasoning_parser::{ParserFactory as ReasoningParserFactory, ReasoningParser};
 use tool_parser::{ParserFactory as ToolParserFactory, ToolParser};
-use tracing::info;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
@@ -52,7 +53,7 @@ fn available_tool_parser_names(tool_parser_factory: &ToolParserFactory) -> Vec<S
 fn available_reasoning_parser_names(
     reasoning_parser_factory: &ReasoningParserFactory,
 ) -> Vec<String> {
-    reasoning_parser_factory.list_parsers()
+    reasoning_parser_factory.list()
 }
 
 /// Validate explicit parser override names without starting request processing.
@@ -73,7 +74,7 @@ pub fn validate_parser_overrides(
 
     let reasoning_parser_factory = ReasoningParserFactory::new();
     if let Some(name) = reasoning_parser
-        && !reasoning_parser_factory.registry().has_parser(name)
+        && !reasoning_parser_factory.contains(name)
     {
         let available_names = available_reasoning_parser_names(&reasoning_parser_factory);
         return Err(Error::ReasoningParserUnavailableByName {
@@ -152,8 +153,7 @@ impl ChatLlm {
         request.validate()?;
 
         let rendered = self.backend.chat_renderer().render(&request)?;
-        let output_processors =
-            self.prepare_output_processors(&request, rendered.reasoning_parser_init)?;
+        let output_processors = self.prepare_output_processors(&request)?;
 
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
@@ -185,11 +185,7 @@ impl ChatLlm {
 }
 
 impl ChatLlm {
-    fn prepare_output_processors(
-        &self,
-        request: &ChatRequest,
-        reasoning_parser_init: ReasoningParserInit,
-    ) -> Result<output::OutputProcessors> {
+    fn prepare_output_processors(&self, request: &ChatRequest) -> Result<output::OutputProcessors> {
         let tool_parsing_enabled =
             matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
         let tool_parser = if tool_parsing_enabled {
@@ -202,15 +198,7 @@ impl ChatLlm {
         } else {
             Vec::new()
         };
-        let reasoning_parser = self.resolve_reasoning_parser(reasoning_parser_init)?;
-
-        LOG_ONCE.call_once(|| {
-            // TODO: tool-parser doesn't expose its model type.
-            if let Some(reasoning_parser) = &reasoning_parser {
-                let model_type = reasoning_parser.model_type();
-                info!(model_type, "using reasoning parser");
-            }
-        });
+        let reasoning_parser = self.resolve_reasoning_parser()?;
 
         Ok(output::OutputProcessors {
             reasoning_parser,
@@ -240,37 +228,41 @@ impl ChatLlm {
             })
     }
 
-    fn resolve_reasoning_parser(
-        &self,
-        reasoning_parser_init: ReasoningParserInit,
-    ) -> Result<Option<Box<dyn ReasoningParser>>> {
-        let registry = self.reasoning_parser_factory.registry();
-
-        let mut reasoning_parser = if let Some(name) = self.reasoning_parser.as_deref() {
-            // Explicit parser name takes precedence.
-            registry.create_parser(name).map(Some).ok_or_else(|| {
-                Error::ReasoningParserUnavailableByName {
-                    name: name.to_string(),
-                    available_names: available_reasoning_parser_names(
-                        &self.reasoning_parser_factory,
-                    ),
+    fn resolve_reasoning_parser(&self) -> Result<Option<Box<dyn ReasoningParser>>> {
+        let parser_name = match self.reasoning_parser.as_deref() {
+            Some(name) => {
+                if !self.reasoning_parser_factory.contains(name) {
+                    return Err(Error::ReasoningParserUnavailableByName {
+                        name: name.to_string(),
+                        available_names: available_reasoning_parser_names(
+                            &self.reasoning_parser_factory,
+                        ),
+                    });
                 }
-            })?
-        } else {
-            registry.create_for_model(self.text.model_id())
+                Some(name.to_string())
+            }
+            None => self
+                .reasoning_parser_factory
+                .find_parser_for_model(self.text.model_id()),
         };
 
-        // Apply initialization hints from the rendering result.
-        if let Some(parser) = reasoning_parser.as_mut() {
-            if reasoning_parser_init.mark_reasoning_started {
-                parser.mark_reasoning_started();
-            }
-            if reasoning_parser_init.mark_think_start_stripped {
-                parser.mark_think_start_stripped();
-            }
-        }
+        let Some(parser_name) = parser_name else {
+            return Ok(None);
+        };
 
-        Ok(reasoning_parser)
+        let parser = self
+            .reasoning_parser_factory
+            .create(&parser_name, &*self.text.tokenizer())
+            .map_err(|error| Error::ReasoningParserInitialization {
+                name: parser_name.clone(),
+                message: error.to_string(),
+            })?;
+
+        LOG_ONCE.call_once(|| {
+            info!(parser_name, "using reasoning parser");
+        });
+
+        Ok(Some(parser))
     }
 }
 
@@ -281,10 +273,11 @@ mod tests {
     use thiserror_ext::AsReport;
 
     use super::validate_parser_overrides;
+    use crate::reasoning::names;
 
     #[test]
     fn validate_parser_overrides_accepts_registered_names() {
-        validate_parser_overrides(Some("json"), Some("qwen3")).unwrap();
+        validate_parser_overrides(Some("json"), Some(names::QWEN3)).unwrap();
     }
 
     #[test]
@@ -300,6 +293,6 @@ mod tests {
         let error = validate_parser_overrides(None, Some("definitely_missing_reasoning_parser"))
             .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: base, cohere_cmd, deepseek_r1, deepseek_v31, glm45, kimi, kimi_k25, kimi_thinking, minimax, nano_v3, qwen3, qwen3_thinking, step3)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
     }
 }

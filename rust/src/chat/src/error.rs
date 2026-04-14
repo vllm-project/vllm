@@ -30,6 +30,8 @@ pub enum Error {
         name: String,
         available_names: Vec<String>,
     },
+    #[error("failed to initialize reasoning parser `{name}`: {message}")]
+    ReasoningParserInitialization { name: String, message: String },
     #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"

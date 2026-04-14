@@ -182,7 +182,15 @@ impl Tokenizer for FakeChatTokenizer {
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        token.bytes().next().map(u32::from)
+        match token {
+            "<think>" => Some(0xF001),
+            "</think>" => Some(0xF002),
+            "<|START_THINKING|>" => Some(0xF003),
+            "<|END_THINKING|>" => Some(0xF004),
+            "◁think▷" => Some(0xF005),
+            "◁/think▷" => Some(0xF006),
+            _ => None,
+        }
     }
 }
 
@@ -248,10 +256,7 @@ impl ChatRenderer for FakeChatBackend {
             prompt.push_str("assistant:");
         }
 
-        Ok(RenderedPrompt {
-            prompt,
-            reasoning_parser_init: Default::default(),
-        })
+        Ok(RenderedPrompt { prompt })
     }
 }
 
@@ -1053,6 +1058,12 @@ async fn chat_stream_parses_tool_calls_automatically() {
                         outputs: vec![
                             request_output(
                                 "chat-tool",
+                                bytes_to_token_ids(b"<think>Need tool.</think>"),
+                                None,
+                                None,
+                            ),
+                            request_output(
+                                "chat-tool",
                                 bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
                                 None,
                                 None,
@@ -1153,6 +1164,12 @@ async fn chat_collect_message_preserves_tool_call_arguments_in_final_only_mode()
                     push,
                     EngineCoreOutputs {
                         outputs: vec![
+                            request_output(
+                                "chat-final-only-tool",
+                                bytes_to_token_ids(b"<think>Need tool.</think>"),
+                                None,
+                                None,
+                            ),
                             request_output(
                                 "chat-final-only-tool",
                                 bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
@@ -1462,6 +1479,47 @@ async fn chat_rejects_unknown_tool_parser_before_engine_request() {
         error,
         vllm_chat::Error::ToolParserUnavailableByName { name, .. }
         if name == "definitely_missing_tool_parser"
+    ));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    chat.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_rejects_unknown_reasoning_parser_before_engine_request() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-chat-reasoning-no-model".to_vec();
+    let (shutdown_tx, engine_task) =
+        spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
+            Box::pin(async move {
+                assert!(
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer))
+                        .await
+                        .is_err(),
+                    "chat request should fail before any engine request is sent"
+                );
+            })
+        });
+
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
+    let chat = connect_chat_llm_with_ipc(
+        EngineCoreClientConfig::new_single(handshake_address),
+        &ipc,
+        backend,
+    )
+    .await
+    .with_reasoning_parser("definitely_missing_reasoning_parser");
+    let error = match chat.chat(sample_request("chat-reasoning-no-model")).await {
+        Ok(_) => panic!("unknown explicit reasoning parser should fail"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        vllm_chat::Error::ReasoningParserUnavailableByName { name, .. }
+        if name == "definitely_missing_reasoning_parser"
     ));
 
     let _ = shutdown_tx.send(());

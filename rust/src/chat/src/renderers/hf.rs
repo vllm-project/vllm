@@ -2,13 +2,12 @@ use serde::Serialize;
 use serde_json::Value;
 use smg_tokenizer::SpecialTokens;
 use smg_tokenizer::chat_template::{
-    ChatTemplateContentFormat, ChatTemplateParams, ChatTemplateState, ThinkingKeyName,
-    ThinkingToggle,
+    ChatTemplateContentFormat, ChatTemplateParams, ChatTemplateState,
 };
 use thiserror_ext::AsReport as _;
 use tracing::trace;
 
-use super::{ChatRenderer, ReasoningParserInit, RenderedPrompt};
+use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
 use crate::{AssistantMessageExt, Error};
@@ -46,12 +45,10 @@ impl HfChatRenderer {
     fn apply_chat_template_inner(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         let messages = template_messages_to_json(&request.messages, self.inner.content_format())?;
         let tools = request.template_tools();
-        let reasoning_parser_init = reasoning_parser_init(&self.inner, request);
         trace!(
             request_id = %request.request_id,
             message_count = messages.len(),
             content_format = ?self.inner.content_format(),
-            ?reasoning_parser_init,
             ?messages,
             "applying chat template"
         );
@@ -93,10 +90,7 @@ impl HfChatRenderer {
             "rendered chat template prompt"
         );
 
-        Ok(RenderedPrompt {
-            prompt,
-            reasoning_parser_init,
-        })
+        Ok(RenderedPrompt { prompt })
     }
 }
 
@@ -104,59 +98,6 @@ impl ChatRenderer for HfChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         self.apply_chat_template(request)
     }
-}
-
-/// Construct the [`ReasoningParserInit`] based on the template's thinking toggle configuration and
-/// any relevant template kwargs in the request.
-fn reasoning_parser_init(
-    template_state: &ChatTemplateState,
-    request: &ChatRequest,
-) -> ReasoningParserInit {
-    // `think_in_prefill()` only describes what the template would emit inside its
-    // `add_generation_prompt` branch. Continuation renders intentionally skip that
-    // branch, so carrying any parser pre-init into those requests would incorrectly
-    // classify early assistant text as reasoning even though no prefill `<think>`
-    // was injected for this render.
-    if !request.chat_options.add_generation_prompt {
-        return ReasoningParserInit::default();
-    }
-
-    let thinking_enabled = match template_state.thinking_toggle() {
-        ThinkingToggle::None => false,
-        ThinkingToggle::DefaultOn => {
-            extract_request_thinking(template_state, request).unwrap_or(true)
-        }
-        ThinkingToggle::DefaultOff => {
-            extract_request_thinking(template_state, request).unwrap_or(false)
-        }
-    };
-
-    ReasoningParserInit {
-        mark_reasoning_started: thinking_enabled,
-        mark_think_start_stripped: thinking_enabled && template_state.think_in_prefill(),
-    }
-}
-
-/// Extract the thinking toggle value from the request's template kwargs based on the template's
-/// expected key name.
-///
-/// Returns `None` if the template doesn't have a thinking toggle or if the expected key is not
-/// present in the request.
-fn extract_request_thinking(
-    template_state: &ChatTemplateState,
-    request: &ChatRequest,
-) -> Option<bool> {
-    let key = match template_state.thinking_key_name() {
-        Some(ThinkingKeyName::EnableThinking) => "enable_thinking",
-        Some(ThinkingKeyName::Thinking) => "thinking",
-        None => return None,
-    };
-
-    request
-        .chat_options
-        .template_kwargs
-        .get(key)
-        .and_then(Value::as_bool)
 }
 
 /// Chat message in the JSON shape expected by Jinja chat templates.
@@ -294,31 +235,10 @@ mod tests {
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
     };
-    use crate::{AssistantContentBlock, ChatRenderer, Error, RenderedPrompt, Result};
+    use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
     const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../tests/templates/qwen3.jinja");
     const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../tests/templates/qwen35.jinja");
-    const DEFAULT_ON_THINK_PREFILL_TEMPLATE: &str = r#"
-        {% if add_generation_prompt %}
-        assistant
-        {% if enable_thinking %}<think>{% endif %}
-        {% endif %}
-    "#;
-    const DEFAULT_OFF_THINK_PREFILL_TEMPLATE: &str = r#"
-        {% if not thinking is defined %}{% set thinking = false %}{% endif %}
-        {% if add_generation_prompt %}
-        assistant
-        {% if thinking %}<think>{% endif %}
-        {% endif %}
-    "#;
-    const DEFAULT_ON_NO_PREFILL_THINK_TEMPLATE: &str = r#"
-        {% if add_generation_prompt %}
-        assistant
-        {% endif %}
-        {% if enable_thinking is defined and enable_thinking is false %}
-        no_thinking
-        {% endif %}
-    "#;
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
@@ -329,11 +249,9 @@ mod tests {
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
-        Ok(rendered_prompt(template, request)?.prompt)
-    }
-
-    fn rendered_prompt(template: Option<&str>, request: &ChatRequest) -> Result<RenderedPrompt> {
-        HfChatRenderer::new(template.map(str::to_owned), None)?.render(request)
+        Ok(HfChatRenderer::new(template.map(str::to_owned), None)?
+            .render(request)?
+            .prompt)
     }
 
     #[test]
@@ -597,176 +515,48 @@ mod tests {
     }
 
     #[test]
-    fn thinking_default_on_prefill_marks_reasoning_started_by_default() {
-        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-
-        let rendered = rendered_prompt(Some(DEFAULT_ON_THINK_PREFILL_TEMPLATE), &request).unwrap();
-
-        expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: true,
-                mark_think_start_stripped: true,
-            }
-        "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
-    }
-
-    #[test]
-    fn thinking_default_on_prefill_respects_explicit_false() {
-        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request
-            .chat_options
-            .template_kwargs
-            .insert("enable_thinking".to_string(), Value::Bool(false));
-
-        let rendered = rendered_prompt(Some(DEFAULT_ON_THINK_PREFILL_TEMPLATE), &request).unwrap();
-
-        expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: false,
-                mark_think_start_stripped: false,
-            }
-        "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
-    }
-
-    #[test]
-    fn thinking_default_off_prefill_stays_disabled_without_request_override() {
-        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-
-        let rendered = rendered_prompt(Some(DEFAULT_OFF_THINK_PREFILL_TEMPLATE), &request).unwrap();
-
-        expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: false,
-                mark_think_start_stripped: false,
-            }
-        "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
-    }
-
-    #[test]
-    fn thinking_default_off_prefill_respects_explicit_true() {
-        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request
-            .chat_options
-            .template_kwargs
-            .insert("thinking".to_string(), Value::Bool(true));
-
-        let rendered = rendered_prompt(Some(DEFAULT_OFF_THINK_PREFILL_TEMPLATE), &request).unwrap();
-
-        expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: true,
-                mark_think_start_stripped: true,
-            }
-        "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
-    }
-
-    #[test]
-    fn thinking_template_ignores_wrong_key_name() {
-        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request
-            .chat_options
-            .template_kwargs
-            .insert("enable_thinking".to_string(), Value::Bool(false));
-
-        let rendered = rendered_prompt(Some(DEFAULT_OFF_THINK_PREFILL_TEMPLATE), &request).unwrap();
-
-        expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: false,
-                mark_think_start_stripped: false,
-            }
-        "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
-    }
-
-    #[test]
-    fn thinking_metadata_follows_per_request_template_override() {
-        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.chat_options.chat_template = Some(DEFAULT_ON_THINK_PREFILL_TEMPLATE.to_string());
-
-        let rendered = rendered_prompt(Some("{{ messages[0].content }}"), &request).unwrap();
-
-        expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: true,
-                mark_think_start_stripped: true,
-            }
-        "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
-    }
-
-    #[test]
-    fn thinking_enabled_without_prefill_think_only_marks_reasoning_started() {
-        let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-
-        let rendered =
-            rendered_prompt(Some(DEFAULT_ON_NO_PREFILL_THINK_TEMPLATE), &request).unwrap();
-
-        assert!(!rendered.prompt.contains("<think>"));
-        expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: true,
-                mark_think_start_stripped: false,
-            }
-        "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
-    }
-
-    #[test]
-    fn qwen35_template_with_enable_thinking_true_marks_prefill_reasoning_started() {
+    fn qwen35_template_renders_prefilled_reasoning_start_when_thinking_enabled() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         request
             .chat_options
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(true));
 
-        let rendered = rendered_prompt(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
+        let rendered = render(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
 
-        assert!(
-            rendered
-                .prompt
-                .ends_with("<|im_start|>assistant\n<think>\n")
-        );
         expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: true,
-                mark_think_start_stripped: true,
-            }
+            <|im_start|>user
+            hello<|im_end|>
+            <|im_start|>assistant
+            <think>
         "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
+        .assert_eq(&rendered);
     }
 
     #[test]
-    fn qwen35_template_with_enable_thinking_false_keeps_reasoning_init_off() {
+    fn qwen35_template_renders_closed_empty_reasoning_span_when_thinking_disabled() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         request
             .chat_options
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(false));
 
-        let rendered = rendered_prompt(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
+        let rendered = render(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
 
-        assert!(
-            rendered
-                .prompt
-                .trim()
-                .ends_with("<|im_start|>assistant\n<think>\n\n</think>")
-        );
         expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: false,
-                mark_think_start_stripped: false,
-            }
+            <|im_start|>user
+            hello<|im_end|>
+            <|im_start|>assistant
+            <think>
+
+            </think>
+
         "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
+        .assert_eq(&rendered);
     }
 
     #[test]
-    fn reasoning_init_stays_off_without_generation_prompt() {
+    fn qwen35_template_omits_assistant_reasoning_prefill_without_generation_prompt() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         request.chat_options.add_generation_prompt = false;
         request.chat_options.continue_final_message = true;
@@ -775,15 +565,12 @@ mod tests {
             .template_kwargs
             .insert("enable_thinking".to_string(), Value::Bool(true));
 
-        let rendered = rendered_prompt(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
+        let rendered = render(Some(QWEN3_5_0_8B_TEMPLATE), &request).unwrap();
 
-        assert!(rendered.prompt.trim().ends_with("hello<|im_end|>"));
         expect![[r#"
-            ReasoningParserInit {
-                mark_reasoning_started: false,
-                mark_think_start_stripped: false,
-            }
+            <|im_start|>user
+            hello<|im_end|>
         "#]]
-        .assert_debug_eq(&rendered.reasoning_parser_init);
+        .assert_eq(&rendered);
     }
 }

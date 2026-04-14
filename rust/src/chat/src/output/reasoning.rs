@@ -7,7 +7,6 @@
 
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use reasoning_parser::ReasoningParser;
 use thiserror_ext::AsReport;
 use tracing::warn;
 use vllm_text::output::DecodedTextEvent;
@@ -16,6 +15,7 @@ use super::ContentEvent;
 use crate::error::Error;
 use crate::event::AssistantBlockKind;
 use crate::output::DecodedTextEventStream;
+use crate::reasoning::{ReasoningDelta, ReasoningParser};
 
 /// Per-stream reasoning parsing state.
 struct ReasoningState {
@@ -46,19 +46,13 @@ impl ReasoningState {
 
         let mut events = Vec::new();
 
-        match self.parser.parse_reasoning_streaming_incremental(&delta) {
+        match self.parser.push(&delta) {
             Ok(result) => {
-                push_text_delta(
-                    &mut events,
-                    AssistantBlockKind::Reasoning,
-                    result.reasoning_text,
-                );
-                push_text_delta(&mut events, AssistantBlockKind::Text, result.normal_text);
+                push_reasoning_delta(&mut events, result);
             }
             Err(error) => {
                 if !self.parser_failed {
                     warn!(
-                        parser = self.parser.model_type(),
                         error = %error.as_report(),
                         "reasoning parser failed; falling back to plain text deltas"
                     );
@@ -70,6 +64,43 @@ impl ReasoningState {
 
         events
     }
+
+    /// Initialize parser state once prompt token IDs are available.
+    fn initialize(&mut self, prompt_token_ids: &[u32]) {
+        if self.parser_failed {
+            return;
+        }
+
+        match self.parser.initialize(prompt_token_ids) {
+            Ok(()) => {}
+            Err(error) => {
+                warn!(
+                    error = %error.as_report(),
+                    "failed to initialize reasoning parser; falling back to plain text deltas"
+                );
+                self.parser_failed = true;
+            }
+        }
+    }
+
+    /// Flush any parser-held partial delimiter state at end of stream.
+    fn finish(&mut self) -> Vec<ContentEvent> {
+        if self.parser_failed {
+            return Vec::new();
+        }
+
+        match self.parser.finish() {
+            Ok(result) => {
+                let mut events = Vec::new();
+                push_reasoning_delta(&mut events, result);
+                events
+            }
+            Err(error) => {
+                warn!(error = %error.as_report(), "failed to flush reasoning parser state");
+                Vec::new()
+            }
+        }
+    }
 }
 
 /// Push one semantic text delta if it is non-empty.
@@ -78,6 +109,16 @@ fn push_text_delta(events: &mut Vec<ContentEvent>, kind: AssistantBlockKind, del
         return;
     }
     events.push(ContentEvent::TextDelta { kind, delta });
+}
+
+/// Convert one parsed reasoning delta into zero or more content events.
+fn push_reasoning_delta(events: &mut Vec<ContentEvent>, delta: ReasoningDelta) {
+    if let Some(reasoning) = delta.reasoning {
+        push_text_delta(events, AssistantBlockKind::Reasoning, reasoning);
+    }
+    if let Some(content) = delta.content {
+        push_text_delta(events, AssistantBlockKind::Text, content);
+    }
 }
 
 /// Wrap one decoded-text stream into the internal reasoning event stream.
@@ -106,6 +147,7 @@ pub(crate) async fn reasoning_event_stream(
                 prompt_token_ids,
                 prompt_logprobs,
             } => {
+                state.initialize(&prompt_token_ids);
                 yield ContentEvent::Start {
                     prompt_token_ids,
                     prompt_logprobs,
@@ -127,6 +169,9 @@ pub(crate) async fn reasoning_event_stream(
                     };
                 }
                 if let Some(finished) = finished {
+                    for next in state.finish() {
+                        yield next;
+                    }
                     yield ContentEvent::Done {
                         prompt_token_count: finished.prompt_token_count,
                         output_token_count: finished.output_token_count,
@@ -143,56 +188,78 @@ pub(crate) async fn reasoning_event_stream(
 mod tests {
 
     use futures::{StreamExt as _, stream};
-    use reasoning_parser::{ParseError, ParserFactory, ParserResult, ReasoningParser};
     use vllm_llm::FinishReason;
     use vllm_text::output::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
     };
+    use vllm_text::tokenizers::Tokenizer;
 
     use super::super::ContentEvent;
     use super::reasoning_event_stream;
     use crate::event::AssistantBlockKind;
+    use crate::reasoning::{
+        ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory, names,
+    };
+
+    struct FakeTokenizer;
+
+    impl Tokenizer for FakeTokenizer {
+        fn encode(&self, text: &str, _add_special_tokens: bool) -> vllm_text::Result<Vec<u32>> {
+            Ok(text.chars().map(u32::from).collect())
+        }
+
+        fn decode(
+            &self,
+            token_ids: &[u32],
+            _skip_special_tokens: bool,
+        ) -> vllm_text::Result<String> {
+            Ok(token_ids
+                .iter()
+                .map(|token_id| char::from_u32(*token_id).unwrap_or('\u{FFFD}'))
+                .collect())
+        }
+
+        fn token_to_id(&self, token: &str) -> Option<u32> {
+            match token {
+                "<think>" => Some(1),
+                "</think>" => Some(2),
+                _ => None,
+            }
+        }
+    }
 
     struct FailingReasoningParser {
         fail_next: bool,
     }
 
     impl ReasoningParser for FailingReasoningParser {
-        fn detect_and_parse_reasoning(&mut self, _text: &str) -> Result<ParserResult, ParseError> {
-            Ok(ParserResult::default())
+        fn create(_tokenizer: &dyn Tokenizer) -> Result<Box<dyn ReasoningParser>, ReasoningError>
+        where
+            Self: Sized + 'static,
+        {
+            Ok(Box::new(Self { fail_next: true }))
         }
 
-        fn parse_reasoning_streaming_incremental(
-            &mut self,
-            _text: &str,
-        ) -> Result<ParserResult, ParseError> {
+        fn push(&mut self, _text: &str) -> Result<ReasoningDelta, ReasoningError> {
             if self.fail_next {
                 self.fail_next = false;
-                return Err(ParseError::ConfigError("boom".to_string()));
+                return Err(ReasoningError::UnknownModel {
+                    model_id: "boom".to_string(),
+                });
             }
-
-            Ok(ParserResult::default())
+            Ok(ReasoningDelta::default())
         }
+    }
 
-        fn reset(&mut self) {
-            self.fail_next = false;
-        }
+    fn test_reasoning_parser(factory: &mut ReasoningParserFactory) -> Box<dyn ReasoningParser> {
+        factory.register_parser::<FailingReasoningParser>("failing");
 
-        fn model_type(&self) -> &str {
-            "test"
-        }
-
-        fn is_in_reasoning(&self) -> bool {
-            false
-        }
-
-        fn mark_reasoning_started(&mut self) {}
-
-        fn mark_think_start_stripped(&mut self) {}
+        factory.create("failing", &FakeTokenizer).unwrap()
     }
 
     #[tokio::test]
     async fn reasoning_parser_failure_falls_back_to_plain_text() {
+        let mut factory = ReasoningParserFactory::new();
         let events = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1, 2, 3].into(),
@@ -217,12 +284,9 @@ mod tests {
             }),
         ]);
 
-        let collected = reasoning_event_stream(
-            events,
-            Some(Box::new(FailingReasoningParser { fail_next: true })),
-        )
-        .collect::<Vec<_>>()
-        .await;
+        let collected = reasoning_event_stream(events, Some(test_reasoning_parser(&mut factory)))
+            .collect::<Vec<_>>()
+            .await;
 
         let events = collected
             .into_iter()
@@ -314,8 +378,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qwen3_parser_without_init_keeps_text_as_normal_content() {
+    async fn qwen3_parser_uses_prompt_end_marker_to_switch_to_content() {
+        let tokenizer = std::sync::Arc::new(FakeTokenizer);
         let events = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![2].into(),
+                prompt_logprobs: None,
+            }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "thought ".to_string(),
                 token_ids: vec![],
@@ -330,13 +399,13 @@ mod tests {
             }),
         ]);
 
-        let parser = ParserFactory::new()
-            .registry()
-            .create_parser("qwen3")
-            .expect("qwen3 parser should be registered");
-        let collected = reasoning_event_stream(events, Some(parser))
-            .collect::<Vec<_>>()
-            .await;
+        let factory = ReasoningParserFactory::new();
+        let collected = reasoning_event_stream(
+            events,
+            Some(factory.create(names::QWEN3, &*tokenizer).unwrap()),
+        )
+        .collect::<Vec<_>>()
+        .await;
 
         let events = collected
             .into_iter()
@@ -346,6 +415,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                ContentEvent::Start {
+                    prompt_token_ids: vec![2].into(),
+                    prompt_logprobs: None,
+                },
                 ContentEvent::TextDelta {
                     kind: AssistantBlockKind::Text,
                     delta: "thought ".to_string(),
@@ -359,8 +432,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn qwen3_parser_with_prefill_init_splits_reasoning_from_final_text() {
+    async fn qwen3_parser_tolerates_prompt_prefill_reasoning() {
+        let tokenizer = std::sync::Arc::new(FakeTokenizer);
         let events = stream::iter(vec![
+            Ok(DecodedTextEvent::Start {
+                prompt_token_ids: vec![1].into(),
+                prompt_logprobs: None,
+            }),
             Ok(DecodedTextEvent::TextDelta {
                 delta: "thought ".to_string(),
                 token_ids: vec![],
@@ -375,15 +453,13 @@ mod tests {
             }),
         ]);
 
-        let mut parser = ParserFactory::new()
-            .registry()
-            .create_parser("qwen3")
-            .expect("qwen3 parser should be registered");
-        parser.mark_reasoning_started();
-        parser.mark_think_start_stripped();
-        let collected = reasoning_event_stream(events, Some(parser))
-            .collect::<Vec<_>>()
-            .await;
+        let factory = ReasoningParserFactory::new();
+        let collected = reasoning_event_stream(
+            events,
+            Some(factory.create(names::QWEN3, &*tokenizer).unwrap()),
+        )
+        .collect::<Vec<_>>()
+        .await;
 
         let events = collected
             .into_iter()
@@ -393,6 +469,10 @@ mod tests {
         assert_eq!(
             events,
             vec![
+                ContentEvent::Start {
+                    prompt_token_ids: vec![1].into(),
+                    prompt_logprobs: None,
+                },
                 ContentEvent::TextDelta {
                     kind: AssistantBlockKind::Reasoning,
                     delta: "thought ".to_string(),

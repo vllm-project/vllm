@@ -25,6 +25,8 @@ use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
 
+use crate::tokenizers::DynTokenizer;
+
 mod backend;
 pub mod backends;
 mod error;
@@ -82,6 +84,11 @@ impl TextLlm {
     /// Expose the underlying engine-core client for low-level utility/admin calls.
     pub fn engine_core_client(&self) -> &EngineCoreClient {
         self.llm.engine_core_client()
+    }
+
+    /// Return the tokenizer used by this text backend.
+    pub fn tokenizer(&self) -> DynTokenizer {
+        self.backend.tokenizer()
     }
 
     /// Tokenize if needed, lower to a generate request, and return the raw token stream.

@@ -414,7 +414,15 @@ impl Tokenizer for FakeChatTokenizer {
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        token.bytes().next().map(u32::from)
+        match token {
+            "<think>" => Some(0xF001),
+            "</think>" => Some(0xF002),
+            "<|START_THINKING|>" => Some(0xF003),
+            "<|END_THINKING|>" => Some(0xF004),
+            "◁think▷" => Some(0xF005),
+            "◁/think▷" => Some(0xF006),
+            _ => None,
+        }
     }
 }
 
@@ -460,10 +468,7 @@ impl ChatRenderer for FakeChatBackend {
         if request.chat_options.add_generation_prompt {
             prompt.push_str("assistant:");
         }
-        Ok(vllm_chat::RenderedPrompt {
-            prompt,
-            reasoning_parser_init: Default::default(),
-        })
+        Ok(vllm_chat::RenderedPrompt { prompt })
     }
 }
 
@@ -2489,6 +2494,7 @@ async fn tool_calls_are_mapped_to_tool_call_sse_chunks() {
     let (app, engine_task) = test_app_with_backend_and_stream_output_specs(
         Arc::new(FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B")),
         vec![
+            (bytes_to_token_ids(b"<think>Need tool.</think>"), None),
             (
                 bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
                 None,
@@ -2564,6 +2570,29 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                 let request: EngineCoreRequest =
                     rmp_serde::from_slice(&add[1]).expect("decode request");
 
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        engine_index: 0,
+                        outputs: vec![request_output_with_logprobs(
+                            &request.request_id,
+                            bytes_to_token_ids(b"<think>Need tool.</think>"),
+                            None,
+                            None,
+                            Some(sample_logprobs_for_tokens(&bytes_to_token_ids(
+                                b"<think>Need tool.</think>",
+                            ))),
+                            None,
+                        )],
+                        scheduler_stats: None,
+                        timestamp: 0.0,
+                        utility_output: None,
+                        finished_requests: None,
+                        wave_complete: None,
+                        start_wave: None,
+                    },
+                )
+                .await;
                 send_outputs(
                     push,
                     EngineCoreOutputs {

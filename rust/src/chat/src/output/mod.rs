@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use futures::Stream;
 use openai_protocol::common::Tool as OpenAiTool;
-use reasoning_parser::ReasoningParser;
 use subenum::subenum;
 use tool_parser::ToolParser;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
@@ -19,6 +18,7 @@ use crate::FinishReason;
 use crate::error::Result;
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
 use crate::output::structured::structured_chat_event_stream;
+use crate::reasoning::ReasoningParser;
 
 /// Internal assistant event before final assembly.
 ///
@@ -114,6 +114,7 @@ trait AssistantEventStream = Stream<Item = Result<AssistantEvent>> + Send + 'sta
 pub(crate) trait DecodedTextEventStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
 pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'static;
 
+/// Request-scoped processors that adapt decoded text into structured chat events.
 pub(crate) struct OutputProcessors {
     pub(crate) reasoning_parser: Option<Box<dyn ReasoningParser>>,
     pub(crate) parser_tools: Vec<OpenAiTool>,
