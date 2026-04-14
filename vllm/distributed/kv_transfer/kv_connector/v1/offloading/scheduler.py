@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import islice
@@ -123,6 +122,9 @@ class RequestOffloadState:
         for group_state, new_blocks in zip(self.group_states, new_block_id_groups):
             group_state.block_ids.extend(new_blocks)
 
+    def is_idle(self) -> bool:
+        return self.req.is_finished() and not self.load_jobs and not self.store_jobs
+
 
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -139,14 +141,9 @@ class OffloadingConnectorScheduler:
             set() if spec.vllm_config.cache_config.enable_prefix_caching else None
         )
 
-        # request ID -> set(offload keys being stored/loaded)
-        self._reqs_being_stored = defaultdict[ReqId, set[OffloadKey]](set)
-        self._reqs_being_loaded = defaultdict[ReqId, set[OffloadKey]](set)
-
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
-        self._load_jobs: dict[int, TransferJobStatus] = {}
-        self._store_jobs: dict[int, TransferJobStatus] = {}
+        self._jobs: dict[int, TransferJobStatus] = {}
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -286,16 +283,14 @@ class OffloadingConnectorScheduler:
             transfer_spec=(src_spec, dst_spec),
         )
         req_status.load_jobs[load_job_id] = set(offload_keys)
-        self._load_jobs[load_job_id] = TransferJobStatus(
+        self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
         )
-        req_blocks_being_loaded = self._reqs_being_loaded[request.request_id]
-        req_blocks_being_loaded.update(offload_keys)
         group_state.next_stored_block_idx = num_blocks
 
         if self._blocks_being_loaded is not None:
-            self._blocks_being_loaded.update(req_blocks_being_loaded)
+            self._blocks_being_loaded.update(offload_keys)
 
     def _get_reqs_to_store(
         self, scheduler_output: SchedulerOutput
@@ -369,7 +364,7 @@ class OffloadingConnectorScheduler:
 
             job_id = self._generate_job_id()
             req_status.store_jobs[job_id] = set(keys_to_store)
-            self._store_jobs[job_id] = TransferJobStatus(
+            self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
             )
@@ -377,7 +372,6 @@ class OffloadingConnectorScheduler:
             reqs_to_store[job_id] = TransferJob(
                 req_id=req_id, transfer_spec=(src_spec, dst_spec)
             )
-            self._reqs_being_stored[req_id] |= keys_to_store
 
             logger.debug(
                 "Request %s offloading %s blocks starting from block #%d (job %d)",
@@ -395,7 +389,7 @@ class OffloadingConnectorScheduler:
         if req_status is None:
             return
         for jid in req_status.store_jobs:
-            self._store_jobs.pop(jid, None)
+            self._jobs.pop(jid, None)
         req_status.store_jobs.clear()
 
     def build_connector_meta(
@@ -411,11 +405,15 @@ class OffloadingConnectorScheduler:
         # NOTE (orozery): we should move this logic to update_connector_output
         # once KVConnectorOutput allows us to report completed transfers
         for req_id in scheduler_output.preempted_req_ids or ():
-            keys = self._reqs_being_stored.get(req_id)
+            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            keys = set().union(*req_status.store_jobs.values())
             if keys:
                 self.manager.complete_store(keys)
-                keys.clear()
             self._cleanup_store_jobs_for_req(req_id)
+            if req_status.is_idle():
+                self._req_status.pop(req_id, None)
 
         return meta
 
@@ -431,15 +429,15 @@ class OffloadingConnectorScheduler:
         assert isinstance(meta, OffloadingWorkerMetadata)
 
         for job_id, count in meta.completed_store_jobs.items():
-            job_status = self._store_jobs.get(job_id)
+            job_status = self._jobs.get(job_id)
             if job_status is None:
                 continue
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
 
-            # All TP workers reported — job is complete.
-            self._store_jobs.pop(job_id)
+            # All TP workers reported — store is complete.
+            self._jobs.pop(job_id)
             req_status = self._req_status.get(job_status.req_id)
             if req_status is None:
                 continue
@@ -447,55 +445,42 @@ class OffloadingConnectorScheduler:
             if not keys:
                 continue
             self.manager.complete_store(keys)
-            remaining = self._reqs_being_stored.get(job_status.req_id)
-            if remaining is not None:
-                remaining -= keys
-                # Keep the empty set so request_finished()
-                # still returns True, ensuring _free_blocks
-                # waits for finished_sending.
+            if req_status.is_idle():
+                self._req_status.pop(job_status.req_id, None)
 
         for job_id, count in meta.completed_load_jobs.items():
-            job_status = self._load_jobs.get(job_id)
+            job_status = self._jobs.get(job_id)
             if job_status is None:
                 continue
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
 
-            # All TP workers reported — job is complete.
-            self._load_jobs.pop(job_id)
+            # All TP workers reported — load is complete.
+            self._jobs.pop(job_id)
             req_status = self._req_status.get(job_status.req_id)
-            keys = (
-                req_status.load_jobs.pop(job_id, None)
-                if req_status is not None
-                else None
-            )
-            if not keys:
-                keys = self._reqs_being_loaded.get(job_status.req_id)
-            if not keys:
-                continue
+            assert req_status is not None
+            keys = req_status.load_jobs.pop(job_id, None)
+            assert keys is not None
 
             self.manager.complete_load(keys)
 
             if self._blocks_being_loaded:
                 self._blocks_being_loaded.difference_update(keys)
-
-            remaining = self._reqs_being_loaded.get(job_status.req_id)
-            if remaining is not None:
-                remaining -= keys
-                if not remaining:
-                    self._reqs_being_loaded.pop(job_status.req_id, None)
+            if req_status.is_idle():
+                self._req_status.pop(job_status.req_id, None)
 
         # Handle request-level completion (for _free_blocks in scheduler).
         for req_id in connector_output.finished_sending or []:
-            keys = self._reqs_being_stored.pop(req_id, None)
+            req_status = self._req_status.get(req_id)
+            if req_status is None:
+                continue
+            keys = set().union(*req_status.store_jobs.values())
             if keys:
                 self.manager.complete_store(keys)
             self._cleanup_store_jobs_for_req(req_id)
-
-        for req_id in connector_output.finished_recving or []:
-            if not self._reqs_being_loaded.get(req_id):
-                self._reqs_being_loaded.pop(req_id, None)
+            if req_status.is_idle():
+                self._req_status.pop(req_id, None)
 
     def request_finished(
         self,
@@ -516,9 +501,13 @@ class OffloadingConnectorScheduler:
 
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
-        self._req_status.pop(req_id, None)
+        req_status = self._req_status.get(req_id)
+        if req_status is None:
+            return False, None
 
-        request_being_stored = req_id in self._reqs_being_stored
+        request_being_stored = bool(req_status.store_jobs)
+        if req_status.is_idle():
+            self._req_status.pop(req_id, None)
         return request_being_stored, None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
