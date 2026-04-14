@@ -1513,7 +1513,23 @@ class TimedTrace(BenchmarkDataset):
             # now we create the SampleRequest with timing info
             entry = json.loads(entry.strip())
             input_length = entry.get(self.label_input_length)
+            if input_length is None:
+                raise ValueError(
+                    f"Input length field '{self.label_input_length}' "
+                    f"not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-input-length to specify the correct "
+                    f"field name."
+                )
             new_output_len = entry.get(self.label_output_length)
+            if new_output_len is None:
+                raise ValueError(
+                    f"Output length field '{self.label_output_length}' "
+                    f"not found in trace entry. "
+                    f"Available fields: {list(entry.keys())}. "
+                    f"Use --label-output-length to specify the correct "
+                    f"field name."
+                )
             prompt_ids = self._expand_prompt(
                 entry.get(self.label_hash_ids, []), input_length, tokenizer
             )
