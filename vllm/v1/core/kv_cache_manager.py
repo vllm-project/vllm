@@ -223,6 +223,42 @@ class KVCacheManager:
         num_external_computed_tokens: int = 0,
         num_encoder_tokens: int = 0,
     ) -> bool:
+        return self._can_fit_full_sequence_with_block_budget(
+            request,
+            self.block_pool.get_num_free_blocks(),
+            num_new_computed_tokens=num_new_computed_tokens,
+            new_computed_blocks=new_computed_blocks,
+            num_external_computed_tokens=num_external_computed_tokens,
+            num_encoder_tokens=num_encoder_tokens,
+        )
+
+    def can_fit_full_sequence_in_empty_cache(
+        self,
+        request: Request,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
+        num_external_computed_tokens: int = 0,
+        num_encoder_tokens: int = 0,
+    ) -> bool:
+        """Check if the sequence fits when this request is the only resident."""
+        return self._can_fit_full_sequence_with_block_budget(
+            request,
+            self.block_pool.num_gpu_blocks - 1,
+            num_new_computed_tokens=num_new_computed_tokens,
+            new_computed_blocks=new_computed_blocks,
+            num_external_computed_tokens=num_external_computed_tokens,
+            num_encoder_tokens=num_encoder_tokens,
+        )
+
+    def _can_fit_full_sequence_with_block_budget(
+        self,
+        request: Request,
+        num_available_blocks: int,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
+        num_external_computed_tokens: int = 0,
+        num_encoder_tokens: int = 0,
+    ) -> bool:
         """Check if the KV cache has enough free blocks to hold the full
         sequence, accounting for prefix cache hits and sliding window.
 
@@ -252,7 +288,7 @@ class KVCacheManager:
             num_tokens_main_model=full_num_tokens,
         )
 
-        return num_blocks_to_allocate <= self.block_pool.get_num_free_blocks()
+        return num_blocks_to_allocate <= num_available_blocks
 
     def allocate_slots(
         self,

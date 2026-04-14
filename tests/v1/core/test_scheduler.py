@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -20,6 +20,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.platforms.cpu import CpuPlatform
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.utils.hashing import sha256
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
@@ -104,6 +105,65 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
     assert len(scheduler.running) == len(requests)
     for i, request in enumerate(requests):
         assert scheduler.running[i] == request
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("reserve_full_isl", [True, False])
+def test_schedule_rejects_waiting_request_exceeding_kv_capacity(
+    reserve_full_isl: bool,
+):
+    with patch("vllm.platforms.current_platform", CpuPlatform()):
+        scheduler = create_scheduler(
+            max_num_seqs=2,
+            max_num_batched_tokens=128,
+            max_model_len=128,
+            num_blocks=5,
+            block_size=16,
+        )
+    scheduler.scheduler_reserve_full_isl = reserve_full_isl
+    scheduler.scheduler_config.scheduler_reserve_full_isl = reserve_full_isl
+
+    request_too_large = create_requests(
+        num_requests=1,
+        num_tokens=65,
+        req_ids=["too_large"],
+    )[0]
+    request_small = create_requests(
+        num_requests=1,
+        num_tokens=8,
+        req_ids=["small"],
+    )[0]
+    scheduler.add_request(request_too_large)
+    scheduler.add_request(request_small)
+
+    output = scheduler.schedule()
+
+    assert len(output.scheduled_new_reqs) == 1
+    assert output.scheduled_new_reqs[0].req_id == request_small.request_id
+    assert request_too_large.request_id in output.finished_req_ids
+    assert request_too_large.request_id not in scheduler.requests
+    assert request_too_large.status == RequestStatus.FINISHED_ERROR
+    assert not scheduler.waiting
+    assert not scheduler.skipped_waiting
+    assert len(scheduler.running) == 1
+    assert scheduler.running[0].request_id == request_small.request_id
+
+    model_output = ModelRunnerOutput(
+        req_ids=[request_small.request_id],
+        req_id_to_index={request_small.request_id: 0},
+        sampled_token_ids=[[]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_output)
+
+    assert len(engine_core_outputs[0].outputs) == 1
+    error_output = engine_core_outputs[0].outputs[0]
+    assert error_output.request_id == request_too_large.request_id
+    assert error_output.new_token_ids == []
+    assert error_output.finish_reason == FinishReason.ERROR
+    assert "KV cache capacity" in str(error_output.stop_reason)
 
 
 def test_schedule_multimodal_requests():

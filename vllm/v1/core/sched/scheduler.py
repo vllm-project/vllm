@@ -173,6 +173,7 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+        self.pending_outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -747,9 +748,20 @@ class Scheduler(SchedulerInterface):
                         num_encoder_tokens=num_encoder_tokens,
                     )
                 ):
-                    if request.has_encoder_inputs:
-                        self.encoder_cache_manager.free(request)
-                    break
+                    if self.kv_cache_manager.can_fit_full_sequence_in_empty_cache(
+                        request,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        num_encoder_tokens=num_encoder_tokens,
+                    ):
+                        if request.has_encoder_inputs:
+                            self.encoder_cache_manager.free(request)
+                        break
+
+                    request = request_queue.pop_request()
+                    self._reject_request_for_kv_capacity(request)
+                    continue
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -764,12 +776,22 @@ class Scheduler(SchedulerInterface):
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
+                    if self.kv_cache_manager.can_fit_full_sequence_in_empty_cache(
+                        request,
+                        num_new_computed_tokens=num_new_local_computed_tokens,
+                        new_computed_blocks=new_computed_blocks,
+                        num_external_computed_tokens=num_external_computed_tokens,
+                        num_encoder_tokens=num_encoder_tokens,
+                    ):
+                        # NOTE: we need to untouch the request from the encode
+                        # cache manager.
+                        if request.has_encoder_inputs:
+                            self.encoder_cache_manager.free(request)
+                        break
 
-                    # NOTE: we need to untouch the request from the encode cache
-                    # manager
-                    if request.has_encoder_inputs:
-                        self.encoder_cache_manager.free(request)
-                    break
+                    request = request_queue.pop_request()
+                    self._reject_request_for_kv_capacity(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -957,6 +979,26 @@ class Scheduler(SchedulerInterface):
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
+
+    def _reject_request_for_kv_capacity(self, request: Request) -> None:
+        reason = (
+            f"Request with {request.num_tokens} tokens exceeds the available KV "
+            "cache capacity for this model."
+        )
+        logger.warning("%s Rejecting request %s.", reason, request.request_id)
+        request.stop_reason = reason
+        request.resumable = False
+        self.finish_requests(request.request_id, RequestStatus.FINISHED_ERROR)
+        self.pending_outputs[request.client_index].append(
+            EngineCoreOutput(
+                request_id=request.request_id,
+                new_token_ids=[],
+                finish_reason=request.get_finished_reason(),
+                stop_reason=request.stop_reason,
+                events=request.take_events(),
+                trace_headers=request.trace_headers,
+            )
+        )
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
@@ -1502,6 +1544,11 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                     )
                 )
+
+        if self.pending_outputs:
+            for client_index, pending_outputs in self.pending_outputs.items():
+                outputs[client_index].extend(pending_outputs)
+            self.pending_outputs = defaultdict(list)
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
