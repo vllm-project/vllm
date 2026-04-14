@@ -24,6 +24,7 @@ from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 DEVICE_TYPE = current_platform.device_type
 
+
 @pytest.fixture(scope="module", autouse=True)
 def setup_multiprocessing():
     """Set multiprocessing start method to 'spawn' for compatibility."""

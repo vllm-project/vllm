@@ -18,6 +18,7 @@ from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
 
+
 @support_torch_compile
 class RotaryEmbeddingCompileModule(torch.nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:

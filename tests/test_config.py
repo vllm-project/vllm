@@ -36,6 +36,7 @@ from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
 
+
 def test_compile_config_repr_succeeds():
     # setup: VllmBackend mutates the config object
     config = VllmConfig()
