@@ -59,6 +59,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -1676,7 +1677,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         in_dtype=dtype,
         is_act_and_mul=True,
         routing_method=RoutingMethodType.Renormalize,
-        max_num_tokens=m,
+        max_num_tokens=next_power_of_2(m),
     )
 
     with set_current_vllm_config(vllm_config):

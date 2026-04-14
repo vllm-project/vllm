@@ -40,6 +40,7 @@ class SchedulerConfig:
     """
 
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+    DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
     runner_type: RunnerType = "generate"
