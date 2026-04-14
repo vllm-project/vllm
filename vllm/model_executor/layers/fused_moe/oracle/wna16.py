@@ -146,8 +146,6 @@ def select_wna16_moe_backend(
         "No WNA16 MoE backend supports the deployment configuration."
     )
 
-    return WNA16MoEBackend.NONE, None
-
 
 def make_wna16_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
