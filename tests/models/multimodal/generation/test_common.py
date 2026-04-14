@@ -616,6 +616,21 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
     ),
+    "qianfan_ocr": VLMTestInfo(
+        models=["bairongz/QianfanOCR"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<image>\nWhat's the content in the center of the image?",
+                "cherry_blossom": "<image>\nWhat is the season?",
+            }
+        ),
+        multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
+        max_model_len=4096,
+        use_tokenizer_eos=True,
+        patch_hf_runner=model_utils.qianfan_ocr_patch_hf_runner,
+    ),
     "isaac": VLMTestInfo(
         # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF
         # repo has a stale model.safetensors.index.json that references

@@ -1264,6 +1264,9 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         tokenizer_mode="mistral",
     ),
+    "QianfanOCRForConditionalGeneration": _HfExamplesInfo(
+        "bairongz/QianfanOCR",
+    ),
     "QwenVLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen-VL",
         extras={"chat": "Qwen/Qwen-VL-Chat"},
