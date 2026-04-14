@@ -4,6 +4,8 @@
 import json
 from collections.abc import Sequence
 from enum import Enum, auto
+from random import choices
+from string import ascii_letters, digits
 from typing import Any
 
 import ijson
@@ -20,6 +22,7 @@ from mistral_common.protocol.instruct.tool_calls import (
 from mistral_common.protocol.instruct.tool_calls import (
     ToolChoiceEnum as MistralToolChoiceEnum,
 )
+from pydantic import Field
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -30,6 +33,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaToolCall,
     ExtractedToolCallInformation,
     FunctionCall,
+    ToolCall,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
@@ -39,12 +43,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.mistral_tool_types import MistralToolCall
-from vllm.utils.mistral import (
-    is_mistral_tokenizer,
-)
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
+
+ALPHANUMERIC = ascii_letters + digits
 
 _DEFAULT_JSON_SCHEMA = {"anyOf": [{"type": "object"}, {"type": "array"}]}
 
@@ -63,6 +66,20 @@ class StreamingState(Enum):
     PARSING_ARGUMENTS_COMPLETED = auto()
     TOOL_COMPLETE = auto()
     ALL_TOOLS_COMPLETE = auto()
+
+
+class MistralToolCall(ToolCall):
+    id: str = Field(default_factory=lambda: MistralToolCall.generate_random_id())
+
+    @staticmethod
+    def generate_random_id():
+        # Mistral Tool Call Ids must be alphanumeric with a length of 9.
+        # https://github.com/mistralai/mistral-common/blob/21ee9f6cee3441e9bb1e6ed2d10173f90bd9b94b/src/mistral_common/protocol/instruct/validator.py#L299
+        return "".join(choices(ALPHANUMERIC, k=9))
+
+    @staticmethod
+    def is_valid_id(id: str) -> bool:
+        return id.isalnum() and len(id) == 9
 
 
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:

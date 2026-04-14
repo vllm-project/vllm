@@ -12,7 +12,6 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.tool_parsers.streaming import extract_named_tool_call_streaming
 from vllm.tool_parsers.utils import get_json_schema_from_tools
 
 pytestmark = pytest.mark.cpu_test
@@ -362,39 +361,3 @@ def test_streaming_output_valid_with_trailing_extra_data():
         previous_text = current_text
 
     assert len(messages) > 0
-
-
-@pytest.mark.skip_global_cleanup
-def test_named_tool_streaming_helper_reconstructs_arguments():
-    tokenizer = MagicMock()
-    function_name_returned = False
-    messages = []
-    created_flags = []
-
-    for delta_text in ["{", '"city": "Boston"', "}"]:
-        delta_message, function_name_returned, created_new = (
-            extract_named_tool_call_streaming(
-                delta_text=delta_text,
-                function_name="get_weather",
-                function_name_returned=function_name_returned,
-                tool_call_idx=0,
-                tool_call_id_type="random",
-                tokenizer=tokenizer,
-                tool_call_array_index=0,
-            )
-        )
-        messages.append(delta_message)
-        created_flags.append(created_new)
-
-    assert created_flags == [True, False, False]
-    assert messages[0].tool_calls[0].function is not None
-    assert messages[0].tool_calls[0].function.name == "get_weather"
-    assert messages[1].tool_calls[0].function is not None
-    assert messages[1].tool_calls[0].function.name is None
-
-    arguments = "".join(
-        message.tool_calls[0].function.arguments or ""
-        for message in messages
-        if message.tool_calls and message.tool_calls[0].function is not None
-    )
-    assert json.loads(arguments) == {"city": "Boston"}

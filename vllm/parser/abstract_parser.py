@@ -93,7 +93,6 @@ class Parser:
         self._reasoning_parser: ReasoningParser | None = None
         self._tool_parser: ToolParser | None = None
         self._stream_state = StreamState()
-        self.tool_call_id_type = "random"
 
     @cached_property
     def vocab(self) -> dict[str, int]:
