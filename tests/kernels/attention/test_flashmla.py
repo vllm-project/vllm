@@ -88,20 +88,18 @@ def test_flash_mla(
         )
     blocked_v = blocked_k[..., :dv]
 
-    scheduler_metadata, _ = get_mla_metadata(
-        cache_seqlens, s_q * h_q // h_kv, h_kv
-    )
-
     if use_fp8:
         tile_scheduler_metadata, num_splits = get_mla_metadata_dense_fp8(
             cache_seqlens, s_q * h_q // h_kv, h_kv
         )
-
         assert tile_scheduler_metadata.dtype == torch.int32
         assert num_splits.dtype == torch.int32
-        
-        scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
-        scheduler_metadata.num_splits = num_splits
+        scheduler_metadata = None
+    else:
+        scheduler_metadata, _ = get_mla_metadata(
+            cache_seqlens, s_q * h_q // h_kv, h_kv
+        )
+        tile_scheduler_metadata, num_splits = None, None
     
     init_dtype = q.dtype
     if use_fp8:
