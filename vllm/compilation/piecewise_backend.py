@@ -361,13 +361,13 @@ class PiecewiseBackend:
                 f"{self.compile_ranges}"
             )
         else:
-            # All inputs have static shapes; use the first compiled range_entry
-            range_entry = next(
-                (re for re in self.range_entries.values() if re.compiled), None
+            # All inputs have static shapes; use the only compiled range_entry
+            compiled_entries = [re for re in self.range_entries.values() if re.compiled]
+            assert len(compiled_entries) == 1, (
+                f"Expected exactly one compiled range_entry for static shape "
+                f"compilation, but found {len(compiled_entries)}"
             )
-            assert range_entry is not None, (
-                "No compiled range_entry found for static shape compilation"
-            )
+            range_entry = compiled_entries[0]
 
         assert range_entry.compiled, (
             "All ranges should be compiled or loaded up front in "
