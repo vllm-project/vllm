@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
-import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -28,6 +27,7 @@ try:
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
+        ParallelStrategy,
     )
 
     try:
@@ -45,6 +45,7 @@ except ImportError:
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
+        ParallelStrategy,
     )
 
 if TYPE_CHECKING:
@@ -62,12 +63,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
-
-
-def _adapter_accepts_tp_size() -> bool:
-    """Check if the imported adapter accepts tp_size."""
-    sig = inspect.signature(LMCacheMPSchedulerAdapter.__init__)
-    return "tp_size" in sig.parameters
 
 
 # Helper functions
@@ -105,8 +100,8 @@ def extract_world_size_and_kv_rank(
         # vLLM constructs TP groups first, and then construct other
         # parallel groups on top of TP groups.
         # for example, TP=4, PP=2,
-        # TP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # PP group: [0, 4], [1, 5], [2, 6], [3, 7]
+        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
+        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
         # So we can "exclude" the effect of TP by rank // tp_size.
         return world_size // tp_size, rank // tp_size
 
@@ -123,24 +118,24 @@ def create_scheduler_adapter(
         vllm_config.parallel_config.rank,
         vllm_config,
     )
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
-
-    # Pass tp_size only when the adapter accepts it so that
-    # a newer vllm can still work with an older LMCache.
-    kwargs: dict[str, Any] = {}
-    if _adapter_accepts_tp_size():
-        kwargs["tp_size"] = tp_size
-
-    return LMCacheMPSchedulerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
+    parallel_strategy = ParallelStrategy(
+        mla_enabled(vllm_config.model_config),
         world_size,
         kv_rank,
-        vllm_config.cache_config.block_size,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.parallel_config.tensor_parallel_size,
+        vllm_config.parallel_config.pipeline_parallel_size,
+    )
+
+    return LMCacheMPSchedulerAdapter(
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
-        **kwargs,
     )
 
 
@@ -156,13 +151,22 @@ def create_worker_adapter(
         vllm_config.parallel_config.rank,
         vllm_config,
     )
-    return LMCacheMPWorkerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
+    parallel_strategy = ParallelStrategy(
+        mla_enabled(vllm_config.model_config),
         world_size,
         kv_rank,
-        vllm_config.cache_config.block_size,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.parallel_config.tensor_parallel_size,
+        vllm_config.parallel_config.pipeline_parallel_size,
+    )
+
+    return LMCacheMPWorkerAdapter(
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
     )
@@ -612,6 +616,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        # In MLA scenario, only the first rank of the pipeline group
+        # needs to save the KV cache.
+        if (
+            self.worker_adapter.use_mla
+            and not self.worker_adapter.is_first_rank_of_pp_group
+        ):
+            return
+
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
