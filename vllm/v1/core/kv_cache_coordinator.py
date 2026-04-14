@@ -188,15 +188,17 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.cache_blocks(request, num_computed_tokens)
 
-    def free(self, request_id: str) -> None:
+    def free(self, request_id: str, num_thinking_blocks: int = 0) -> None:
         """
         Free the blocks for the request.
 
         Args:
             request_id: The request ID.
+            num_thinking_blocks: Number of trailing blocks to immediately
+                evict from prefix cache (thinking token blocks).
         """
         for manager in self.single_type_managers:
-            manager.free(request_id)
+            manager.free(request_id, num_thinking_blocks=num_thinking_blocks)
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """

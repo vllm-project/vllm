@@ -426,15 +426,22 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(new_blocks)
 
-    def free(self, request: Request) -> None:
+    def free(
+        self, request: Request, num_thinking_blocks: int = 0
+    ) -> None:
         """Free the blocks allocated for the request.
         We free the blocks in reverse order so that the tail blocks are evicted
         first when caching is enabled.
 
         Args:
             request: The request to free the blocks.
+            num_thinking_blocks: Number of trailing blocks to immediately
+                evict from prefix cache (thinking token blocks).
         """
-        self.coordinator.free(request.request_id)
+        self.coordinator.free(
+            request.request_id,
+            num_thinking_blocks=num_thinking_blocks,
+        )
 
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int

@@ -421,6 +421,31 @@ class BlockPool:
             [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
         )
 
+    def free_blocks_immediate_evict(
+        self, ordered_blocks: Iterable[KVCacheBlock]
+    ) -> None:
+        """Free blocks and immediately evict them from the prefix cache.
+
+        Unlike ``free_blocks`` which appends freed blocks to the *tail* of the
+        free queue (keeping them cached for potential prefix reuse), this method
+        removes block hashes and prepends freed blocks to the *head* so they
+        are the first to be reallocated.
+
+        Use this for blocks whose cached KV entries will never be matched by
+        future requests (e.g. thinking token blocks that clients strip from
+        subsequent turns).
+        """
+        blocks_list = list(ordered_blocks)
+        evictable: list[KVCacheBlock] = []
+        for block in blocks_list:
+            # Remove the block hash so it can't be prefix-matched.
+            self._maybe_evict_cached_block(block)
+            block.ref_cnt -= 1
+            if block.ref_cnt == 0 and not block.is_null:
+                evictable.append(block)
+        # Prepend to head: these blocks will be reused first.
+        self.free_block_queue.prepend_n(evictable)
+
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
 

@@ -173,6 +173,11 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # Number of reasoning/thinking tokens in the output. Set by
+        # update_reasoning_token_count() at request completion. Used to
+        # determine which blocks to immediately evict from the prefix cache.
+        self.num_reasoning_tokens: int = 0
+
     @classmethod
     def from_engine_core_request(
         cls,
@@ -281,6 +286,30 @@ class Request:
         prefill_stats = self.prefill_stats
         self.prefill_stats = None
         return prefill_stats
+
+    def update_reasoning_token_count(
+        self,
+        start_token_id: int,
+        end_token_id: int,
+    ) -> None:
+        """Count all tokens within thinking markers (e.g. <think>...</think>)
+        in the output, including the markers themselves.
+
+        Uses a depth counter so nested spans are handled safely. Only
+        single-token start/end markers are supported for now.
+        """
+        count = 0
+        depth = 0
+        for tid in self._output_token_ids:
+            if tid == start_token_id:
+                depth += 1
+                count += 1
+            elif tid == end_token_id and depth > 0:
+                depth -= 1
+                count += 1
+            elif depth > 0:
+                count += 1
+        self.num_reasoning_tokens = count
 
     def __lt__(self, other: "Request") -> bool:
         """

@@ -273,21 +273,44 @@ class SingleTypeKVCacheManager(ABC):
 
         self.num_cached_block[request.request_id] = num_full_blocks
 
-    def free(self, request_id: str) -> None:
+    def free(
+        self, request_id: str, num_thinking_blocks: int = 0
+    ) -> None:
         """
         Free the blocks for the request.
 
         Args:
             request_id: The request ID.
+            num_thinking_blocks: Number of trailing blocks that contain
+                thinking/answer tokens and should be immediately evicted
+                from the prefix cache (prepended to the head of the free
+                queue).  When 0, all blocks follow the normal eviction
+                path.
         """
         # Default to [] in case a request is freed (aborted) before alloc.
         req_blocks = self.req_to_blocks.pop(request_id, [])
 
-        # Free blocks in reverse order so that the tail blocks are
-        # freed first.
-        ordered_blocks = reversed(req_blocks)
+        if num_thinking_blocks > 0 and len(req_blocks) > 0:
+            # Split into prompt blocks (keep cached, normal LRU) and
+            # thinking+answer blocks (evict immediately).
+            # Due to RoPE position mismatch, answer tokens after thinking
+            # are also unreusable, so everything after prompt blocks gets
+            # evicted.
+            num_prompt_blocks = max(0, len(req_blocks) - num_thinking_blocks)
+            prompt_blocks = req_blocks[:num_prompt_blocks]
+            thinking_blocks = req_blocks[num_prompt_blocks:]
 
-        self.block_pool.free_blocks(ordered_blocks)
+            # Normal path for prompt blocks (reversed = tail first)
+            self.block_pool.free_blocks(reversed(prompt_blocks))
+            # Immediate evict for thinking+answer blocks (head of queue)
+            self.block_pool.free_blocks_immediate_evict(
+                reversed(thinking_blocks)
+            )
+        else:
+            # Normal path: free in reverse order so that the tail blocks
+            # are freed first.
+            self.block_pool.free_blocks(reversed(req_blocks))
+
         self.num_cached_block.pop(request_id, None)
 
     @abstractmethod
@@ -1008,11 +1031,13 @@ class MambaManager(SingleTypeKVCacheManager):
                 self._allocated_block_reqs.add(request_id)
                 return req_blocks[prev_block_len:]
 
-    def free(self, request_id: str) -> None:
+    def free(
+        self, request_id: str, num_thinking_blocks: int = 0
+    ) -> None:
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
-        super().free(request_id)
+        super().free(request_id, num_thinking_blocks=num_thinking_blocks)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """

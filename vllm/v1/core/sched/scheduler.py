@@ -1839,8 +1839,46 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
-        self.kv_cache_manager.free(request)
+        num_thinking_blocks = self._get_num_thinking_blocks(request)
+        self.kv_cache_manager.free(
+            request, num_thinking_blocks=num_thinking_blocks
+        )
         del self.requests[request.request_id]
+
+    def _get_num_thinking_blocks(self, request: Request) -> int:
+        """Compute how many trailing blocks contain thinking/answer tokens
+        that should be immediately evicted from the prefix cache.
+
+        Returns 0 when reasoning is disabled, caching of reasoning tokens
+        is opted-in, or the output contains no thinking tokens.
+        """
+        reasoning_config = self.vllm_config.reasoning_config
+        if (
+            reasoning_config is None
+            or not reasoning_config.enabled
+            or reasoning_config.cache_reasoning_tokens
+        ):
+            return 0
+
+        start_ids = reasoning_config.reasoning_start_token_ids
+        end_ids = reasoning_config.reasoning_end_token_ids
+        if not start_ids or not end_ids:
+            return 0
+
+        # Count reasoning tokens in the output using the start/end markers.
+        request.update_reasoning_token_count(start_ids[0], end_ids[0])
+        if request.num_reasoning_tokens == 0:
+            return 0
+
+        # All output tokens (thinking + answer) occupy blocks after the
+        # prompt prefix.  Answer tokens after thinking have mismatched
+        # RoPE positions and cannot be reused either, so we evict all
+        # post-prompt blocks.
+        num_prompt_blocks = request.num_prompt_tokens // self.block_size
+        num_total_blocks = (
+            (request.num_tokens + self.block_size - 1) // self.block_size
+        )
+        return max(0, num_total_blocks - num_prompt_blocks)
 
     @property
     def pause_state(self) -> PauseState:

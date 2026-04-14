@@ -345,6 +345,37 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
+    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks at the front of the free list so they are
+        the first to be reused by ``popleft``/``popleft_n``.
+
+        This is used for blocks that should be evicted as soon as possible
+        (e.g. thinking token blocks that will never be prefix-matched).
+
+        Args:
+            blocks: The blocks to prepend.
+        """
+        if len(blocks) == 0:
+            return
+
+        first_real = self.fake_free_list_head.next_free_block
+        assert first_real is not None, (
+            "next_free_block of fake_free_list_head should always exist"
+        )
+
+        # Build the chain: fake_head -> blocks[0] -> ... -> blocks[-1]
+        prev = self.fake_free_list_head
+        for block in blocks:
+            prev.next_free_block = block
+            block.prev_free_block = prev
+            prev = block
+
+        # Connect the last prepended block to the original first block
+        prev.next_free_block = first_real
+        first_real.prev_free_block = prev
+
+        self.num_free_blocks += len(blocks)
+
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
 
