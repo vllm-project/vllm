@@ -773,6 +773,10 @@ class MooncakeConnectorWorker:
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
 
     def _sync_block_size_with_kernel(self) -> None:
+        # When speculative decoding (e.g. Eagle) is enabled, the main model
+        # and draft model may use different attention backends with different
+        # physical block sizes. Pick the common (smallest) block size so that
+        # KV-cache registration and transfer work correctly for both models.
         backends = get_current_attn_backends(self.vllm_config)
         kernel_block_size = select_common_block_size(self.block_size, backends)
         if self.block_size != kernel_block_size:
