@@ -128,9 +128,7 @@ _TEXT_GENERATION_MODELS = {
     "HunYuanDenseV1ForCausalLM": ("hunyuan_v1", "HunYuanDenseV1ForCausalLM"),
     "HYV3ForCausalLM": ("hy_v3", "HYV3ForCausalLM"),
     "HCXVisionForCausalLM": ("hyperclovax_vision", "HCXVisionForCausalLM"),
-    "HCXVisionV2ForCausalLM": ("hyperclovax_omni", "HyperCLOVAXOmniForCausalLM"),
     "HyperCLOVAXForCausalLM": ("hyperclovax", "HyperCLOVAXForCausalLM"),
-    "HyperCLOVAXOmniForCausalLM": ("hyperclovax_omni", "HyperCLOVAXOmniForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
     "InternLM3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "IQuestCoderForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -417,6 +415,7 @@ _MULTIMODAL_MODELS = {
         "hunyuan_vision",
         "HunYuanVLForConditionalGeneration",
     ),
+    "HCXVisionV2ForCausalLM": ("hyperclovax_omni", "HyperCLOVAXOmniForCausalLM"),
     "HyperCLOVAXOmniForCausalLM": ("hyperclovax_omni", "HyperCLOVAXOmniForCausalLM"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "InternS1ForConditionalGeneration": (
