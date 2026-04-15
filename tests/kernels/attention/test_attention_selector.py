@@ -441,16 +441,18 @@ def test_per_head_quant_scales_backend_selection(
 def test_non_causal_backend_selection(
     backend_name: str, use_non_causal: bool, should_succeed: bool
 ):
-    """Test that use_non_causal is a per-layer parameter, not global.
+    """Test that use_non_causal on AttentionConfig controls backend filtering.
 
-    Only the draft model's layers should require non-causal support (e.g.
-    for dflash speculative decoding). Target model layers should be free
-    to use any backend regardless of the speculative decoding method.
+    DFlashProposer sets use_non_causal=True on the draft model's
+    AttentionConfig so only non-causal-capable backends are selected.
+    The target model keeps use_non_causal=False (default) and can use
+    any backend.
     """
     _cached_get_attn_backend.cache_clear()
 
     attention_config = AttentionConfig(
         backend=AttentionBackendEnum[backend_name],
+        use_non_causal=use_non_causal,
     )
     cache_config = CacheConfig(block_size=16)
     vllm_config = VllmConfig(
@@ -468,7 +470,6 @@ def test_non_causal_backend_selection(
                 head_size=128,
                 dtype=torch.float16,
                 kv_cache_dtype=None,
-                use_non_causal=use_non_causal,
             )
             assert backend.get_name() == backend_name
         else:
@@ -477,6 +478,5 @@ def test_non_causal_backend_selection(
                     head_size=128,
                     dtype=torch.float16,
                     kv_cache_dtype=None,
-                    use_non_causal=use_non_causal,
                 )
             assert "non-causal" in str(exc_info.value).lower()
