@@ -86,7 +86,6 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
-
         self.mtp_block = DeepseekV2DecoderLayer(
             vllm_config,
             prefix,
