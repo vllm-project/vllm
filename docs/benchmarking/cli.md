@@ -943,35 +943,6 @@ vllm bench serve --model Qwen/Qwen3.5-2B \
 
 This will replay the first 100 lines from the trace file `conversation.jsonl`.  
 
-#### ShareGPT Dataset with Prefix Caching
-
-```bash
-# download dataset
-# wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
-
-python3 benchmarks/benchmark_prefix_caching.py \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --dataset-path /path/ShareGPT_V3_unfiltered_cleaned_split.json \
-  --enable-prefix-caching \
-  --num-prompts 20 \
-  --repeat-count 5 \
-  --input-length-range 128:256
-```
-
-##### Prefix Repetition Dataset
-
-```bash
-vllm bench serve \
-  --backend openai \
-  --model meta-llama/Llama-2-7b-chat-hf \
-  --dataset-name prefix_repetition \
-  --num-prompts 100 \
-  --prefix-repetition-prefix-len 512 \
-  --prefix-repetition-suffix-len 128 \
-  --prefix-repetition-num-prefixes 5 \
-  --prefix-repetition-output-len 128
-```
-
 </details>
 
 ### 🧪 Hashing Benchmarks
