@@ -557,6 +557,36 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
+        # Per-token-head prefill fast-path: on first-chunk pure prefills
+        # (no prior cached KV), skip the quantized cache read entirely and
+        # run a Triton prefill kernel on the raw K/V tensors.  The
+        # quantized cache was already written by do_kv_cache_update, so
+        # subsequent decode steps still see the stored KV.  Avoids
+        # per-tile scale lookups and dequant inside the kernel loop.
+        if (
+            self._is_per_token_head_quant
+            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+            and self.alibi_slopes is None
+            and not self.use_alibi_sqrt
+            and self.sinks is None
+            and self.logits_soft_cap == 0
+            and self.sliding_window == (-1, -1)
+            and attn_metadata.mm_prefix_range_tensor is None
+            and output_scale is None
+        ):
+            context_attention_fwd(
+                q=query[:num_actual_tokens],
+                k=key[:num_actual_tokens],
+                v=value[:num_actual_tokens],
+                o=output[:num_actual_tokens],
+                b_start_loc=attn_metadata.query_start_loc,
+                b_seq_len=attn_metadata.seq_lens,
+                max_input_len=attn_metadata.max_query_len,
+                is_causal=True,
+                softmax_scale=self.scale,
+            )
+            return output
+
         # Per-token-head quantized KV cache: use separate scale caches.
         if self._is_per_token_head_quant:
             self._ensure_scale_caches(kv_cache)
