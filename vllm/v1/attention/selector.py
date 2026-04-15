@@ -81,8 +81,6 @@ def get_attn_backend(
     else:
         block_size = None
 
-    use_non_causal = vllm_config.attention_config.use_non_causal
-
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
         dtype=dtype,
@@ -94,7 +92,7 @@ def get_attn_backend(
         use_mm_prefix=use_mm_prefix,
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
-        use_non_causal=use_non_causal,
+        use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
     )
 
