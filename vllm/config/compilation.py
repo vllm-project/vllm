@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Callable
 from dataclasses import field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import Field, TypeAdapter, field_validator
 
@@ -119,42 +119,40 @@ class PassConfig(DeferredFieldsMixin):
     improper state.
     """
 
-    # Deferred annotation for fields initialized during VllmConfig post_init
+    # Fields initialized during VllmConfig.__post_init__.
+    #
+    # Deferred(False) is a last-resort fallback that fires only when neither
+    # the user nor the optimization-level table (OPTIMIZATION_LEVEL_TO_CONFIG
+    # in vllm.py) has supplied a value.  Most fields are covered by the table;
+    # the exceptions are fuse_attn_quant (absent from levels 0 and 1) and
+    # fuse_minimax_qk_norm (absent from all levels), where Deferred(False) is
+    # the sole default.
 
-    # Fields below use Deferred(False) as a last-resort fallback that fires
-    # only when neither the user nor the optimization-level table
-    # (OPTIMIZATION_LEVEL_TO_CONFIG in vllm.py) has supplied a value.
-    # In practice, most of these fields are covered by the optimization-level
-    # table, so Deferred(False) rarely triggers for them.  The exceptions are
-    # fuse_attn_quant (absent from optimization levels 0 and 1) and
-    # fuse_minimax_qk_norm (absent from all optimizati
-    # on levels), where Deferred(False) provides the only default.
-
-    fuse_norm_quant: Annotated[bool | None, Deferred(False)] = None
+    fuse_norm_quant: bool = Deferred(False)
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: Annotated[bool | None, Deferred(False)] = None
+    fuse_act_quant: bool = Deferred(False)
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: Annotated[bool | None, Deferred(False)] = None
+    fuse_attn_quant: bool = Deferred(False)
     """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: Annotated[bool | None, Deferred(False)] = None
+    enable_sp: bool = Deferred(False)
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
-    fuse_gemm_comms: Annotated[bool | None, Deferred(False)] = None
+    fuse_gemm_comms: bool = Deferred(False)
     """Enable async TP."""
-    fuse_allreduce_rms: Annotated[bool | None, Deferred(False)] = None
+    fuse_allreduce_rms: bool = Deferred(False)
     """Enable flashinfer allreduce fusion."""
-    fuse_minimax_qk_norm: Annotated[bool | None, Deferred(False)] = None
+    fuse_minimax_qk_norm: bool = Deferred(False)
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: Annotated[bool | None, Deferred(False)] = None
+    fuse_act_padding: bool = Deferred(False)
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_mla_dual_rms_norm: Annotated[bool | None, Deferred(False)] = None
+    fuse_mla_dual_rms_norm: bool = Deferred(False)
     """Fuse paired q/kv RMS norms in MLA attention."""
-    fuse_rope_kvcache: Annotated[bool | None, Deferred(False)] = None
+    fuse_rope_kvcache: bool = Deferred(False)
     """Fuse the QK rope + KV cache ops."""
 
     enable_qk_norm_rope_fusion: bool = False

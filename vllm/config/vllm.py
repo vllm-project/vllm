@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass
+from dataclasses import fields, is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -47,7 +47,7 @@ from .reasoning import ReasoningConfig
 from .scheduler import SchedulerConfig
 from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import DeferredFieldsMixin, SupportsHash, config, replace
+from .utils import DeferredFieldsMixin, SupportsHash, _DeferredValue, config, replace
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -633,7 +633,12 @@ class VllmConfig:
             key: Attribute name.
             value: Default value (static or callable).
         """
-        if getattr(config_obj, key) is None:
+        current = getattr(config_obj, key)
+        # Apply the default when the field is unset (None) or still holds its
+        # Deferred sentinel (a _DeferredValue produced by Deferred(factory)).
+        # Without the _DeferredValue check, optimization-level defaults would
+        # never be applied to deferred fields because their sentinel is not None.
+        if current is None or isinstance(current, _DeferredValue):
             # Some config values are known before initialization and are
             # hard coded.
             # Other values depend on the user given configuration, so they are
@@ -966,10 +971,10 @@ class VllmConfig:
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
 
-        # Initialize deferred fields in PassConfig
-        if isinstance(self.compilation_config.pass_config, DeferredFieldsMixin):
-            self.compilation_config.pass_config.initialize_deferred_fields(self)
-            self.compilation_config.pass_config.validate_deferred_fields_initialized()
+        # Initialize deferred fields in PassConfig (must run after the
+        # optimization-level table is applied so the table's explicit values
+        # take priority over the Deferred fallbacks).
+        self.compilation_config.pass_config.initialize_deferred_fields(self)
 
         if self.kernel_config.enable_flashinfer_autotune is None:
             raise ValueError(
@@ -1352,6 +1357,15 @@ class VllmConfig:
 
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
+
+        # Validate that every DeferredFieldsMixin sub-config had all its
+        # deferred fields initialized before __post_init__ completed.
+        # Auto-discovery means new DeferredFieldsMixin sub-configs are covered
+        # automatically without touching this loop.
+        for _f in fields(self):  # type: ignore[arg-type]
+            _value = getattr(self, _f.name)
+            if isinstance(_value, DeferredFieldsMixin):
+                _value.validate_deferred_fields_initialized()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when

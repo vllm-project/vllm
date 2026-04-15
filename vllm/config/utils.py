@@ -15,13 +15,10 @@ from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
 from typing import (
     TYPE_CHECKING,
-    Annotated,
     Any,
     Protocol,
     TypeVar,
     cast,
-    get_args,
-    get_origin,
     overload,
 )
 
@@ -29,7 +26,7 @@ import torch
 from pydantic import ConfigDict
 from pydantic.dataclasses import dataclass
 from pydantic.fields import Field as PydanticField
-from pydantic.fields import FieldInfo
+from pydantic.fields import FieldInfo as PydanticFieldInfo
 from typing_extensions import dataclass_transform, runtime_checkable
 
 import vllm.envs as envs
@@ -106,7 +103,7 @@ def get_field(cls: ConfigType, name: str) -> Any:
     init = named_field.init
 
     # Handle pydantic.Field
-    if isinstance(default, FieldInfo):
+    if isinstance(default, PydanticFieldInfo):
         if default.init is not None:
             init = default.init
         if default.default_factory is not None:
@@ -245,6 +242,15 @@ def normalize_value(x):
     # Fast path
     if x is None or isinstance(x, (bool, int, float, str)):
         return x
+
+    # Deferred sentinel: a field was never initialized before compute_hash()
+    # was called.  This is always a bug — surface it clearly.
+    if isinstance(x, _DeferredValue):
+        raise TypeError(
+            f"normalize_value: encountered uninitialized deferred field "
+            f"({x!r}).  Call initialize_deferred_fields() on the containing "
+            "config before computing hashes."
+        )
 
     # Enums: tag with FQN to avoid primitive collisions.
     # Ex: Enum(1) vs int(1) -> ("module.QualName", value).
@@ -477,134 +483,124 @@ def set_from_deprecated_env_if_set(
         setattr(config, field_name, field_value)
 
 
-# Deferred field initialization support
-# This pattern is used for configuration fields that cannot be determined statically
-# but are always set during VllmConfig initialization.
+# ---------------------------------------------------------------------------
+# Deferred field initialization
+#
+# Fields whose values cannot be determined at dataclass construction time
+# (they depend on being resolved at runtime in VllmConfig.__post_init__)
+# are declared as:
+#
+#     field_name: bool = Deferred(False)
+#     field_name: bool = Deferred(lambda cfg: cfg.parallel_config.tp > 1)
+#
+# Deferred(factory) sets the field's pydantic default to a _DeferredValue
+# instance that carries the factory.  The sentinel is falsy so that
+# __post_init__ guards like ``if self.fuse_norm_quant:`` do not fire before
+# initialization.  VllmConfig calls initialize_deferred_fields() to replace
+# every _DeferredValue with its resolved value, and
+# validate_deferred_fields_initialized() (auto-discovered at the end of
+# VllmConfig.__post_init__) asserts that no sentinels remain.
+# ---------------------------------------------------------------------------
 
 
-class _DeferredMarker:
-    """Marker for deferred initialization.
+class _DeferredValue:
+    """Per-field sentinel that doubles as a factory carrier.
 
-    This class is used as metadata in Annotated types to mark fields
-    that will be initialized later during VllmConfig post-initialization.
+    Each ``Deferred(factory)`` call produces one ``_DeferredValue`` instance
+    that becomes the pydantic default for that field.  Embedding the factory
+    in the default value means:
 
-    Example:
-        field_name: Annotated[bool, Deferred(enable_norm_fusion)] = None
-
-    Attributes:
-        factory: Either a static value or a callable that takes VllmConfig
-                 and returns the field value.
+    * Detection uses only ``isinstance(value, _DeferredValue)`` on the live
+      field value — no dependency on ``FieldInfo.metadata`` or pydantic
+      internals.
+    * ``__bool__`` returns ``False`` so guards in ``__post_init__`` that read
+      deferred fields before initialization treat them as falsy, matching the
+      behaviour of the old ``None`` sentinel.
     """
 
-    def __init__(self, factory: Callable[[Any], Any] | Any):
+    def __init__(self, factory: "Callable[[Any], Any] | Any") -> None:
         self.factory = factory
+
+    def __bool__(self) -> bool:
+        return False
 
     def __repr__(self) -> str:
         factory_name = getattr(self.factory, "__name__", repr(self.factory))
-        return f"Deferred({factory_name})"
+        return f"<Deferred({factory_name})>"
 
 
-def Deferred(factory: Callable[[Any], Any] | Any) -> Any:
-    """Mark a field for deferred initialization.
+def Deferred(factory: "Callable[[Any], Any] | Any") -> Any:
+    """Declare a config field whose value is resolved in VllmConfig.__post_init__.
 
-    Use this in Annotated type hints to indicate that a field's value
-    will be determined during VllmConfig initialization rather than at
-    config class instantiation.
+    Returns a pydantic Field whose default is a ``_DeferredValue`` instance
+    carrying the factory.  The declared annotation is the true runtime type —
+    no ``| None`` needed.  ``validate_default=False`` tells pydantic to skip
+    coercion of the sentinel through the field's type validator.
 
     Args:
-        factory: Either:
-            - A static value (e.g., False, True, 0)
-            - A callable that takes VllmConfig and returns the value
-              (e.g., enable_norm_fusion, lambda cfg: cfg.parallel_config.tp > 1)
+        factory: Either a static fallback value (e.g. False) or a callable
+                 that accepts a VllmConfig instance and returns the value.
 
-    Returns:
-        _DeferredMarker instance for use in Annotated type hints
+    Example::
 
-    Example:
         @config
         class MyConfig(DeferredFieldsMixin):
-            # Static default
-            simple_field: Annotated[bool, Deferred(False)] = None
-
-            # Dynamic default based on VllmConfig
-            complex_field: Annotated[bool, Deferred(enable_norm_fusion)] = None
+            simple_flag: bool = Deferred(False)
+            tp_flag: bool = Deferred(lambda cfg: cfg.parallel_config.tp > 1)
     """
-    return _DeferredMarker(factory)
-
-
-def get_deferred_factory(field_type: Any) -> _DeferredMarker | None:
-    """Extract _DeferredMarker from an Annotated type.
-
-    Args:
-        field_type: The type annotation to inspect
-
-    Returns:
-        _DeferredMarker if found, None otherwise
-    """
-    if get_origin(field_type) is Annotated:
-        for metadata in get_args(field_type)[1:]:
-            if isinstance(metadata, _DeferredMarker):
-                return metadata
-    return None
+    return PydanticField(  # type: ignore[call-overload]
+        default=_DeferredValue(factory),
+        validate_default=False,
+    )
 
 
 class DeferredFieldsMixin:
-    """Mixin to handle deferred field initialization.
+    """Mixin for config classes that contain Deferred fields.
 
-    Add this mixin to any config class that has fields marked with
-    Annotated[T, Deferred(factory)]. The mixin provides methods to
-    initialize and validate deferred fields.
+    Provides initialize_deferred_fields() and validate_deferred_fields_initialized().
+    VllmConfig.__post_init__ is responsible for calling both at the appropriate
+    points (see vllm/config/vllm.py).
 
-    Example:
+    Usage::
+
         @config
         class PassConfig(DeferredFieldsMixin):
-            fuse_norm_quant: Annotated[bool, Deferred(enable_norm_fusion)] = None
-
-            def __post_init__(self) -> None:
-                # Existing validation logic
-                pass
-
-    The VllmConfig.__post_init__() method should call:
-        config.initialize_deferred_fields(self)
-        config.validate_deferred_fields_initialized()
+            fuse_norm_quant: bool = Deferred(False)
     """
 
     def initialize_deferred_fields(self, vllm_config: Any) -> None:
-        """Initialize all deferred fields in this config.
+        """Replace every field still holding a _DeferredValue with its value.
 
-        This method should be called from VllmConfig.__post_init__() after
-        the config object is created but before it's used.
+        Fields explicitly set by the caller (e.g. the optimization-level table)
+        are left unchanged; only sentinel-valued fields are touched.
+
+        Uses ``dataclasses.fields()`` for discovery so that the mechanism works
+        regardless of which pydantic internals (``__pydantic_fields__``,
+        ``FieldInfo.metadata``) are available.
 
         Args:
-            vllm_config: The VllmConfig instance to use for initialization
+            vllm_config: The VllmConfig instance passed to factory callables.
         """
-        for field_info in fields(self):  # type: ignore[arg-type]
-            marker = get_deferred_factory(field_info.type)
-            if marker is not None:
-                current_value = getattr(self, field_info.name)
-                # Only initialize if not already set by user
-                if current_value is None:
-                    factory = marker.factory
-                    value = factory(vllm_config) if callable(factory) else factory
-                    setattr(self, field_info.name, value)
+        for dc_field in fields(self):  # type: ignore[arg-type]
+            current = getattr(self, dc_field.name)
+            if isinstance(current, _DeferredValue):
+                factory = current.factory
+                value = factory(vllm_config) if callable(factory) else factory
+                setattr(self, dc_field.name, value)
 
     def validate_deferred_fields_initialized(self) -> None:
-        """Validate that all deferred fields have been initialized.
+        """Assert that no field still holds a _DeferredValue.
 
-        This should be called after initialize_deferred_fields() to ensure
-        all deferred fields were properly set.
-
-        Raises:
-            ValueError: If any deferred fields are still None
+        Called automatically by VllmConfig.__post_init__ via auto-discovery.
+        Raises ValueError listing every offending field name.
         """
-        uninitialized = []
-        for field_info in fields(self):  # type: ignore[arg-type]
-            marker = get_deferred_factory(field_info.type)
-            if marker is not None and getattr(self, field_info.name) is None:
-                uninitialized.append(field_info.name)
-
+        uninitialized = [
+            dc_field.name
+            for dc_field in fields(self)  # type: ignore[arg-type]
+            if isinstance(getattr(self, dc_field.name), _DeferredValue)
+        ]
         if uninitialized:
             raise ValueError(
-                f"{self.__class__.__name__}: Deferred fields not initialized: "
+                f"{type(self).__name__}: deferred fields were never initialized: "
                 f"{uninitialized}. This is a bug in VllmConfig initialization."
             )
