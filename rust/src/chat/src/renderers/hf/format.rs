@@ -1,4 +1,6 @@
-use minijinja::machinery::ast::{Expr, Stmt};
+use std::collections::{HashSet, VecDeque};
+
+use minijinja::machinery::ast::{Expr, ForLoop, Set, Stmt};
 use minijinja::machinery::{WhitespaceConfig, parse};
 use minijinja::syntax::SyntaxConfig;
 
@@ -12,238 +14,178 @@ pub enum ChatTemplateContentFormat {
     OpenAi,
 }
 
-/// Flags tracking which OpenAI-style patterns we've seen.
-#[derive(Default, Debug, Clone, Copy)]
-struct Flags {
-    saw_iteration: bool,
-    saw_structure: bool,
-    saw_assignment: bool,
-    saw_macro: bool,
+fn is_var_access(expr: &Expr, varname: &str) -> bool {
+    matches!(expr, Expr::Var(v) if v.id == varname)
 }
 
-impl Flags {
-    fn any(self) -> bool {
-        // `saw_assignment` alone (e.g. `set content = message.content`) is not sufficient to
-        // classify as OpenAI format. Many string-format templates use this pattern to extract
-        // content into a local variable, then check `content is string`.
-        self.saw_iteration || self.saw_structure || self.saw_macro
+fn is_const_str(expr: &Expr, value: &str) -> bool {
+    matches!(expr, Expr::Const(c) if c.value.as_str() == Some(value))
+}
+
+fn is_attr_access(expr: &Expr, varname: &str, key: &str) -> bool {
+    match expr {
+        Expr::GetItem(g) => is_var_access(&g.expr, varname) && is_const_str(&g.subscript_expr, key),
+        Expr::GetAttr(g) => is_var_access(&g.expr, varname) && g.name == key,
+        _ => false,
     }
 }
 
-/// Single-pass AST detector with scope tracking.
-struct Detector<'a> {
-    ast: &'a Stmt<'a>,
-    /// Message loop vars currently in scope (e.g., `message`, `m`, `msg`).
-    scope: std::collections::VecDeque<String>,
-    scope_set: std::collections::HashSet<String>,
-    flags: Flags,
+fn is_var_or_elems_access(expr: &Expr, varname: &str, key: Option<&str>) -> bool {
+    match expr {
+        Expr::Filter(f) => f
+            .expr
+            .as_ref()
+            .is_some_and(|inner| is_var_or_elems_access(inner, varname, key)),
+        Expr::Test(t) => is_var_or_elems_access(&t.expr, varname, key),
+        Expr::Slice(s) => is_var_or_elems_access(&s.expr, varname, key),
+        _ => key.map_or_else(
+            || is_var_access(expr, varname),
+            |key| is_attr_access(expr, varname, key),
+        ),
+    }
 }
 
-impl<'a> Detector<'a> {
-    fn new(ast: &'a Stmt<'a>) -> Self {
-        Self {
-            ast,
-            scope: std::collections::VecDeque::new(),
-            scope_set: std::collections::HashSet::new(),
-            flags: Flags::default(),
-        }
-    }
-
-    fn run(mut self) -> Flags {
-        self.walk_stmt(self.ast);
-        self.flags
-    }
-
-    fn push_scope(&mut self, var: String) {
-        self.scope.push_back(var.clone());
-        self.scope_set.insert(var);
-    }
-
-    fn pop_scope(&mut self) {
-        if let Some(v) = self.scope.pop_back() {
-            self.scope_set.remove(&v);
-        }
-    }
-
-    fn is_var_access(expr: &Expr, varname: &str) -> bool {
-        matches!(expr, Expr::Var(v) if v.id == varname)
-    }
-
-    fn is_const_str(expr: &Expr, value: &str) -> bool {
-        matches!(expr, Expr::Const(c) if c.value.as_str() == Some(value))
-    }
-
-    fn is_numeric_const(expr: &Expr) -> bool {
-        matches!(expr, Expr::Const(c) if c.value.is_number())
-    }
-
-    /// Check if expr is varname.content or varname["content"].
-    fn is_var_dot_content(expr: &Expr, varname: &str) -> bool {
-        match expr {
-            Expr::GetAttr(g) => Self::is_var_access(&g.expr, varname) && g.name == "content",
-            Expr::GetItem(g) => {
-                Self::is_var_access(&g.expr, varname)
-                    && Self::is_const_str(&g.subscript_expr, "content")
+fn visit_stmt<'a>(
+    stmt: &'a Stmt<'a>,
+    assignments: &mut Vec<&'a Set<'a>>,
+    loops: &mut Vec<&'a ForLoop<'a>>,
+) {
+    match stmt {
+        Stmt::Template(t) => {
+            for child in &t.children {
+                visit_stmt(child, assignments, loops);
             }
-            Expr::Filter(f) => f
-                .expr
-                .as_ref()
-                .is_some_and(|e| Self::is_var_dot_content(e, varname)),
-            Expr::Test(t) => Self::is_var_dot_content(&t.expr, varname),
-            _ => false,
+        }
+        Stmt::ForLoop(fl) => {
+            loops.push(fl);
+            for child in &fl.body {
+                visit_stmt(child, assignments, loops);
+            }
+            for child in &fl.else_body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::IfCond(ic) => {
+            for child in &ic.true_body {
+                visit_stmt(child, assignments, loops);
+            }
+            for child in &ic.false_body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::WithBlock(wb) => {
+            for child in &wb.body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::Set(set_stmt) => assignments.push(set_stmt),
+        Stmt::SetBlock(sb) => {
+            for child in &sb.body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::AutoEscape(ae) => {
+            for child in &ae.body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::FilterBlock(fb) => {
+            for child in &fb.body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::Block(b) => {
+            for child in &b.body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::Macro(m) => {
+            for child in &m.body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        Stmt::CallBlock(cb) => {
+            for child in &cb.macro_decl.body {
+                visit_stmt(child, assignments, loops);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_assignments_and_loops<'a>(
+    root: &'a Stmt<'a>,
+) -> (Vec<&'a Set<'a>>, Vec<&'a ForLoop<'a>>) {
+    let mut assignments = Vec::new();
+    let mut loops = Vec::new();
+    visit_stmt(root, &mut assignments, &mut loops);
+    (assignments, loops)
+}
+
+fn iter_nodes_assign_var_or_elems(root: &Stmt<'_>, varname: &str) -> Vec<String> {
+    let (assignments, _) = collect_assignments_and_loops(root);
+
+    let mut discovered = vec![varname.to_string()];
+    let mut seen = HashSet::from([varname.to_string()]);
+    let mut related = VecDeque::from([varname.to_string()]);
+
+    while let Some(related_varname) = related.pop_front() {
+        for assign in &assignments {
+            let Expr::Var(lhs) = &assign.target else {
+                continue;
+            };
+
+            if is_var_or_elems_access(&assign.expr, &related_varname, None) {
+                let lhs_name = lhs.id.to_string();
+                if seen.insert(lhs_name.clone()) {
+                    discovered.push(lhs_name.clone());
+                    if lhs_name != related_varname {
+                        related.push_back(lhs_name);
+                    }
+                }
+            }
         }
     }
 
-    /// Check if expr accesses `.content` on any variable in scope, or any descendant of it.
-    fn is_any_scope_var_content(&self, expr: &Expr) -> bool {
-        let mut current_expr = expr;
-        loop {
-            if self
-                .scope_set
+    discovered
+}
+
+fn iter_nodes_assign_messages_item(root: &Stmt<'_>) -> Vec<String> {
+    let message_varnames = iter_nodes_assign_var_or_elems(root, "messages");
+    let (_, loops) = collect_assignments_and_loops(root);
+
+    let mut discovered = Vec::new();
+    let mut seen = HashSet::new();
+
+    for loop_ast in loops {
+        let Expr::Var(target) = &loop_ast.target else {
+            continue;
+        };
+
+        if message_varnames
+            .iter()
+            .any(|varname| is_var_or_elems_access(&loop_ast.iter, varname, None))
+        {
+            let target_name = target.id.to_string();
+            if seen.insert(target_name.clone()) {
+                discovered.push(target_name);
+            }
+        }
+    }
+
+    discovered
+}
+
+fn has_content_item_loop(root: &Stmt<'_>) -> bool {
+    let message_varnames = iter_nodes_assign_messages_item(root);
+    let (_, loops) = collect_assignments_and_loops(root);
+
+    loops.into_iter().any(|loop_ast| {
+        matches!(loop_ast.target, Expr::Var(_))
+            && message_varnames
                 .iter()
-                .any(|v| Self::is_var_dot_content(current_expr, v))
-            {
-                return true;
-            }
-            match current_expr {
-                Expr::GetAttr(g) => current_expr = &g.expr,
-                Expr::GetItem(g) => current_expr = &g.expr,
-                _ => return false,
-            }
-        }
-    }
-
-    fn walk_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::Template(t) => {
-                for ch in &t.children {
-                    self.walk_stmt(ch);
-                }
-            }
-            Stmt::ForLoop(fl) => {
-                if let Expr::Var(iter) = &fl.iter
-                    && iter.id == "messages"
-                    && let Expr::Var(target) = &fl.target
-                {
-                    self.push_scope(target.id.to_string());
-                }
-
-                if self.is_any_scope_var_content(&fl.iter) {
-                    self.flags.saw_iteration = true;
-                }
-                if matches!(&fl.iter, Expr::Var(v) if v.id == "content") {
-                    self.flags.saw_iteration = true;
-                }
-
-                for b in &fl.body {
-                    self.walk_stmt(b);
-                }
-
-                if let Expr::Var(iter) = &fl.iter
-                    && iter.id == "messages"
-                    && matches!(&fl.target, Expr::Var(_))
-                {
-                    self.pop_scope();
-                }
-            }
-            Stmt::IfCond(ic) => {
-                self.inspect_expr_for_structure(&ic.expr);
-
-                for b in &ic.true_body {
-                    self.walk_stmt(b);
-                }
-                for b in &ic.false_body {
-                    self.walk_stmt(b);
-                }
-            }
-            Stmt::EmitExpr(e) => {
-                self.inspect_expr_for_structure(&e.expr);
-            }
-            Stmt::Set(s)
-                if Self::is_var_access(&s.target, "content")
-                    && self.is_any_scope_var_content(&s.expr) =>
-            {
-                self.flags.saw_assignment = true;
-            }
-            Stmt::Macro(m) => {
-                let mut has_type_check = false;
-                let mut has_loop = false;
-                Self::scan_macro_body(&m.body, &mut has_type_check, &mut has_loop);
-                if has_type_check && has_loop {
-                    self.flags.saw_macro = true;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn inspect_expr_for_structure(&mut self, expr: &Expr) {
-        if self.flags.saw_structure {
-            return;
-        }
-
-        match expr {
-            Expr::GetItem(gi)
-                if (matches!(&gi.expr, Expr::Var(v) if v.id == "content")
-                    || self.is_any_scope_var_content(&gi.expr))
-                    && Self::is_numeric_const(&gi.subscript_expr) =>
-            {
-                self.flags.saw_structure = true;
-            }
-            Expr::Filter(f) => {
-                if f.name == "length" {
-                    if let Some(inner) = &f.expr {
-                        let inner_ref: &Expr = inner;
-                        let is_content_var = matches!(inner_ref, Expr::Var(v) if v.id == "content");
-                        if is_content_var || self.is_any_scope_var_content(inner_ref) {
-                            self.flags.saw_structure = true;
-                        }
-                    }
-                } else if let Some(inner) = &f.expr {
-                    let inner_ref: &Expr = inner;
-                    self.inspect_expr_for_structure(inner_ref);
-                }
-            }
-            Expr::Test(t) => self.inspect_expr_for_structure(&t.expr),
-            Expr::GetAttr(g) => {
-                self.inspect_expr_for_structure(&g.expr);
-            }
-            Expr::BinOp(op) => {
-                self.inspect_expr_for_structure(&op.left);
-                self.inspect_expr_for_structure(&op.right);
-            }
-            Expr::UnaryOp(op) => {
-                self.inspect_expr_for_structure(&op.expr);
-            }
-            _ => {}
-        }
-    }
-
-    fn scan_macro_body(body: &[Stmt], has_type_check: &mut bool, has_loop: &mut bool) {
-        for s in body {
-            if *has_type_check && *has_loop {
-                return;
-            }
-
-            match s {
-                Stmt::IfCond(ic) => {
-                    if matches!(&ic.expr, Expr::Test(_)) {
-                        *has_type_check = true;
-                    }
-                    Self::scan_macro_body(&ic.true_body, has_type_check, has_loop);
-                    Self::scan_macro_body(&ic.false_body, has_type_check, has_loop);
-                }
-                Stmt::ForLoop(fl) => {
-                    *has_loop = true;
-                    Self::scan_macro_body(&fl.body, has_type_check, has_loop);
-                }
-                Stmt::Template(t) => {
-                    Self::scan_macro_body(&t.children, has_type_check, has_loop);
-                }
-                _ => {}
-            }
-        }
-    }
+                .any(|varname| is_var_or_elems_access(&loop_ast.iter, varname, Some("content")))
+    })
 }
 
 /// Detect the content format expected by a Jinja2 chat template based on AST analysis.
@@ -258,10 +200,153 @@ pub fn detect_chat_template_content_format(template: &str) -> ChatTemplateConten
         Err(_) => return ChatTemplateContentFormat::String,
     };
 
-    let flags = Detector::new(&ast).run();
-    if flags.any() {
+    if has_content_item_loop(&ast) {
         ChatTemplateContentFormat::OpenAi
     } else {
         ChatTemplateContentFormat::String
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use expect_test::expect;
+
+    use super::{ChatTemplateContentFormat, detect_chat_template_content_format};
+
+    fn detect(template: &str) -> ChatTemplateContentFormat {
+        detect_chat_template_content_format(template)
+    }
+
+    fn vllm_examples_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/templates/vllm_examples")
+            .canonicalize()
+            .expect("vLLM example template directory should exist locally")
+    }
+
+    fn read_vllm_example(relative_path: &str) -> String {
+        fs::read_to_string(vllm_examples_dir().join(relative_path))
+            .unwrap_or_else(|_| panic!("failed to read vLLM example template: {relative_path}"))
+    }
+
+    fn iter_vllm_example_template_paths() -> impl Iterator<Item = PathBuf> {
+        let mut paths = fs::read_dir(vllm_examples_dir())
+            .expect("failed to read vLLM example template directory")
+            .map(|entry| {
+                entry
+                    .expect("failed to read vLLM example template dir entry")
+                    .path()
+            })
+            .filter(|path| path.extension().is_some_and(|ext| ext == "jinja"))
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths.into_iter()
+    }
+
+    #[test]
+    fn detects_string_template_without_content_loop() {
+        assert_eq!(
+            detect("{% for message in messages %}{{ message.content }}{% endfor %}"),
+            ChatTemplateContentFormat::String
+        );
+    }
+
+    #[test]
+    fn detects_openai_template_with_direct_content_loop() {
+        assert_eq!(
+            detect(
+                "{% for message in messages %}{% for content in message['content'] %}{{ content }}{% endfor %}{% endfor %}"
+            ),
+            ChatTemplateContentFormat::OpenAi
+        );
+    }
+
+    #[test]
+    fn detects_openai_template_with_messages_alias() {
+        assert_eq!(
+            detect(
+                "{% set msgs = messages %}{% for message in msgs %}{% for content in message.content %}{{ content }}{% endfor %}{% endfor %}"
+            ),
+            ChatTemplateContentFormat::OpenAi
+        );
+    }
+
+    #[test]
+    fn does_not_detect_content_alias_loop_as_openai() {
+        assert_eq!(
+            detect(
+                "{% for message in messages %}{% set parts = message.content %}{% for item in parts %}{{ item }}{% endfor %}{% endfor %}"
+            ),
+            ChatTemplateContentFormat::String
+        );
+    }
+
+    #[test]
+    fn does_not_treat_length_or_index_access_as_openai() {
+        assert_eq!(
+            detect("{% for message in messages %}{{ message.content|length }}{% endfor %}"),
+            ChatTemplateContentFormat::String
+        );
+        assert_eq!(
+            detect("{% for message in messages %}{{ message.content[0] }}{% endfor %}"),
+            ChatTemplateContentFormat::String
+        );
+    }
+
+    #[test]
+    fn matches_vllm_example_template_formats() {
+        let snapshot = iter_vllm_example_template_paths()
+            .map(|path| {
+                let file_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("template file name should be valid UTF-8");
+                let template = read_vllm_example(file_name);
+                let format = detect(&template);
+                format!("{file_name:50} => {format:?}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        expect![[r#"
+            template_alpaca.jinja                              => String
+            template_baichuan.jinja                            => String
+            template_chatglm.jinja                             => String
+            template_chatglm2.jinja                            => String
+            template_chatml.jinja                              => String
+            template_falcon.jinja                              => String
+            template_falcon_180b.jinja                         => String
+            template_inkbot.jinja                              => String
+            template_teleflm.jinja                             => String
+            tool_chat_template_deepseekr1.jinja                => String
+            tool_chat_template_deepseekv3.jinja                => String
+            tool_chat_template_deepseekv31.jinja               => String
+            tool_chat_template_functiongemma.jinja             => String
+            tool_chat_template_gemma3_pythonic.jinja           => OpenAi
+            tool_chat_template_gemma4.jinja                    => OpenAi
+            tool_chat_template_glm4.jinja                      => String
+            tool_chat_template_granite.jinja                   => String
+            tool_chat_template_granite_20b_fc.jinja            => String
+            tool_chat_template_hermes.jinja                    => String
+            tool_chat_template_hunyuan_a13b.jinja              => String
+            tool_chat_template_internlm2_tool.jinja            => String
+            tool_chat_template_llama3.1_json.jinja             => OpenAi
+            tool_chat_template_llama3.2_json.jinja             => OpenAi
+            tool_chat_template_llama3.2_pythonic.jinja         => String
+            tool_chat_template_llama4_json.jinja               => OpenAi
+            tool_chat_template_llama4_pythonic.jinja           => OpenAi
+            tool_chat_template_minimax_m1.jinja                => OpenAi
+            tool_chat_template_mistral.jinja                   => String
+            tool_chat_template_mistral3.jinja                  => OpenAi
+            tool_chat_template_mistral_parallel.jinja          => String
+            tool_chat_template_phi4_mini.jinja                 => String
+            tool_chat_template_qwen3coder.jinja                => String
+            tool_chat_template_toolace.jinja                   => String
+            tool_chat_template_xlam_llama.jinja                => String
+            tool_chat_template_xlam_qwen.jinja                 => String"#]]
+        .assert_eq(&snapshot);
     }
 }
