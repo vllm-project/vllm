@@ -27,50 +27,53 @@ from vllm.utils.torch_utils import direct_register_custom_op
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_device
 
-if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
-    _lora_aux_cuda_stream: torch.cuda.Stream | None = None
+_lora_aux_cuda_stream: torch.cuda.Stream | None = None
 
-    def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
-        global _lora_aux_cuda_stream
-        if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
-            _lora_aux_cuda_stream = torch.cuda.Stream()
-        return _lora_aux_cuda_stream
 
-    def lora_linear_async(
-        layer_name: str,
-        output_size: int,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        forward_context: ForwardContext = get_forward_context()
-        self = forward_context.no_compile_layers[layer_name]
-        return self._apply_async_impl(x, bias)
+def _get_lora_aux_cuda_stream() -> torch.cuda.Stream | None:
+    global _lora_aux_cuda_stream
+    if _lora_aux_cuda_stream is None and current_platform.is_cuda_alike():
+        _lora_aux_cuda_stream = torch.cuda.Stream()
+    return _lora_aux_cuda_stream
 
-    def lora_linear_async_fake(
-        layer_name: str,
-        output_size: int,
-        x: torch.Tensor,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        # The real function reshapes output back to the original 3D shape
-        # when the input has an extra batch dimension (transformers backend).
-        if x.ndim == 3:
-            return torch.empty(
-                (x.size(0), x.size(1), output_size),
-                device=x.device,
-                dtype=x.dtype,
-            )
+
+def lora_linear_async(
+    layer_name: str,
+    output_size: int,
+    x: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    forward_context: ForwardContext = get_forward_context()
+    self = forward_context.no_compile_layers[layer_name]
+    return self._apply_async_impl(x, bias)
+
+
+def lora_linear_async_fake(
+    layer_name: str,
+    output_size: int,
+    x: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    # The real function reshapes output back to the original 3D shape
+    # when the input has an extra batch dimension (transformers backend).
+    if x.ndim == 3:
         return torch.empty(
-            (x.size(0), output_size),
+            (x.size(0), x.size(1), output_size),
             device=x.device,
             dtype=x.dtype,
         )
-
-    direct_register_custom_op(
-        op_name="lora_linear_async",
-        op_func=lora_linear_async,
-        fake_impl=lora_linear_async_fake,
+    return torch.empty(
+        (x.size(0), output_size),
+        device=x.device,
+        dtype=x.dtype,
     )
+
+
+direct_register_custom_op(
+    op_name="lora_linear_async",
+    op_func=lora_linear_async,
+    fake_impl=lora_linear_async_fake,
+)
 
 
 class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
