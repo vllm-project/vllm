@@ -186,6 +186,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             return self.KVCacheMethodCls(self)
 
         if envs.VLLM_USE_HUMMING:
+            # TODO: use kernel backend instead
             from vllm.model_executor.layers.quantization.humming import HummingConfig
 
             config = HummingConfig.from_config(config=self.original_config)

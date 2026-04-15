@@ -70,7 +70,6 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         if prepare_finalize is not None:
             max_num_tokens: int | None = None
             num_dispatchers: int | None = None
-            assert self.is_batched
             if self.is_batched:
                 max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
                 num_dispatchers = prepare_finalize.num_dispatchers()
@@ -244,7 +243,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 "dtype": torch_dtype_map[a_dtype],
             },
             "down_output": {
-                "shape": (real_shape_m, K),
+                "shape": output_shape if self.is_batched else (real_shape_m, K),
                 "dtype": torch_dtype_map[c_dtype],
             },
             "output": {
@@ -424,7 +423,7 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
             "valid_shape_m": valid_shape_m,
         }
 
-        top_k = topk_ids.size(1)
+        top_k = 1 if self.is_batched else topk_ids.size(1)
         moe_kwargs1 = {"top_k": top_k, "tuning_config": self.w13_tuning_config_str}
         moe_kwargs2 = {"top_k": 1, "tuning_config": self.w2_tuning_config_str}
         moe_kwargs1.update(moe_common_kwargs)
@@ -560,6 +559,7 @@ class HummingGroupedExperts(HummingExpertsBase):
             topk_ids=topk_ids,
             n_expert=self.global_num_experts,
             n_local_expert=self.num_experts,
+            expert_map=self.layer.expert_map,
         )
 
         inputs, input_scale = HummingMethod.may_quant_input(
