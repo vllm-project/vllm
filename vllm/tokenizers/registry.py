@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -206,11 +207,14 @@ def get_tokenizer(
     # Ensure that, if the config were to come from vllm.transformers_utils.config, it is
     # registered with AutoConfig before the tokenizer is loaded. This is necessary since
     # tokenizer_cls_.from_pretrained will call AutoConfig.from_pretrained internally.
-    get_config(
-        tokenizer_name,
-        trust_remote_code=trust_remote_code,
-        revision=revision,
-    )
+    # This may fail for paths that don't have a model config (e.g. LoRA adapters),
+    # which is fine — those don't need custom config registration.
+    with contextlib.suppress(ValueError, OSError):
+        get_config(
+            tokenizer_name,
+            trust_remote_code=trust_remote_code,
+            revision=revision,
+        )
 
     if tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
