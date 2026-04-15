@@ -45,21 +45,22 @@ from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
 )
 from vllm.v1.attention.ops.triton_quant_kv._helpers import (
     apply_alibi_to_score,
+    apply_softcap,
+    cdiv_fn,
     compute_kv_seq_mask,
+    compute_tile_loop_bounds,
+    init_softmax_M,
     load_qq_bias_tile,
     pack_int2_quartet,
     pack_int4_nibbles,
+    resolve_seq_and_query_len,
     softmax_step,
+    store_segm_reduce_scalars,
     unpack_int2_quartet,
     unpack_int4_nibbles,
 )
 from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVBackend
-from vllm.v1.attention.ops.triton_unified_attention import (
-    apply_softcap,
-    cdiv_fn,
-    find_seq_idx,
-    reduce_segments,
-)
+from vllm.v1.attention.ops.triton_unified_attention import reduce_segments
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 float8_info = torch.finfo(current_platform.fp8_dtype())
@@ -516,28 +517,27 @@ def _attn_packed(
     # -----------------------------------------------------------------
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
-    if IS_3D:
-        segm_idx = tl.program_id(2)
+    segm_idx = tl.program_id(2) if IS_3D else 0
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
+    (
+        seq_idx,
+        q_block_local_idx,
+        cur_batch_in_all_start_index,
+        cur_batch_query_len,
+        seq_len,
+    ) = resolve_seq_and_query_len(
+        query_start_len_ptr, seq_lens_ptr, q_block_global_idx, num_seqs, BLOCK_Q
     )
-
-    q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
-    q_block_local_idx = q_block_global_idx - q_block_start_idx
-
-    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
-    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
 
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
 
-    seq_len = tl.load(seq_lens_ptr + seq_idx)
     if IS_3D:
         tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
         if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
             return
+    else:
+        tiles_per_segment = 0
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_t = tl.arange(0, TILE_SIZE)
@@ -602,22 +602,10 @@ def _attn_packed(
 
     # -----------------------------------------------------------------
     # Online-softmax state + optional feature loads.
-    # 2D loads sinks unconditionally; 3D only on segm_idx == 0 because
-    # ``reduce_segments`` adds the sink contribution once.
     # -----------------------------------------------------------------
-    if USE_SINKS:
-        load_sinks = (not IS_3D) or (segm_idx == 0)
-        if load_sinks:
-            M = tl.load(
-                sink_ptr + query_offset_1,
-                mask=query_mask_1,
-                other=float("-inf"),
-            ).to(dtype=tl.float32)
-        else:
-            M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
-    else:
-        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
-
+    M = init_softmax_M(
+        sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
+    )
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc_s0 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
     acc_s1 = tl.zeros([BLOCK_M, PACKED_HEAD_PADDED], dtype=tl.float32)
@@ -635,38 +623,21 @@ def _attn_packed(
     if USE_QQ_BIAS:
         qq_bias_row_ptrs = qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
 
-    max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
+    loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
+        context_len,
+        seq_len,
+        cur_batch_query_len,
+        q_block_local_idx,
+        segm_idx,
+        tiles_per_segment,
+        TILE_SIZE,
+        BLOCK_M,
+        BLOCK_Q,
+        num_queries_per_kv,
+        SLIDING_WINDOW,
+        USE_MM_PREFIX,
+        IS_3D,
     )
-    if USE_MM_PREFIX:
-        max_seq_prefix_len = tl.maximum(max_seq_prefix_len, seq_len)
-    else:
-        max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
-
-    num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
-
-    tile_start = 0
-    tile_end = num_tiles
-    if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
-        qpos_lo = q_block_local_idx * BLOCK_Q
-        qpos_hi = tl.minimum(
-            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
-            cur_batch_query_len - 1,
-        )
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
-        last_allowed_key = context_len + qpos_hi
-        tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
-        tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
-
-    if IS_3D:
-        loop_lo = max(segm_idx * tiles_per_segment, tile_start)
-        loop_hi = min((segm_idx + 1) * tiles_per_segment, tile_end)
-    else:
-        loop_lo = tile_start
-        loop_hi = tile_end
 
     # -----------------------------------------------------------------
     # Tile loop.  Per-tile: load packed KV + scales, dequantize into
@@ -862,13 +833,19 @@ def _attn_packed(
                 acc_s3,
                 mask=mask_s3[None, :] & out_mask,
             )
-        segm_offset = (
-            query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
-            + query_offset_1 * NUM_SEGMENTS_PER_SEQ
-            + segm_idx
+        store_segm_reduce_scalars(
+            segm_max_ptr,
+            segm_expsum_ptr,
+            query_offset_0,
+            query_offset_1,
+            segm_idx,
+            M,
+            L,
+            query_mask_0,
+            query_mask_1,
+            num_query_heads,
+            NUM_SEGMENTS_PER_SEQ,
         )
-        tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
-        tl.store(segm_expsum_ptr + segm_offset, L, mask=query_mask_0 & query_mask_1)
     else:
         acc_s0 = acc_s0 / L[:, None]
         acc_s1 = acc_s1 / L[:, None]
@@ -1151,214 +1128,197 @@ def _run_reshape_kernel(
     )
 
 
-class Int4PerTokenHeadBackend(QuantKVBackend):
+class _PackedBackend(QuantKVBackend):
+    """Shared Backend for sub-byte packed per-token-head modes.
+
+    Subclasses declare the mode-specific pieces as class attributes /
+    classmethods; the ``reshape_and_cache`` / ``unified_attention``
+    bodies are identical and live here.
+
+    Mode-specific hooks (must be set/overridden by subclasses)
+    ---------------------------------------------------------
+    ``_reshape_kernel``
+        The ``@triton.jit`` reshape kernel for this mode.
+    ``_rotate_kv(x)``
+        Pre-rotation applied to K / V before packing (RHT for INT4,
+        full Hadamard for INT2).
+    ``_rotate_q(q)``
+        Pre-rotation applied to Q before attention.  Typically the same
+        rotation as ``_rotate_kv`` so the dot product is preserved.
+    ``_unrotate_out(out, head_size)``
+        Inverse rotation on the kernel output, written back in-place.
+    ``_transform_softmax_scale(scale, head_size)``
+        Optional rescaling of ``softmax_scale`` before the kernel (INT4
+        divides by ``head_size`` to absorb the RHT scale; INT2 is a
+        no-op).
+    """
+
+    needs_scale_caches = True
+
+    # Filled in by subclasses.
+    _reshape_kernel: object
+
+    @staticmethod
+    def _rotate_kv(x: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    @staticmethod
+    def _rotate_q(q: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    @staticmethod
+    def _unrotate_out(out: torch.Tensor, head_size: int) -> torch.Tensor:
+        raise NotImplementedError
+
+    @staticmethod
+    def _transform_softmax_scale(scale: float, head_size: int) -> float:
+        return scale
+
+    def reshape_and_cache(
+        self,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        *,
+        k_scale_cache: torch.Tensor | None = None,
+        v_scale_cache: torch.Tensor | None = None,
+    ) -> None:
+        assert k_scale_cache is not None and v_scale_cache is not None, (
+            f"{self.mode.name} requires k_scale_cache / v_scale_cache"
+        )
+        key = self._rotate_kv(key.float()).to(key.dtype)
+        value = self._rotate_kv(value.float()).to(value.dtype)
+        _run_reshape_kernel(
+            self._reshape_kernel,
+            key=key,
+            value=value,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            slot_mapping=slot_mapping,
+            packing_factor=self.packing_factor,
+        )
+
+    def unified_attention(
+        self,
+        q: torch.Tensor,
+        k_cache: torch.Tensor,
+        v_cache: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        cu_seqlens_q: torch.Tensor,
+        max_seqlen_q: int,
+        seqused_k: torch.Tensor,
+        max_seqlen_k: int,
+        softmax_scale: float,
+        window_size: tuple[int, int],
+        block_table: torch.Tensor,
+        softcap: float,
+        sinks: torch.Tensor | None,
+        alibi_slopes: torch.Tensor | None,
+        use_alibi_sqrt: bool,
+        qq_bias: torch.Tensor | None,
+        output_scale: torch.Tensor | None,
+        mm_prefix_range: torch.Tensor | None,
+        k_scale_cache: torch.Tensor | None = None,
+        v_scale_cache: torch.Tensor | None = None,
+        seq_threshold_3D: int | None = None,
+        num_par_softmax_segments: int | None = None,
+        softmax_segm_output: torch.Tensor | None = None,
+        softmax_segm_max: torch.Tensor | None = None,
+        softmax_segm_expsum: torch.Tensor | None = None,
+    ) -> None:
+        assert k_scale_cache is not None and v_scale_cache is not None
+
+        q_orig_dtype = q.dtype
+        q = self._rotate_q(q.float()).to(q_orig_dtype)
+        head_size = q.shape[2]
+        softmax_scale = self._transform_softmax_scale(softmax_scale, head_size)
+
+        _launch_packed_attn(
+            q=q,
+            k_cache=k_cache,
+            v_cache=v_cache,
+            out=out,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqused_k,
+            softmax_scale=softmax_scale,
+            window_size=window_size,
+            block_table=block_table,
+            softcap=softcap,
+            sinks=sinks,
+            alibi_slopes=alibi_slopes,
+            use_alibi_sqrt=use_alibi_sqrt,
+            qq_bias=qq_bias,
+            output_scale=output_scale,
+            mm_prefix_range=mm_prefix_range,
+            k_scale_cache=k_scale_cache,
+            v_scale_cache=v_scale_cache,
+            seq_threshold_3D=seq_threshold_3D,
+            num_par_softmax_segments=num_par_softmax_segments,
+            softmax_segm_output=softmax_segm_output,
+            softmax_segm_max=softmax_segm_max,
+            softmax_segm_expsum=softmax_segm_expsum,
+            packing_factor=self.packing_factor,
+        )
+
+        out_f = self._unrotate_out(out, head_size)
+        out.copy_(out_f.to(q_orig_dtype))
+
+
+class Int4PerTokenHeadBackend(_PackedBackend):
     """KV cache backend for ``KVQuantMode.INT4_PER_TOKEN_HEAD``."""
 
     mode = KVQuantMode.INT4_PER_TOKEN_HEAD
     packing_factor = 2  # 2 × int4 per byte
-    needs_scale_caches = True
+    _reshape_kernel = _reshape_cache_int4_kernel
 
-    def reshape_and_cache(
-        self,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        *,
-        k_scale_cache: torch.Tensor | None = None,
-        v_scale_cache: torch.Tensor | None = None,
-    ) -> None:
-        assert k_scale_cache is not None and v_scale_cache is not None, (
-            "INT4 per-token-head requires k_scale_cache / v_scale_cache"
-        )
-        # RHT pre-rotation gaussianizes data → better quantization.
-        key = single_rht(key.float()).to(key.dtype)
-        value = single_rht(value.float()).to(value.dtype)
-        _run_reshape_kernel(
-            _reshape_cache_int4_kernel,
-            key=key,
-            value=value,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            k_scale_cache=k_scale_cache,
-            v_scale_cache=v_scale_cache,
-            slot_mapping=slot_mapping,
-            packing_factor=self.packing_factor,
-        )
+    # RHT pre-rotation gaussianizes data → better quantization.  The
+    # forward RHT has norm ``sqrt(head_size)``, so ``softmax_scale`` is
+    # divided by ``head_size`` and the inverse RHT divides the output
+    # by ``head_size`` as well.
+    @staticmethod
+    def _rotate_kv(x: torch.Tensor) -> torch.Tensor:
+        return single_rht(x)
 
-    def unified_attention(
-        self,
-        q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        out: torch.Tensor,
-        *,
-        cu_seqlens_q: torch.Tensor,
-        max_seqlen_q: int,
-        seqused_k: torch.Tensor,
-        max_seqlen_k: int,
-        softmax_scale: float,
-        window_size: tuple[int, int],
-        block_table: torch.Tensor,
-        softcap: float,
-        sinks: torch.Tensor | None,
-        alibi_slopes: torch.Tensor | None,
-        use_alibi_sqrt: bool,
-        qq_bias: torch.Tensor | None,
-        output_scale: torch.Tensor | None,
-        mm_prefix_range: torch.Tensor | None,
-        k_scale_cache: torch.Tensor | None = None,
-        v_scale_cache: torch.Tensor | None = None,
-        seq_threshold_3D: int | None = None,
-        num_par_softmax_segments: int | None = None,
-        softmax_segm_output: torch.Tensor | None = None,
-        softmax_segm_max: torch.Tensor | None = None,
-        softmax_segm_expsum: torch.Tensor | None = None,
-    ) -> None:
-        assert k_scale_cache is not None and v_scale_cache is not None
+    @staticmethod
+    def _rotate_q(q: torch.Tensor) -> torch.Tensor:
+        return single_rht(q)
 
-        # Q rotation: single RHT, scale absorbs the d factor.
-        q_orig_dtype = q.dtype
-        q = single_rht(q.float()).to(q_orig_dtype)
-        head_size = q.shape[2]
-        softmax_scale = softmax_scale / head_size
+    @staticmethod
+    def _unrotate_out(out: torch.Tensor, head_size: int) -> torch.Tensor:
+        return single_rht(out.float(), inverse=True) / head_size
 
-        _launch_packed_attn(
-            q=q,
-            k_cache=k_cache,
-            v_cache=v_cache,
-            out=out,
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k,
-            softmax_scale=softmax_scale,
-            window_size=window_size,
-            block_table=block_table,
-            softcap=softcap,
-            sinks=sinks,
-            alibi_slopes=alibi_slopes,
-            use_alibi_sqrt=use_alibi_sqrt,
-            qq_bias=qq_bias,
-            output_scale=output_scale,
-            mm_prefix_range=mm_prefix_range,
-            k_scale_cache=k_scale_cache,
-            v_scale_cache=v_scale_cache,
-            seq_threshold_3D=seq_threshold_3D,
-            num_par_softmax_segments=num_par_softmax_segments,
-            softmax_segm_output=softmax_segm_output,
-            softmax_segm_max=softmax_segm_max,
-            softmax_segm_expsum=softmax_segm_expsum,
-            packing_factor=self.packing_factor,
-        )
-
-        # Inverse RHT; divide by head_size to undo the forward RHT scale.
-        out_f = single_rht(out.float(), inverse=True) / head_size
-        out.copy_(out_f.to(q_orig_dtype))
+    @staticmethod
+    def _transform_softmax_scale(scale: float, head_size: int) -> float:
+        return scale / head_size
 
 
-class Int2PerTokenHeadBackend(QuantKVBackend):
+class Int2PerTokenHeadBackend(_PackedBackend):
     """KV cache backend for ``KVQuantMode.INT2_PER_TOKEN_HEAD``."""
 
     mode = KVQuantMode.INT2_PER_TOKEN_HEAD
     packing_factor = 4  # 4 × int2 per byte
-    needs_scale_caches = True
+    _reshape_kernel = _reshape_cache_int2_kernel
 
-    def reshape_and_cache(
-        self,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        *,
-        k_scale_cache: torch.Tensor | None = None,
-        v_scale_cache: torch.Tensor | None = None,
-    ) -> None:
-        assert k_scale_cache is not None and v_scale_cache is not None, (
-            "INT2 per-token-head requires k_scale_cache / v_scale_cache"
-        )
-        # Pre-rotation: full Hadamard (no random sign).
-        key = fast_hadamard_transform(key.float()).to(key.dtype)
-        value = fast_hadamard_transform(value.float()).to(value.dtype)
-        _run_reshape_kernel(
-            _reshape_cache_int2_kernel,
-            key=key,
-            value=value,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            k_scale_cache=k_scale_cache,
-            v_scale_cache=v_scale_cache,
-            slot_mapping=slot_mapping,
-            packing_factor=self.packing_factor,
-        )
+    # Full Hadamard (no random sign).  Its own inverse — so the output
+    # rotation is identical.  No softmax_scale adjustment: the ``d^1.5``
+    # factor is absorbed into the stored scale at write time.
+    @staticmethod
+    def _rotate_kv(x: torch.Tensor) -> torch.Tensor:
+        return fast_hadamard_transform(x)
 
-    def unified_attention(
-        self,
-        q: torch.Tensor,
-        k_cache: torch.Tensor,
-        v_cache: torch.Tensor,
-        out: torch.Tensor,
-        *,
-        cu_seqlens_q: torch.Tensor,
-        max_seqlen_q: int,
-        seqused_k: torch.Tensor,
-        max_seqlen_k: int,
-        softmax_scale: float,
-        window_size: tuple[int, int],
-        block_table: torch.Tensor,
-        softcap: float,
-        sinks: torch.Tensor | None,
-        alibi_slopes: torch.Tensor | None,
-        use_alibi_sqrt: bool,
-        qq_bias: torch.Tensor | None,
-        output_scale: torch.Tensor | None,
-        mm_prefix_range: torch.Tensor | None,
-        k_scale_cache: torch.Tensor | None = None,
-        v_scale_cache: torch.Tensor | None = None,
-        seq_threshold_3D: int | None = None,
-        num_par_softmax_segments: int | None = None,
-        softmax_segm_output: torch.Tensor | None = None,
-        softmax_segm_max: torch.Tensor | None = None,
-        softmax_segm_expsum: torch.Tensor | None = None,
-    ) -> None:
-        assert k_scale_cache is not None and v_scale_cache is not None
+    @staticmethod
+    def _rotate_q(q: torch.Tensor) -> torch.Tensor:
+        return fast_hadamard_transform(q)
 
-        # Q rotation: full Hadamard, no rescaling.
-        q_orig_dtype = q.dtype
-        q = fast_hadamard_transform(q.float()).to(q_orig_dtype)
-
-        _launch_packed_attn(
-            q=q,
-            k_cache=k_cache,
-            v_cache=v_cache,
-            out=out,
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_q=max_seqlen_q,
-            seqused_k=seqused_k,
-            softmax_scale=softmax_scale,
-            window_size=window_size,
-            block_table=block_table,
-            softcap=softcap,
-            sinks=sinks,
-            alibi_slopes=alibi_slopes,
-            use_alibi_sqrt=use_alibi_sqrt,
-            qq_bias=qq_bias,
-            output_scale=output_scale,
-            mm_prefix_range=mm_prefix_range,
-            k_scale_cache=k_scale_cache,
-            v_scale_cache=v_scale_cache,
-            seq_threshold_3D=seq_threshold_3D,
-            num_par_softmax_segments=num_par_softmax_segments,
-            softmax_segm_output=softmax_segm_output,
-            softmax_segm_max=softmax_segm_max,
-            softmax_segm_expsum=softmax_segm_expsum,
-            packing_factor=self.packing_factor,
-        )
-
-        # Inverse Hadamard on output.
-        out_f = fast_hadamard_transform(out.float())
-        out.copy_(out_f.to(q_orig_dtype))
+    @staticmethod
+    def _unrotate_out(out: torch.Tensor, head_size: int) -> torch.Tensor:
+        return fast_hadamard_transform(out.float())
 
 
 register(Int4PerTokenHeadBackend())

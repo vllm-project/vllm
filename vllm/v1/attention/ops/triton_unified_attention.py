@@ -15,51 +15,22 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_quant_kv._helpers import (
     apply_alibi_to_score,
+    apply_softcap,
+    cdiv_fn,
     compute_kv_seq_mask,
+    compute_tile_loop_bounds,
+    find_seq_idx,
+    init_softmax_M,
     load_qq_bias_tile,
+    resolve_seq_and_query_len,
     softmax_step,
+    store_segm_reduce_scalars,
 )
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
-
-
-@triton.jit
-def cdiv_fn(x, y):
-    return (x + y - 1) // y
-
-
-@triton.jit
-def apply_softcap(S, x):
-    Sdiv = S / x
-    p1 = tl.exp(Sdiv)
-    p2 = tl.exp(-Sdiv)
-    return x * (p1 - p2) / (p1 + p2)
-
-
-@triton.jit
-def find_seq_idx(
-    query_start_len_ptr,
-    target_idx,
-    num_seqs,
-    BLOCK_Q: tl.constexpr,
-    use_q_block_mode: tl.constexpr,
-):
-    left: tl.int32 = 0
-    right = num_seqs
-    while left < right:
-        mid = (left + right) // 2
-        val = tl.load(query_start_len_ptr + mid)
-        mid_val = val // BLOCK_Q + mid if use_q_block_mode else val
-
-        if mid_val <= target_idx:
-            left = mid + 1
-        else:
-            right = mid
-
-    return left - 1
 
 
 @triton.jit
@@ -173,30 +144,27 @@ def kernel_unified_attention(
 
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
-    if IS_3D:
-        segm_idx = tl.program_id(2)
+    segm_idx = tl.program_id(2) if IS_3D else 0
 
-    seq_idx = find_seq_idx(
-        query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
+    (
+        seq_idx,
+        q_block_local_idx,
+        cur_batch_in_all_start_index,
+        cur_batch_query_len,
+        seq_len,
+    ) = resolve_seq_and_query_len(
+        query_start_len_ptr, seq_lens_ptr, q_block_global_idx, num_seqs, BLOCK_Q
     )
-
-    q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
-    q_block_local_idx = q_block_global_idx - q_block_start_idx
-
-    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
-    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
 
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
-
-    # sequence len for this particular sequence
-    seq_len = tl.load(seq_lens_ptr + seq_idx)
 
     if IS_3D:
         tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
         if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
             return
+    else:
+        tiles_per_segment = 0
 
     offs_m = tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, HEAD_SIZE_PADDED)
@@ -224,25 +192,12 @@ def kernel_unified_attention(
 
     block_table_offset = seq_idx * block_table_stride
 
-    # Sinks: 2D loads unconditionally; 3D only loads on segment 0 because
-    # ``reduce_segments`` adds the sink contribution exactly once.
-    if USE_SINKS:
-        load_sinks = (not IS_3D) or (segm_idx == 0)
-        if load_sinks:
-            M = tl.load(
-                sink_ptr + query_offset_1,
-                mask=query_mask_1,
-                other=float("-inf"),
-            ).to(dtype=tl.float32)
-        else:
-            M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
-    else:
-        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
-
+    M = init_softmax_M(
+        sink_ptr, query_offset_1, query_mask_1, segm_idx, BLOCK_M, USE_SINKS, IS_3D
+    )
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, HEAD_SIZE_PADDED], dtype=tl.float32)
 
-    # context length for this particular sequences
     context_len = seq_len - cur_batch_query_len
 
     if USE_ALIBI_SLOPES:
@@ -253,45 +208,21 @@ def kernel_unified_attention(
     if USE_QQ_BIAS:
         qq_bias_row_ptrs = qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
 
-    # Length of the longest sequence prefix spanned by any query token in
-    # the current q_block.
-    max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
+    loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
+        context_len,
+        seq_len,
+        cur_batch_query_len,
+        q_block_local_idx,
+        segm_idx,
+        tiles_per_segment,
+        TILE_SIZE,
+        BLOCK_M,
+        BLOCK_Q,
+        num_queries_per_kv,
+        SLIDING_WINDOW,
+        USE_MM_PREFIX,
+        IS_3D,
     )
-    if USE_MM_PREFIX:
-        # Image bidirectional ranges may extend past the q_block; ensure
-        # the doc mask sees the full sequence.
-        max_seq_prefix_len = tl.maximum(max_seq_prefix_len, seq_len)
-    else:
-        max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
-
-    num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
-
-    # ---- Sliding-window tile pruning --------------------------------------
-    tile_start = 0
-    tile_end = num_tiles
-    # TODO(Isotr0py): sliding window pruning with image bidirectional mask
-    if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
-        qpos_lo = q_block_local_idx * BLOCK_Q
-        qpos_hi = tl.minimum(
-            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
-            cur_batch_query_len - 1,
-        )
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
-        last_allowed_key = context_len + qpos_hi
-        tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
-        tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
-
-    # 3D scopes the loop to one segment's slice of the tile range.
-    if IS_3D:
-        loop_lo = max(segm_idx * tiles_per_segment, tile_start)
-        loop_hi = min((segm_idx + 1) * tiles_per_segment, tile_end)
-    else:
-        loop_lo = tile_start
-        loop_hi = tile_end
 
     for j in range(loop_lo, loop_hi):
         seq_offset = j * TILE_SIZE + offs_t
@@ -413,13 +344,19 @@ def kernel_unified_attention(
             acc,
             mask=dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None],
         )
-        segm_offset = (
-            query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
-            + query_offset_1 * NUM_SEGMENTS_PER_SEQ
-            + segm_idx
+        store_segm_reduce_scalars(
+            segm_max_ptr,
+            segm_expsum_ptr,
+            query_offset_0,
+            query_offset_1,
+            segm_idx,
+            M,
+            L,
+            query_mask_0,
+            query_mask_1,
+            num_query_heads,
+            NUM_SEGMENTS_PER_SEQ,
         )
-        tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
-        tl.store(segm_expsum_ptr + segm_offset, L, mask=query_mask_0 & query_mask_1)
     else:
         acc = acc / L[:, None]
         if USE_FP8:
