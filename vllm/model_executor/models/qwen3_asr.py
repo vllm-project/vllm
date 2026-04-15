@@ -22,6 +22,7 @@
 # limitations under the License.
 """Inference-only Qwen3-ASR model."""
 
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal
 
@@ -90,6 +91,15 @@ from vllm.transformers_utils.processors.qwen3_asr import (
 
 logger = init_logger(__name__)
 _ASR_TEXT_TAG = "<asr_text>"
+# User-supplied `prompt` / `response_prefix` must not inject extra ChatML turns.
+_CHATML_LIKE_TOKEN = re.compile(r"<\|[^|]+\|>")
+
+
+def _sanitize_transcription_user_text(text: str) -> str:
+    """Strip ChatML-style special tokens from user-controlled transcription fields."""
+    if not text:
+        return ""
+    return _CHATML_LIKE_TOKEN.sub("", text).replace(_ASR_TEXT_TAG, "")
 
 
 def _get_feat_extract_output_lengths(input_lengths: torch.Tensor):
@@ -577,7 +587,7 @@ class Qwen3ASRForConditionalGeneration(
                 "Supported task types are 'transcribe' and 'translate'."
             )
 
-        context = request_prompt or ""
+        context = _sanitize_transcription_user_text(request_prompt)
 
         prompt = (
             f"<|im_start|>system\n{context}<|im_end|>\n"
