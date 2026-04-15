@@ -410,6 +410,15 @@ class HfRunner:
             model_name,
             trust_remote_code=trust_remote_code,
         )
+        # HF runner should use the HF config so that it's consistent with the HF model
+        if self.config.__module__.startswith("vllm.transformers_utils.configs"):
+            from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+            del CONFIG_MAPPING._extra_content[self.config.model_type]
+            self.config = AutoConfig.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
         self.device = self.get_default_device()
         self.dtype = dtype = _get_and_verify_dtype(
             self.model_name,

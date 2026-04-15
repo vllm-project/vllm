@@ -75,6 +75,10 @@ def test_rerank_models_mteb(vllm_runner, model_info: RerankModelInfo) -> None:
     mteb_test_rerank_models(vllm_runner, model_info)
 
 
+@pytest.mark.skip(
+    reason="jinaai/jina-embeddings-v3 custom XLMRobertaLoRA model on HF hub "
+    "is incompatible with transformers v5 (missing all_tied_weights_keys)"
+)
 @pytest.mark.parametrize("model_info", EMBEDDING_MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("dimensions", [16, 32])
