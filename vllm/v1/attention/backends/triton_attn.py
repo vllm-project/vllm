@@ -32,10 +32,6 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
-
-_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
-if _HAS_FLASH_ATTN:
-    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
@@ -46,6 +42,11 @@ from vllm.v1.kv_cache_interface import (
     get_kv_quant_mode,
     kv_cache_uses_per_token_head_scales,
 )
+
+if is_flash_attn_varlen_func_available():
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+
+_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 
 logger = init_logger(__name__)
 
