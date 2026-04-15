@@ -115,7 +115,6 @@ class EngineCoreRequest(
 
     reasoning_ended: bool | None = None
 
-    thinking: bool = False
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

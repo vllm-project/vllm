@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
-from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
 
 __all__ = [
     "ReasoningParser",
     "ReasoningParserManager",
-    "DeepSeekV3ReasoningParser",
 ]
 """
 Register a lazy module mapping.

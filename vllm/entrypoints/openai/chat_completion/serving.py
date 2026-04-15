@@ -321,7 +321,6 @@ class OpenAIServingChat(OpenAIServing):
                     priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=reasoning_ended,
-                    thinking=self._request_use_thinking(request),
                 )
 
             generators.append(generator)
@@ -356,15 +355,6 @@ class OpenAIServingChat(OpenAIServing):
         if request.add_generation_prompt:
             return self.response_role
         return request.messages[-1]["role"]
-    
-    def _request_use_thinking(self, request: ChatCompletionRequest) -> bool:
-        chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-            request.chat_template_kwargs,
-            self.default_chat_template_kwargs,
-        )
-        return bool(chat_template_kwargs.get("thinking", False)) or bool(
-            chat_template_kwargs.get("enable_thinking", False)
-        )
 
     @staticmethod
     def _bracket_level(s: str, opening="{", closing="}") -> int:

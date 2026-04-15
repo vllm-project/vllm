@@ -180,7 +180,6 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     priority=request.priority if hasattr(request, "priority") else 0,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=None,
-                    thinking=self._request_use_thinking(single_request),
                 )
             )
 

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.reasoning import ReasoningParserManager, DeepSeekV3ReasoningParser
+from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
 from vllm.v1.structured_output.backend_guidance import GuidanceBackend
@@ -328,7 +328,6 @@ class StructuredOutputManager:
         start = (
             delta_from if delta_from >= 0 else max(len(all_token_ids) + delta_from, 0)
         )
-        self.update_reasoner_for_request(request)
         if self.reasoner.is_reasoning_end_streaming(
             all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
@@ -337,10 +336,6 @@ class StructuredOutputManager:
             structured_req.reasoning_ended = True
 
         return False
-    
-    def update_reasoner_for_request(self, request: "Request") -> None:
-        if isinstance(self.reasoner, DeepSeekV3ReasoningParser):
-            self.reasoner.select_parser(request.thinking)
 
     def clear_backend(self) -> None:
         if self.backend is not None:
