@@ -184,6 +184,20 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_deepgemm_moe.py
     - pytest -v -s kernels/moe/test_deepep_moe.py
 
+- label: Kernels FusedMoE DP+EP Test (2 B200s)
+  timeout_in_minutes: 30
+  device: b200
+  num_devices: 2
+  optional: true
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutedsl_batched_moe.py
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/deepep_ll.py
+  - vllm/model_executor/layers/fused_moe/prepare_finalize/deepep_ht.py
+  - tests/kernels/moe/test_fused_moe_ep_dp.py
+  commands:
+    - pytest -v -s tests/kernels/moe/test_fused_moe_ep_dp.py
+
 - label: Kernels Fp4 MoE Test (B200)
   timeout_in_minutes: 60
   device: b200
