@@ -1361,9 +1361,8 @@ class OpenAIServingChat(OpenAIServing):
                     tool_calls
                 )
                 if tool_call_items:
-                    auto_tools_called = not isinstance(
-                        request.tool_choice,
-                        ChatCompletionNamedToolChoiceParam,
+                    auto_tools_called = (
+                        request.tool_choice is None or request.tool_choice == "auto"
                     )
                 message = ChatMessage(
                     role=role,
