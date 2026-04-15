@@ -147,8 +147,14 @@ class PyNcclCommunicator:
 
     def destroy(self):
         if self.available and not self.disabled:
-            with torch.accelerator.device_index(self.device.index):
-                self.nccl.ncclCommDestroy(self.comm)
+            # Note: we intentionally do not call ncclCommDestroy here.
+            # ncclCommDestroy is a blocking collective that requires all
+            # ranks to participate. During uncoordinated shutdown, peer
+            # ranks may already be gone, causing ncclCommDestroy to hang
+            # indefinitely and orphan GPU worker processes. The OS reclaims
+            # NCCL resources when the process exits, so explicitly destruction
+            # is unnecessary.
+            self.comm = None
             self.available = False
             self.disabled = True
 
