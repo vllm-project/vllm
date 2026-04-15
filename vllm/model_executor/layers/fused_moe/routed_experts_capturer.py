@@ -187,8 +187,10 @@ class RoutedExpertsManager:
         num_experts = get_num_experts(hf_config)
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
         dtype = np.uint8 if num_experts <= 256 else np.int32
-        num_groups = len(kv_cache_config.kv_cache_groups)
-        max_num_slots = (kv_cache_config.num_blocks // num_groups) * self.block_size
+        # Use the full block pool size: block IDs span [0, num_blocks)
+        # regardless of how many kv_cache_groups exist, because all groups
+        # share the same physical block pool.
+        max_num_slots = kv_cache_config.num_blocks * self.block_size
         self.routed_experts_by_slot = np.zeros(
             (
                 max_num_slots,
