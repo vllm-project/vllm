@@ -5,7 +5,7 @@ from collections.abc import Callable, Iterable
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig, DeepseekV2Config
+from transformers import DeepseekV2Config, PretrainedConfig
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
@@ -13,11 +13,11 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
-    VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
@@ -27,7 +27,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import (
-    DeepseekV2DecoderLayer,
     DeepseekV2MLAAttention,
     DeepseekV2MLP,
     get_spec_layer_idx_from_weight_name,
@@ -119,7 +118,7 @@ class JoyAILLMFlashMTPDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states.clone()
@@ -139,10 +138,6 @@ class JoyAILLMFlashMTPDecoderLayer(nn.Module):
             # We scale both hidden_states and residual before
             # rmsnorm, and rmsnorm result would not affect by scale.
             hidden_states *= 1.0 / self.routed_scaling_factor
-            if self.layer_idx == 0:
-                # The residual is shared by all layers, we only scale it on
-                # first layer.
-                residual *= 1.0 / self.routed_scaling_factor
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
@@ -169,7 +164,13 @@ class JoyAILLMFlashMultiTokenPredictorLayer(nn.Module):
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2,
+            config.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.eh_proj",
+        )
 
         self.device = current_platform.device_type
 
@@ -196,7 +197,7 @@ class JoyAILLMFlashMultiTokenPredictorLayer(nn.Module):
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
-        hidden_states = self.eh_proj(
+        hidden_states, _ = self.eh_proj(
             torch.cat([inputs_embeds, previous_hidden_states], dim=-1)
         )
 
@@ -225,11 +226,6 @@ class JoyAILLMFlashMultiTokenPredictor(nn.Module):
                     self.mtp_start_layer_idx + self.num_mtp_layers,
                 )
             }
-        )
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -328,12 +324,6 @@ class JoyAILLMFlashMTP(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            if "embed_tokens" in name:
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-                continue
             if "rotary_emb.inv_freq" in name:
                 continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
@@ -519,20 +509,16 @@ class JoyAILLMFlashMTP(nn.Module):
         and rename shared layer weights to be top level.
         """
         spec_layer_weight_names = [
-            "embed_tokens",
             "enorm",
             "hnorm",
             "eh_proj",
             "shared_head",
         ]
-        shared_weight_names = ["embed_tokens"]
         spec_layer_weight = False
         shared_weight = False
         for weight_name in spec_layer_weight_names:
             if weight_name in name:
                 spec_layer_weight = True
-                if weight_name in shared_weight_names:
-                    shared_weight = True
                 break
         if not spec_layer_weight:
             # treat rest weights as weights for transformer layer block
