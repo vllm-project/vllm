@@ -72,9 +72,8 @@ impl DelimitedReasoningParser {
 
         let partial_suffix_len = self.partial_suffix_len(&self.buffer);
         let stable_len = self.buffer.len() - partial_suffix_len;
-        let stable_text = self.buffer[..stable_len].to_string();
-        let pending_suffix = self.buffer[stable_len..].to_string();
-        self.buffer = pending_suffix;
+        let pending_suffix = self.buffer.split_off(stable_len);
+        let stable_text = std::mem::replace(&mut self.buffer, pending_suffix);
 
         self.parse_stable_text(&stable_text)
     }

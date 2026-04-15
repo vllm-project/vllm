@@ -17,11 +17,11 @@
 mod cohere_cmd;
 mod deepseek_r1;
 mod delimited;
+mod gemma4;
 mod kimi;
 mod qwen3;
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use thiserror::Error;
 use vllm_text::tokenizers::Tokenizer;
@@ -29,14 +29,17 @@ use vllm_text::tokenizers::Tokenizer;
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
 pub(crate) use self::delimited::DelimitedReasoningParser;
+pub use self::gemma4::Gemma4ReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
+use crate::request::ChatRequest;
 
 /// Canonical public names for registered reasoning parsers.
 pub mod names {
     pub const COHERE_CMD: &str = "cohere_cmd";
     pub const DEEPSEEK_R1: &str = "deepseek_r1";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
+    pub const GEMMA4: &str = "gemma4";
     pub const GLM45: &str = "glm45";
     pub const KIMI: &str = "kimi";
     pub const KIMI_K2: &str = "kimi_k2";
@@ -112,6 +115,14 @@ pub trait ReasoningParser: Send {
         Ok(())
     }
 
+    /// Adjust request-level settings before rendering and decoding start.
+    ///
+    /// Parsers may use this hook to request decode behavior that matches their
+    /// output protocol, such as retaining special tokens in streamed text.
+    fn adjust_request(&self, _request: &mut ChatRequest) -> Result<()> {
+        Ok(())
+    }
+
     /// Feed one decoded text delta into the parser.
     fn push(&mut self, delta: &str) -> Result<ReasoningDelta>;
 
@@ -148,7 +159,7 @@ fn available_parser_hint(available_names: &[String]) -> String {
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
-type ParserCreator = Arc<dyn Fn(&dyn Tokenizer) -> Result<Box<dyn ReasoningParser>> + Send + Sync>;
+type ParserCreator = fn(&dyn Tokenizer) -> Result<Box<dyn ReasoningParser>>;
 
 /// Registry and model matcher for reasoning stream parsers.
 #[derive(Clone, Default)]
@@ -166,6 +177,7 @@ impl ReasoningParserFactory {
             .register_parser::<CohereCmdReasoningParser>(names::COHERE_CMD)
             .register_parser::<DeepSeekR1ReasoningParser>(names::DEEPSEEK_R1)
             .register_parser::<DeepSeekV3ReasoningParser>(names::DEEPSEEK_V3)
+            .register_parser::<Gemma4ReasoningParser>(names::GEMMA4)
             .register_parser::<Glm45ReasoningParser>(names::GLM45)
             .register_parser::<KimiReasoningParser>(names::KIMI)
             .register_parser::<KimiK2ReasoningParser>(names::KIMI_K2)
@@ -177,6 +189,8 @@ impl ReasoningParserFactory {
         factory
             .register_pattern("deepseek-r1", names::DEEPSEEK_R1)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
+            .register_pattern("gemma-4", names::GEMMA4)
+            .register_pattern("gemma4", names::GEMMA4)
             .register_pattern("qwen", names::QWEN3)
             .register_pattern("glm45", names::GLM45)
             .register_pattern("glm47", names::GLM45)
@@ -198,14 +212,14 @@ impl ReasoningParserFactory {
     where
         T: ReasoningParser + 'static,
     {
-        self.creators.insert(name.to_string(), Arc::new(T::create));
+        self.creators.insert(name.to_string(), T::create);
         self
     }
 
     /// Add a case-insensitive substring match from model ID to parser name.
     pub fn register_pattern(&mut self, pattern: &str, parser_name: &str) -> &mut Self {
         self.patterns
-            .push((pattern.to_string(), parser_name.to_string()));
+            .push((pattern.to_lowercase(), parser_name.to_string()));
         self
     }
 
@@ -214,7 +228,7 @@ impl ReasoningParserFactory {
         let model_lower = model_id.to_lowercase();
         self.patterns
             .iter()
-            .find(|(pattern, _)| model_lower.contains(&pattern.to_lowercase()))
+            .find(|(pattern, _)| model_lower.contains(pattern))
             .map(|(_, parser_name)| parser_name.clone())
     }
 

@@ -27,6 +27,7 @@ pub use request::{
     ChatToolChoice, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
+use thiserror_ext::AsReport;
 use tracing::info;
 pub use vllm_llm::FinishReason;
 
@@ -151,11 +152,11 @@ impl ChatLlm {
     }
 
     /// Render, tokenize, and submit one chat request.
-    pub async fn chat(&self, request: ChatRequest) -> Result<ChatEventStream> {
+    pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
 
+        let output_processors = self.prepare_output_processors(&mut request)?;
         let rendered = self.backend.chat_renderer().render(&request)?;
-        let output_processors = self.prepare_output_processors(&request)?;
 
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
@@ -187,7 +188,10 @@ impl ChatLlm {
 }
 
 impl ChatLlm {
-    fn prepare_output_processors(&self, request: &ChatRequest) -> Result<output::OutputProcessors> {
+    fn prepare_output_processors(
+        &self,
+        request: &mut ChatRequest,
+    ) -> Result<output::OutputProcessors> {
         let tool_parsing_enabled =
             matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
         let tool_parser = if tool_parsing_enabled {
@@ -200,7 +204,7 @@ impl ChatLlm {
         } else {
             Vec::new()
         };
-        let reasoning_parser = self.resolve_reasoning_parser()?;
+        let reasoning_parser = self.resolve_reasoning_parser(request)?;
 
         Ok(output::OutputProcessors {
             reasoning_parser,
@@ -235,7 +239,10 @@ impl ChatLlm {
         Ok(Some(parser))
     }
 
-    fn resolve_reasoning_parser(&self) -> Result<Option<Box<dyn ReasoningParser>>> {
+    fn resolve_reasoning_parser(
+        &self,
+        request: &mut ChatRequest,
+    ) -> Result<Option<Box<dyn ReasoningParser>>> {
         let parser_name = match &self.reasoning_parser {
             ParserSelection::Auto => self
                 .reasoning_parser_factory
@@ -266,7 +273,14 @@ impl ChatLlm {
             .create(&parser_name, &*self.text.tokenizer())
             .map_err(|error| Error::ReasoningParserInitialization {
                 name: parser_name.clone(),
-                message: error.to_string(),
+                message: error.to_report_string(),
+            })?;
+
+        parser
+            .adjust_request(request)
+            .map_err(|error| Error::ReasoningParserInitialization {
+                name: parser_name,
+                message: error.to_report_string(),
             })?;
 
         Ok(Some(parser))
@@ -315,6 +329,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, step3)"].assert_eq(&error.to_report_string());
     }
 }
