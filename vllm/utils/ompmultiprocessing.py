@@ -36,6 +36,9 @@ class OMPProcessManager:
         self.simulate_multi_node = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
         ld_preload_str = os.getenv("LD_PRELOAD", "")
         self.use_iomp = "libiomp" in ld_preload_str or "libomp5" in ld_preload_str
+        self.use_gomp = "libgomp" in ld_preload_str
+
+        assert not (self.use_iomp and self.use_gomp)
 
         # at least reserve 1 core for scheduler proc as always use
         # MP executor
@@ -83,14 +86,17 @@ class OMPProcessManager:
             envs_dict["KMP_FORKJOIN_BARRIER_PATTERN"] = "dist,dist"
             envs_dict["KMP_PLAIN_BARRIER_PATTERN"] = "dist,dist"
             envs_dict["KMP_REDUCTION_BARRIER_PATTERN"] = "dist,dist"
+        elif self.use_gomp:
+            # set GOMP envs
+            # likes '0 1 2 ...'
+            cpu_list_str = " ".join(cpu_list)
+            envs_dict["GOMP_CPU_AFFINITY"] = cpu_list_str
         else:
             # set OMP envs
-            # likes '{0,1,2,...},{1},{2},...', to avoid unexpected warnings
-            # because there are 2 distinct gomp loaded by torch and scikit-learn
-            cpu_list[0] = f"{','.join(cpu_list)}"
-            cpu_list = [f"{{{i}}}" for i in cpu_list]
+            # likes '{0,1,2,...}'
             cpu_list_str = ",".join(cpu_list)
-            envs_dict["OMP_PLACES"] = cpu_list_str
+            envs_dict["OMP_PLACES"] = f"{{{cpu_list_str}}}"
+            envs_dict["OMP_PROC_BIND"] = "true"
 
         # backup envs
         old_envs_dict = {}
