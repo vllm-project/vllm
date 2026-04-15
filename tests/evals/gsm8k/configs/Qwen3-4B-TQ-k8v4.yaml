@@ -1,0 +1,5 @@
+model_name: "Qwen/Qwen3-4B"
+accuracy_threshold: 0.80
+num_questions: 1319
+num_fewshot: 5
+server_args: "--kv-cache-dtype turboquant_k8v4 --enforce-eager --max-model-len 4096"
