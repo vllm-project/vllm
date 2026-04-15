@@ -416,6 +416,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "MiniMaxAI/MiniMax-M2",
         trust_remote_code=True,
     ),
+    "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
@@ -645,6 +646,7 @@ _LATE_INTERACTION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["ColBERTLfm2Model"]},
     ),
+    "JinaForRanking": _HfExamplesInfo("jinaai/jina-reranker-v3"),
     # [Multimodal]
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",

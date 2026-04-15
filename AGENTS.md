@@ -72,11 +72,11 @@ uv pip install -e . --torch-backend=auto
 
 ```bash
 # Install test dependencies.
-# requirements/test.txt is pinned to x86_64; on other platforms, use the
+# requirements/test/cuda.txt is pinned to x86_64; on other platforms, use the
 # unpinned source file instead:
-uv pip install -r requirements/test.in    # resolves for current platform
+uv pip install -r requirements/test/cuda.in    # resolves for current platform
 # Or on x86_64:
-uv pip install -r requirements/test.txt
+uv pip install -r requirements/test/cuda.txt
 
 # Run a specific test file (use .venv/bin/python directly;
 # `source activate` does not persist in non-interactive shells):

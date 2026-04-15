@@ -160,6 +160,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
+    "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
@@ -273,6 +274,7 @@ _LATE_INTERACTION_MODELS = {
     "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
     "ColBERTLfm2Model": ("colbert", "ColBERTLfm2Model"),
+    "JinaForRanking": ("jina", "JinaForRanking"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
