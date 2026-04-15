@@ -33,6 +33,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Model types whose hub tokenizer_class is incorrect and should be overridden with
+# TokenizersBackend (the generic fast tokenizer). Adding a model type here is always a
+# temporary workaround and better long term solutions are:
+# - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
+# - Fix tokenizer_class on the hub for the affected models (best)
+_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
+
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
@@ -209,14 +216,26 @@ def get_tokenizer(
     # tokenizer_cls_.from_pretrained will call AutoConfig.from_pretrained internally.
     # This may fail for paths that don't have a model config (e.g. LoRA adapters),
     # which is fine — those don't need custom config registration.
+    config = None
     with contextlib.suppress(ValueError, OSError):
-        get_config(
+        config = get_config(
             tokenizer_name,
             trust_remote_code=trust_remote_code,
             revision=revision,
         )
 
-    if tokenizer_cls == TokenizerLike:
+    # Some models have an incorrect tokenizer_class on the hub.
+    # For these model types, bypass AutoTokenizer and use TokenizersBackend directly.
+    model_type = getattr(config, "model_type", None) if config else None
+    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+        from transformers.tokenization_utils_tokenizers import TokenizersBackend
+
+        logger.debug(
+            "Overriding tokenizer_class to TokenizersBackend for model_type=%r",
+            model_type,
+        )
+        tokenizer_cls_ = TokenizersBackend
+    elif tokenizer_cls == TokenizerLike:
         tokenizer_cls_ = TokenizerRegistry.load_tokenizer_cls(tokenizer_mode)
     else:
         tokenizer_cls_ = tokenizer_cls
