@@ -24,6 +24,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_quant_kv import register
 from vllm.v1.attention.ops.triton_quant_kv._hadamard import single_rht
+from vllm.v1.attention.ops.triton_quant_kv._packed import (
+    pack_int4_nibbles,
+    unpack_int4_nibbles,
+)
 from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVBackend
 from vllm.v1.attention.ops.triton_unified_attention import (
     apply_softcap,
@@ -148,9 +152,7 @@ def _reshape_cache_int4_kernel(
         k_scale_packed,
     )
 
-    k_even_u = k_even_q.to(tl.uint8)
-    k_odd_u = k_odd_q.to(tl.uint8)
-    k_packed = (k_even_u & 0xF) | ((k_odd_u & 0xF) << 4)
+    k_packed = pack_int4_nibbles(k_even_q.to(tl.uint8), k_odd_q.to(tl.uint8))
     tl.store(
         key_cache_ptr
         + blk * stride_kc_blk
@@ -225,9 +227,7 @@ def _reshape_cache_int4_kernel(
         v_scale_packed,
     )
 
-    v_even_u = v_even_q.to(tl.uint8)
-    v_odd_u = v_odd_q.to(tl.uint8)
-    v_packed = (v_even_u & 0xF) | ((v_odd_u & 0xF) << 4)
+    v_packed = pack_int4_nibbles(v_even_q.to(tl.uint8), v_odd_q.to(tl.uint8))
     tl.store(
         value_cache_ptr
         + blk * stride_vc_blk
@@ -425,8 +425,9 @@ def _attn_int4_2d(
             mask=half_dim_mask[:, None] & tile_mask[None, :],
             other=0,
         )
-        K_lo = (K_packed & 0xF).to(Q_even.dtype)
-        K_hi = ((K_packed >> 4) & 0xF).to(Q_odd.dtype)
+        K_lo_u, K_hi_u = unpack_int4_nibbles(K_packed)
+        K_lo = K_lo_u.to(Q_even.dtype)
+        K_hi = K_hi_u.to(Q_odd.dtype)
 
         v_off = (
             physical_block_idx[:, None] * stride_v_cache_0
@@ -439,8 +440,9 @@ def _attn_int4_2d(
             mask=half_dim_mask[None, :] & tile_mask[:, None],
             other=0,
         )
-        V_lo = (V_packed & 0xF).to(Q_even.dtype)
-        V_hi = ((V_packed >> 4) & 0xF).to(Q_odd.dtype)
+        V_lo_u, V_hi_u = unpack_int4_nibbles(V_packed)
+        V_lo = V_lo_u.to(Q_even.dtype)
+        V_hi = V_hi_u.to(Q_odd.dtype)
 
         ks_idx = (
             physical_block_idx * stride_ks_blk
@@ -761,8 +763,9 @@ def _attn_int4_3d(
             mask=half_dim_mask[:, None] & tile_mask[None, :],
             other=0,
         )
-        K_lo = (K_packed & 0xF).to(Q_even.dtype)
-        K_hi = ((K_packed >> 4) & 0xF).to(Q_odd.dtype)
+        K_lo_u, K_hi_u = unpack_int4_nibbles(K_packed)
+        K_lo = K_lo_u.to(Q_even.dtype)
+        K_hi = K_hi_u.to(Q_odd.dtype)
 
         v_off = (
             physical_block_idx[:, None] * stride_v_cache_0
@@ -775,8 +778,9 @@ def _attn_int4_3d(
             mask=half_dim_mask[None, :] & tile_mask[:, None],
             other=0,
         )
-        V_lo = (V_packed & 0xF).to(Q_even.dtype)
-        V_hi = ((V_packed >> 4) & 0xF).to(Q_odd.dtype)
+        V_lo_u, V_hi_u = unpack_int4_nibbles(V_packed)
+        V_lo = V_lo_u.to(Q_even.dtype)
+        V_hi = V_hi_u.to(Q_odd.dtype)
 
         ks_idx = (
             physical_block_idx * stride_ks_blk

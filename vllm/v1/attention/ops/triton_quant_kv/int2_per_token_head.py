@@ -27,6 +27,10 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_quant_kv import register
 from vllm.v1.attention.ops.triton_quant_kv._hadamard import fast_hadamard_transform
+from vllm.v1.attention.ops.triton_quant_kv._packed import (
+    pack_int2_quartet,
+    unpack_int2_quartet,
+)
 from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVBackend
 from vllm.v1.attention.ops.triton_unified_attention import (
     apply_softcap,
@@ -150,7 +154,7 @@ def _reshape_cache_int2_kernel(
     q2 = _lloyd_max_quantize_4(k2_z)
     q3 = _lloyd_max_quantize_4(k3_z)
 
-    k_packed = (q0 & 0x3) | ((q1 & 0x3) << 2) | ((q2 & 0x3) << 4) | ((q3 & 0x3) << 6)
+    k_packed = pack_int2_quartet(q0, q1, q2, q3)
     tl.store(
         key_cache_ptr
         + blk * stride_kc_blk
@@ -202,9 +206,7 @@ def _reshape_cache_int2_kernel(
     vq2 = _lloyd_max_quantize_4(v2_z)
     vq3 = _lloyd_max_quantize_4(v3_z)
 
-    v_packed = (
-        (vq0 & 0x3) | ((vq1 & 0x3) << 2) | ((vq2 & 0x3) << 4) | ((vq3 & 0x3) << 6)
-    )
+    v_packed = pack_int2_quartet(vq0, vq1, vq2, vq3)
     tl.store(
         value_cache_ptr
         + blk * stride_vc_blk
@@ -426,10 +428,11 @@ def _attn_int2_2d(
             mask=qtr_dim_mask[:, None] & tile_mask[None, :],
             other=0,
         )
-        KC0 = _lloyd_max_dequant_4(K_pk & 0x3).to(tl.float32)
-        KC1 = _lloyd_max_dequant_4((K_pk >> 2) & 0x3).to(tl.float32)
-        KC2 = _lloyd_max_dequant_4((K_pk >> 4) & 0x3).to(tl.float32)
-        KC3 = _lloyd_max_dequant_4((K_pk >> 6) & 0x3).to(tl.float32)
+        kc0_u, kc1_u, kc2_u, kc3_u = unpack_int2_quartet(K_pk)
+        KC0 = _lloyd_max_dequant_4(kc0_u).to(tl.float32)
+        KC1 = _lloyd_max_dequant_4(kc1_u).to(tl.float32)
+        KC2 = _lloyd_max_dequant_4(kc2_u).to(tl.float32)
+        KC3 = _lloyd_max_dequant_4(kc3_u).to(tl.float32)
         v_off = (
             physical_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_2
@@ -441,10 +444,11 @@ def _attn_int2_2d(
             mask=qtr_dim_mask[None, :] & tile_mask[:, None],
             other=0,
         )
-        VC0 = _lloyd_max_dequant_4(V_pk & 0x3).to(tl.float32)
-        VC1 = _lloyd_max_dequant_4((V_pk >> 2) & 0x3).to(tl.float32)
-        VC2 = _lloyd_max_dequant_4((V_pk >> 4) & 0x3).to(tl.float32)
-        VC3 = _lloyd_max_dequant_4((V_pk >> 6) & 0x3).to(tl.float32)
+        vc0_u, vc1_u, vc2_u, vc3_u = unpack_int2_quartet(V_pk)
+        VC0 = _lloyd_max_dequant_4(vc0_u).to(tl.float32)
+        VC1 = _lloyd_max_dequant_4(vc1_u).to(tl.float32)
+        VC2 = _lloyd_max_dequant_4(vc2_u).to(tl.float32)
+        VC3 = _lloyd_max_dequant_4(vc3_u).to(tl.float32)
 
         ks_idx = (
             physical_block_idx * stride_ks_blk
@@ -797,10 +801,11 @@ def _attn_int2_3d(
             mask=qtr_dim_mask[:, None] & tile_mask[None, :],
             other=0,
         )
-        KC0 = _lloyd_max_dequant_4(K_pk & 0x3).to(tl.float32)
-        KC1 = _lloyd_max_dequant_4((K_pk >> 2) & 0x3).to(tl.float32)
-        KC2 = _lloyd_max_dequant_4((K_pk >> 4) & 0x3).to(tl.float32)
-        KC3 = _lloyd_max_dequant_4((K_pk >> 6) & 0x3).to(tl.float32)
+        kc0_u, kc1_u, kc2_u, kc3_u = unpack_int2_quartet(K_pk)
+        KC0 = _lloyd_max_dequant_4(kc0_u).to(tl.float32)
+        KC1 = _lloyd_max_dequant_4(kc1_u).to(tl.float32)
+        KC2 = _lloyd_max_dequant_4(kc2_u).to(tl.float32)
+        KC3 = _lloyd_max_dequant_4(kc3_u).to(tl.float32)
         v_off = (
             physical_block_idx[:, None] * stride_v_cache_0
             + kv_head_idx * stride_v_cache_2
@@ -812,10 +817,11 @@ def _attn_int2_3d(
             mask=qtr_dim_mask[None, :] & tile_mask[:, None],
             other=0,
         )
-        VC0 = _lloyd_max_dequant_4(V_pk & 0x3).to(tl.float32)
-        VC1 = _lloyd_max_dequant_4((V_pk >> 2) & 0x3).to(tl.float32)
-        VC2 = _lloyd_max_dequant_4((V_pk >> 4) & 0x3).to(tl.float32)
-        VC3 = _lloyd_max_dequant_4((V_pk >> 6) & 0x3).to(tl.float32)
+        vc0_u, vc1_u, vc2_u, vc3_u = unpack_int2_quartet(V_pk)
+        VC0 = _lloyd_max_dequant_4(vc0_u).to(tl.float32)
+        VC1 = _lloyd_max_dequant_4(vc1_u).to(tl.float32)
+        VC2 = _lloyd_max_dequant_4(vc2_u).to(tl.float32)
+        VC3 = _lloyd_max_dequant_4(vc3_u).to(tl.float32)
 
         ks_idx = (
             physical_block_idx * stride_ks_blk

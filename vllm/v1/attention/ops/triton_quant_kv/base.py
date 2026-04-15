@@ -85,7 +85,9 @@ class QuantKVBackend(ABC):
         """
 
     # ----- Attention read path ----------------------------------------------
-    @abstractmethod
+    # Only modes that need a bespoke attention loop (INT4 / INT2 with
+    # split-dot + sub-byte unpack) override this.  INT8 / FP8 per-token-head
+    # use the core kernel via a constexpr branch and never call this method.
     def unified_attention(
         self,
         q: torch.Tensor,
@@ -117,3 +119,7 @@ class QuantKVBackend(ABC):
         softmax_segm_expsum: torch.Tensor | None = None,
     ) -> None:
         """Run paged attention with this mode's KV layout, writing into *out*."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement a bespoke attention "
+            f"kernel.  This mode should be handled by the core kernel."
+        )

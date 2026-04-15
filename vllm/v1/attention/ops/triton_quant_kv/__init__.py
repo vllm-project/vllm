@@ -2,6 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-mode KV cache quantization backends.
 
+The core attention kernel
+(:mod:`vllm.v1.attention.ops.triton_unified_attention`) handles modes
+``NONE``, ``FP8_PER_TENSOR``, ``INT8_PER_TOKEN_HEAD`` and
+``FP8_PER_TOKEN_HEAD`` directly via constexpr branches.  Backends
+registered here own:
+
+  * the **write side** for any mode that needs more than a plain copy
+    (per-token-head absmax, asymmetric INT4 with zero-point packing,
+    INT2 Lloyd-Max + Hadamard, …); and
+  * the **attention read side** for sub-byte packed modes (INT4 / INT2)
+    whose inner loop is structurally different from the core kernel
+    (split-dot, centroid lookup, etc.).
+
 Adding a new quantization mode
 ------------------------------
 1. Add a new value to :class:`KVQuantMode` in
@@ -9,8 +22,9 @@ Adding a new quantization mode
 2. Add a new entry to ``_MODULES`` below mapping the mode to a module path.
 3. Create a new file under ``quant_kv/`` that defines a subclass of
    :class:`QuantKVBackend` and calls :func:`register` at module level.
-4. Done.  No edits required to the core attention or reshape kernels,
-   nor to ``triton_attn.py``.
+   If the mode can use the core attention kernel, override only
+   ``reshape_and_cache`` / ``allocate_scale_caches``; otherwise also
+   override ``unified_attention``.
 """
 
 from __future__ import annotations
