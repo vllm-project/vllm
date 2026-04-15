@@ -59,7 +59,7 @@ docker buildx build --file docker/Dockerfile \
   --build-arg CUDA_VERSION="${NIGHTLY_CUDA_VERSION}" \
   --build-arg BUILD_BASE_IMAGE="${NIGHTLY_BUILD_BASE_IMAGE}" \
   --build-arg FINAL_BASE_IMAGE="${NIGHTLY_FINAL_BASE_IMAGE}" \
-  --build-arg torch_cuda_arch_list="8.0 8.9 9.0 10.0 12.0" \
+  --build-arg torch_cuda_arch_list="7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX" \
   --tag "$IMAGE_TAG" \
   --push \
   --target test \
