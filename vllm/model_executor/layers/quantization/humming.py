@@ -216,7 +216,7 @@ class HummingConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         return "humming" if user_quant == "humming" else None
 
@@ -747,9 +747,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         locks = torch.zeros(1024, dtype=torch.int32)
         layer.register_buffer("locks", locks)
 
-    def get_fused_moe_quant_config(
-        self, layer: torch.nn.Module
-    ) -> FusedMoEQuantConfig | None:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
         assert isinstance(self.input_schema, HummingInputSchema)
         assert isinstance(self.weight_schema, HummingWeightSchema)
 
@@ -762,7 +760,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
         weight_scale_group_size = self.weight_schema.weight_scale_group_size
         weight_scale_group_size_n = self.weight_schema.weight_scale_group_size_n
-        weight_group_shape = ()
+        weight_group_shape: tuple[int, ...] = ()
         if weight_scale_group_size_n > 1:
             weight_group_shape = (weight_scale_group_size, weight_scale_group_size_n)
         elif weight_scale_group_size == 0:
