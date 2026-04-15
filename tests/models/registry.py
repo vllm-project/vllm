@@ -859,7 +859,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_transformers_version="5.1",
         transformers_version_reason={
-            "hf": "Incompatible with transformers v5.2+ "
+            "vllm": "Incompatible with transformers v5.2+ "
             "(dict object has no attribute '__name__').",
         },
     ),
@@ -868,7 +868,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_transformers_version="5.1",
         transformers_version_reason={
-            "hf": "Incompatible with transformers v5.2+ "
+            "vllm": "Incompatible with transformers v5.2+ "
             "(dict object has no attribute '__name__').",
         },
     ),
@@ -877,7 +877,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_transformers_version="5.1",
         transformers_version_reason={
-            "hf": "Incompatible with transformers v5.2+ "
+            "vllm": "Incompatible with transformers v5.2+ "
             "(dict object has no attribute '__name__').",
         },
     ),
