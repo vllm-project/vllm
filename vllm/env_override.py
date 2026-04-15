@@ -113,6 +113,23 @@ torch._inductor.config.compile_threads = 1
 # in the environment.
 os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
 
+# Ensure DG_JIT_CACHE_DIR is set and the directory exists before
+# deep_gemm is ever imported.  DeepGEMM's C++ _C.init() reads
+# this env var at import time; if the var is missing or the path
+# doesn't exist, it irreversibly falls back to in-memory JIT cache.
+if "DG_JIT_CACHE_DIR" not in os.environ:
+    _dg_cache = os.path.join(
+        os.path.expanduser(
+            os.environ.get(
+                "VLLM_CACHE_ROOT",
+                os.path.join(os.environ.get("XDG_CACHE_HOME", "~/.cache"), "vllm"),
+            )
+        ),
+        "deep_gemm",
+    )
+    os.environ["DG_JIT_CACHE_DIR"] = _dg_cache
+os.makedirs(os.environ["DG_JIT_CACHE_DIR"], exist_ok=True)
+
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
 # ===================================================
