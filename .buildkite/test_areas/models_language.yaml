@@ -1,10 +1,9 @@
 group: Models - Language
-depends_on: 
+depends_on:
   - image-build
 steps:
 - label: Language Models Tests (Standard)
   timeout_in_minutes: 25
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language
@@ -12,10 +11,11 @@ steps:
     # Test standard language models, excluding a subset of slow tests
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
+  mirror:
+    torch_nightly: {}
 
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/language/pooling/test_embedding.py
@@ -27,10 +27,11 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
+  mirror:
+    torch_nightly: {}
 
 - label: Language Models Tests (Hybrid) %N
   timeout_in_minutes: 75
-  torch_nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -42,6 +43,8 @@ steps:
     # Shard hybrid language model tests
     - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
+  mirror:
+    torch_nightly: {}
 
 - label: Language Models Test (Extended Generation) # 80min
   timeout_in_minutes: 110
@@ -62,7 +65,7 @@ steps:
       - image-build-amd
       commands:
       - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
