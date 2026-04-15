@@ -112,8 +112,12 @@ struct Fp4GemmSm120 {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
 
+  // Must stay void (data-parallel) for batch_invariant correctness; stream-K
+  // or split-K would make output depend on total grid size.
+  using TileSchedulerTag = void;
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
+      TileSchedulerTag>;
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
 };
@@ -199,7 +203,7 @@ void cutlass_fp4_bf16_gemm_dispatch(
     using BiGemm =
         Fp4GemmSm120<sm120_fp4_config_batch_invariant, cutlass::bfloat16_t>;
     static_assert(
-        std::is_void_v<typename BiGemm::Gemm::GemmKernel::TileScheduler>,
+        std::is_void_v<typename BiGemm::TileSchedulerTag>,
         "batch_invariant requires a data-parallel tile scheduler (void); "
         "stream-K or split-K would break numerical invariance");
     runGemm<typename BiGemm::Gemm>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
@@ -225,7 +229,7 @@ void cutlass_fp4_f16_gemm_dispatch(
     using BiGemm =
         Fp4GemmSm120<sm120_fp4_config_batch_invariant, cutlass::half_t>;
     static_assert(
-        std::is_void_v<typename BiGemm::Gemm::GemmKernel::TileScheduler>,
+        std::is_void_v<typename BiGemm::TileSchedulerTag>,
         "batch_invariant requires a data-parallel tile scheduler (void); "
         "stream-K or split-K would break numerical invariance");
     runGemm<typename BiGemm::Gemm>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);

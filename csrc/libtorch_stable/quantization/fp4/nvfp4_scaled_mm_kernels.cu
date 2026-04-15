@@ -121,8 +121,12 @@ struct Fp4GemmSm100 {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
 
+  // Must stay void (data-parallel) for batch_invariant correctness; stream-K
+  // or split-K would make output depend on total grid size.
+  using TileSchedulerTag = void;
   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
+      TileSchedulerTag>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   using StrideA = typename Gemm::GemmKernel::StrideA;
   using LayoutA = decltype(cute::make_layout(make_shape(0, 0, 0), StrideA{}));
@@ -221,7 +225,7 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
   if (batch_invariant) {
     using BiGemm = Fp4GemmSm100<sm100_fp4_config_batch_invariant, OutType>;
     static_assert(
-        std::is_void_v<typename BiGemm::Gemm::GemmKernel::TileScheduler>,
+        std::is_void_v<typename BiGemm::TileSchedulerTag>,
         "batch_invariant requires a data-parallel tile scheduler (void); "
         "stream-K or split-K would break numerical invariance");
     runGemm<BiGemm>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
