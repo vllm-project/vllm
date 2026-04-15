@@ -255,6 +255,11 @@ class CudaPlatformBase(Platform):
         valid_backends_priorities = []
         invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
 
+        # TurboQuant KV cache: route directly to TQ backend
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            return [(AttentionBackendEnum.TURBOQUANT, 0)], {}
+
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             device_capability,
@@ -547,6 +552,10 @@ class CudaPlatformBase(Platform):
     def support_deep_gemm(cls) -> bool:
         """Currently, only Hopper and Blackwell GPUs are supported."""
         return cls.is_device_capability(90) or cls.is_device_capability_family(100)
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        return bool(torch.cuda.get_device_properties(device_id).is_integrated)
 
     @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
