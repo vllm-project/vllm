@@ -13,7 +13,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_quant_kv._attn_loop import (
+from vllm.v1.attention.ops.triton_quant_kv._helpers import (
     apply_alibi_to_score,
     compute_kv_seq_mask,
     load_qq_bias_tile,
