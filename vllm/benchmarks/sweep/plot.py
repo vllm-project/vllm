@@ -51,6 +51,7 @@ class PlotFilterBase(ABC):
 class PlotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        target: float | str
         try:
             target = float(self.target)
         except ValueError:
@@ -63,6 +64,7 @@ class PlotEqualTo(PlotFilterBase):
 class PlotNotEqualTo(PlotFilterBase):
     @override
     def apply(self, df: "pd.DataFrame") -> "pd.DataFrame":
+        target: float | str
         try:
             target = float(self.target)
         except ValueError:
@@ -182,7 +184,7 @@ def _convert_inf_nan_strings(data: list[dict[str, object]]) -> list[dict[str, ob
     """
     converted_data = []
     for record in data:
-        converted_record = {}
+        converted_record: dict[str, object] = {}
         for key, value in record.items():
             if isinstance(value, str):
                 if value in ["inf", "-inf", "nan"]:

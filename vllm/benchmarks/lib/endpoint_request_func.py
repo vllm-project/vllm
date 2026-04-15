@@ -75,7 +75,7 @@ class RequestFuncInput:
     logprobs: int | None = None
     extra_headers: dict | None = None
     extra_body: dict | None = None
-    multi_modal_content: dict | list[dict] | None = None
+    multi_modal_content: dict[str, Any] | list[dict[str, Any]] | None = None
     ignore_eos: bool = False
     language: str | None = None
     request_id: str | None = None
@@ -268,13 +268,13 @@ def _get_chat_content(
     request_func_input: RequestFuncInput,
     mm_position: Literal["first", "last"] = "last",
 ) -> list[dict[str, Any]]:
-    mm_contents = []
+    mm_contents: list[dict[str, Any]] = []
     if request_func_input.multi_modal_content:
         mm_content = request_func_input.multi_modal_content
         if isinstance(mm_content, list):
-            mm_contents.extend(request_func_input.multi_modal_content)
+            mm_contents.extend(mm_content)
         elif isinstance(mm_content, dict):
-            mm_contents.append(request_func_input.multi_modal_content)
+            mm_contents.append(mm_content)
         else:
             raise TypeError(
                 "multi_modal_content must be a dict or list[dict] for openai-chat"
@@ -750,7 +750,7 @@ async def async_request_infinity_embeddings(
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "Infinity Embeddings API", "embeddings")
 
-    payload = {
+    payload: dict[str, Any] = {
         "model": request_func_input.model_name
         if request_func_input.model_name
         else request_func_input.model,

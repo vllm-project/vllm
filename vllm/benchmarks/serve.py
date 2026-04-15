@@ -52,6 +52,7 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
@@ -216,7 +217,7 @@ class EmbedBenchmarkMetrics:
     mean_e2el_ms: float
     std_e2el_ms: float
     median_e2el_ms: float
-    percentiles_e2el_ms: float
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 def _get_current_request_rate(
@@ -289,8 +290,8 @@ async def get_request(
     assert total_requests > 0, "No requests provided."
 
     # Precompute delays among requests to minimize request send laggings
-    request_rates = []
-    delay_ts = []
+    request_rates: list[float] = []
+    delay_ts: list[float] = []
 
     # if the traces have timing info then:
     if not self_timed:
@@ -455,7 +456,7 @@ def calculate_metrics(
                     )
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
-            tpot = 0
+            tpot = 0.0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
                 tpot = latency_minus_ttft / (output_len - 1)
@@ -928,6 +929,8 @@ async def benchmark(
                 "per_position_acceptance_rates": per_pos_rates,
             }
 
+    metrics: BenchmarkMetrics | EmbedBenchmarkMetrics
+    actual_output_lens: list[int] | int
     if task_type == TaskType.GENERATION:
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
@@ -961,7 +964,7 @@ async def benchmark(
             "Request throughput (req/s):", metrics.request_throughput
         )
     )
-    if goodput_config_dict:
+    if goodput_config_dict and isinstance(metrics, BenchmarkMetrics):
         print(
             "{:<40} {:<10.2f}".format(
                 "Request goodput (req/s):", metrics.request_goodput
@@ -998,6 +1001,7 @@ async def benchmark(
             )
         )
 
+    result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
         result = {
             "duration": benchmark_duration,
@@ -1258,7 +1262,7 @@ def compute_result_filename(
     return file_name
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
         "--label",
@@ -1820,6 +1824,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.self_timed = False
 
     # Load the dataset.
+    assert tokenizer is not None, "Tokenizer must be initialized before loading dataset"
     input_requests = get_samples(args, tokenizer)
     goodput_config_dict = check_goodput_args(args)
 
@@ -1945,6 +1950,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate timeline plot if requested
     if args.plot_timeline:
+        assert file_name is not None, (
+            "file_name must be set when plot_timeline is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_timeline_plot
 
@@ -1991,6 +1999,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate dataset statistics plot if requested
     if args.plot_dataset_stats:
+        assert file_name is not None, (
+            "file_name must be set when plot_dataset_stats is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_dataset_stats_plot
 
@@ -2040,6 +2051,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Save to file
     if args.save_result or args.append_result:
+        assert file_name is not None, (
+            "file_name must be set when save_result or append_result is enabled"
+        )
         with open(
             file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
         ) as outfile:
