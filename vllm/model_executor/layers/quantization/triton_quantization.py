@@ -3,9 +3,7 @@
 """Triton kernels for fused activation + quantization.
 
 Generated and optimized by KernelAgent
-(https://github.com/meta-pytorch/KernelAgent), an autonomous GPU kernel
-synthesis system that uses LLM-assisted generation with runtime
-verification on NVIDIA Blackwell (GB200) GPUs.
+(https://github.com/meta-pytorch/KernelAgent).
 """
 
 import torch
