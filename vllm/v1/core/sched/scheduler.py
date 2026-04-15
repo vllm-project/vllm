@@ -944,6 +944,25 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
+        # Capture routed experts BEFORE freeing blocks so that a subsequent
+        # abort can still return valid routing data.
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            re = self._get_routed_experts(request)
+            if re is not None:
+                existing = self._aborted_routed_experts.get(request.request_id)
+                # Only overwrite if new data is at least as complete as
+                # the existing cache (guards against chunked-prefill
+                # producing shorter routing after a prior full preemption).
+                if existing is None or re.shape[0] >= existing.shape[0]:
+                    self._aborted_routed_experts[request.request_id] = re
+                    logger.info(
+                        "Cached routed_experts before preemption: "
+                        "req_id=%s, num_tokens=%d, shape=%s",
+                        request.request_id,
+                        request.num_tokens,
+                        re.shape,
+                    )
+
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
@@ -1384,6 +1403,9 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
+                # Prefill complete and routing data is in blocks now;
+                # discard stale preemption cache if any.
+                self._aborted_routed_experts.pop(req_id, None)
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
@@ -1595,7 +1617,10 @@ class Scheduler(SchedulerInterface):
         if not self.vllm_config.model_config.enable_return_routed_experts:
             return None
         block_ids = self._get_routed_experts_block_ids(request)
-        return self.routed_experts_mgr.get(block_ids, request.num_tokens - 1)
+        num_tokens = request.num_tokens - 1
+        if not block_ids or num_tokens <= 0:
+            return None
+        return self.routed_experts_mgr.get(block_ids, num_tokens)
 
     def pop_aborted_routed_experts(self, req_id: str) -> np.ndarray | None:
         """Pop cached routed experts for an aborted request."""
@@ -1782,7 +1807,12 @@ class Scheduler(SchedulerInterface):
             # Capture routed experts BEFORE freeing blocks.
             re = self._get_routed_experts(request)
             if re is not None:
-                self._aborted_routed_experts[request.request_id] = re
+                existing = self._aborted_routed_experts.get(request.request_id)
+                # Only overwrite if new data is at least as complete
+                # (e.g. a RUNNING request aborted during chunked re-prefill
+                # may have fewer routing entries than the prior preemption).
+                if existing is None or re.shape[0] >= existing.shape[0]:
+                    self._aborted_routed_experts[request.request_id] = re
 
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:

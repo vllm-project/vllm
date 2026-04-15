@@ -18,7 +18,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 logger = logging.getLogger(__name__)
 
 
-def _resolve_num_experts(hf_config) -> int:
+def get_num_experts(hf_config) -> int:
     for key in ("num_experts", "n_routed_experts", "num_local_experts"):
         val = getattr(hf_config, key, None)
         if val is not None:
@@ -45,7 +45,7 @@ class RoutedExpertsCapturer:
         vllm_config: VllmConfig,
     ) -> None:
         hf_config = vllm_config.model_config.hf_text_config
-        num_experts = _resolve_num_experts(hf_config)
+        num_experts = get_num_experts(hf_config)
         dtype = torch.uint8 if num_experts <= 256 else torch.int32
         self.device_buffer = torch.zeros(
             (
@@ -140,11 +140,11 @@ class RoutedExpertsManager:
 
         # Routed experts indexed by KV-cache slot.
         hf_config = vllm_config.model_config.hf_text_config
-        num_experts = _resolve_num_experts(hf_config)
+        num_experts = get_num_experts(hf_config)
         dtype = np.uint8 if num_experts <= 256 else np.int32
         num_groups = len(kv_cache_config.kv_cache_groups)
         max_num_slots = (kv_cache_config.num_blocks // num_groups) * self.block_size
-        self._routed_experts_by_slot = np.zeros(
+        self.routed_experts_by_slot = np.zeros(
             (
                 max_num_slots,
                 hf_config.num_hidden_layers,
@@ -159,7 +159,7 @@ class RoutedExpertsManager:
         Equivalent to the old shared-memory write:
             shared_memory[slot_mapping] = data
         """
-        self._routed_experts_by_slot[slot_mapping] = data
+        self.routed_experts_by_slot[slot_mapping] = data
 
     def get(self, block_ids: list[int], num_tokens: int) -> np.ndarray:
         """Read routed experts data for a completed request.
@@ -177,4 +177,4 @@ class RoutedExpertsManager:
         slot_mapping = (
             block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
         ).flatten()[:num_tokens]
-        return self._routed_experts_by_slot[slot_mapping]
+        return self.routed_experts_by_slot[slot_mapping]
