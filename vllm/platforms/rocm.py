@@ -64,7 +64,12 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
     "0x74a9": "AMD_Instinct_MI300X_HF",
     "0x74bd": "AMD_Instinct_MI300X_HF",
     "0x744c": "AMD_Radeon_RX7900XTX",
-    "0x7551": "AMD_Radeon_R9700",
+    # RDNA 3.5 APUs (Strix Point / Strix Halo)
+    "0x150e": "AMD_Radeon_890M",  # gfx1150, Strix Point
+    "0x1586": "AMD_Radeon_8060S",  # gfx1151, Strix Halo
+    # RDNA 4 discrete (Navi 48)
+    "0x7550": "AMD_Radeon_RX9070XT",  # gfx1201
+    "0x7551": "AMD_Radeon_R9700",  # gfx1201
 }
 
 
@@ -182,6 +187,7 @@ _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
+_ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
 
@@ -271,6 +277,10 @@ def on_mi3xx() -> bool:
 
 def on_gfx9() -> bool:
     return _ON_GFX9
+
+
+def on_gfx90a() -> bool:
+    return _ON_GFX90A
 
 
 def on_gfx942() -> bool:
@@ -402,9 +412,10 @@ class RocmPlatform(Platform):
         "gguf",
         "quark",
         "mxfp4",
-        "petit_nvfp4",
+        "gpt_oss_mxfp4",
         "torchao",
         "bitsandbytes",
+        "modelopt_fp4",
     ]
 
     @classmethod
@@ -599,6 +610,10 @@ class RocmPlatform(Platform):
         Set the device for the current platform.
         """
         torch.cuda.set_device(device)
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
 
     @classmethod
     @lru_cache(maxsize=8)

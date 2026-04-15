@@ -102,6 +102,88 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _xpu_mxfp8_quantize_impl(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP8_BLOCK_SIZE = 32
+    assert x.shape[-1] % MXFP8_BLOCK_SIZE == 0
+    if dtype is not None:
+        assert dtype in (torch.float8_e4m3fn, torch.float8_e5m2), (
+            f"Unsupported dtype for xpu_mxfp8_quantize: {dtype}. "
+            f"Expected torch.float8_e4m3fn or torch.float8_e5m2."
+        )
+    else:
+        dtype = current_platform.fp8_dtype()
+
+    finfo = torch.finfo(dtype)
+    fp8_min = finfo.min
+    fp8_max = finfo.max
+    eps = 1e-10
+
+    x_q = torch.empty_like(x, device=x.device, dtype=dtype)
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.empty(shape, device=x.device, dtype=torch.float32)
+    torch.ops._C.per_token_group_fp8_quant(
+        x, x_q, x_s, MXFP8_BLOCK_SIZE, eps, fp8_min, fp8_max, True
+    )
+    x_s = x_s.to(torch.float8_e8m0fnu)
+    return x_q, x_s
+
+
+def _xpu_mxfp8_quantize_fake(
+    x: torch.Tensor, dtype: torch.dtype | None = None
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if dtype is None:
+        dtype = current_platform.fp8_dtype()
+
+    MXFP8_BLOCK_SIZE = 32
+
+    shape = x.shape[:-1] + (x.shape[-1] // MXFP8_BLOCK_SIZE,)
+    x_s = torch.zeros(shape, device=x.device, dtype=torch.float32)
+
+    return x.to(dtype), x_s.to(torch.float8_e8m0fnu)
+
+
+def _xpu_mxfp4_quantize_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP4_BLOCK_SIZE = 32
+    eps = 1e-10
+    assert x.ndim == 2, "input must be 2-D"
+    assert x.shape[-1] % MXFP4_BLOCK_SIZE == 0, (
+        f"last dimension {x.shape[-1]} must be divisible by group_size "
+        f"{MXFP4_BLOCK_SIZE}"
+    )
+    assert x.is_contiguous(), "input groups must be contiguous"
+
+    M, N = x.shape
+
+    # Packed FP4 output: two nibbles per byte
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+
+    torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE, eps)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
+
+
+def _xpu_mxfp4_quantize_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP4_BLOCK_SIZE = 32
+    M, N = x.shape
+
+    # Packed FP4 output: two nibbles per byte
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -216,6 +298,9 @@ class xpu_ops:
             # alibi_slopes = alibi_slopes,
             # softcap=softcap,
             return_softmax_lse=return_softmax_lse,
+            q_descale=q_descale,
+            k_descale=k_descale,
+            v_descale=v_descale,
         )
 
     @staticmethod
@@ -502,6 +587,18 @@ class xpu_ops:
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_mxfp8_quantize",
+                op_func=_xpu_mxfp8_quantize_impl,
+                fake_impl=_xpu_mxfp8_quantize_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_mxfp4_quantize",
+                op_func=_xpu_mxfp4_quantize_impl,
+                fake_impl=_xpu_mxfp4_quantize_fake,
             )
 
             _OPS_REGISTERED = True

@@ -208,6 +208,15 @@ class Platform:
         return cls.simple_compile_backend
 
     @classmethod
+    def import_ir_kernels(cls) -> None:
+        """
+        The default implementation imports ``vllm.kernels``, which registers
+        the built-in IR op implementations. Out-of-tree (OOT) platforms should
+        override this method to import their own kernel modules.
+        """
+        import vllm.kernels  # noqa: F401
+
+    @classmethod
     def device_id_to_physical_device_id(cls, device_id: int):
         # Treat empty device control env var as unset. This is a valid
         # configuration in Ray setups where the engine is launched in
@@ -380,6 +389,11 @@ class Platform:
         """
         Set the device for the current platform.
         """
+        raise NotImplementedError
+
+    @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        """Set RNG seed across all devices for the current platform."""
         raise NotImplementedError
 
     @classmethod
@@ -719,6 +733,18 @@ class Platform:
         Get device specific communicator class for distributed communication.
         """
         return "vllm.distributed.device_communicators.base_device_communicator.DeviceCommunicatorBase"  # noqa
+
+    @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        """
+        Returns whether the GPU is an integrated (UMA) device that shares
+        system memory with the CPU.
+
+        On UMA systems (e.g. NVIDIA GH200, DGX Spark, Jetson Orin),
+        cudaMemGetInfo may underreport free memory because it does not
+        account for reclaimable OS memory (page cache, buffers).
+        """
+        return False
 
     @classmethod
     def supports_mx(cls) -> bool:

@@ -265,6 +265,7 @@ def merge_attn_states(
     suffix_lse: torch.Tensor,
     output_lse: torch.Tensor | None = None,
     prefill_tokens_with_context: int | None = None,
+    output_scale: torch.Tensor | None = None,
 ) -> None:
     torch.ops._C.merge_attn_states(
         output,
@@ -274,6 +275,7 @@ def merge_attn_states(
         suffix_output,
         suffix_lse,
         prefill_tokens_with_context,
+        output_scale,
     )
 
 
@@ -433,6 +435,7 @@ def fused_qk_norm_rope(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     position_ids: torch.Tensor,
+    forced_token_heads_per_warp: int = -1,
 ) -> None:
     torch.ops._C.fused_qk_norm_rope(
         qkv,
@@ -446,6 +449,7 @@ def fused_qk_norm_rope(
         cos_sin_cache,
         is_neox,
         position_ids,
+        forced_token_heads_per_warp,
     )
 
 
@@ -2639,6 +2643,22 @@ def swap_blocks(
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
 
 
+def swap_blocks_batch(
+    src_ptrs: torch.Tensor,
+    dst_ptrs: torch.Tensor,
+    sizes: torch.Tensor,
+) -> None:
+    """
+    Batch version of swap_blocks: submit all copies in a single driver call.
+
+    Each entry specifies a raw pointer copy: src_ptrs[i] -> dst_ptrs[i]
+    of sizes[i] bytes. All three tensors must be int64 CPU tensors.
+    On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
+    overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
+    """
+    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+
+
 def convert_fp8(
     output: torch.Tensor, input: torch.Tensor, scale: float = 1.0, kv_dtype: str = "fp8"
 ) -> None:
@@ -3473,3 +3493,38 @@ if hasattr(torch.ops._C, "hadacore_transform"):
     @register_fake("_C::hadacore_transform")
     def _hadacore_transform_fake(x: torch.Tensor, inplace: bool) -> torch.Tensor:
         return torch.empty_like(x) if not inplace else x
+
+
+if hasattr(torch.ops._C, "minimax_allreduce_rms"):
+
+    @register_fake("_C::minimax_allreduce_rms")
+    def _minimax_allreduce_rms_fake(
+        input: torch.Tensor,
+        norm_weight: torch.Tensor,
+        workspace: torch.Tensor,
+        rank: int,
+        nranks: int,
+        eps: float,
+    ) -> torch.Tensor:
+        return torch.empty_like(input)
+
+
+if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
+
+    @register_fake("_C::minimax_allreduce_rms_qk")
+    def _minimax_allreduce_rms_qk_fake(
+        qkv: torch.Tensor,
+        norm_weight_q: torch.Tensor,
+        norm_weight_k: torch.Tensor,
+        workspace: torch.Tensor,
+        q_size: int,
+        kv_size: int,
+        rank: int,
+        nranks: int,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_num = qkv.shape[0]
+        return (
+            torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
+            torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
+        )

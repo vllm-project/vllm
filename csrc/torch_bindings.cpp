@@ -73,7 +73,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    Tensor prefix_lse,"
       "    Tensor suffix_output,"
       "    Tensor suffix_lse,"
-      "    int!? prefill_tokens_with_context) -> ()");
+      "    int!? prefill_tokens_with_context,"
+      "    Tensor? output_scale=None) -> ()");
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 #ifndef USE_ROCM
   ops.def(
@@ -108,6 +109,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
   ops.impl("silu_and_mul_quant", torch::kCUDA, &silu_and_mul_quant);
+
+  // Fused SiLU+Mul + per-block quantization
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
+           &silu_and_mul_per_block_quant);
 
   ops.def("mul_and_silu(Tensor! out, Tensor input) -> ()");
   ops.impl("mul_and_silu", torch::kCUDA, &mul_and_silu);
@@ -160,7 +173,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
       "int num_heads_k, int num_heads_v, int head_dim, float eps, "
       "Tensor q_weight, Tensor k_weight, Tensor cos_sin_cache, "
-      "bool is_neox, Tensor position_ids) -> ()");
+      "bool is_neox, Tensor position_ids, "
+      "int forced_token_heads_per_warp=-1) -> ()");
   ops.impl("fused_qk_norm_rope", torch::kCUDA, &fused_qk_norm_rope);
 
   // Apply repetition penalties to logits in-place
@@ -184,10 +198,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("top_k_per_row_decode", torch::kCUDA, &top_k_per_row_decode);
 
   ops.def(
-      "large_context_topk(Tensor score, Tensor indices, Tensor lengths, "
-      "Tensor? "
-      "row_starts_opt) -> ()");
-  ops.impl("large_context_topk", torch::kCUDA, &large_context_topk);
+      "persistent_topk(Tensor logits, Tensor lengths, Tensor! output, "
+      "Tensor workspace, int k, int max_seq_len) -> ()");
+  ops.impl("persistent_topk", torch::kCUDA, &persistent_topk);
 
   // Layernorm-quant
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
@@ -232,17 +245,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization ops
 #ifndef USE_ROCM
-  // Fused SiLU+Mul + per-block quantization
-  ops.def(
-      "silu_and_mul_per_block_quant("
-      "Tensor! out, "
-      "Tensor input, "
-      "Tensor! scales, "
-      "int group_size, "
-      "Tensor? scale_ub=None, "
-      "bool is_scale_transposed=False) -> ()");
-  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
-           &silu_and_mul_per_block_quant);
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
@@ -495,6 +497,29 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? b_qzeros, "
       "SymInt n, SymInt group_size, SymInt sm_count, SymInt sm_version, SymInt "
       "CUBLAS_M_THRESHOLD, bool has_zp, bool n32k16_reorder) -> Tensor");
+
+  ops.def(
+      "minimax_allreduce_rms("
+      "Tensor input,"
+      "Tensor norm_weight,"
+      "Tensor workspace,"
+      "int rank,"
+      "int nranks,"
+      "float eps) -> Tensor");
+  ops.impl("minimax_allreduce_rms", torch::kCUDA, &minimax_allreduce_rms);
+  ops.def(
+      "minimax_allreduce_rms_qk("
+      "Tensor qkv,"
+      "Tensor norm_weight_q,"
+      "Tensor norm_weight_k,"
+      "Tensor workspace,"
+      "int q_size,"
+      "int kv_size,"
+      "int rank,"
+      "int nranks,"
+      "float eps) -> (Tensor, Tensor)");
+  ops.impl("minimax_allreduce_rms_qk", torch::kCUDA, &minimax_allreduce_rms_qk);
+
   //  conditionally compiled so impl in source file
 #endif
 }
@@ -506,6 +531,12 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
       "swap_blocks(Tensor src, Tensor! dst,"
       "            int block_size_in_bytes, Tensor block_mapping) -> ()");
   cache_ops.impl("swap_blocks", torch::kCUDA, &swap_blocks);
+
+  // Batch swap: submit all block copies in a single driver call.
+  cache_ops.def(
+      "swap_blocks_batch(Tensor src_ptrs, Tensor dst_ptrs,"
+      "                  Tensor sizes) -> ()");
+  cache_ops.impl("swap_blocks_batch", torch::kCPU, &swap_blocks_batch);
 
   // Reshape the key and value tensors and cache them.
   cache_ops.def(
