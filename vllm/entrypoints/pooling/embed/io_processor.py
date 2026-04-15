@@ -24,7 +24,13 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingChatRequest,
     EmbeddingCompletionRequest,
 )
-from vllm.entrypoints.pooling.typing import PoolingServeContext
+from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingIOProcessorMixin
+from vllm.entrypoints.pooling.typing import (
+    OfflineInputsContext,
+    PoolingChatLikeRequest,
+    PoolingCompletionLikeRequest,
+    PoolingServeContext,
+)
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
@@ -464,7 +470,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
             truncate_prompt_tokens=truncate_prompt_tokens,
             truncation_side=truncation_side,
         )
-        return self._preprocess_completion_online(
+        return self._preprocess_cmpl_online(
             proxy, prompt_input=proxy.input, prompt_embeds=None
         )
 
@@ -553,3 +559,48 @@ class EmbedIOProcessor(PoolingIOProcessor):
 
 class TokenEmbedIOProcessor(PoolingIOProcessor):
     name = "token_embed"
+
+
+class JinaRankingTokenEmbedIOProcessor(
+    TokenEmbedIOProcessor, JinaRankingIOProcessorMixin
+):
+    def pre_process_online(self, ctx: PoolingServeContext):
+        request = ctx.request
+        if isinstance(request, PoolingCompletionLikeRequest):
+            prompts = request.input
+            if not isinstance(prompts, Sequence) or len(prompts) < 2:
+                raise ValueError("The JinaForRanking model requires at least 2 inputs.")
+
+            text_prompts = self.ensure_str(prompts)
+
+            # The JinaForRanking model concatenates docs first, then query.
+            # Let's stay consistent with this novel design.
+            prompt_input = self.format_docs_prompts_func(
+                query=text_prompts[-1], docs=text_prompts[:-1]
+            )
+
+            engine_inputs = self._preprocess_cmpl_online(
+                request,
+                prompt_input=prompt_input,
+                prompt_embeds=None,
+            )
+        elif isinstance(request, PoolingChatLikeRequest):
+            raise ValueError("The JinaForRanking does not support chat Request.")
+        else:
+            raise ValueError(f"Invalid {self.name} request type")
+
+        ctx.engine_inputs = engine_inputs
+
+    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
+        if not isinstance(ctx.prompts, Sequence) or len(ctx.prompts) < 2:
+            raise ValueError("The JinaForRanking model requires at least 2 inputs.")
+
+        text_prompts = self.ensure_str(ctx.prompts)
+
+        # The JinaForRanking model concatenates docs first, then query.
+        # Let's stay consistent with this novel design.
+        ctx.prompts = self.format_docs_prompts_func(
+            query=text_prompts[-1], docs=text_prompts[:-1]
+        )
+
+        return super().pre_process_offline(ctx)
