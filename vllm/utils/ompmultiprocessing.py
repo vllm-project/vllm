@@ -120,13 +120,13 @@ class OMPProcessManager:
         if self.auto_setup:
             # auto generate CPU lists
             cpu_arch = current_platform.get_cpu_architecture()
-            if cpu_arch in (CpuArchEnum.POWERPC, CpuArchEnum.S390X):
-                # For S390X/POWERPC SMT-8/4/2
+            if cpu_arch == CpuArchEnum.POWERPC:
+                # For POWERPC SMT-8/4/2
                 cpu_list, reserve_list = self._get_autobind_cpu_ids(
                     lambda cpus: [cpu for cpu in cpus if cpu.id % 8 < 4]
                 )
-            elif cpu_arch == CpuArchEnum.X86:
-                # For x86 SMT-2, use 1 logical CPU per physical core
+            elif cpu_arch in (CpuArchEnum.X86, CpuArchEnum.S390X):
+                # For x86/S390X SMT-2, use 1 logical CPU per physical core
                 cpu_list, reserve_list = self._get_autobind_cpu_ids(
                     lambda cpus: cpus[-1:]
                 )
