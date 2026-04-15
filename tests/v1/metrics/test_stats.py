@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.stats import IterationStats, PromptTokenStats, RequestStateStats
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    PrefillStats,
+    PromptTokenStats,
+    RequestStateStats,
+)
 
 
 def test_iteration_stats_repr():
@@ -114,15 +119,18 @@ def test_prompt_token_stats_all_computed():
     stats = PromptTokenStats()
 
     # Case 1: No caching (All tokens computed locally)
-    stats.update_from_output(
-        num_cached_tokens=0,
-        num_external_computed_tokens=0,
-        prompt_len=1000,
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=0,
     )
+    stats.update_from_output(prefill_stats)
 
     assert stats.computed == 1000
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 0
+    assert stats.cached_tokens == 0
     assert stats.total == 1000
 
 
@@ -131,15 +139,19 @@ def test_prompt_token_stats_partial_local_cache():
     stats = PromptTokenStats()
 
     # Case 2: Partial local cache
-    stats.update_from_output(
-        num_cached_tokens=300,
-        num_external_computed_tokens=0,
-        prompt_len=1000,
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=300,
+        num_external_cached_tokens=0,
     )
+    stats.update_from_output(prefill_stats)
 
     assert stats.computed == 700
     assert stats.local_cache_hit == 300
     assert stats.external_kv_transfer == 0
+    assert stats.cached_tokens == 300
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_partial_external_transfer():
@@ -147,15 +159,19 @@ def test_prompt_token_stats_partial_external_transfer():
     stats = PromptTokenStats()
 
     # Case 3: Partial external transfer
-    stats.update_from_output(
-        num_cached_tokens=500,
-        num_external_computed_tokens=500,
-        prompt_len=1000,
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=500,
     )
+    stats.update_from_output(prefill_stats)
 
     assert stats.computed == 500
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 500
+    assert stats.cached_tokens == 500
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_mixed_sources():
@@ -163,47 +179,60 @@ def test_prompt_token_stats_mixed_sources():
     stats = PromptTokenStats()
 
     # Case 4: Mixed sources
-    stats.update_from_output(
-        num_cached_tokens=600,
-        num_external_computed_tokens=200,
-        prompt_len=1000,
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=400,
+        num_external_cached_tokens=200,
     )
+    stats.update_from_output(prefill_stats)
 
     assert stats.computed == 400
     assert stats.local_cache_hit == 400
     assert stats.external_kv_transfer == 200
+    assert stats.cached_tokens == 600
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_full_local_cache_recompute():
     """Test full local cache triggers last token recomputation.
 
-    When all tokens are cached, the scheduler reduces num_cached_tokens by 1
-    to force the model to recompute the last token.
+    When all tokens are cached, the scheduler forces the model to recompute
+    the last token (num_computed_tokens=1), with the rest from cache.
     """
     stats = PromptTokenStats()
 
-    # Case 5: Full local cache (999 cached after reduction, 1 recomputed)
-    stats.update_from_output(
-        num_cached_tokens=999,
-        num_external_computed_tokens=0,
-        prompt_len=1000,
+    # Case 5: Full local cache (999 cached, 1 recomputed)
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=999,
+        num_external_cached_tokens=0,
     )
+    stats.update_from_output(prefill_stats)
 
     assert stats.computed == 1
     assert stats.local_cache_hit == 999
+    assert stats.external_kv_transfer == 0
+    assert stats.cached_tokens == 999
+    assert stats.total == 1000
 
 
 def test_prompt_token_stats_full_external_transfer_recompute():
     """Test full external transfer triggers last token recomputation."""
     stats = PromptTokenStats()
 
-    # Case 6: Full external transfer (999 cached after reduction, 1 recomputed)
-    stats.update_from_output(
-        num_cached_tokens=999,
-        num_external_computed_tokens=999,
-        prompt_len=1000,
+    # Case 6: Full external transfer (999 from external, 1 recomputed)
+    prefill_stats = PrefillStats()
+    prefill_stats.set(
+        num_prompt_tokens=1000,
+        num_local_cached_tokens=0,
+        num_external_cached_tokens=999,
     )
+    stats.update_from_output(prefill_stats)
 
     assert stats.computed == 1
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 999
+    assert stats.cached_tokens == 999
+    assert stats.total == 1000
