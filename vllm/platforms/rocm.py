@@ -306,6 +306,16 @@ def use_rocm_custom_paged_attention(
     # custom paged attn always supported on V0. On V1, requires sliding window
     # disabled due to observed numerical discrepancy.
     if _ON_GFX9:
+        # Keep gfx9 on the Triton path for the known-bad mfma4 specializations.
+        # These shapes stay within ROCM_ATTN, but the native paged kernel has
+        # shown correctness and stability problems:
+        # - gqa_ratio=2: deterministic score drift for Qwen3-VL reranker
+        #   (#35569)
+        # - gqa_ratio=4: illegal memory access during graph capture for
+        #   Llama-3.2-1B-Instruct (#36180)
+        if gqa_ratio in (2, 4):
+            return False
+
         return (
             (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
