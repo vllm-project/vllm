@@ -181,8 +181,14 @@ def flash_attn_supports_quant_query_input() -> bool:
 def flash_attn_supports_sinks() -> bool:
     if current_platform.is_xpu():
         return True
-    else:
-        return get_flash_attn_version() == 3
+    fa_version = get_flash_attn_version()
+    if fa_version == 3:
+        return True
+    if fa_version == 4:
+        return current_platform.is_device_capability_family(
+            90
+        ) or current_platform.is_device_capability_family(100)
+    return False
 
 
 def flash_attn_supports_mla():
