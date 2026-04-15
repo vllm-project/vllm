@@ -1290,10 +1290,7 @@ class DeepseekV2Model(nn.Module):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                llama_4_scaling,
+                positions, hidden_states, residual, llama_4_scaling
             )
 
         if not get_pp_group().is_last_rank:
