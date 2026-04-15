@@ -17,6 +17,7 @@ from vllm.v1.attention.backends.hpc_attn import (
     HpcAttentionImpl,
     HpcAttentionMetadata,
     HpcAttentionMetadataBuilder,
+    _hpc_decode_use_splitk,
 )
 
 
@@ -265,6 +266,7 @@ def test_do_kv_cache_update(device):
 
 def _make_decode_meta(num_reqs, device):
     seq_lens = torch.randint(32, 512, (num_reqs,), dtype=torch.int32, device=device)
+    max_decode_seq_len = int(seq_lens.max().item())
     return HpcAttentionMetadata(
         num_actual_tokens=num_reqs,
         max_query_len=1,
@@ -275,6 +277,7 @@ def _make_decode_meta(num_reqs, device):
         slot_mapping=torch.zeros(num_reqs, dtype=torch.int64, device=device),
         num_decodes=num_reqs,
         num_decode_tokens=num_reqs,
+        max_decode_seq_len=max_decode_seq_len,
     )
 
 
@@ -335,7 +338,33 @@ def test_forward_decode_dispatch(device):
     kw = fake_hpc.attention_decode_bf16.call_args[1]
     assert torch.equal(kw["num_seq_kvcache"], meta.seq_lens)
     assert kw["new_kv_included"] is True
-    assert kw["splitk"] is True
+    assert kw["splitk"] is False  # even batch, MHA, max decode KV < 2048
+
+
+@pytest.mark.parametrize(
+    ("max_sl", "n_dec_tok", "nq", "nkv", "expect"),
+    [
+        # default branch (not 32h/4kv): split-K off only for short KV
+        (100, 4, 8, 8, False),
+        (1024, 4, 8, 8, True),
+        # 32h / 4kv table
+        (100, 3, 32, 4, True),  # t < 6
+        (500, 8, 32, 4, False),  # 6 <= t < 12 and sl < 1024
+        (2000, 8, 32, 4, True),  # 6 <= t < 12 but sl >= 1024
+        (2000, 12, 32, 4, False),  # 12 <= t < 14 and sl < 3072
+        (4000, 12, 32, 4, True),  # 12 <= t < 14 but sl >= 3072
+        (4095, 15, 32, 4, False),  # 14 <= t < 16 and sl < 4k
+        (5000, 15, 32, 4, True),  # 14 <= t < 16 but sl >= 4k
+        (8191, 20, 32, 4, False),  # 16 <= t < 24 and sl < 8k
+        (9000, 20, 32, 4, True),
+        (24575, 28, 32, 4, False),  # 24 <= t < 32 and sl < 24k
+        (30000, 28, 32, 4, True),
+        (20000, 35, 32, 4, False),  # t >= 32 and sl < 24k
+        (30000, 35, 32, 4, True),  # t >= 32 and sl >= 24k
+    ],
+)
+def test_hpc_decode_use_splitk_heuristic(max_sl, n_dec_tok, nq, nkv, expect):
+    assert _hpc_decode_use_splitk(max_sl, n_dec_tok, nq, nkv) is expect
 
 
 def test_forward_prefill_dispatch(device):
@@ -394,6 +423,7 @@ def test_forward_mixed_batch_output_slices(device):
         slot_mapping=torch.zeros(num_actual_tokens, dtype=torch.int64, device=device),
         num_decodes=num_decodes,
         num_decode_tokens=num_decodes,
+        max_decode_seq_len=512,
     )
 
     query = torch.randn(
@@ -538,16 +568,21 @@ def _build_kvcache_and_meta(
     # forward() dispatches to the right kernel (decode vs. prefill).
     num_decodes = sum(1 for q in query_lens if q == 1)
     num_decode_tokens = sum(q for q in query_lens if q == 1)
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device=device)
+    max_decode_seq_len = (
+        int(seq_lens_t[:num_decodes].max().item()) if num_decodes > 0 else 0
+    )
     meta = HpcAttentionMetadata(
         num_actual_tokens=total_q,
         max_query_len=max(query_lens),
         query_start_loc=q_start,
         max_seq_len=max(seq_lens),
-        seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+        seq_lens=seq_lens_t,
         block_table=block_table,
         slot_mapping=torch.zeros(total_q, dtype=torch.int64, device=device),
         num_decodes=num_decodes,
         num_decode_tokens=num_decode_tokens,
+        max_decode_seq_len=max_decode_seq_len,
     )
     return (
         key_cache,

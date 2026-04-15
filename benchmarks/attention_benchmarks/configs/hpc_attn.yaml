@@ -3,12 +3,12 @@
 # HPC_ATTN constraints: bfloat16 only, block_size must be 32 or 64,
 #                       decoder attention only, no CUDA graphs.
 
-description: "HPC attention backend benchmark (bfloat16, block_size=32)"
+description: "HPC attention backend benchmark"
 
 model:
   num_layers: 32
   num_q_heads: 32
-  num_kv_heads: 8   # GQA with 4:1 ratio (Llama-3-8B)
+  num_kv_heads: 4   # GQA with 8:1 ratio
   head_dim: 128
   block_size: 32    # HPC_ATTN requires block_size 32 or 64
 
@@ -30,7 +30,13 @@ batch_specs:
 
 backend: HPC_ATTN
 
-cuda_graphs: false   # HPC_ATTN does not support CUDA graphs
+# backends:
+#   - TRITON_ATTN
+#   - FLASH_ATTN
+#   - FLASHINFER
+#   - HPC_ATTN
+
+cuda_graphs: true
 device: "cuda:0"
 repeats: 5
 warmup_iters: 3
