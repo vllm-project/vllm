@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.1-complete
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2.2-complete
 ARG TRITON_BRANCH="ba5c1517"
 ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG PYTORCH_BRANCH="8514f051" # release/2.10 as of 3/17
@@ -293,6 +293,30 @@ RUN --mount=type=bind,from=build_mori,src=/app/install/,target=/install \
 FROM base AS final
 RUN --mount=type=bind,from=debs,src=/app/debs,target=/install \
     pip install /install/*.whl
+
+
+# torch profiler hotfix for 7.2.2: cherry-pick ROCm/rocm-systems#5062 and rebuild CLR
+# will be removed once we move to ROCm 7.13
+ARG CLR_HOTFIX_BRANCH="users/saleelk/7.2cp2"
+ARG CLR_HOTFIX_REPO="https://github.com/ROCm/rocm-systems.git"
+RUN git clone --no-checkout --filter=blob:none ${CLR_HOTFIX_REPO} /tmp/rocm-systems \
+    && cd /tmp/rocm-systems \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/hip projects/clr \
+    && git checkout ${CLR_HOTFIX_BRANCH} \
+    && export CLR_DIR=/tmp/rocm-systems/projects/clr \
+    && export HIP_DIR=/tmp/rocm-systems/projects/hip \
+    && mkdir -p $CLR_DIR/build && cd $CLR_DIR/build \
+    && cmake \
+        -DHIP_COMMON_DIR=$HIP_DIR \
+        -DCMAKE_PREFIX_PATH="/opt/rocm/" \
+        -DCLR_BUILD_HIP=ON \
+        -DCLR_BUILD_OCL=OFF \
+        -DHIP_PLATFORM=amd \
+        .. \
+    && make -j$(nproc) \
+    && make install \
+    && rm -rf /tmp/rocm-systems
 
 ARG BASE_IMAGE
 ARG TRITON_BRANCH
