@@ -197,7 +197,7 @@ class CompilerManager:
                     start, end = range_tuple
                     check_type(start, int)
                     check_type(end, int)
-                    range_tuple = Range(start=start, end=end)
+                    range_tuple = Range(start=start, end=end)  # type: ignore[call-arg]
                 check_type(range_tuple, Range)
                 return range_tuple, graph_index, compiler_name
 

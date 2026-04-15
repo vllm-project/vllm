@@ -192,6 +192,17 @@ def replace_rms_norm_class(rms_norm: nn.Module, hidden_size: int) -> RMSNorm:
     weight_meta = getattr(rms_norm, "weight", None)
     if weight_meta is not None:
         kwargs["hidden_size"] = weight_meta.size(0)
+    else:
+        # No weight: try to infer the norm's dimension from other attributes
+        # (e.g. Gemma4RMSNorm stores 'dim' on the class when with_scale=False)
+        inferred = getattr_iter(
+            rms_norm, ("dim", "hidden_size", "normalized_shape"), None
+        )
+        if inferred is not None:
+            # normalized_shape may be a tuple/list; take the last element
+            if isinstance(inferred, (list, tuple)):
+                inferred = inferred[-1]
+            kwargs["hidden_size"] = int(inferred)
     # Check if weight is all zeros, which indicates GemmaRMSNorm
     # We must create a new instance because rms_norm is on meta
     try:

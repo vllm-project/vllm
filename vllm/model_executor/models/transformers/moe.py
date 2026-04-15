@@ -196,7 +196,9 @@ class MoEMixin(MixtureOfExperts):
 
         # Positional arguments
         num_experts = self.model_config.get_num_experts()
-        top_k = getattr_iter(text_config, ["num_experts_per_tok", "top_k"], None)
+        top_k = getattr_iter(
+            text_config, ["num_experts_per_tok", "top_k", "top_k_experts"], None
+        )
         assert top_k is not None
         hidden_size = text_config.hidden_size
         intermediate_size = getattr_iter(

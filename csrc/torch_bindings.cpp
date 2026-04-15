@@ -81,7 +81,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "convert_vertical_slash_indexes("
       "   Tensor! block_count, Tensor! block_offset, "
       "   Tensor! column_count, Tensor! column_index, "
-      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor q_seqlens, Tensor kv_seqlens, "
       "   Tensor vertical_indexes, Tensor slash_indexes, "
       "   int context_size, int block_size_M, int block_size_N, "
       "   bool causal) -> ()");
@@ -92,7 +92,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "convert_vertical_slash_indexes_mergehead("
       "   Tensor! block_count, Tensor! block_offset, "
       "   Tensor! column_count, Tensor! column_index, "
-      "   Tensor q_seqlens, Tensor q_seqlens, "
+      "   Tensor q_seqlens, Tensor kv_seqlens, "
       "   Tensor vertical_indexes, Tensor slash_indexes, "
       "   Tensor vertical_indices_count, Tensor slash_indices_count, "
       "   int context_size, int block_size_M, int block_size_N, "
@@ -245,10 +245,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Quantization ops
 #ifndef USE_ROCM
+  #ifdef ENABLE_DSV3_FUSED_A_GEMM
+  // Fused SiLU+Mul + per-block quantization
+  ops.def(
+      "silu_and_mul_per_block_quant("
+      "Tensor! out, "
+      "Tensor input, "
+      "Tensor! scales, "
+      "int group_size, "
+      "Tensor? scale_ub=None, "
+      "bool is_scale_transposed=False) -> ()");
+  ops.impl("silu_and_mul_per_block_quant", torch::kCUDA,
+           &silu_and_mul_per_block_quant);
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl registration is in source file
+    // conditionally compiled so impl registration is in source file
+  #endif
 
   // Quantized GEMM for AWQ.
   ops.def(

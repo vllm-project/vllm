@@ -143,7 +143,7 @@ class PiecewiseBackend:
                 last_compile_range.end
                 == vllm_config.scheduler_config.max_num_batched_tokens
             )
-            self.compile_ranges[-1] = Range(
+            self.compile_ranges[-1] = Range(  # type: ignore[call-arg]
                 start=last_compile_range.start, end=max_int32
             )
 
@@ -171,7 +171,7 @@ class PiecewiseBackend:
                     )
                 else:
                     assert isinstance(size, int)
-                    range = Range(start=size, end=size)
+                    range = Range(start=size, end=size)  # type: ignore[call-arg]
                     if range not in self.compile_ranges:
                         self.range_entries[range] = RangeEntry(
                             compile_range=range,
@@ -346,7 +346,7 @@ class PiecewiseBackend:
             return None
 
         if runtime_shape in self.compile_sizes:
-            return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]
+            return self.range_entries[Range(start=runtime_shape, end=runtime_shape)]  # type: ignore[call-arg]
         else:
             for range in self.compile_ranges:
                 if runtime_shape in range:

@@ -284,7 +284,7 @@ class ModelArchConfigConvertorBase:
         return derived_max_model_len, max_len_key
 
     def convert(self) -> ModelArchitectureConfig:
-        model_arch_config = ModelArchitectureConfig(
+        model_arch_config = ModelArchitectureConfig(  # type: ignore[call-arg]
             architectures=self.get_architectures(),
             model_type=self.hf_config.model_type,
             text_model_type=getattr(self.hf_text_config, "model_type", None),
