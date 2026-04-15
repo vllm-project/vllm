@@ -89,16 +89,38 @@ def apply_penalties(
     return logits
 
 
+def _tinygemm_bf16_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    """Real implementation: calls FlashInfer tinygemm via lazy wrapper."""
+    from vllm.utils.flashinfer import flashinfer_tinygemm_bf16
+    out = torch.empty(
+        input.shape[0], weight.shape[0],
+        dtype=torch.bfloat16, device=input.device,
+    )
+    flashinfer_tinygemm_bf16(input, weight, out, bias=bias)
+    return out
+
+
+def _tinygemm_bf16_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+) -> torch.Tensor:
+    """Fake implementation for torch.compile graph tracing."""
+    return torch.empty(
+        input.shape[0], weight.shape[0],
+        dtype=torch.bfloat16, device=input.device,
+    )
+
+
 _TINYGEMM_AVAILABLE = False
 
 
 def _init_tinygemm():
-    """Eagerly check tinygemm availability and JIT-compile the custom op.
-
-    Must run before torch.compile so that:
-    1. _TINYGEMM_AVAILABLE is a plain bool (dynamo-safe guard)
-    2. flashinfer::tinygemm2_op is registered (dynamo-safe custom op call)
-    """
+    """Register tinygemm custom op if FlashInfer is available on SM90+."""
     global _TINYGEMM_AVAILABLE
     try:
         from vllm.utils.flashinfer import has_flashinfer
@@ -107,8 +129,11 @@ def _init_tinygemm():
         capability = current_platform.get_device_capability()
         if capability is None or capability[0] < 9:
             return
-        from flashinfer.gemm.routergemm import get_tinygemm2_module
-        get_tinygemm2_module()
+        direct_register_custom_op(
+            "tinygemm_bf16",
+            _tinygemm_bf16_impl,
+            fake_impl=_tinygemm_bf16_fake,
+        )
         _TINYGEMM_AVAILABLE = True
     except Exception:
         pass
@@ -135,14 +160,13 @@ def _tinygemm_unquantized_gemm(
     ):
         if bias is None:
             bias = torch.zeros(
-                weight.shape[0], dtype=torch.bfloat16, device=x.device
+                weight.shape[0], dtype=torch.bfloat16, device=x.device,
             )
-        out = x.new_empty((*x.shape[:-1], weight.shape[0]))
-        torch.ops.flashinfer.tinygemm2_op(
+        out_shape = (*x.shape[:-1], weight.shape[0])
+        result = torch.ops.vllm.tinygemm_bf16(
             x.view(num_tokens, -1), weight, bias,
-            out.view(num_tokens, -1), False,
         )
-        return out
+        return result.view(out_shape)
     return torch.nn.functional.linear(x, weight, bias)
 
 
