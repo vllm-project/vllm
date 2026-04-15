@@ -33,7 +33,6 @@ from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
 import vllm._custom_ops as ops
-from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -79,7 +78,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.utils import sequence_parallel_chunk
+from vllm.model_executor.models.utils import (
+    extract_layer_index,
+    sequence_parallel_chunk,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -971,7 +973,6 @@ class DeepseekV2MLAAttention(nn.Module):
         self.is_v32 = hasattr(config, "index_topk")
 
         _skip_topk = False
-        _next_skip_topk = False
         if self.is_v32:
             self.indexer_rope_emb = get_rope(
                 qk_rope_head_dim,
@@ -989,21 +990,21 @@ class DeepseekV2MLAAttention(nn.Module):
                 topk_indices_buffer,
                 f"{prefix}.indexer",
             )
-            # IndexCache config
-            indexcache_enabled = envs.VLLM_USE_INDEXCACHE
-            if indexcache_enabled:
+
+            # Enable IndexCache for DeepSeek models to reduce redundant top-k
+            # token selection computations in sparse attention.
+            use_index_cache = getattr(config, "use_index_cache", False)
+            if use_index_cache:
+                # IndexCache config
+                # Refer: https://arxiv.org/abs/2603.12201 for more details.
                 _index_topk_freq = getattr(config, "index_topk_freq", 1)
                 _index_topk_pattern = getattr(config, "index_topk_pattern", None)
-                layer_id = int(prefix.split(".")[-2]) if "." in prefix else 0
+                layer_id = extract_layer_index(prefix)
                 if _index_topk_pattern is None:
                     _skip_topk = max(layer_id - 1, 0) % _index_topk_freq != 0
-                    _next_skip_topk = layer_id % _index_topk_freq != 0
-                else:
+                elif 0 <= layer_id < len(_index_topk_pattern):
                     _skip_topk = _index_topk_pattern[layer_id] == "S"
-                    if layer_id < len(_index_topk_pattern) - 1:
-                        _next_skip_topk = _index_topk_pattern[layer_id + 1] == "S"
-                    else:
-                        _next_skip_topk = False
+
         else:
             self.indexer_rope_emb = None
             self.indexer = None
@@ -1041,23 +1042,16 @@ class DeepseekV2MLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
+            skip_topk=_skip_topk,
         )
-        self.mla_attn.skip_topk = _skip_topk
-        self.mla_attn.next_skip_topk = _next_skip_topk
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None,
-        prev_topk_indices: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
-        return self.mla_attn(
-            positions,
-            hidden_states,
-            llama_4_scaling,
-            prev_topk_indices=prev_topk_indices,
-        )
+    ) -> torch.Tensor:
+        return self.mla_attn(positions, hidden_states, llama_4_scaling)
 
 
 class DeepseekV2DecoderLayer(nn.Module):
@@ -1150,7 +1144,6 @@ class DeepseekV2DecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
         llama_4_scaling: torch.Tensor | None = None,
-        prev_topk_indices: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -1165,12 +1158,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         }
         if not self.use_mha:
             attn_kwargs["llama_4_scaling"] = llama_4_scaling
-            attn_kwargs["prev_topk_indices"] = prev_topk_indices
         hidden_states = self.self_attn(**attn_kwargs)
-        if isinstance(hidden_states, tuple):
-            hidden_states, topk_indices = hidden_states
-        else:
-            topk_indices = None
 
         if (
             not isinstance(self.self_attn, DeepseekAttention)
@@ -1197,7 +1185,7 @@ class DeepseekV2DecoderLayer(nn.Module):
             # of DeepseekV2MOE
             hidden_states *= 1.0 / self.routed_scaling_factor
 
-        return hidden_states, residual, topk_indices
+        return hidden_states, residual
 
 
 @support_torch_compile
@@ -1295,19 +1283,17 @@ class DeepseekV2Model(nn.Module):
             llama_4_scaling = None
 
         aux_hidden_states = []
-        topk_indices = None
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
         ):
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_states.append(hidden_states + residual)
-            hidden_states, residual, topk_indices = layer(
+            hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
                 llama_4_scaling,
-                prev_topk_indices=topk_indices,
             )
 
         if not get_pp_group().is_last_rank:

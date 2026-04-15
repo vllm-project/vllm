@@ -64,6 +64,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        skip_topk: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -88,16 +89,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         self.is_sparse = mla_modules.is_sparse
 
         # Whether to skip top-k token selection computation in this layer.
-        # When True, this layer will use the top-k indices from the previous layer
-        # instead of recomputing them, reducing redundant calculations.
+        # When True, the indexer will not be called, and the layer will reuse
+        # the topk_tokens buffer written by a previous layer in the same pass.
         # Refer: https://arxiv.org/abs/2603.12201 for more details.
-        self.skip_topk = False
-
-        # Whether the next layer should skip top-k computation.
-        # When True, this layer will pass its computed top-k indices to the next layer,
-        # allowing the next layer to reuse the cached results.
-        # Refer: https://arxiv.org/abs/2603.12201 for more details.
-        self.next_skip_topk = False
+        self.skip_topk = skip_topk
         if self.indexer is not None:
             assert hasattr(self.indexer, "topk_tokens")
             self.topk_tokens = self.indexer.topk_tokens
@@ -126,8 +121,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         llama_4_scaling: torch.Tensor | None = None,
-        prev_topk_indices: torch.Tensor | None = None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
+    ) -> torch.Tensor:
         q_c = None
         kv_lora = None
 
@@ -171,13 +165,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse:
-            # If skip_topk is True, reuse the top-k indices from the previous layer
-            _topk_indices = prev_topk_indices
-            if not self.skip_topk:
-                _topk_indices = self.indexer(
-                    hidden_states, q_c, positions, self.indexer_rope_emb
-                )
+        if self.indexer and self.is_sparse and not self.skip_topk:
+            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
 
         if llama_4_scaling is not None:
             q *= llama_4_scaling
@@ -188,11 +177,5 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
         )
-
         output = self.o_proj(attn_out)[0]
-        if self.indexer and self.is_sparse:
-            if not self.next_skip_topk:
-                return output, None
-            else:
-                return output, _topk_indices
         return output
