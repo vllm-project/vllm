@@ -155,11 +155,40 @@ class TestReasoningTokenCount:
         # First reasoning token is at output index 2
         assert first_idx == 2
 
-    def test_unmatched_end_token(self):
-        """End token without start should be ignored."""
-        req = self._make_request([51, 200, 201])
-        req.update_reasoning_token_count(start_token_id=50, end_token_id=51)
-        assert req.num_reasoning_tokens == 0
+    def test_end_token_without_start_implicit_reasoning(self):
+        """</think> without <think> in output means the model was already
+        in thinking mode (e.g. Qwen3 places <think> in the chat template,
+        MiniMax M2 never generates <think>).  All tokens up to </think>
+        should be counted as reasoning, starting from output position 0."""
+        # Output: [100, 101, 102, </think>, 200, 201]
+        req = self._make_request([100, 101, 102, 51, 200, 201])
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
+        # Tokens 0..3 inclusive (100, 101, 102, </think>) = 4 reasoning
+        assert req.num_reasoning_tokens == 4
+        assert first_idx == 0
+
+    def test_end_token_only_all_thinking(self):
+        """Entire output is thinking, closed by </think> at the end."""
+        req = self._make_request([100, 101, 102, 51])
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
+        assert req.num_reasoning_tokens == 4
+        assert first_idx == 0
+
+    def test_orphan_end_token_after_matched_block(self):
+        """An orphan </think> after a properly matched block should not
+        change the count (only the first unmatched </think> triggers
+        implicit reasoning)."""
+        # Output: [<think>, 100, </think>, 200, </think>]
+        req = self._make_request([50, 100, 51, 200, 51])
+        first_idx = req.update_reasoning_token_count(
+            start_token_id=50, end_token_id=51)
+        # Matched block: <think>(50) + 100 + </think>(51) = 3 tokens
+        # The trailing orphan </think> does not trigger implicit mode
+        # because <think> was already found in the output.
+        assert req.num_reasoning_tokens == 3
+        assert first_idx == 0
 
 
 # ---------------------------------------------------------------------------

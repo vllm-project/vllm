@@ -300,21 +300,41 @@ class Request:
 
         Uses a depth counter so nested spans are handled safely. Only
         single-token start/end markers are supported for now.
+
+        Some models (Qwen3, MiniMax M2) place ``<think>`` in the prompt
+        template or omit it entirely — the model only generates
+        ``</think>`` to end reasoning.  When ``</think>`` is found in the
+        output without a preceding ``<think>``, all tokens from the start
+        of the output up to ``</think>`` are treated as reasoning (i.e.
+        the model was already in thinking mode from the prompt).
         """
         count = 0
         depth = 0
         first_idx: int | None = None
+        has_end_without_start = False
         for i, tid in enumerate(self._output_token_ids):
             if tid == start_token_id:
                 if first_idx is None:
                     first_idx = i
                 depth += 1
                 count += 1
-            elif tid == end_token_id and depth > 0:
-                depth -= 1
-                count += 1
+            elif tid == end_token_id:
+                if depth > 0:
+                    depth -= 1
+                    count += 1
+                elif first_idx is None:
+                    # </think> found without any preceding <think> in
+                    # the output.  The model was already in thinking
+                    # mode (start marker is in the prompt or implicit).
+                    # Retroactively count all tokens from position 0.
+                    has_end_without_start = True
+                    count = i + 1  # tokens 0..i inclusive
             elif depth > 0:
                 count += 1
+
+        if has_end_without_start and first_idx is None:
+            first_idx = 0
+
         self.num_reasoning_tokens = count
         return first_idx
 

@@ -1851,6 +1851,21 @@ class Scheduler(SchedulerInterface):
 
         Returns 0 when reasoning is disabled, caching of reasoning tokens
         is opted-in, or the output contains no thinking tokens.
+
+        Known limitations:
+        - Speculative decoding: ``allocate_slots()`` may allocate
+          lookahead blocks beyond ``request.num_tokens``.  The block
+          count here is based on finalized tokens only, so the
+          prompt/thinking split in ``free()`` could be off by a few
+          blocks when speculative decoding is active.
+        - Hybrid KV cache groups: this method computes a single
+          ``num_thinking_blocks`` using ``self.block_size``, but hybrid
+          cache groups may have different effective block sizes.  Passing
+          the same count to every group may over-evict for groups with
+          larger blocks.
+        - Multi-token delimiters: only ``start_ids[0]`` and
+          ``end_ids[0]`` are used.  Models with multi-token reasoning
+          delimiters are not yet supported.
         """
         reasoning_config = self.vllm_config.reasoning_config
         if (
