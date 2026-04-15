@@ -67,20 +67,18 @@ def init_pooling_state(
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.pooling.classify.serving import ServingClassification
     from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
-    from vllm.entrypoints.pooling.pooling.serving import OpenAIServingPooling
+    from vllm.entrypoints.pooling.pooling.serving import ServingPooling
     from vllm.entrypoints.pooling.scoring.serving import ServingScores
     from vllm.tasks import POOLING_TASKS
 
     model_config = engine_client.model_config
-
     resolved_chat_template = load_chat_template(args.chat_template)
 
     state.serving_pooling = (
         (
-            OpenAIServingPooling(
+            ServingPooling(
                 engine_client,
                 state.openai_serving_models,
-                state.openai_serving_render,
                 supported_tasks=supported_tasks,
                 request_logger=request_logger,
                 chat_template=resolved_chat_template,
