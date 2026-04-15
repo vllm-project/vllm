@@ -14,14 +14,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-
-@dataclass
-class ScaledMMLinearLayerConfig:
-    pass
+from ..base import MMLinearLayerConfig
 
 
 @dataclass
-class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+class Int8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
     is_static_input_scheme: bool
     is_channelwise: bool
@@ -29,10 +26,12 @@ class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
 
 
 @dataclass
-class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+class FP8ScaledMMLinearLayerConfig(MMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
-    out_dtype: torch.dtype | None
+    weight_shape: tuple[int, int]
+    input_dtype: torch.dtype
+    out_dtype: torch.dtype
 
 
 _FP8ParamsT = tuple[
@@ -50,7 +49,7 @@ _Int8ParamsT = tuple[
 ]
 
 _ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
-_ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
+_ConfigT = TypeVar("_ConfigT", bound=MMLinearLayerConfig)
 
 
 class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):

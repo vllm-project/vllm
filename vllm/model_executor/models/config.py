@@ -7,7 +7,9 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, VllmConfig
+    from transformers import PretrainedConfig
+
+    from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 
 logger = init_logger(__name__)
@@ -107,6 +109,23 @@ class Gemma4Config(VerifyAndUpdateConfig):
 
 class GptOssForCausalLMConfig(VerifyAndUpdateConfig):
     @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        quant_config = getattr(model_config.hf_config, "quantization_config", None)
+        if quant_config is not None and quant_config.get("quant_method") == "mxfp4":
+            model_config.hf_config.quantization_config["quant_method"] = "gpt_oss_mxfp4"
+
+        hf_text_quant_config = getattr(
+            model_config.hf_text_config, "quantization_config", None
+        )
+        if (
+            hf_text_quant_config is not None
+            and hf_text_quant_config.get("quant_method") == "mxfp4"
+        ):
+            model_config.hf_text_config.quantization_config["quant_method"] = (
+                "gpt_oss_mxfp4"
+            )
+
+    @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
         structured_outputs_config = vllm_config.structured_outputs_config
         if structured_outputs_config.reasoning_parser == "":
@@ -190,6 +209,12 @@ class JambaForSequenceClassificationConfig(VerifyAndUpdateConfig):
             pooler_config.use_activation = False
 
 
+class JinaForRankingConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.embedding_size = 512
+
+
 class JinaRobertaModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -224,8 +249,8 @@ class JinaVLForSequenceClassificationConfig(VerifyAndUpdateConfig):
         config = model_config.hf_config
         config.num_labels = 1
         pooler_config = model_config.pooler_config
-        if pooler_config.logit_bias is None:
-            pooler_config.logit_bias = 2.65
+        if pooler_config.logit_mean is None:
+            pooler_config.logit_mean = 2.65
 
 
 class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
@@ -346,17 +371,20 @@ class MambaModelConfig(VerifyAndUpdateConfig):
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
-    @staticmethod
-    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+    DEFAULT_MAMBA_SSM_CACHE_DTYPE = "float32"
+    """Only `float32` is known to have no accuracy issues by default."""
+
+    @classmethod
+    def update_mamba_ssm_cache_dtype(
+        cls, *, cache_config: "CacheConfig", hf_config: "PretrainedConfig"
+    ) -> None:
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
-        float16 if not specified.
+        `float32` if not specified.
         """
-        cache_config = vllm_config.cache_config
         if cache_config.mamba_ssm_cache_dtype == "auto":
-            hf_config = vllm_config.model_config.hf_config
             mamba_ssm_cache_dtype = getattr(
-                hf_config, "mamba_ssm_cache_dtype", "float16"
+                hf_config, "mamba_ssm_cache_dtype", cls.DEFAULT_MAMBA_SSM_CACHE_DTYPE
             )
             logger.info(
                 "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
@@ -364,8 +392,22 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             )
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        cls.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config,
+        )
+
 
 class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        NemotronHForCausalLMConfig.update_mamba_ssm_cache_dtype(
+            cache_config=vllm_config.cache_config,
+            hf_config=vllm_config.model_config.hf_config.text_config,
+        )
+
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         mm_config = model_config.multimodal_config
@@ -593,6 +635,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteNewForSequenceClassification": GteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
+    "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
