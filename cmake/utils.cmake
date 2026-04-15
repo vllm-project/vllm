@@ -125,6 +125,17 @@ function (get_torch_gpu_compiler_flags OUT_GPU_FLAGS GPU_LANG)
       "-Werror=unused-variable"
       "-fno-gpu-rdc")
 
+    # gfx1250: __builtin_amdgcn_dot4_f32_fp8_fp8 (RDNA4 FP8 dot) requires LLVM target
+    # feature dot11-insts; hipcc does not always enable it for gfx1250 multi-arch builds.
+    if (DEFINED ENV{PYTORCH_ROCM_ARCH})
+      string(FIND "$ENV{PYTORCH_ROCM_ARCH}" "gfx1250" _VLLM_GFX1250_IDX)
+      if (NOT _VLLM_GFX1250_IDX EQUAL -1)
+        list(APPEND GPU_FLAGS "-mllvm" "-mattr=+dot11-insts")
+        message(STATUS
+          "PYTORCH_ROCM_ARCH contains gfx1250: adding -mattr=+dot11-insts for HIP FP8 dot kernels")
+      endif()
+    endif()
+
   endif()
   set(${OUT_GPU_FLAGS} ${GPU_FLAGS} PARENT_SCOPE)
 endfunction()

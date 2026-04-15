@@ -164,8 +164,16 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # -----------------------
 # vLLM build stages
 FROM fetch_vllm AS build_vllm
+# setup.py uses MAX_JOBS for `cmake --build -j=...` (default = CPU count). On large hosts
+# that can be 200+ and exhaust RAM in Docker/Jenkins; override at build time if needed.
+ARG MAX_JOBS=32
+ENV MAX_JOBS=${MAX_JOBS}
+# Ensure Ray Compiled Graph matches vLLM (base images may ship an older ray; avoids resolver warnings)
+# HIP: gfx1250 FP8 dot builtins need dot11-insts (see cmake/utils.cmake; append helps hipcc in some setups)
+ENV HIPCC_COMPILE_FLAGS_APPEND="-mllvm -mattr=+dot11-insts"
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
+    && uv pip install --upgrade 'ray[cgraph]>=2.48.0' \
     && uv pip install -r requirements/rocm.txt \
     && uv pip uninstall -y torch torchvision torchaudio || true \
     && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
@@ -287,6 +295,9 @@ RUN git clone ${DEEPEP_REPO} \
 # This stage pins dependencies to custom ROCm wheel versions and handles version detection
 FROM fetch_vllm AS build_vllm_wheel_release
 
+ARG MAX_JOBS=32
+ENV MAX_JOBS=${MAX_JOBS}
+
 ARG COMMON_WORKDIR
 
 # Create /install directory for custom wheels
@@ -393,6 +404,7 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
+    && uv pip install --system --upgrade 'ray[cgraph]>=2.48.0' \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip install --system -r requirements/rocm-test.txt \
     && uv pip uninstall -y torch torchvision torchaudio || true \
@@ -507,6 +519,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
+    && uv pip install --system --upgrade 'ray[cgraph]>=2.48.0' \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip uninstall -y torch torchvision torchaudio || true \
     && uv pip install --system --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
