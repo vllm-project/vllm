@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import os
-from typing import Any
 
 import torch
 
@@ -40,17 +39,10 @@ class XPUWorker(Worker):
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
 
-        # Torch profiler. Enabled and configured through profiler_config.
-        self.profiler: Any | None = None
-        profiler_config = vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU", "XPU"],
-            )
+        # XPU workers need the profiler to be created lazily in profile()
+        # because init_device() may adjust local_rank in DP mode.
+        if self.profiler_config.profiler not in ("torch", None):
+            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
     def init_device(self):
         # In DP mode, XPU workers see all visible devices.
@@ -145,3 +137,36 @@ class XPUWorker(Worker):
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
+
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        if self.profiler_config is None or self.profiler_config.profiler is None:
+            raise RuntimeError(
+                "Profiling is not enabled. Please set --profiler-config to enable "
+                "profiling. Example: "
+                "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
+                "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
+            )
+
+        if is_start:
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+            trace_name = (
+                f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
+            )
+
+            if self.profiler is None:
+                self.profiler = TorchProfilerWrapper(
+                    self.profiler_config,
+                    worker_name=trace_name,
+                    local_rank=self.local_rank,
+                    activities=["CPU", "XPU"],
+                )
+                logger.debug("Starting torch profiler with trace name: %s", trace_name)
+
+            self.profiler.start()
+        else:
+            if self.profiler is None:
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
+            self.profiler.stop()
