@@ -1670,14 +1670,34 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
-        if resolved_cache_dtype.startswith("turboquant_") and model_config.is_hybrid:
-            attn_indices = _get_full_attention_layer_indices(model_config)
-            if not attn_indices:
-                raise NotImplementedError(
-                    "TurboQuant KV cache requires identifiable full-attention "
-                    "layers, but none were found in the hybrid model config."
-                )
-            logger.info("TQ hybrid: full-attention layers %s", attn_indices)
+        if resolved_cache_dtype.startswith("turboquant_"):
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            num_layers = model_config.hf_text_config.num_hidden_layers
+            if model_config.is_hybrid:
+                # Hybrid models often have only 8-12 full-attention layers
+                # total; a hard n=2 on each side can cover ~40% of them.
+                # Leave boundary protection off by default here — the dense
+                # GSM8K baselines that motivate n=2 don't cover hybrids.
+                attn_indices = _get_full_attention_layer_indices(model_config)
+                if not attn_indices:
+                    raise NotImplementedError(
+                        "TurboQuant KV cache requires identifiable full-attention "
+                        "layers, but none were found in the hybrid model config."
+                    )
+                logger.info("TQ hybrid: full-attention layers %s", attn_indices)
+                boundary: list[str] = []
+            else:
+                # Dense stacks: skip first/last 2 attention layers. Empirically
+                # required for aggressive presets (k3v4_nc, 3bit_nc) — without
+                # it GSM8K drops ~30 points on Qwen3-4B.
+                boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            cache_config.kv_cache_dtype_skip_layers = sorted(
+                existing | set(boundary), key=int
+            )
 
         ray_runtime_env = None
         if is_ray_initialized():
