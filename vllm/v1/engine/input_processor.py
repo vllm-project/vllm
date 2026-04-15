@@ -190,11 +190,12 @@ class InputProcessor:
         """
         cache = getattr(self.renderer, "mm_processor_cache", None)
         if cache is None:
-            # Fall back to recording stats directly if no cache available
+            # No cache configured — record queries (not hits) for
+            # observability so the metric reflects items were seen.
             mm_cache_stats = getattr(self.renderer, "_mm_cache_stats", None)
             if mm_cache_stats is not None:
                 total = sum(len(h) for h in mm_hashes.values())
-                mm_cache_stats.record(total, total)
+                mm_cache_stats.record(total, 0)
             return
         try:
             for modality, hashes in mm_hashes.items():
@@ -202,10 +203,10 @@ class InputProcessor:
                 for i, mm_hash in enumerate(hashes):
                     if i < len(items) and items[i] is not None:
                         # Insert into cache via get_and_update_item.
-                        # If already cached, this is a no-op that returns
-                        # the existing item. If not cached, it inserts.
-                        cache.get_and_update_item(
-                            (items[i], []),  # (kwargs_item, empty prompt_updates)
+                        # Use the returned item (may be an address for SHM
+                        # cache or the original item for LRU cache).
+                        items[i], _ = cache.get_and_update_item(
+                            (items[i], []),
                             mm_hash,
                         )
             # Update cache stats to reflect the externally processed items

@@ -129,7 +129,6 @@ class MultiModalInput(_InputOptions):
     """
 
 
-
 def mm_input(
     prompt_token_ids: list[int],
     mm_kwargs: "MultiModalKwargsOptionalItems",
