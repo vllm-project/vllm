@@ -66,8 +66,7 @@ def _make_varlen_inputs(
     head_dim: int,
     dtype: torch.dtype,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor, int]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     total = sum(seq_lens)
     q = torch.randn(total, num_q_heads, head_dim, dtype=dtype, device=device)
     k = torch.randn(total, num_kv_heads, head_dim, dtype=dtype, device=device)
@@ -75,17 +74,20 @@ def _make_varlen_inputs(
 
     cu = torch.zeros(len(seq_lens) + 1, dtype=torch.int32, device=device)
     cu[1:] = torch.cumsum(
-        torch.tensor(seq_lens, dtype=torch.int32, device=device), dim=0)
+        torch.tensor(seq_lens, dtype=torch.int32, device=device), dim=0
+    )
 
     return q, k, v, cu, max(seq_lens)
 
 
 def _shard_varlen(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
     seq_lens: list[int],
-    rank: int, world_size: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor, int]:
+    rank: int,
+    world_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]:
     """Shard packed tensors: each rank gets a contiguous chunk per request."""
     q_chunks, k_chunks, v_chunks = [], [], []
     local_lens = []
@@ -94,9 +96,9 @@ def _shard_varlen(
     for sl in seq_lens:
         chunk_size = sl // world_size
         start = offset + rank * chunk_size
-        q_chunks.append(q[start:start + chunk_size])
-        k_chunks.append(k[start:start + chunk_size])
-        v_chunks.append(v[start:start + chunk_size])
+        q_chunks.append(q[start : start + chunk_size])
+        k_chunks.append(k[start : start + chunk_size])
+        v_chunks.append(v[start : start + chunk_size])
         local_lens.append(chunk_size)
         offset += sl
 
@@ -104,10 +106,10 @@ def _shard_varlen(
     k_local = torch.cat(k_chunks, dim=0).contiguous()
     v_local = torch.cat(v_chunks, dim=0).contiguous()
 
-    cu_local = torch.zeros(len(local_lens) + 1, dtype=torch.int32,
-                           device=q.device)
+    cu_local = torch.zeros(len(local_lens) + 1, dtype=torch.int32, device=q.device)
     cu_local[1:] = torch.cumsum(
-        torch.tensor(local_lens, dtype=torch.int32, device=q.device), dim=0)
+        torch.tensor(local_lens, dtype=torch.int32, device=q.device), dim=0
+    )
 
     return q_local, k_local, v_local, cu_local, max(local_lens)
 
@@ -134,41 +136,57 @@ def _run_one_config(
 
     torch.manual_seed(42)
     q, k, v, cu, max_sl = _make_varlen_inputs(
-        seq_lens, num_q_heads, num_kv_heads, head_dim, dtype, device)
+        seq_lens, num_q_heads, num_kv_heads, head_dim, dtype, device
+    )
 
     ref, _, _ = reference_varlen(
-        q, k, v,
-        cu_seqlens_q=cu, cu_seqlens_k=cu,
-        max_seqlen_q=max_sl, max_seqlen_k=max_sl,
-        causal=causal, return_attn_probs=True)
+        q,
+        k,
+        v,
+        cu_seqlens_q=cu,
+        cu_seqlens_k=cu,
+        max_seqlen_q=max_sl,
+        max_seqlen_k=max_sl,
+        causal=causal,
+        return_attn_probs=True,
+    )
 
-    q_l, k_l, v_l, cu_l, max_l = _shard_varlen(
-        q, k, v, seq_lens, rank, world_size)
+    q_l, k_l, v_l, cu_l, max_l = _shard_varlen(q, k, v, seq_lens, rank, world_size)
 
     ring = ring_flash_attn_varlen_func(
-        q_l, k_l, v_l,
-        cu_seqlens_q=cu_l, cu_seqlens_k=cu_l,
-        max_seqlen_q=max_l, max_seqlen_k=max_l,
-        cp_group=dist.group.WORLD, causal=causal)
+        q_l,
+        k_l,
+        v_l,
+        cu_seqlens_q=cu_l,
+        cu_seqlens_k=cu_l,
+        max_seqlen_q=max_l,
+        max_seqlen_k=max_l,
+        cp_group=dist.group.WORLD,
+        causal=causal,
+    )
 
     ref_chunks = []
     offset = 0
     for sl in seq_lens:
         chunk_size = sl // world_size
         start = offset + rank * chunk_size
-        ref_chunks.append(ref[start:start + chunk_size])
+        ref_chunks.append(ref[start : start + chunk_size])
         offset += sl
     ref_local = torch.cat(ref_chunks, dim=0)
 
     torch.testing.assert_close(
-        ring.float(), ref_local.float(),
-        atol=ATOL, rtol=RTOL,
-        msg=f"Ring Attention mismatch on rank {rank}")
+        ring.float(),
+        ref_local.float(),
+        atol=ATOL,
+        rtol=RTOL,
+        msg=f"Ring Attention mismatch on rank {rank}",
+    )
 
 
 # =====================================================================
 # Standalone torchrun mode
 # =====================================================================
+
 
 def _run_standalone():
     dist.init_process_group(backend="nccl")
@@ -188,8 +206,8 @@ def _run_standalone():
             continue
         try:
             _run_one_config(
-                seq_lens, Hq, Hkv, D, causal, dtype,
-                rank, world_size, device)
+                seq_lens, Hq, Hkv, D, causal, dtype, rank, world_size, device
+            )
             if rank == 0:
                 print(f"  [PASS] {label}")
         except AssertionError as e:
@@ -230,8 +248,7 @@ else:
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
         device = torch.device(f"cuda:{rank}")
         torch.accelerator.set_device_index(device)
-        init_test_distributed_environment(
-            tp_size, pp_size, rank, distributed_init_port)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
 
         seq_lens = [int(x) for x in os.environ["TEST_SEQ_LENS"].split(",")]
         Hq = int(os.environ["TEST_HQ"])
@@ -240,15 +257,13 @@ else:
         causal = os.environ["TEST_CAUSAL"] == "1"
         dtype = getattr(torch, os.environ["TEST_DTYPE"])
 
-        _run_one_config(seq_lens, Hq, Hkv, D, causal, dtype,
-                        rank, tp_size, device)
+        _run_one_config(seq_lens, Hq, Hkv, D, causal, dtype, rank, tp_size, device)
 
     CP_SIZES = [2, 4]
 
     @pytest.mark.distributed
     @pytest.mark.parametrize("cp_size", CP_SIZES)
-    @pytest.mark.parametrize(
-        "seq_lens,Hq,Hkv,D,causal,dtype,label", VARLEN_CONFIGS)
+    @pytest.mark.parametrize("seq_lens,Hq,Hkv,D,causal,dtype,label", VARLEN_CONFIGS)
     def test_ring_attn_varlen(
         monkeypatch: pytest.MonkeyPatch,
         cp_size: int,
@@ -268,8 +283,7 @@ else:
         monkeypatch.setenv("TEST_HKV", str(Hkv))
         monkeypatch.setenv("TEST_D", str(D))
         monkeypatch.setenv("TEST_CAUSAL", "1" if causal else "0")
-        monkeypatch.setenv("TEST_DTYPE",
-                           str(dtype).split(".")[-1])
+        monkeypatch.setenv("TEST_DTYPE", str(dtype).split(".")[-1])
 
         multi_process_parallel(
             monkeypatch,

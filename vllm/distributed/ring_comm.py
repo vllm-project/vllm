@@ -40,12 +40,12 @@ class RingComm:
         for step in range(comm.world_size):
             if step + 1 < comm.world_size:
                 next_kv = comm.send_recv(current_kv)
-                comm.commit()       # launch P2P on cp_stream
+                comm.commit()  # launch P2P on cp_stream
 
             # ... run attention on the default (compute) stream ...
 
             if step + 1 < comm.world_size:
-                comm.wait()         # sync cp_stream → compute stream
+                comm.wait()  # sync cp_stream → compute stream
                 current_kv = next_kv
     """
 
@@ -98,8 +98,7 @@ class RingComm:
             to_send = to_send.contiguous()
 
         if recv_tensor is None:
-            res = torch.empty_like(to_send,
-                                   memory_format=torch.contiguous_format)
+            res = torch.empty_like(to_send, memory_format=torch.contiguous_format)
         else:
             res = recv_tensor
             if not res.is_contiguous():
@@ -109,18 +108,22 @@ class RingComm:
         # to avoid potential deadlocks on some NCCL/RCCL versions
         if self.rank % 2 == 0:
             self._ops.append(
-                dist.P2POp(dist.isend, to_send, self.send_rank,
-                           group=self._process_group))
+                dist.P2POp(
+                    dist.isend, to_send, self.send_rank, group=self._process_group
+                )
+            )
             self._ops.append(
-                dist.P2POp(dist.irecv, res, self.recv_rank,
-                           group=self._process_group))
+                dist.P2POp(dist.irecv, res, self.recv_rank, group=self._process_group)
+            )
         else:
             self._ops.append(
-                dist.P2POp(dist.irecv, res, self.recv_rank,
-                           group=self._process_group))
+                dist.P2POp(dist.irecv, res, self.recv_rank, group=self._process_group)
+            )
             self._ops.append(
-                dist.P2POp(dist.isend, to_send, self.send_rank,
-                           group=self._process_group))
+                dist.P2POp(
+                    dist.isend, to_send, self.send_rank, group=self._process_group
+                )
+            )
         return res
 
     def commit(self) -> None:
@@ -133,7 +136,8 @@ class RingComm:
         if self._reqs is not None:
             raise RuntimeError(
                 "commit() called while previous operations are still pending. "
-                "Call wait() before committing new operations.")
+                "Call wait() before committing new operations."
+            )
 
         # compute stream records: "my tensors are ready to send"
         self._compute_event.record(torch.cuda.current_stream())
@@ -153,7 +157,8 @@ class RingComm:
         if self._reqs is None:
             raise RuntimeError(
                 "wait() called before commit(). "
-                "Queue operations with send_recv(), then call commit().")
+                "Queue operations with send_recv(), then call commit()."
+            )
 
         # Wait for all P2P ops to finish on cp_stream
         with torch.cuda.stream(self._cp_stream):

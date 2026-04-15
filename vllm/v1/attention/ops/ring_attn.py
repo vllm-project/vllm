@@ -46,7 +46,6 @@ from vllm.v1.attention.backends.fa_utils import (
     flash_attn_varlen_func,
 )
 
-
 # ---------------------------------------------------------------------------
 # Cached CUDA stream for P2P communication.
 # hipStreamCreate costs ~2ms on ROCm; caching avoids this on every call.
@@ -212,7 +211,9 @@ def ring_flash_attn_varlen_func(
             # probability matrix; the third return value is always an empty
             # tensor.  LSE is returned as the second value with shape [H, N].
             block_out, block_lse, _ = flash_attn_varlen_func(
-                q, k, v,
+                q,
+                k,
+                v,
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_q=max_seqlen_q,
@@ -225,8 +226,7 @@ def ring_flash_attn_varlen_func(
             if out is None:
                 out, lse = _init_out_and_lse(block_out, block_lse)
             else:
-                out, lse = _update_out_and_lse(
-                    out, lse, block_out, block_lse)
+                out, lse = _update_out_and_lse(out, lse, block_out, block_lse)
 
         if step + 1 < comm.world_size:
             comm.wait()
