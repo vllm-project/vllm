@@ -1,0 +1,5 @@
+model_name: "MiniMaxAI/MiniMax-M2.7"
+accuracy_threshold: 0.78
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 4096"

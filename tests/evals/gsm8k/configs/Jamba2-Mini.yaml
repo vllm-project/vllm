@@ -1,0 +1,5 @@
+model_name: "ai21labs/AI21-Jamba2-Mini"
+accuracy_threshold: 0.75
+num_questions: 1319
+num_fewshot: 5
+server_args: "--enforce-eager --max-model-len 4096 --mamba-backend flashinfer"

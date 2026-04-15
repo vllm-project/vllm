@@ -1,0 +1,15 @@
+Trinity-Mini.yaml
+Gemma-4-26B-A4B-it.yaml
+GLM-4.7-Flash.yaml
+GPT-OSS-20B.yaml
+Granite-4.0-H-Small.yaml
+Jamba2-Mini.yaml
+LFM2.5-350M.yaml
+moe-refactor/Llama-4-Scout-BF16-triton.yaml
+MiniMax-M2.7.yaml
+moe-refactor/Mixtral-8x7B-BF16-triton.yaml
+Nemotron-3-Super-120B-A12B-NVFP4.yaml
+OLMoE-1B-7B-0125-Instruct.yaml
+Phi-Tiny-MoE-Instruct.yaml
+Sarvam-30B.yaml
+Step-3.5-Flash.yaml
