@@ -130,11 +130,6 @@ def test_models(
     model_info.check_available_online(on_fail="skip")
     model_info.check_transformers_version(on_fail="skip")
 
-    if model == "TitanML/tiny-mixtral":
-        # Untrained model has near-uniform logits, so the top-k token sets
-        # diverge easily between HF and vLLM.  Use a wider window.
-        num_logprobs = 10
-
     if use_rocm_aiter and (model in AITER_MODEL_LIST):
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
         if model == "TitanML/tiny-mixtral":
