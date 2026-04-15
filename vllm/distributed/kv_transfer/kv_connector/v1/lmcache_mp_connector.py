@@ -215,6 +215,8 @@ class LMCacheMPRequestTracker:
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
+    cache_salt: str = ""
+
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
         self.cache_salt: str = request.cache_salt or ""
