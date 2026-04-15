@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import multiprocessing
 import os
 import pickle
@@ -11,7 +12,7 @@ import traceback
 import weakref
 from collections import deque
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, InvalidStateError
+from concurrent.futures import Future, InvalidStateError, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum, auto
@@ -165,42 +166,70 @@ class MultiprocExecutor(Executor):
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
             # workers
-            inherited_fds: list[int] | None = (
-                [] if context.get_start_method() == "fork" else None
-            )
+            is_fork = context.get_start_method() == "fork"
+            inherited_fds: list[int] | None = [] if is_fork else None
 
-            for local_rank in range(self.local_world_size):
-                global_rank = global_start_rank + local_rank
-                is_driver_worker = self._is_driver_worker(global_rank)
-                if current_platform.is_cpu():
-                    om = current_platform.get_omp_manager()
-                    logger.info("Configured OMP PLACES %s", str(om.omp_places))
-                    unready_worker_handle = om.run(
-                        WorkerProc.make_worker_process,
-                        vllm_config=self.vllm_config,
-                        local_rank=local_rank,
-                        rank=global_rank,
-                        distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
-                        shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
-                        inherited_fds=inherited_fds,
-                    )
-                else:
-                    unready_worker_handle = WorkerProc.make_worker_process(
-                        vllm_config=self.vllm_config,
-                        local_rank=local_rank,
-                        rank=global_rank,
-                        distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
-                        shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
-                        inherited_fds=inherited_fds,
-                    )
-                unready_workers.append(unready_worker_handle)
-                if inherited_fds is not None:
-                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
-                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
+            # Use async parallel startup for spawn mode with multiple workers.
+            # Fork mode requires sequential fd tracking, so it must use serial.
+            # CPU platform uses om.run() which is not compatible with async startup.
+            use_async_startup = (
+                not is_fork
+                and not current_platform.is_cpu()
+                and self.local_world_size > 1
+            )
+            if use_async_startup:
+                logger.info(
+                    "Using async parallel startup for %d worker processes.",
+                    self.local_world_size,
+                )
+                unready_workers = self._run_async_workers_startup(
+                    global_start_rank,
+                    distributed_init_method,
+                    scheduler_output_handle,
+                    shared_worker_lock,
+                )
+                logger.info(
+                    "All %d worker processes started successfully.",
+                    self.local_world_size,
+                )
+            else:
+                # Serial startup path (fork mode, CPU platform, or small world_size).
+                for local_rank in range(self.local_world_size):
+                    global_rank = global_start_rank + local_rank
+                    is_driver_worker = self._is_driver_worker(global_rank)
+                    if current_platform.is_cpu():
+                        om = current_platform.get_omp_manager()
+                        logger.info("Configured OMP PLACES %s", str(om.omp_places))
+                        unready_worker_handle = om.run(
+                            WorkerProc.make_worker_process,
+                            vllm_config=self.vllm_config,
+                            local_rank=local_rank,
+                            rank=global_rank,
+                            distributed_init_method=distributed_init_method,
+                            input_shm_handle=scheduler_output_handle,
+                            shared_worker_lock=shared_worker_lock,
+                            is_driver_worker=is_driver_worker,
+                            inherited_fds=inherited_fds,
+                        )
+                    else:
+                        unready_worker_handle = WorkerProc.make_worker_process(
+                            vllm_config=self.vllm_config,
+                            local_rank=local_rank,
+                            rank=global_rank,
+                            distributed_init_method=distributed_init_method,
+                            input_shm_handle=scheduler_output_handle,
+                            shared_worker_lock=shared_worker_lock,
+                            is_driver_worker=is_driver_worker,
+                            inherited_fds=inherited_fds,
+                        )
+                    unready_workers.append(unready_worker_handle)
+                    if inherited_fds is not None:
+                        inherited_fds.append(
+                            unready_worker_handle.death_writer.fileno()
+                        )
+                        inherited_fds.append(
+                            unready_worker_handle.ready_pipe.fileno()
+                        )
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -272,6 +301,83 @@ class MultiprocExecutor(Executor):
 
     def _is_driver_worker(self, rank: int) -> bool:
         return rank % self.parallel_config.tensor_parallel_size == 0
+
+    def _run_async_workers_startup(
+        self,
+        global_start_rank: int,
+        distributed_init_method: str,
+        scheduler_output_handle,
+        shared_worker_lock,
+    ) -> list["UnreadyWorkerProcHandle"]:
+        """Run _start_workers_async() in an event loop.
+
+        Handles the case where we are already inside a running event loop
+        by offloading to a dedicated thread with its own loop.
+        """
+        try:
+            asyncio.get_running_loop()
+            # Already inside an event loop — spin up a fresh loop in a
+            # background thread to avoid nesting asyncio.run() calls.
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self._start_workers_async(
+                        global_start_rank,
+                        distributed_init_method,
+                        scheduler_output_handle,
+                        shared_worker_lock,
+                    ),
+                )
+                return future.result()
+        except RuntimeError:
+            # No running loop — safe to call asyncio.run() directly.
+            return asyncio.run(
+                self._start_workers_async(
+                    global_start_rank,
+                    distributed_init_method,
+                    scheduler_output_handle,
+                    shared_worker_lock,
+                )
+            )
+
+    async def _start_workers_async(
+        self,
+        global_start_rank: int,
+        distributed_init_method: str,
+        scheduler_output_handle,
+        shared_worker_lock,
+    ) -> list["UnreadyWorkerProcHandle"]:
+        """Start all worker processes concurrently.
+
+        Each WorkerProc.make_worker_process() call is offloaded to a
+        thread-pool thread via asyncio.to_thread(), allowing all workers
+        to be spawned in parallel rather than sequentially.
+
+        Note: This method is only used when inherited_fds is None
+        (i.e., spawn mode), since fork mode requires sequential fd tracking.
+        """
+
+        async def _start_one(
+            local_rank: int, global_rank: int
+        ) -> "UnreadyWorkerProcHandle":
+            is_driver_worker = self._is_driver_worker(global_rank)
+            return await asyncio.to_thread(
+                WorkerProc.make_worker_process,
+                vllm_config=self.vllm_config,
+                local_rank=local_rank,
+                rank=global_rank,
+                distributed_init_method=distributed_init_method,
+                input_shm_handle=scheduler_output_handle,
+                shared_worker_lock=shared_worker_lock,
+                is_driver_worker=is_driver_worker,
+                inherited_fds=None,  # spawn mode only
+            )
+
+        tasks = [
+            _start_one(local_rank, global_start_rank + local_rank)
+            for local_rank in range(self.local_world_size)
+        ]
+        return list(await asyncio.gather(*tasks))
 
     def start_worker_monitor(self, inline=False) -> None:
         workers = self.workers

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+import concurrent.futures
 import contextlib
 import os
 import threading
@@ -11,7 +13,7 @@ from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import patch
 
 import msgspec
@@ -35,6 +37,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
+
+# Threshold for switching to async parallel startup of EngineCore processes.
+# When local_engine_count > this value, all processes are started concurrently
+# via asyncio.gather() to reduce total startup time from O(N) to O(1).
+_ASYNC_STARTUP_ENGINE_THRESHOLD = 1
 
 
 class CoreEngineState(Enum):
@@ -80,6 +87,29 @@ class EngineHandshakeMetadata:
     parallel_config: dict[str, int | str | list[int]]
 
 
+def _enginecore_bootstrap(
+    *,
+    evar: str,
+    value: str,
+    target_fn: Callable[..., Any],
+    target_kwargs: dict[str, Any],
+) -> None:
+    """Bootstrap function for EngineCore subprocesses that need env control.
+
+    Sets the device control environment variable (e.g. CUDA_VISIBLE_DEVICES)
+    before invoking the real engine entry point. This avoids the race
+    condition that arises when the parent process temporarily patches the
+    environment variable and then forks, because the patch is applied
+    inside the child instead.
+
+    Only used when need_env_control is True (non-CUDA platforms or Ray
+    launcher). CUDA platforms without Ray use torch.cuda.set_device()
+    inside the worker and never call this function.
+    """
+    os.environ[evar] = value
+    target_fn(**target_kwargs)
+
+
 class CoreEngineProcManager:
     """
     Utility class to handle creation, readiness, and shutdown
@@ -112,9 +142,21 @@ class CoreEngineProcManager:
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
-        is_dp = vllm_config.parallel_config.data_parallel_size > 1
-
         from vllm.v1.engine.core import EngineCoreProc
+
+        # Determine whether we need to control the device visibility env var
+        # inside the child process rather than in the parent.
+        # For CUDA platforms without Ray we rely on torch.cuda.set_device()
+        # inside the worker, so no env-var patching is needed.
+        data_parallel = vllm_config.parallel_config.data_parallel_size > 1
+        need_env_control = data_parallel and (
+            not current_platform.is_cuda_alike()
+            or vllm_config.parallel_config.use_ray
+        )
+        if need_env_control:
+            evar = current_platform.device_control_env_var
+            world_size = vllm_config.parallel_config.world_size
+            local_world_size = vllm_config.parallel_config.local_world_size
 
         self.processes: list[BaseProcess] = []
         local_dp_ranks = []
@@ -126,10 +168,28 @@ class CoreEngineProcManager:
             local_dp_ranks.append(local_index)
             self.processes.append(
                 context.Process(
-                    target=EngineCoreProc.run_engine_core,
-                    name=f"EngineCore_DP{global_index}" if is_dp else "EngineCore",
-                    kwargs=common_kwargs
-                    | {"dp_rank": global_index, "local_dp_rank": local_index},
+                    target=(_enginecore_bootstrap if need_env_control
+                            else EngineCoreProc.run_engine_core),
+                    name=(f"EngineCore_DP{global_index}" if data_parallel
+                          else "EngineCore"),
+                    kwargs=(
+                        {
+                            "evar": evar,
+                            "value": get_device_indices(
+                                evar, local_index, world_size, local_world_size
+                            ),
+                            "target_fn": EngineCoreProc.run_engine_core,
+                            "target_kwargs": common_kwargs | {
+                                "dp_rank": global_index,
+                                "local_dp_rank": local_index,
+                            },
+                        }
+                        if need_env_control
+                        else common_kwargs | {
+                            "dp_rank": global_index,
+                            "local_dp_rank": local_index,
+                        }
+                    ),
                 )
             )
 
@@ -137,43 +197,93 @@ class CoreEngineProcManager:
         self.manager_stopped = threading.Event()
         self.failed_proc_name: str | None = None
 
-        try:
-            for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
-                # Adjust device control in DP for non-CUDA platforms
-                # as well as external and ray launchers
-                # For CUDA platforms, we use torch.accelerator.set_device_index()()
-                device_control_context: contextlib.AbstractContextManager[None] = (
-                    contextlib.nullcontext()
+        # Start all processes concurrently to avoid O(N) sequential startup
+        # latency. Serial path is taken only for single-engine deployments.
+        use_async_startup = local_engine_count > _ASYNC_STARTUP_ENGINE_THRESHOLD
+        if use_async_startup:
+            logger.info(
+                "Using async parallel startup for %d EngineCore processes.",
+                local_engine_count,
+            )
+            try:
+                self._run_async_startup(vllm_config, local_dp_ranks)
+                logger.info(
+                    "All %d EngineCore processes started successfully.",
+                    local_engine_count,
                 )
-                if is_dp and (
-                    not current_platform.is_cuda_alike()
-                    or vllm_config.parallel_config.use_ray
-                ):
-                    device_control_context = set_device_control_env_var(
-                        vllm_config, local_dp_rank
-                    )
-
-                with (
-                    device_control_context,
-                    numa_utils.configure_subprocess(
-                        # EngineCore itself does not have a TP/PP-local rank.
-                        # When DP is enabled, set_device_control_env_var()
-                        # narrows visible devices to this DP shard first, so
-                        # local_rank=0 means "the first local GPU in this
-                        # shard". The actual TP/PP worker processes spawned by
-                        # the executor are bound separately with their own
-                        # local_rank values.
+            finally:
+                if self.finished_procs():
+                    self.shutdown()
+        else:
+            # Serial startup path (small DP or single-engine).
+            # For non-CUDA / Ray cases the env var is now set inside the child
+            # via _enginecore_bootstrap, so no parent-side patching is needed.
+            try:
+                for proc, local_dp_rank in zip(self.processes, local_dp_ranks):
+                    with numa_utils.configure_subprocess(
                         vllm_config,
                         local_rank=0,
                         dp_local_rank=local_dp_rank,
                         process_kind="EngineCore",
-                    ),
+                    ):
+                        proc.start()
+            finally:
+                if self.finished_procs():
+                    self.shutdown()
+
+    def _run_async_startup(
+        self,
+        vllm_config: VllmConfig,
+        local_dp_ranks: list[int],
+    ) -> None:
+        """Run _start_processes_async() in an event loop.
+
+        Handles the case where we are already inside a running event loop
+        (e.g. called from AsyncLLM) by offloading to a dedicated thread
+        with its own loop, avoiding nested asyncio.run() calls.
+        """
+        try:
+            asyncio.get_running_loop()
+            # Already inside an event loop - spin up a fresh loop in a
+            # background thread to avoid nesting asyncio.run() calls.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self._start_processes_async(vllm_config, local_dp_ranks),
+                )
+                future.result()
+        except RuntimeError:
+            # No running loop - safe to call asyncio.run() directly.
+            asyncio.run(self._start_processes_async(vllm_config, local_dp_ranks))
+
+    async def _start_processes_async(
+        self,
+        vllm_config: VllmConfig,
+        local_dp_ranks: list[int],
+    ) -> None:
+        """Start all EngineCore processes concurrently.
+
+        Each proc.start() is offloaded to the thread pool via
+        asyncio.to_thread so that NUMA binding context managers can be
+        applied per-process without blocking the event loop.
+        """
+
+        async def _start_one(proc: BaseProcess, local_dp_rank: int) -> None:
+            def _start_with_numa() -> None:
+                with numa_utils.configure_subprocess(
+                    vllm_config,
+                    local_rank=0,
+                    dp_local_rank=local_dp_rank,
+                    process_kind="EngineCore",
                 ):
                     proc.start()
-        finally:
-            # Kill other procs if not all are running.
-            if self.finished_procs():
-                self.shutdown()
+
+            await asyncio.to_thread(_start_with_numa)
+
+        await asyncio.gather(
+            *(_start_one(proc, rank)
+              for proc, rank in zip(self.processes, local_dp_ranks))
+        )
 
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine core processes with configurable timeout."""
