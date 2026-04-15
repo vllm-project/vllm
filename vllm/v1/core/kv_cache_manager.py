@@ -109,6 +109,7 @@ class KVCacheManager:
         kv_cache_config: KVCacheConfig,
         max_model_len: int,
         hash_block_size: int,
+        max_num_batched_tokens: int = 0,
         enable_caching: bool = True,
         use_eagle: bool = False,
         log_stats: bool = False,
@@ -118,6 +119,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
     ) -> None:
         self.max_model_len = max_model_len
+        self.max_num_batched_tokens = max_num_batched_tokens
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
@@ -131,6 +133,7 @@ class KVCacheManager:
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
+            max_num_batched_tokens=self.max_num_batched_tokens,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,

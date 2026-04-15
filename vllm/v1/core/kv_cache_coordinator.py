@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
     SingleTypeKVCacheManager,
+    SlidingWindowManager,
     get_manager_for_kv_cache_spec,
 )
 from vllm.v1.kv_cache_interface import (
@@ -40,10 +41,12 @@ class KVCacheCoordinator(ABC):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
+        max_num_batched_tokens: int = 0,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         self.kv_cache_config = kv_cache_config
         self.max_model_len = max_model_len
+        self.max_num_batched_tokens = max_num_batched_tokens
         self.enable_caching = enable_caching
 
         self.block_pool = BlockPool(
@@ -105,9 +108,19 @@ class KVCacheCoordinator(ABC):
                     request_id, num_encoder_tokens, [], 0, num_encoder_tokens
                 )
             else:
+                # Cap num_tokens for SWA: a sliding window layer never
+                # holds more than sliding_window blocks at steady state.
+                # OOW blocks are freed between chunks by
+                # remove_skipped_blocks(), so the admission check only
+                # needs to budget for the window, not the full sequence.
+                effective_num_tokens = num_tokens
+                if isinstance(manager, SlidingWindowManager):
+                    effective_num_tokens = min(
+                        num_tokens, manager.sliding_window + self.max_num_batched_tokens
+                    )
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
-                    num_tokens,
+                    effective_num_tokens,
                     new_computed_blocks[i],
                     total_computed_tokens,
                     num_tokens_main_model,
@@ -270,6 +283,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
+        max_num_batched_tokens: int = 0,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -281,6 +295,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
+            max_num_batched_tokens=max_num_batched_tokens,
             metrics_collector=metrics_collector,
         )
         self.num_single_type_manager = len(self.single_type_managers)
@@ -316,6 +331,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
+        max_num_batched_tokens: int = 0,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -327,6 +343,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
+            max_num_batched_tokens=max_num_batched_tokens,
             metrics_collector=metrics_collector,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
@@ -381,6 +398,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         dcp_world_size: int,
         pcp_world_size: int,
         hash_block_size: int,
+        max_num_batched_tokens: int = 0,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -392,6 +410,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
+            max_num_batched_tokens=max_num_batched_tokens,
             metrics_collector=metrics_collector,
         )
         # hash_block_size: the block size used to compute block hashes.
@@ -547,6 +566,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
 def get_kv_cache_coordinator(
     kv_cache_config: KVCacheConfig,
     max_model_len: int,
+    max_num_batched_tokens: int,
     use_eagle: bool,
     enable_caching: bool,
     enable_kv_cache_events: bool,
@@ -564,6 +584,7 @@ def get_kv_cache_coordinator(
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
+            max_num_batched_tokens=max_num_batched_tokens,
             metrics_collector=metrics_collector,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
@@ -576,6 +597,7 @@ def get_kv_cache_coordinator(
             dcp_world_size=dcp_world_size,
             pcp_world_size=pcp_world_size,
             hash_block_size=hash_block_size,
+            max_num_batched_tokens=max_num_batched_tokens,
             metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
@@ -587,5 +609,6 @@ def get_kv_cache_coordinator(
         dcp_world_size=dcp_world_size,
         pcp_world_size=pcp_world_size,
         hash_block_size=hash_block_size,
+        max_num_batched_tokens=max_num_batched_tokens,
         metrics_collector=metrics_collector,
     )
