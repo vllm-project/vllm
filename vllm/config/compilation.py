@@ -519,12 +519,20 @@ class CompilationConfig:
     User-provided values override auto-inference.
     Example: [2048, 4096, 8192, 13824]"""
 
-    encoder_cudagraph_max_images_per_batch: int = 0
-    """Maximum number of images per batch for encoder CUDA graph capture.
+    encoder_cudagraph_max_vision_items_per_batch: int = 0
+    """Maximum number of images/videos per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
     auto-inference."""
+
+    encoder_cudagraph_max_frames_per_batch: int = 0
+    """Maximum total video frames per batch for encoder CUDA graph capture.
+    Controls the cu_seqlens buffer size (one entry per attention sequence,
+    i.e. one per video frame). If 0 (default), auto-inferred per budget
+    level as token_budget (tight bound: packing guarantees
+    sum(T_i) <= token_budget). Positive value overrides auto-inference
+    and applies to all budget levels."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None
@@ -702,6 +710,8 @@ class CompilationConfig:
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
+    encoder_compilation_time: float = field(default=0.0, init=False)
+    """time taken for multimodal encoder compilation"""
 
     static_forward_context: dict[str, Any] = field(default_factory=dict, init=False)
     """Per-model forward context
@@ -748,6 +758,7 @@ class CompilationConfig:
             "local_cache_dir",
             "traced_files",
             "compilation_time",
+            "encoder_compilation_time",
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
@@ -767,6 +778,7 @@ class CompilationConfig:
             "enabled_custom_ops": True,
             "disabled_custom_ops": True,
             "compilation_time": True,
+            "encoder_compilation_time": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
@@ -964,10 +976,18 @@ class CompilationConfig:
         # Validate encoder CUDA graph configuration
         if (
             self.cudagraph_mm_encoder
-            and self.encoder_cudagraph_max_images_per_batch < 0
+            and self.encoder_cudagraph_max_vision_items_per_batch < 0
         ):
             raise ValueError(
-                "encoder_cudagraph_max_images_per_batch must be "
+                "encoder_cudagraph_max_vision_items_per_batch must be "
+                "non-negative (0 = auto-infer)"
+            )
+        if (
+            self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_frames_per_batch < 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_frames_per_batch must be "
                 "non-negative (0 = auto-infer)"
             )
 
