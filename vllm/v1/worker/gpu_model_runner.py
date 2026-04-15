@@ -55,6 +55,7 @@ from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
+    RoutedExpertsPendingCopy,
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
@@ -233,9 +234,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
-        re_cpu: torch.Tensor | None = None,
-        re_total: int | None = None,
-        re_slot_mapping: np.ndarray | None = None,
+        re_pending: RoutedExpertsPendingCopy | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -251,9 +250,7 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         # Routed experts async D2H metadata (copy already issued on
         # default stream before this constructor is called).
-        self._re_cpu = re_cpu
-        self._re_total = re_total
-        self._re_slot_mapping = re_slot_mapping
+        self._re_pending = re_pending
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -300,11 +297,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output.logprobs = logprobs_lists
 
         # Finalize routed experts from non-blocking D2H copy.
-        if self._re_total is not None:
-            assert self._re_cpu is not None
-            batch = self._re_cpu[: self._re_total].numpy()
-            output.routed_experts = (batch, self._re_slot_mapping)
-            self._re_total = None
+        # At this point the default-stream event has been synchronized,
+        # so both routed_experts_cpu and slot_mapping D2H are complete.
+        if self._re_pending is not None:
+            output.routed_experts = self._re_pending.finalize()
+            self._re_pending = None
 
         return output
 
@@ -451,8 +448,7 @@ class GPUModelRunner(
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
-        self._re_total: int | None = None
-        self._re_slot_mapping: np.ndarray | None = None
+        self._re_pending: RoutedExpertsPendingCopy | None = None
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -2168,8 +2164,8 @@ class GPUModelRunner(
         if self.routed_experts_initialized:
             attn_gid = self.routed_experts_attn_gid
             slot_mapping_attn = slot_mappings[attn_gid]
-            self.routed_experts_slot_mapping = (
-                slot_mapping_attn[:num_tokens].cpu().numpy()
+            self.routed_experts_slot_mapping = slot_mapping_attn[:num_tokens].to(
+                "cpu", non_blocking=True
             )
 
         num_computed_tokens_cpu = self.input_batch.num_computed_tokens_cpu_tensor[
@@ -4354,8 +4350,11 @@ class GPUModelRunner(
                 buf = self.routed_experts_capturer.get_device_buffer()
                 total = scheduler_output.total_num_scheduled_tokens
                 self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
-                self._re_total = total
-                self._re_slot_mapping = self.routed_experts_slot_mapping
+                self._re_pending = RoutedExpertsPendingCopy(
+                    cpu_buffer=self.routed_experts_cpu,
+                    total=total,
+                    slot_mapping=self.routed_experts_slot_mapping,
+                )
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -4374,13 +4373,10 @@ class GPUModelRunner(
 
         if not self.use_async_scheduling:
             # Sync path: wait for the non-blocking D2H, then finalize.
-            if self._re_total is not None:
+            if self._re_pending is not None:
                 torch.cuda.current_stream().synchronize()
-                output.routed_experts = (
-                    self.routed_experts_cpu[: self._re_total].numpy(),
-                    self._re_slot_mapping,
-                )
-                self._re_total = None
+                output.routed_experts = self._re_pending.finalize()
+                self._re_pending = None
             return output
 
         with record_function_or_nullcontext(
@@ -4393,9 +4389,7 @@ class GPUModelRunner(
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
-                re_cpu=getattr(self, "routed_experts_cpu", None),
-                re_total=getattr(self, "_re_total", None),
-                re_slot_mapping=getattr(self, "_re_slot_mapping", None),
+                re_pending=self._re_pending,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -6870,6 +6864,11 @@ class GPUModelRunner(
         return 0
 
     def init_routed_experts_capturer(self):
+        assert self.parallel_config.pipeline_parallel_size <= 1, (
+            "Routed experts capture requires batch_queue_size=1 "
+            "(no pipeline parallelism). With PP>1 the shared pinned "
+            "CPU buffer would be overwritten before finalize()."
+        )
         logger.info(
             "Initializing routed experts capturer, enable_return_routed_experts: %s",
             self.model_config.enable_return_routed_experts,

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -16,6 +17,30 @@ from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RoutedExpertsPendingCopy:
+    """Pending non-blocking D2H copy for routed experts capture.
+
+    Both ``cpu_buffer`` and ``slot_mapping`` are copied from GPU with
+    ``non_blocking=True`` on the default stream.  Call :meth:`finalize`
+    only after the stream has been synchronized (or an event recorded on
+    that stream has been waited on).
+
+    NOTE: ``cpu_buffer`` holds a **reference** to the shared pinned
+    buffer on GPUModelRunner, not a copy.  ``finalize()`` must be called
+    before the next ``execute_model()`` overwrites the buffer.  This is
+    guaranteed when ``batch_queue_size <= 1`` (sync scheduling).
+    """
+
+    cpu_buffer: torch.Tensor
+    total: int
+    slot_mapping: torch.Tensor  # D2H in-flight; call .numpy() after sync
+
+    def finalize(self) -> tuple[np.ndarray, np.ndarray]:
+        """Convert to numpy arrays after D2H synchronization."""
+        return self.cpu_buffer[: self.total].numpy(), self.slot_mapping.numpy()
 
 
 def get_num_experts(hf_config) -> int:
