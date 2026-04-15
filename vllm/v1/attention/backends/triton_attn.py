@@ -239,7 +239,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         if seq_lens_cpu is not None:
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
-            all_pure_first_prefill = bool(torch.equal(query_lens_cpu, seq_lens_cpu))
+            all_pure_first_prefill = bool(
+                torch.equal(query_lens_cpu, seq_lens_cpu.to(query_lens_cpu.dtype))
+            )
         else:
             all_pure_first_prefill = False
 
