@@ -3,10 +3,10 @@
 # SM86 included for broader Ampere coverage; SM89 for marlin fp8 support
 env:
   CUDA_ARCH_X86: "7.5 8.0 8.6 8.9 9.0 10.0 12.0+PTX"
+  # aarch64 only architectures: 8.7 for Orin, 11.0 for Thor (since CUDA 13)
   CUDA_ARCH_AARCH64: "8.0 8.7 8.9 9.0 10.0 11.0 12.0+PTX"
-  # CUDA 12.9 builds: same arches without +PTX forward compat
   CUDA_ARCH_X86_CU129: "7.5 8.0 8.6 8.9 9.0 10.0 12.0"
-  CUDA_ARCH_AARCH64_CU129: "8.0 8.7 8.9 9.0 10.0 11.0 12.0"
+  CUDA_ARCH_AARCH64_CU129: "8.0 8.7 8.9 9.0 10.0 12.0"
 
 steps:
   - input: "Provide Release version here"
