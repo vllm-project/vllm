@@ -200,6 +200,64 @@ class TestTurboQuantConfig:
         assert len(layers) == 8
 
 
+class TestHybridAttentionIndices:
+    """Regression tests for boundary protection on hybrid models.
+
+    Hybrid models (attention + Mamba / linear-attention) identify KV-carrying
+    layers via layer_types / layers_block_type / attn_type_list. The helper
+    must return the *global* layer indices of the full-attention layers so
+    that kv_cache_dtype_skip_layers matches what extract_layer_index(prefix)
+    reports on the Attention layers at runtime.
+    """
+
+    @staticmethod
+    def _fake_model_config(text_cfg=None, hf_cfg=None):
+        class _Obj:
+            pass
+
+        m = _Obj()
+        m.hf_text_config = text_cfg if text_cfg is not None else _Obj()
+        m.hf_config = hf_cfg if hf_cfg is not None else _Obj()
+        return m
+
+    def test_layer_types_full_attention(self):
+        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+
+        cfg = type("C", (), {})()
+        cfg.layer_types = [
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+            "linear_attention",
+            "full_attention",
+            "full_attention",
+        ]
+        mc = self._fake_model_config(text_cfg=cfg)
+        assert _get_full_attention_layer_indices(mc) == [2, 4, 5]
+
+    def test_layers_block_type_jamba(self):
+        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+
+        cfg = type("C", (), {})()
+        cfg.layers_block_type = ["mamba", "attention", "mamba", "attention"]
+        mc = self._fake_model_config(text_cfg=cfg)
+        assert _get_full_attention_layer_indices(mc) == [1, 3]
+
+    def test_attn_type_list_minimax(self):
+        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+
+        hf = type("C", (), {})()
+        hf.attn_type_list = [0, 1, 0, 1, 1]
+        mc = self._fake_model_config(hf_cfg=hf)
+        assert _get_full_attention_layer_indices(mc) == [1, 3, 4]
+
+    def test_no_hybrid_hints_returns_empty(self):
+        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+
+        mc = self._fake_model_config()
+        assert _get_full_attention_layer_indices(mc) == []
+
+
 # ============================================================================
 # Centroids tests (CPU-only)
 # ============================================================================

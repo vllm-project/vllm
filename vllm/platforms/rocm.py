@@ -472,6 +472,16 @@ class RocmPlatform(Platform):
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
+        # Layers without a turboquant_* dtype (skips, hybrid mamba) must fall
+        # through to the default backend even when TQ was requested globally.
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        kv_dt = attn_selector_config.kv_cache_dtype
+        if selected_backend == AttentionBackendEnum.TURBOQUANT and (
+            kv_dt is None or not kv_dt.startswith("turboquant_")
+        ):
+            selected_backend = None
+
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
