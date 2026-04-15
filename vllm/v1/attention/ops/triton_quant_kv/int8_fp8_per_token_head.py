@@ -221,19 +221,6 @@ class _PerTokenHeadBackend(QuantKVBackend):
     _quant_max: float
     _quant_min: float
 
-    def allocate_scale_caches(
-        self,
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        shape = (num_blocks, block_size, num_kv_heads)
-        return (
-            torch.zeros(shape, dtype=torch.float32, device=device),
-            torch.zeros(shape, dtype=torch.float32, device=device),
-        )
-
     def reshape_and_cache(
         self,
         key: torch.Tensor,

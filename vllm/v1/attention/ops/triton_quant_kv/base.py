@@ -60,10 +60,22 @@ class QuantKVBackend(ABC):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Allocate aux per-(token, head) scale buffers.
 
-        Default: this mode does not need scale caches.  Override for
-        per-token-head modes that store one float per (token, head).
+        Default: when ``needs_scale_caches`` is True, allocate one
+        ``float32`` per (block, slot, kv_head) for both K and V — the
+        layout shared by every per-token-head mode (INT8 / FP8 store
+        one absmax-derived scale; INT4 steganographs the zero-point in
+        the low 4 mantissa bits of that scale; INT2 stores
+        ``norm / d^1.5``).  Modes that need a different shape or dtype
+        override this method.  Modes that don't need scale caches at
+        all (``needs_scale_caches = False``) get ``(None, None)``.
         """
-        return (None, None)
+        if not self.needs_scale_caches:
+            return (None, None)
+        shape = (num_blocks, block_size, num_kv_heads)
+        return (
+            torch.zeros(shape, dtype=torch.float32, device=device),
+            torch.zeros(shape, dtype=torch.float32, device=device),
+        )
 
     # ----- Cache write path -------------------------------------------------
     @abstractmethod

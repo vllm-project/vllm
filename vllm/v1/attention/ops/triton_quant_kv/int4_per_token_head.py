@@ -611,19 +611,6 @@ class Int4PerTokenHeadBackend(QuantKVBackend):
     packing_factor = 2  # 2 × int4 per byte
     needs_scale_caches = True
 
-    def allocate_scale_caches(
-        self,
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        device: torch.device,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        shape = (num_blocks, block_size, num_kv_heads)
-        return (
-            torch.zeros(shape, dtype=torch.float32, device=device),
-            torch.zeros(shape, dtype=torch.float32, device=device),
-        )
-
     def reshape_and_cache(
         self,
         key: torch.Tensor,
