@@ -53,15 +53,15 @@ class ServingEmbedding(PoolingServing):
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
 
-    async def _build_response(
+    def _build_response(
         self,
         ctx: PoolingServeContext,
     ) -> Response:
         if isinstance(ctx.request, CohereEmbedRequest):
             return self._build_cohere_response_from_ctx(ctx)
-        return await self._build_openai_response(ctx)
+        return self._build_openai_response(ctx)
 
-    async def _build_openai_response(
+    def _build_openai_response(
         self,
         ctx: EmbeddingServeContext,
     ) -> JSONResponse | StreamingResponse:
