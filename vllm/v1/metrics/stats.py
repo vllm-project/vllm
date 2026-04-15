@@ -224,7 +224,7 @@ class FinishedRequestStats:
     """Stats associated with a finished request."""
 
     finish_reason: "FinishReason"
-    request_id: str = ""
+    request_id: str | None = None
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
     num_generation_tokens: int = 0
