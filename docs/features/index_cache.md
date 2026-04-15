@@ -14,7 +14,7 @@ See: [IndexCache Paper](https://arxiv.org/abs/2603.12201)
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V3.2 \
-    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' ...
 ```
 
 ### Configuration Reference
@@ -31,7 +31,7 @@ vllm serve deepseek-ai/DeepSeek-V3.2 \
 
 ```bash
 vllm serve deepseek-ai/DeepSeek-V3.2 \
-    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}'
+    --hf-overrides '{"use_index_cache": true, "index_topk_freq": 4}' ...
 ```
 
 **Using `index_topk_pattern`** (explicit per-layer control):
