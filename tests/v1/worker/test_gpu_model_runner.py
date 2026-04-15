@@ -1216,6 +1216,39 @@ def test_is_uniform_decode() -> None:
         num_reqs=15,
         force_uniform_decode=False,
     )
+    # Prefill guard: a request with num_computed_tokens == 0 is prefilling
+    # and should not be classified as uniform decode.
+    assert not GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=10,
+        num_reqs=2,
+        num_computed_tokens_cpu=np.array([0, 100]),
+    )
+    # All-decode batch (no zeros) should still be uniform.
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=10,
+        num_reqs=2,
+        num_computed_tokens_cpu=np.array([50, 100]),
+    )
+    # force_uniform_decode=True overrides the prefill guard.
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=10,
+        num_reqs=2,
+        force_uniform_decode=True,
+        num_computed_tokens_cpu=np.array([0, 100]),
+    )
+    # num_computed_tokens_cpu=None (default) skips the prefill check.
+    assert GPUModelRunner._is_uniform_decode(
+        max_num_scheduled_tokens=5,
+        uniform_decode_query_len=5,
+        num_tokens=10,
+        num_reqs=2,
+    )
 
 
 @pytest.mark.skipif(

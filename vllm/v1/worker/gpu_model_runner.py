@@ -3531,19 +3531,24 @@ class GPUModelRunner(
         num_tokens: int,
         num_reqs: int,
         force_uniform_decode: bool | None = None,
+        num_computed_tokens_cpu: np.ndarray | None = None,
     ) -> bool:
         """
         Checks if it's a decode batch with same amount scheduled tokens
         across all requests.
+
+        When num_computed_tokens_cpu is provided, also verifies that no
+        request is still prefilling (num_computed_tokens == 0).  This
+        prevents misclassifying a prefill whose token count happens to
+        match uniform_decode_query_len * num_reqs.
         """
-        return (
-            (
-                (max_num_scheduled_tokens == uniform_decode_query_len)
-                and (num_tokens == max_num_scheduled_tokens * num_reqs)
-            )
-            if force_uniform_decode is None
-            else force_uniform_decode
-        )
+        if force_uniform_decode is not None:
+            return force_uniform_decode
+        if (max_num_scheduled_tokens != uniform_decode_query_len) or (
+            num_tokens != max_num_scheduled_tokens * num_reqs
+        ):
+            return False
+        return num_computed_tokens_cpu is None or np.all(num_computed_tokens_cpu != 0)
 
     def _determine_batch_execution_and_padding(
         self,
@@ -3573,16 +3578,10 @@ class GPUModelRunner(
             num_tokens=num_tokens,
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
+            num_computed_tokens_cpu=(
+                self.input_batch.num_computed_tokens_cpu[:num_reqs]
+            ),
         )
-        # The shape check above can misclassify a prefill as uniform
-        # decode when its token count matches 1 + num_speculative_tokens.
-        # Verify the batch is actually all-decode (no prefilling requests).
-        if (
-            uniform_decode
-            and force_uniform_decode is None
-            and np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0)
-        ):
-            uniform_decode = False
 
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
