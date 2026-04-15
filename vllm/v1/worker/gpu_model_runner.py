@@ -3574,6 +3574,16 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
+        # The shape check above can misclassify a prefill as uniform
+        # decode when its token count matches 1 + num_speculative_tokens.
+        # Verify the batch is actually all-decode (no prefilling requests).
+        if (
+            uniform_decode
+            and force_uniform_decode is None
+            and np.any(self.input_batch.num_computed_tokens_cpu[:num_reqs] == 0)
+        ):
+            uniform_decode = False
+
         # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
         # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
