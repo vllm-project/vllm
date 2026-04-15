@@ -209,6 +209,46 @@ def test_deep_sleep():
 
 
 @create_new_process_for_each_test()
+def test_deep_sleep_lora():
+    """Level-2 sleep/wake/reload with enable_lora=True.
+
+    LoRA wrapping moves parameters under base_layer, which breaks
+    named_parameters() name resolution during reload_weights().
+    Also, LoRA stacked tensors (lora_a_stacked, lora_b_stacked) are
+    plain attributes not restored by the reload machinery — they must
+    be explicitly re-zeroed after wake.
+    """
+    model = "hmellor/tiny-random-LlamaForCausalLM"
+    llm = LLM(model,
+              enable_sleep_mode=True,
+              enable_lora=True,
+              max_lora_rank=8,
+              enforce_eager=True)
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    # Level-2 sleep discards all GPU memory
+    llm.sleep(level=2)
+
+    # Reload weights from checkpoint
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+    # Multiple cycles should not accumulate corruption
+    for _ in range(3):
+        llm.sleep(level=2)
+        llm.wake_up(tags=["weights"])
+        llm.collective_rpc("reload_weights")
+        llm.wake_up(tags=["kv_cache"])
+    output3 = llm.generate(prompt, sampling_params)
+    assert output[0].outputs[0].text == output3[0].outputs[0].text
+
+
+@create_new_process_for_each_test()
 def test_deep_sleep_async():
     async def test():
         model = "hmellor/tiny-random-LlamaForCausalLM"
