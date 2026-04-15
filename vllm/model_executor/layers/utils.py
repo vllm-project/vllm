@@ -90,6 +90,7 @@ def apply_penalties(
     return logits
 
 
+@torch._dynamo.assume_constant_result
 @functools.cache
 def _tinygemm_bf16_available() -> bool:
     """Check if FlashInfer's tinygemm_bf16 kernel is available (SM90+)."""
