@@ -520,7 +520,7 @@ def split_decodes_and_prefills(
     max_query_len = common_attn_metadata.max_query_len
     num_reqs = common_attn_metadata.num_reqs
     num_tokens = common_attn_metadata.num_actual_tokens
-    query_start_loc = common_attn_metadata.query_start_loc_cpu
+    query_start_loc_list = common_attn_metadata.query_start_loc_cpu.tolist()
 
     if (
         max_query_len <= decode_threshold
@@ -529,8 +529,8 @@ def split_decodes_and_prefills(
     ):
         return num_reqs, 0, num_tokens, 0
 
-    query_lens = query_start_loc[1:] - query_start_loc[:-1]
-    if query_lens[0].item() > decode_threshold:
+    query_lens_list = [query_start_loc_list[i+1] - query_start_loc_list[i] for i in range(len(query_start_loc_list) - 1)]
+    if query_lens_list[0] > decode_threshold:
         # first request is not decode, so no decode requests
         return 0, num_reqs, 0, num_tokens
 
@@ -538,23 +538,24 @@ def split_decodes_and_prefills(
         # check if we are in a padded uniform batch; this is used for full-CGs, some
         # requests may have a query length of 0 but since they are padding its fine
         # to treat them as decodes (ensures num_decodes matches the captured size)
-        if torch.all((query_lens == query_lens[0]) | (query_lens == 0)):
+        first_len = query_lens_list[0]
+        if all(l == first_len or l == 0 for l in query_lens_list):
             return num_reqs, 0, num_tokens, 0  # all decodes
-        is_prefill = query_lens != query_lens[0]
+        is_prefill_list = [length != first_len for length in query_lens_list]
     else:
-        is_prefill = query_lens > decode_threshold
+        is_prefill_list = [length > decode_threshold for length in query_lens_list]
 
     if not treat_short_extends_as_decodes:
         assert common_attn_metadata.is_prefilling is not None
-        is_prefill |= common_attn_metadata.is_prefilling
+        is_prefill_list |= common_attn_metadata.is_prefilling
 
-    if not torch.any(is_prefill):
+    if not any(is_prefill_list):
         return num_reqs, 0, num_tokens, 0
 
-    first_prefill = is_prefill.int().argmax(dim=-1).item()
+    first_prefill = is_prefill_list.index(True)
     num_decodes = first_prefill
     num_prefills = num_reqs - num_decodes
-    num_decode_tokens = query_start_loc[first_prefill].item()
+    num_decode_tokens = query_start_loc_list[first_prefill]
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 

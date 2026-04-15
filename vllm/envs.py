@@ -257,6 +257,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
+    VLLM_BATCH_PROCESS_ATTNMETADATA: bool = False
 
 
 def get_default_cache_root():
@@ -1706,6 +1707,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to enable dual cuda streams for LoRA computation
     "VLLM_LORA_ENABLE_DUAL_STREAM": lambda: bool(
         int(os.getenv("VLLM_LORA_ENABLE_DUAL_STREAM", "0"))
+    ),
+    "VLLM_BATCH_PROCESS_ATTNMETADATA": lambda: bool(
+        int(os.getenv("VLLM_BATCH_PROCESS_ATTNMETADATA", "0"))
     ),
 }
 
