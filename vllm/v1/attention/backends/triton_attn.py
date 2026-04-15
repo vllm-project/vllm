@@ -232,13 +232,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         use_cascade = common_prefix_len > 0
 
-        # Per-request check: batch-level max comparisons would let
-        # sequences with cached context sneak into the fast-path.
-        qsl_cpu = common_attn_metadata.query_start_loc_cpu
-        query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
-        all_pure_first_prefill = bool(
-            torch.equal(query_lens_cpu, common_attn_metadata.seq_lens_cpu)
-        )
+        # Per-request check.  Only runs when the scheduler already
+        # materialized the CPU copy of seq_lens — otherwise we skip the
+        # fast-path gate to avoid triggering a D2H sync here.
+        seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        if seq_lens_cpu is not None:
+            qsl_cpu = common_attn_metadata.query_start_loc_cpu
+            query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
+            all_pure_first_prefill = bool(torch.equal(query_lens_cpu, seq_lens_cpu))
+        else:
+            all_pure_first_prefill = False
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
