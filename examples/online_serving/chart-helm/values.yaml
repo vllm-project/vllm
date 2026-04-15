@@ -42,6 +42,18 @@ resources:
     # -- Number of gpus used
     nvidia.com/gpu: 1
 
+# -- Dynamic Resource Allocation (DRA) configuration (Kubernetes 1.31+)
+# -- When enabled, GPU allocation uses DRA ResourceClaims instead of nvidia.com/gpu resource limits
+dra:
+  # -- Enable DRA for GPU allocation
+  enabled: false
+  # -- Resource claims for the pod (referenced by containers via resources.claims)
+  resourceClaims: []
+  # Example:
+  # resourceClaims:
+  # - name: gpu
+  #   resourceClaimTemplateName: vllm-gpu
+
 # -- Type of gpu used
 gpuModels:
   - "TYPE_GPU_USED"
