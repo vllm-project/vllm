@@ -13,6 +13,8 @@ from gguf.quants import GGMLQuantizationType
 from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5Config
+from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeConfig
 
 from .repo_utils import list_filtered_repo_files
 
@@ -291,6 +293,29 @@ def maybe_patch_hf_config_from_gguf(
                 architectures=["Gemma3ForConditionalGeneration"],
             )
             hf_config = new_hf_config
+
+        # Qwen3.5: upgrade text-only config to multimodal when mmproj found
+        if hf_config.model_type in ("qwen3_5", "qwen3_5_text"):
+            hf_config = Qwen3_5Config(
+                text_config=hf_config.to_dict(),
+                architectures=["Qwen3_5ForConditionalGeneration"],
+            )
+        elif hf_config.model_type in ("qwen3_5_moe", "qwen3_5_moe_text"):
+            hf_config = Qwen3_5MoeConfig(
+                text_config=hf_config.to_dict(),
+                architectures=["Qwen3_5MoeForConditionalGeneration"],
+            )
+
+    # Qwen3.5 is multimodal — ensure ConditionalGeneration architecture
+    _QWEN35_CONDITIONAL_ARCH = {
+        "qwen3_5": "Qwen3_5ForConditionalGeneration",
+        "qwen3_5_moe": "Qwen3_5MoeForConditionalGeneration",
+    }
+    conditional_arch = _QWEN35_CONDITIONAL_ARCH.get(hf_config.model_type)
+    if conditional_arch is not None:
+        archs = getattr(hf_config, "architectures", []) or []
+        if not any("ConditionalGeneration" in a for a in archs):
+            hf_config.architectures = [conditional_arch]
 
     return hf_config
 

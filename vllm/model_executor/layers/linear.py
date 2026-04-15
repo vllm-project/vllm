@@ -696,13 +696,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
         is_gguf_weight_type = getattr(param, "is_gguf_weight_type", False)
-        if isinstance(loaded_shard_id, tuple) and (
-            is_gguf_weight or is_gguf_weight_type
-        ):
-            raise NotImplementedError(
-                "Shard id with multiple indices is not supported for GGUF."
-            )
         if is_gguf_weight_type:
+            if isinstance(loaded_shard_id, tuple):
+                # Fused weight type covers multiple shards
+                for idx in loaded_shard_id:
+                    param.data[idx].copy_(loaded_weight)
+                    param.shard_weight_type[idx] = loaded_weight.item()
+                return
             if loaded_shard_id is not None:
                 param.data[loaded_shard_id].copy_(loaded_weight)
                 param.shard_weight_type[loaded_shard_id] = loaded_weight.item()
@@ -714,6 +714,26 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
+            if isinstance(loaded_shard_id, tuple):
+                # Fused weight covers multiple shards - split and load each
+                output_sizes = self.output_sizes[
+                    loaded_shard_id[0] : loaded_shard_id[-1] + 1
+                ]
+                current_offset = 0
+                for i, idx in enumerate(loaded_shard_id):
+                    shard_weight = loaded_weight.narrow(
+                        output_dim, current_offset, output_sizes[i]
+                    )
+                    shard_size = shard_weight.size(output_dim) // self.tp_size
+                    start_idx = self.tp_rank * shard_size
+                    narrowed = shard_weight.narrow(
+                        output_dim, start_idx, shard_size
+                    )
+                    param.shard_id.append(idx)
+                    param.shard_id_map[idx] = len(param.data_container)
+                    param.data_container.append(narrowed)
+                    current_offset += output_sizes[i]
+                return
             shard_size = loaded_weight.size(output_dim) // self.tp_size
             start_idx = self.tp_rank * shard_size
 
