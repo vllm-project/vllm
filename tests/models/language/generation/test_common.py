@@ -143,6 +143,11 @@ def test_models(
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
+    if current_platform.is_cpu() and model == "TitanML/tiny-mixtral":
+        # This untrained model is sensitive to the rounding error
+        # Fuse ops to reduce bfloat16 rounding
+        monkeypatch.setenv("VLLM_CPU_CI_ENV", "0")
+
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs
