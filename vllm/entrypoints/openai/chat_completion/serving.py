@@ -319,7 +319,7 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 if not request.include_reasoning:
                     reasoning_ended = True
-                elif MistralToolParser.is_mistral_grammar_path(request):
+                elif request._grammar_from_tool_parser:
                     # The Mistral grammar already includes an optional
                     # `think?` rule that handles both reasoning and
                     # non-reasoning outputs.
@@ -544,7 +544,7 @@ class OpenAIServingChat(OpenAIServing):
             harmony_tools_streamed = [False] * num_choices
         tools_streamed = [False] * num_choices
 
-        is_mistral_grammar_path = MistralToolParser.is_mistral_grammar_path(request)
+        is_mistral_grammar_path = request._grammar_from_tool_parser
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -792,7 +792,6 @@ class OpenAIServingChat(OpenAIServing):
                     elif is_mistral_grammar_path:
                         assert tool_parser is not None
                         assert isinstance(tool_parser, MistralToolParser)
-                        assert added_content_delta_arr is not None
                         assert reasoning_end_arr is not None
                         output_token_ids = as_list(output.token_ids)
                         result = tool_parser.extract_maybe_reasoning_and_tool_streaming(
@@ -804,13 +803,11 @@ class OpenAIServingChat(OpenAIServing):
                             current_token_ids=current_token_ids,
                             output_token_ids=output_token_ids,
                             reasoning_ended=reasoning_end_arr[i],
-                            added_content_delta=added_content_delta_arr[i],
                             prompt_is_reasoning_end=(prompt_is_reasoning_end_arr[i]),
                             request=request,
                         )
                         delta_message = result.delta_message
                         reasoning_end_arr[i] = result.reasoning_ended
-                        added_content_delta_arr[i] = result.added_content_delta
                         current_text = result.current_text
                         current_token_ids = result.current_token_ids
                         if result.tools_called:
@@ -1358,7 +1355,7 @@ class OpenAIServingChat(OpenAIServing):
                 MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
 
-            use_mistral_tool_parser = MistralToolParser.is_mistral_grammar_path(request)
+            use_mistral_tool_parser = request._grammar_from_tool_parser
             if use_mistral_tool_parser:
                 tool_call_items = MistralToolParser.build_non_streaming_tool_calls(
                     tool_calls

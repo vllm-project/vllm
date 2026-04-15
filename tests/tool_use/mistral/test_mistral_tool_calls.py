@@ -323,14 +323,18 @@ async def test_tool_call_none_with_tools(
         stream=True,
     )
 
-    result = await _collect_streamed_content(stream)
+    # Pre-v11 models lack grammar enforcement, so the model may still
+    # emit tool calls even with tool_choice="none".
+    pre_v11 = _is_pre_v11(server_config)
+    result = await _collect_streamed_content(stream, no_tool_calls=not pre_v11)
 
     assert result.finish_reason_count == 1
-    assert result.finish_reason != "tool_calls"
+    if not pre_v11:
+        assert result.finish_reason != "tool_calls"
     streamed_content = "".join(result.chunks)
-    if not _is_pre_v11(server_config):
+    if not pre_v11:
         assert "[TOOL_CALLS]" not in streamed_content
-    assert streamed_content == non_streaming_content
+        assert streamed_content == non_streaming_content
 
 
 @pytest.mark.asyncio

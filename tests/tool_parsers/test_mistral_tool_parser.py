@@ -1474,26 +1474,17 @@ def test_adjust_request_tool_choice_with_json_schema_factory_routing(
     assert len(result.structured_outputs.grammar) > 0
 
 
-@pytest.mark.parametrize(
-    "so, set_from_tool_parser, expected",
-    [
-        (None, False, False),
-        (StructuredOutputsParams(grammar="user grammar"), False, False),
-        (StructuredOutputsParams(grammar="factory grammar"), True, True),
-    ],
-    ids=["no_structured_outputs", "user_supplied_grammar", "from_tool_parser"],
-)
-def test_is_mistral_grammar_path(
-    so: StructuredOutputsParams | None,
-    set_from_tool_parser: bool,
-    expected: bool,
-) -> None:
-    request = _make_request(structured_outputs=so)
-    if set_from_tool_parser:
-        assert request.structured_outputs is not None
-        request.structured_outputs._from_tool_parser = True
+def test_grammar_from_tool_parser_default_false() -> None:
+    request = _make_request()
+    assert request._grammar_from_tool_parser is False
 
-    assert MistralToolParser.is_mistral_grammar_path(request) == expected
+
+def test_grammar_from_tool_parser_set_by_adjust_request(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    request = _make_request()
+    result = mistral_tool_parser.adjust_request(request)
+    assert result._grammar_from_tool_parser is True
 
 
 @pytest.mark.parametrize(
@@ -1564,7 +1555,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         current_token_ids: list[int] | None = None,
         output_token_ids: list[int] | None = None,
         reasoning_ended: bool = False,
-        added_content_delta: bool = False,
         prompt_is_reasoning_end: bool | None = None,
     ) -> MistralStreamingResult:
         return parser.extract_maybe_reasoning_and_tool_streaming(
@@ -1576,7 +1566,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
             current_token_ids=current_token_ids or [1, 2, 3],
             output_token_ids=output_token_ids or [1, 2, 3],
             reasoning_ended=reasoning_ended,
-            added_content_delta=added_content_delta,
             prompt_is_reasoning_end=prompt_is_reasoning_end,
             request=request,
         )
@@ -1600,7 +1589,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=tool_delta,
             reasoning_ended=False,
-            added_content_delta=False,
             tools_called=True,
             current_text="hello",
             current_token_ids=[1, 2, 3],
@@ -1618,7 +1606,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=content_delta,
             reasoning_ended=False,
-            added_content_delta=False,
             tools_called=False,
             current_text="hello",
             current_token_ids=[1, 2, 3],
@@ -1645,7 +1632,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=content_delta,
             reasoning_ended=False,
-            added_content_delta=True,
             tools_called=False,
             current_text="hello",
             current_token_ids=[1, 2, 3],
@@ -1673,7 +1659,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=DeltaMessage(reasoning="thinking..."),
             reasoning_ended=False,
-            added_content_delta=False,
             tools_called=False,
             current_text="hello",
             current_token_ids=[1, 999, 3],
@@ -1701,13 +1686,12 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=DeltaMessage(reasoning="thinking..."),
             reasoning_ended=False,
-            added_content_delta=False,
             tools_called=False,
             current_text="hello",
             current_token_ids=[1, 2, 3],
         )
 
-    def test_reasoning_ended_first_chunk_resets_state(
+    def test_reasoning_already_ended_no_reset(
         self, parser: MistralToolParser, request_obj: ChatCompletionRequest
     ) -> None:
         content_delta = DeltaMessage(content="content")
@@ -1719,20 +1703,22 @@ class TestExtractMaybeReasoningAndToolStreaming:
                 request_obj,
                 reasoning_parser=MagicMock(),
                 reasoning_ended=True,
-                added_content_delta=False,
+                previous_text="prior_tool_text",
+                previous_token_ids=[10, 20],
+                current_text="prior_tool_texthello",
+                current_token_ids=[10, 20, 1, 2, 3],
             )
 
             _, call_kwargs = mock_extract.call_args
-            assert call_kwargs["previous_text"] == ""
-            assert call_kwargs["previous_token_ids"] == []
+            assert call_kwargs["previous_text"] == "prior_tool_text"
+            assert call_kwargs["previous_token_ids"] == [10, 20]
 
         assert result == MistralStreamingResult(
             delta_message=content_delta,
             reasoning_ended=True,
-            added_content_delta=True,
             tools_called=False,
-            current_text="hello",
-            current_token_ids=[1, 2, 3],
+            current_text="prior_tool_texthello",
+            current_token_ids=[10, 20, 1, 2, 3],
         )
 
     def test_pre_v15_ignores_prompt_reasoning_end(
@@ -1762,7 +1748,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=DeltaMessage(reasoning="thinking..."),
             reasoning_ended=False,
-            added_content_delta=False,
             tools_called=False,
             current_text="hello",
             current_token_ids=[999, 1, 2],
@@ -1796,7 +1781,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=content_delta,
             reasoning_ended=True,
-            added_content_delta=True,
             tools_called=False,
             current_text="hello",
             current_token_ids=[10, 20, 30],
@@ -1838,7 +1822,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=content_delta,
             reasoning_ended=True,
-            added_content_delta=True,
             tools_called=False,
             current_text="leftover",
             current_token_ids=[50, 51],
@@ -1877,7 +1860,6 @@ class TestExtractMaybeReasoningAndToolStreaming:
         assert result == MistralStreamingResult(
             delta_message=empty_delta,
             reasoning_ended=True,
-            added_content_delta=True,
             tools_called=False,
             current_text="",
             current_token_ids=[50, 51],

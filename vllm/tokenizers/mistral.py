@@ -57,7 +57,8 @@ logger = init_logger(__name__)
 def _pop_unallowed_keys_and_warn(
     dictionary: dict[str, Any], allowed_keys: set[str], err_dict_name: str
 ):
-    for key in dictionary:
+    keys = list(dictionary.keys())
+    for key in keys:
         if key not in allowed_keys:
             dictionary.pop(key)
             logger.warning_once(

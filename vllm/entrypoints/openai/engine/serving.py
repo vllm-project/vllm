@@ -617,7 +617,7 @@ class OpenAIServing:
             isinstance(request, ChatCompletionRequest)
             and tool_parser_cls is not None
             and issubclass(tool_parser_cls, MistralToolParser)
-            and MistralToolParser.is_mistral_grammar_path(request=request)
+            and request._grammar_from_tool_parser
         )
 
         function_calls = list[FunctionCall]()

@@ -51,8 +51,6 @@ class StructuredOutputsParams:
     """CAUTION: Should only be set by Processor._validate_structured_output"""
     _backend_was_auto: bool = field(default=False, init=False)
     """CAUTION: Should only be set by Processor._validate_structured_output"""
-    _from_tool_parser: bool = field(default=False, init=False)
-    """CAUTION: Should only be set by ToolParser.adjust_request"""
 
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""

@@ -102,7 +102,6 @@ class MistralStreamingResult:
 
     delta_message: DeltaMessage | None
     reasoning_ended: bool
-    added_content_delta: bool
     tools_called: bool
     current_text: str
     current_token_ids: list[int]
@@ -121,14 +120,6 @@ class MistralToolParser(ToolParser):
 
     # Used to generate correct grammar in `adjust_request`
     model_can_reason: bool = False
-
-    @staticmethod
-    def is_mistral_grammar_path(request: ChatCompletionRequest) -> bool:
-        r"""Check if the request was adjusted via the Mistral grammar factory path."""
-        return (
-            request.structured_outputs is not None
-            and request.structured_outputs._from_tool_parser
-        )
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
@@ -285,7 +276,7 @@ class MistralToolParser(ToolParser):
                 )
 
         request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
-        request.structured_outputs._from_tool_parser = True
+        request._grammar_from_tool_parser = True
         return request
 
     def extract_maybe_reasoning_and_tool_streaming(
@@ -299,7 +290,6 @@ class MistralToolParser(ToolParser):
         current_token_ids: list[int],
         output_token_ids: Sequence[int],
         reasoning_ended: bool,
-        added_content_delta: bool,
         prompt_is_reasoning_end: bool | None,
         request: ChatCompletionRequest,
     ) -> MistralStreamingResult:
@@ -328,13 +318,12 @@ class MistralToolParser(ToolParser):
             current_token_ids: Full token ids including current chunk.
             output_token_ids: Raw output token ids from the engine.
             reasoning_ended: Whether reasoning has already ended.
-            added_content_delta: Whether the first content delta after
-                reasoning has been emitted.
             prompt_is_reasoning_end: Whether the prompt itself ends reasoning.
             request: The originating chat completion request.
         """
         delta_message: DeltaMessage | None = None
         tools_called = False
+        reasoning_ended_at_entry = reasoning_ended
 
         # For MistralReasoningParser, only enter the reasoning block when
         # the model has actually emitted a [THINK] token.  Other reasoning
@@ -381,16 +370,17 @@ class MistralToolParser(ToolParser):
                 return MistralStreamingResult(
                     delta_message=delta_message,
                     reasoning_ended=False,
-                    added_content_delta=added_content_delta,
                     tools_called=False,
                     current_text=current_text,
                     current_token_ids=current_token_ids,
                 )
 
         delta_token_ids = list(output_token_ids)
-        if reasoning_parser is not None and not added_content_delta:
-            # First chunk after reasoning ended: reset text state.
-            added_content_delta = True
+
+        # On the iteration where reasoning just ended, reset the text/token
+        # state so the tool parser sees a clean history instead of the
+        # accumulated reasoning text.
+        if not reasoning_ended_at_entry and reasoning_ended:
             previous_text = ""
             previous_token_ids = []
             delta_text = current_text
@@ -411,7 +401,6 @@ class MistralToolParser(ToolParser):
         return MistralStreamingResult(
             delta_message=delta_message,
             reasoning_ended=reasoning_ended,
-            added_content_delta=added_content_delta,
             tools_called=tools_called,
             current_text=current_text,
             current_token_ids=current_token_ids,
