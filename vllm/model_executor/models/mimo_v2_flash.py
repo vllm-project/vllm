@@ -599,8 +599,8 @@ class MiMoV2Model(nn.Module):
             if "qkv_proj" in name:
                 if name in params_dict:
                     param = params_dict[name]
-                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, loaded_weight)
                 continue
 
             stacked_matched = False
