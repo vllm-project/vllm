@@ -57,6 +57,10 @@ _REQUEST_LATENCY_BUCKETS_FINE_LOW_PREFIX: list[float] = [
     0.25,
 ]
 
+_REQUEST_LATENCY_BUCKETS_FINE_MERGED: list[float] = sorted(
+    set(_REQUEST_LATENCY_BUCKETS_FINE_LOW_PREFIX + _REQUEST_LATENCY_BUCKETS_BASE)
+)
+
 
 def build_request_latency_buckets(*, fine_low_end: bool) -> list[float]:
     """Upper bounds (seconds) for request latency Prometheus histograms.
@@ -66,7 +70,4 @@ def build_request_latency_buckets(*, fine_low_end: bool) -> list[float]:
     """
     if not fine_low_end:
         return list(_REQUEST_LATENCY_BUCKETS_BASE)
-    merged = sorted(
-        set(_REQUEST_LATENCY_BUCKETS_FINE_LOW_PREFIX + _REQUEST_LATENCY_BUCKETS_BASE)
-    )
-    return merged
+    return list(_REQUEST_LATENCY_BUCKETS_FINE_MERGED)
