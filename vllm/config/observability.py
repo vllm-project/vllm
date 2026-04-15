@@ -65,6 +65,12 @@ class ObservabilityConfig:
     enable_mfu_metrics: bool = False
     """Enable Model FLOPs Utilization (MFU) metrics."""
 
+    prometheus_fine_grained_request_latency_buckets: bool = False
+    """When True, add sub-300ms upper-bound buckets to Prometheus request latency
+    histograms (`vllm:e2e_request_latency_seconds`, queue, inference, prefill, decode).
+    Default histograms start at 0.3s; enabling this adds buckets down to 10ms for
+    low-latency serving and SLO tracking. Increases Prometheus series cardinality."""
+
     enable_mm_processor_stats: bool = False
     """Enable collection of timing statistics for multimodal processor operations.
     This is for internal use only (e.g., benchmarks) and is not exposed as a CLI

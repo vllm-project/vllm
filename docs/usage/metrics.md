@@ -33,6 +33,14 @@ Then query the endpoint to get the latest metrics from the server:
 
 The following metrics are exposed:
 
+### Finer request latency histograms
+
+Request-phase latency histograms (`vllm:e2e_request_latency_seconds`, queue, inference,
+prefill, decode) use bucket upper bounds in **seconds**. By default the smallest
+finite bucket is **0.3** (300ms). For low-latency workloads, pass
+`--prometheus-fine-grained-request-latency-buckets` to add additional buckets from
+10ms up to 250ms (increases Prometheus cardinality).
+
 ## General Metrics
 
 --8<-- "docs/generated/metrics/general.inc.md"

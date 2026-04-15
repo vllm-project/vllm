@@ -570,6 +570,9 @@ class EngineArgs:
         ObservabilityConfig.enable_layerwise_nvtx_tracing
     )
     enable_mfu_metrics: bool = ObservabilityConfig.enable_mfu_metrics
+    prometheus_fine_grained_request_latency_buckets: bool = (
+        ObservabilityConfig.prometheus_fine_grained_request_latency_buckets
+    )
     enable_logging_iteration_details: bool = (
         ObservabilityConfig.enable_logging_iteration_details
     )
@@ -1241,6 +1244,10 @@ class EngineArgs:
         observability_group.add_argument(
             "--enable-mfu-metrics",
             **observability_kwargs["enable_mfu_metrics"],
+        )
+        observability_group.add_argument(
+            "--prometheus-fine-grained-request-latency-buckets",
+            **observability_kwargs["prometheus_fine_grained_request_latency_buckets"],
         )
         observability_group.add_argument(
             "--enable-logging-iteration-details",
@@ -2051,6 +2058,7 @@ class EngineArgs:
             cudagraph_metrics=self.cudagraph_metrics,
             enable_layerwise_nvtx_tracing=self.enable_layerwise_nvtx_tracing,
             enable_mfu_metrics=self.enable_mfu_metrics,
+            prometheus_fine_grained_request_latency_buckets=self.prometheus_fine_grained_request_latency_buckets,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
         )

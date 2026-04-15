@@ -27,7 +27,10 @@ from vllm.v1.metrics.stats import (
     PromptTokenStats,
     SchedulerStats,
 )
-from vllm.v1.metrics.utils import create_metric_per_engine
+from vllm.v1.metrics.utils import (
+    build_request_latency_buckets,
+    create_metric_per_engine,
+)
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
 
 logger = init_logger(__name__)
@@ -844,29 +847,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             histogram_request_time_per_output_token, per_engine_labelvalues
         )
 
-        request_latency_buckets = [
-            0.3,
-            0.5,
-            0.8,
-            1.0,
-            1.5,
-            2.0,
-            2.5,
-            5.0,
-            10.0,
-            15.0,
-            20.0,
-            30.0,
-            40.0,
-            50.0,
-            60.0,
-            120.0,
-            240.0,
-            480.0,
-            960.0,
-            1920.0,
-            7680.0,
-        ]
+        request_latency_buckets = build_request_latency_buckets(
+            fine_low_end=vllm_config.observability_config.prometheus_fine_grained_request_latency_buckets,
+        )
         histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
