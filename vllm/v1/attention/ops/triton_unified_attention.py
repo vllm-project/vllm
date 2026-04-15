@@ -13,6 +13,12 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.triton_quant_kv._attn_loop import (
+    apply_alibi_to_score,
+    compute_kv_seq_mask,
+    load_qq_bias_tile,
+    softmax_step,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 logger = init_logger(__name__)
@@ -339,31 +345,16 @@ def kernel_unified_attention(
                 v_scale_cache_ptr + v_scale_idx, mask=tile_mask, other=1.0
             )
 
-        # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
-        seq_mask = seq_offset[None, :] <= query_abs_pos
-        if SLIDING_WINDOW > 0:
-            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
-        if USE_MM_PREFIX:
-            for i in range(MAX_MM_RANGES):
-                range_start = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
-                )
-                range_end = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
-                )
-                is_valid = range_start < range_end
-                q_in_range = (
-                    (query_abs_pos >= range_start)
-                    & (query_abs_pos <= range_end)
-                    & is_valid
-                )
-                k_in_range = (
-                    (seq_offset[None, :] >= range_start)
-                    & (seq_offset[None, :] <= range_end)
-                    & is_valid
-                )
-                seq_mask |= q_in_range & k_in_range
+        seq_mask = compute_kv_seq_mask(
+            query_abs_pos,
+            seq_offset,
+            seq_idx,
+            mm_prefix_range_ptr,
+            SLIDING_WINDOW,
+            USE_MM_PREFIX,
+            MAX_MM_RANGES,
+        )
 
         # S : (BLOCK_M, TILE_SIZE)
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
@@ -381,37 +372,17 @@ def kernel_unified_attention(
         )
 
         if USE_ALIBI_SLOPES:
-            if USE_ALIBI_SQRT:
-                relative_pos = seq_offset - (context_len + query_pos[:, None])
-                alibi_offset = tl.where(
-                    relative_pos <= 0,
-                    -tl.sqrt((-relative_pos).to(tl.float32)),
-                    0.0,
-                )
-            else:
-                alibi_offset = seq_offset - context_len
-            S += alibi_slope[:, None] * alibi_offset
+            S = apply_alibi_to_score(
+                S, alibi_slope, seq_offset, context_len, query_pos, USE_ALIBI_SQRT
+            )
 
         if USE_QQ_BIAS:
-            key_rel_pos = seq_offset - context_len
-            is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
-            qq_bias = tl.load(
-                qq_bias_row_ptrs + key_rel_pos[None, :],
-                mask=is_query_key[None, :],
-                other=0.0,
+            S += load_qq_bias_tile(
+                qq_bias_row_ptrs, seq_offset, context_len, qq_bias_stride_0
             )
-            S += qq_bias
 
-        # ---- Online softmax bookkeeping -----------------------------------
-        m_j = tl.maximum(M, tl.max(S, axis=1))
-        # Sliding window may mask an entire row; avoid NaN by clamping -inf.
-        m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
-        P = tl.exp(S - m_j[:, None])
-        l_j = tl.sum(P, axis=1)
-        alpha = tl.exp(M - m_j)
+        M, L, P, alpha = softmax_step(S, M, L)
         acc = acc * alpha[:, None]
-        L = L * alpha + l_j
-        M = m_j
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q

@@ -23,6 +23,12 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_quant_kv import register
+from vllm.v1.attention.ops.triton_quant_kv._attn_loop import (
+    apply_alibi_to_score,
+    compute_kv_seq_mask,
+    load_qq_bias_tile,
+    softmax_step,
+)
 from vllm.v1.attention.ops.triton_quant_kv._hadamard import single_rht
 from vllm.v1.attention.ops.triton_quant_kv._packed import (
     pack_int4_nibbles,
@@ -240,11 +246,18 @@ def _reshape_cache_int4_kernel(
 
 
 # ---------------------------------------------------------------------------
-# Attention kernel (2D): split-dot, asymmetric, single-segment
+# Attention kernel: split-dot, asymmetric, fused 2D/3D via IS_3D constexpr.
 # ---------------------------------------------------------------------------
 @triton.jit
-def _attn_int4_2d(
+def _attn_int4(
+    # Output destinations.  In 2D mode we write the final result into
+    # ``output_ptr``; in 3D mode we write per-segment partials into the
+    # three ``segm_*`` tensors and ``output_ptr`` is unused (callers may
+    # pass any non-null pointer).
     output_ptr,
+    segm_output_ptr,
+    segm_max_ptr,
+    segm_expsum_ptr,
     query_ptr,
     key_cache_ptr,
     value_cache_ptr,
@@ -298,12 +311,16 @@ def _attn_int4_2d(
     BLOCK_Q: tl.constexpr,
     num_seqs: tl.int32,
     BLOCK_M: tl.constexpr,
+    NUM_SEGMENTS_PER_SEQ: tl.constexpr,
     USE_FP8: tl.constexpr,
+    IS_3D: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
+    if IS_3D:
+        segm_idx = tl.program_id(2)
 
     seq_idx = find_seq_idx(
         query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
@@ -319,6 +336,12 @@ def _attn_int4_2d(
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
 
+    seq_len = tl.load(seq_lens_ptr + seq_idx)
+    if IS_3D:
+        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
+        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+            return
+
     offs_m = tl.arange(0, BLOCK_M)
     offs_t = tl.arange(0, TILE_SIZE)
     query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
@@ -329,7 +352,7 @@ def _attn_int4_2d(
     query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
     query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
 
-    # ---- Split-Q prologue: load Q in two interleaved halves -----------------
+    # ---- Split-Q prologue: load Q in two interleaved halves ---------------
     half_offs = tl.arange(0, HALF_HEAD_PADDED)
     even_head_offs = half_offs * 2
     odd_head_offs = half_offs * 2 + 1
@@ -355,20 +378,25 @@ def _attn_int4_2d(
 
     block_table_offset = seq_idx * block_table_stride
 
-    if not USE_SINKS:
-        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    # 2D loads sinks unconditionally; 3D only on segm_idx == 0 because
+    # ``reduce_segments`` adds the sink contribution once.
+    if USE_SINKS:
+        load_sinks = (not IS_3D) or (segm_idx == 0)
+        if load_sinks:
+            M = tl.load(
+                sink_ptr + query_offset_1,
+                mask=query_mask_1,
+                other=float("-inf"),
+            ).to(dtype=tl.float32)
+        else:
+            M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
     else:
-        M = tl.load(
-            sink_ptr + query_offset_1,
-            mask=query_mask_1,
-            other=float("-inf"),
-        ).to(dtype=tl.float32)
+        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
 
     L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
     acc_even = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
     acc_odd = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
 
-    seq_len = tl.load(seq_lens_ptr + seq_idx)
     context_len = seq_len - cur_batch_query_len
 
     if USE_ALIBI_SLOPES:
@@ -405,7 +433,14 @@ def _attn_int4_2d(
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
-    for j in range(tile_start, tile_end):
+    if IS_3D:
+        loop_lo = max(segm_idx * tiles_per_segment, tile_start)
+        loop_hi = min((segm_idx + 1) * tiles_per_segment, tile_end)
+    else:
+        loop_lo = tile_start
+        loop_hi = tile_end
+
+    for j in range(loop_lo, loop_hi):
         seq_offset = j * TILE_SIZE + offs_t
         tile_mask = seq_offset < max_seq_prefix_len
 
@@ -465,33 +500,19 @@ def _attn_int4_2d(
         v_zp = (vs_bits & 0xF).to(tl.float32)
         v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
 
-        # ---- Mask: causal + sliding window + optional mm_prefix ----------
         query_abs_pos = context_len + query_pos[:, None]
-        seq_mask = seq_offset[None, :] <= query_abs_pos
-        if SLIDING_WINDOW > 0:
-            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
-        if USE_MM_PREFIX:
-            for i in range(MAX_MM_RANGES):
-                range_start = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
-                )
-                range_end = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
-                )
-                is_valid = range_start < range_end
-                q_in_range = (
-                    (query_abs_pos >= range_start)
-                    & (query_abs_pos <= range_end)
-                    & is_valid
-                )
-                k_in_range = (
-                    (seq_offset[None, :] >= range_start)
-                    & (seq_offset[None, :] <= range_end)
-                    & is_valid
-                )
-                seq_mask |= q_in_range & k_in_range
+        seq_mask = compute_kv_seq_mask(
+            query_abs_pos,
+            seq_offset,
+            seq_idx,
+            mm_prefix_range_ptr,
+            SLIDING_WINDOW,
+            USE_MM_PREFIX,
+            MAX_MM_RANGES,
+        )
 
-        # ---- Score: split-dot with asymmetric correction ----------------
+        # Score: split-dot with asymmetric correction.  Fused softmax_scale
+        # with per-(token, head) k_scale into one mul.
         S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
         raw_dot = tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)
         S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
@@ -506,407 +527,78 @@ def _attn_int4_2d(
         )
 
         if USE_ALIBI_SLOPES:
-            if USE_ALIBI_SQRT:
-                relative_pos = seq_offset - (context_len + query_pos[:, None])
-                alibi_offset_v = tl.where(
-                    relative_pos <= 0,
-                    -tl.sqrt((-relative_pos).to(tl.float32)),
-                    0.0,
-                )
-            else:
-                alibi_offset_v = seq_offset - context_len
-            S += alibi_slope[:, None] * alibi_offset_v
+            S = apply_alibi_to_score(
+                S, alibi_slope, seq_offset, context_len, query_pos, USE_ALIBI_SQRT
+            )
 
         if USE_QQ_BIAS:
-            key_rel_pos = seq_offset - context_len
-            is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
-            qq_bias = tl.load(
-                qq_bias_row_ptrs + key_rel_pos[None, :],
-                mask=is_query_key[None, :],
-                other=0.0,
+            S += load_qq_bias_tile(
+                qq_bias_row_ptrs, seq_offset, context_len, qq_bias_stride_0
             )
-            S += qq_bias
 
-        # ---- Online softmax ---------------------------------------------
-        m_j = tl.maximum(M, tl.max(S, axis=1))
-        m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
-        P = tl.exp(S - m_j[:, None])
-        l_j = tl.sum(P, axis=1)
-        alpha = tl.exp(M - m_j)
+        M, L, P, alpha = softmax_step(S, M, L)
         acc_even = acc_even * alpha[:, None]
         acc_odd = acc_odd * alpha[:, None]
-        L = L * alpha + l_j
-        M = m_j
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
             sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
             V_lo = tl.where(sw_mask[:, None], V_lo, 0.0)
             V_hi = tl.where(sw_mask[:, None], V_hi, 0.0)
+        # Fuse v per-(token, head) scale into P; subtract the v zero-point
+        # contribution once for both halves.
         P_v = (P * v_token_head_scales[None, :]).to(V_lo.dtype)
         Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
         acc_even += tl.dot(P_v, V_lo) - Pv_zp_sum[:, None]
         acc_odd += tl.dot(P_v, V_hi) - Pv_zp_sum[:, None]
 
-    # ---- Epilogue: interleaved store --------------------------------------
-    acc_even = acc_even / L[:, None]
-    acc_odd = acc_odd / L[:, None]
-    if USE_FP8:
-        out_s = tl.load(out_scale)
-        acc_even = tl.clamp(acc_even * out_s, FP8_MIN, FP8_MAX)
-        acc_odd = tl.clamp(acc_odd * out_s, FP8_MIN, FP8_MAX)
     out_mask = query_mask_0[:, None] & query_mask_1[:, None]
-    out_base = (
-        query_offset_0[:, None] * output_stride_0
-        + query_offset_1[:, None] * output_stride_1
-    )
-    tl.store(
-        output_ptr + out_base + even_head_offs[None, :],
-        acc_even,
-        mask=even_head_mask[None, :] & out_mask,
-    )
-    tl.store(
-        output_ptr + out_base + odd_head_offs[None, :],
-        acc_odd,
-        mask=odd_head_mask[None, :] & out_mask,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Attention kernel (3D): split-dot, asymmetric, parallel softmax segments
-# ---------------------------------------------------------------------------
-@triton.jit
-def _attn_int4_3d(
-    segm_output_ptr,
-    segm_max_ptr,
-    segm_expsum_ptr,
-    query_ptr,
-    key_cache_ptr,
-    value_cache_ptr,
-    sink_ptr,
-    block_tables_ptr,
-    seq_lens_ptr,
-    alibi_slopes_ptr,
-    qq_bias_ptr,
-    scale,
-    softcap,
-    k_scale_cache_ptr,
-    v_scale_cache_ptr,
-    num_query_heads: tl.constexpr,
-    num_queries_per_kv: tl.constexpr,
-    block_table_stride: tl.int64,
-    query_stride_0: tl.int64,
-    query_stride_1: tl.int64,
-    qq_bias_stride_0: tl.int64,
-    BLOCK_SIZE: tl.constexpr,
-    TILE_SIZE: tl.constexpr,
-    HEAD_SIZE: tl.constexpr,
-    HEAD_SIZE_PADDED: tl.constexpr,
-    HALF_HEAD_PADDED: tl.constexpr,
-    USE_ALIBI_SLOPES: tl.constexpr,
-    USE_ALIBI_SQRT: tl.constexpr,
-    USE_QQ_BIAS: tl.constexpr,
-    USE_SOFTCAP: tl.constexpr,
-    USE_SINKS: tl.constexpr,
-    SLIDING_WINDOW: tl.constexpr,
-    stride_k_cache_0: tl.int64,
-    stride_k_cache_1: tl.int64,
-    stride_k_cache_2: tl.int64,
-    stride_k_cache_3: tl.constexpr,
-    stride_v_cache_0: tl.int64,
-    stride_v_cache_1: tl.int64,
-    stride_v_cache_2: tl.int64,
-    stride_v_cache_3: tl.constexpr,
-    stride_ks_blk: tl.int64,
-    stride_ks_slot: tl.int64,
-    stride_ks_head: tl.int64,
-    stride_vs_blk: tl.int64,
-    stride_vs_slot: tl.int64,
-    stride_vs_head: tl.int64,
-    query_start_len_ptr,
-    BLOCK_Q: tl.constexpr,
-    num_seqs: tl.int32,
-    BLOCK_M: tl.constexpr,
-    NUM_SEGMENTS_PER_SEQ: tl.constexpr,
-    USE_MM_PREFIX: tl.constexpr,
-    MAX_MM_RANGES: tl.constexpr,
-    mm_prefix_range_ptr,
-):
-    q_block_global_idx = tl.program_id(0)
-    kv_head_idx = tl.program_id(1)
-    segm_idx = tl.program_id(2)
-
-    seq_idx = find_seq_idx(
-        query_start_len_ptr, q_block_global_idx, num_seqs, BLOCK_Q, True
-    )
-
-    q_block_start_idx = tl.load(query_start_len_ptr + seq_idx) // BLOCK_Q + seq_idx
-    q_block_local_idx = q_block_global_idx - q_block_start_idx
-
-    cur_batch_in_all_start_index = tl.load(query_start_len_ptr + seq_idx)
-    cur_batch_in_all_stop_index = tl.load(query_start_len_ptr + seq_idx + 1)
-    cur_batch_query_len = cur_batch_in_all_stop_index - cur_batch_in_all_start_index
-
-    if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
-        return
-
-    seq_len = tl.load(seq_lens_ptr + seq_idx)
-    num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
-
-    if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
-        return
-
-    offs_m = tl.arange(0, BLOCK_M)
-    offs_t = tl.arange(0, TILE_SIZE)
-    query_pos = q_block_local_idx * BLOCK_Q + offs_m // num_queries_per_kv
-
-    query_offset_0 = cur_batch_in_all_start_index + query_pos
-    query_offset_1 = kv_head_idx * num_queries_per_kv + offs_m % num_queries_per_kv
-
-    query_mask_0 = tl.where(query_pos < cur_batch_query_len, 1, 0).to(tl.int1)
-    query_mask_1 = tl.where(query_offset_1 < num_query_heads, 1, 0).to(tl.int1)
-
-    half_offs = tl.arange(0, HALF_HEAD_PADDED)
-    even_head_offs = half_offs * 2
-    odd_head_offs = half_offs * 2 + 1
-    even_head_mask = tl.where(even_head_offs < HEAD_SIZE, 1, 0).to(tl.int1)
-    odd_head_mask = tl.where(odd_head_offs < HEAD_SIZE, 1, 0).to(tl.int1)
-    half_dim_mask = tl.where(half_offs < HEAD_SIZE // 2, 1, 0).to(tl.int1)
-    q_base = (
-        query_offset_0[:, None] * query_stride_0
-        + query_offset_1[:, None] * query_stride_1
-    )
-    q_mask = query_mask_0[:, None] & query_mask_1[:, None]
-    Q_even = tl.load(
-        query_ptr + q_base + even_head_offs[None, :],
-        mask=even_head_mask[None, :] & q_mask,
-        other=0.0,
-    ).to(tl.float32)
-    Q_odd = tl.load(
-        query_ptr + q_base + odd_head_offs[None, :],
-        mask=odd_head_mask[None, :] & q_mask,
-        other=0.0,
-    ).to(tl.float32)
-    Q_sum = tl.sum(Q_even, axis=1) + tl.sum(Q_odd, axis=1)
-
-    block_table_offset = seq_idx * block_table_stride
-
-    if USE_SINKS:
-        if segm_idx == 0:
-            M = tl.load(
-                sink_ptr + query_offset_1,
-                mask=query_mask_1,
-                other=float("-inf"),
-            ).to(dtype=tl.float32)
-        else:
-            M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
+    if IS_3D:
+        # Per-segment partials; finalized by ``reduce_segments``.
+        segm_base = (
+            query_offset_0[:, None].to(tl.int64)
+            * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+            + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+            + segm_idx * HEAD_SIZE_PADDED
+        )
+        tl.store(
+            segm_output_ptr + segm_base + even_head_offs[None, :],
+            acc_even,
+            mask=even_head_mask[None, :] & out_mask,
+        )
+        tl.store(
+            segm_output_ptr + segm_base + odd_head_offs[None, :],
+            acc_odd,
+            mask=odd_head_mask[None, :] & out_mask,
+        )
+        segm_offset = (
+            query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
+            + query_offset_1 * NUM_SEGMENTS_PER_SEQ
+            + segm_idx
+        )
+        tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
+        tl.store(segm_expsum_ptr + segm_offset, L, mask=query_mask_0 & query_mask_1)
     else:
-        M = tl.full([BLOCK_M], float("-inf"), dtype=tl.float32)
-
-    L = tl.full([BLOCK_M], 1.0, dtype=tl.float32)
-    acc_even = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
-    acc_odd = tl.zeros([BLOCK_M, HALF_HEAD_PADDED], dtype=tl.float32)
-
-    context_len = seq_len - cur_batch_query_len
-
-    if USE_ALIBI_SLOPES:
-        alibi_slope = tl.load(
-            alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
+        acc_even = acc_even / L[:, None]
+        acc_odd = acc_odd / L[:, None]
+        if USE_FP8:
+            out_s = tl.load(out_scale)
+            acc_even = tl.clamp(acc_even * out_s, FP8_MIN, FP8_MAX)
+            acc_odd = tl.clamp(acc_odd * out_s, FP8_MIN, FP8_MAX)
+        out_base = (
+            query_offset_0[:, None] * output_stride_0
+            + query_offset_1[:, None] * output_stride_1
         )
-
-    if USE_QQ_BIAS:
-        qq_bias_row_ptrs = qq_bias_ptr + query_pos[:, None] * qq_bias_stride_0
-
-    max_seq_prefix_len = (
-        context_len
-        + q_block_local_idx * BLOCK_Q
-        + (BLOCK_M - 1) // num_queries_per_kv
-        + 1
-    )
-    max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
-    num_tiles = cdiv_fn(max_seq_prefix_len, TILE_SIZE)
-
-    tile_start = 0
-    tile_end = num_tiles
-    if SLIDING_WINDOW > 0 and not USE_MM_PREFIX:
-        qpos_lo = q_block_local_idx * BLOCK_Q
-        qpos_hi = tl.minimum(
-            qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
-            cur_batch_query_len - 1,
+        tl.store(
+            output_ptr + out_base + even_head_offs[None, :],
+            acc_even,
+            mask=even_head_mask[None, :] & out_mask,
         )
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
-        last_allowed_key = context_len + qpos_hi
-        tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
-        tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
-
-    for j in range(
-        max(segm_idx * tiles_per_segment, tile_start),
-        min((segm_idx + 1) * tiles_per_segment, tile_end),
-    ):
-        seq_offset = j * TILE_SIZE + offs_t
-        tile_mask = seq_offset < max_seq_prefix_len
-
-        physical_block_idx = tl.load(
-            block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE
-        ).to(tl.int64)
-
-        slot_in_blk = seq_offset % BLOCK_SIZE
-        k_off = (
-            physical_block_idx[None, :] * stride_k_cache_0
-            + kv_head_idx * stride_k_cache_2
-            + half_offs[:, None] * stride_k_cache_3
-            + slot_in_blk[None, :] * stride_k_cache_1
+        tl.store(
+            output_ptr + out_base + odd_head_offs[None, :],
+            acc_odd,
+            mask=odd_head_mask[None, :] & out_mask,
         )
-        K_packed = tl.load(
-            key_cache_ptr + k_off,
-            mask=half_dim_mask[:, None] & tile_mask[None, :],
-            other=0,
-        )
-        K_lo_u, K_hi_u = unpack_int4_nibbles(K_packed)
-        K_lo = K_lo_u.to(Q_even.dtype)
-        K_hi = K_hi_u.to(Q_odd.dtype)
-
-        v_off = (
-            physical_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_2
-            + half_offs[None, :] * stride_v_cache_3
-            + slot_in_blk[:, None] * stride_v_cache_1
-        )
-        V_packed = tl.load(
-            value_cache_ptr + v_off,
-            mask=half_dim_mask[None, :] & tile_mask[:, None],
-            other=0,
-        )
-        V_lo_u, V_hi_u = unpack_int4_nibbles(V_packed)
-        V_lo = V_lo_u.to(Q_even.dtype)
-        V_hi = V_hi_u.to(Q_odd.dtype)
-
-        ks_idx = (
-            physical_block_idx * stride_ks_blk
-            + slot_in_blk * stride_ks_slot
-            + kv_head_idx * stride_ks_head
-        )
-        ks_raw = tl.load(k_scale_cache_ptr + ks_idx, mask=tile_mask, other=0)
-        vs_idx = (
-            physical_block_idx * stride_vs_blk
-            + slot_in_blk * stride_vs_slot
-            + kv_head_idx * stride_vs_head
-        )
-        vs_raw = tl.load(v_scale_cache_ptr + vs_idx, mask=tile_mask, other=0)
-
-        ks_bits = ks_raw.to(tl.int32, bitcast=True)
-        k_zp = (ks_bits & 0xF).to(tl.float32)
-        k_token_head_scales = (ks_bits & -16).to(tl.float32, bitcast=True)
-        vs_bits = vs_raw.to(tl.int32, bitcast=True)
-        v_zp = (vs_bits & 0xF).to(tl.float32)
-        v_token_head_scales = (vs_bits & -16).to(tl.float32, bitcast=True)
-
-        query_abs_pos = context_len + query_pos[:, None]
-        seq_mask = seq_offset[None, :] <= query_abs_pos
-        if SLIDING_WINDOW > 0:
-            seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
-        if USE_MM_PREFIX:
-            for i in range(MAX_MM_RANGES):
-                range_start = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2
-                )
-                range_end = tl.load(
-                    mm_prefix_range_ptr + seq_idx * MAX_MM_RANGES * 2 + i * 2 + 1
-                )
-                is_valid = range_start < range_end
-                q_in_range = (
-                    (query_abs_pos >= range_start)
-                    & (query_abs_pos <= range_end)
-                    & is_valid
-                )
-                k_in_range = (
-                    (seq_offset[None, :] >= range_start)
-                    & (seq_offset[None, :] <= range_end)
-                    & is_valid
-                )
-                seq_mask |= q_in_range & k_in_range
-
-        S = tl.zeros(shape=(BLOCK_M, TILE_SIZE), dtype=tl.float32)
-        raw_dot = tl.dot(Q_even, K_lo) + tl.dot(Q_odd, K_hi)
-        S += (raw_dot - Q_sum[:, None] * k_zp[None, :]) * (
-            scale * k_token_head_scales[None, :]
-        )
-
-        if USE_SOFTCAP:
-            S = apply_softcap(S, softcap)
-
-        S = tl.where(
-            query_mask_1[:, None] & query_mask_0[:, None] & seq_mask, S, float("-inf")
-        )
-
-        if USE_ALIBI_SLOPES:
-            if USE_ALIBI_SQRT:
-                relative_pos = seq_offset - (context_len + query_pos[:, None])
-                alibi_offset_v = tl.where(
-                    relative_pos <= 0,
-                    -tl.sqrt((-relative_pos).to(tl.float32)),
-                    0.0,
-                )
-            else:
-                alibi_offset_v = seq_offset - context_len
-            S += alibi_slope[:, None] * alibi_offset_v
-
-        if USE_QQ_BIAS:
-            key_rel_pos = seq_offset - context_len
-            is_query_key = key_rel_pos >= 0 and key_rel_pos < qq_bias_stride_0
-            qq_bias = tl.load(
-                qq_bias_row_ptrs + key_rel_pos[None, :],
-                mask=is_query_key[None, :],
-                other=0.0,
-            )
-            S += qq_bias
-
-        m_j = tl.maximum(M, tl.max(S, axis=1))
-        m_j = tl.where(m_j > float("-inf"), m_j, 0.0)
-        P = tl.exp(S - m_j[:, None])
-        l_j = tl.sum(P, axis=1)
-        alpha = tl.exp(M - m_j)
-        acc_even = acc_even * alpha[:, None]
-        acc_odd = acc_odd * alpha[:, None]
-        L = L * alpha + l_j
-        M = m_j
-
-        if SLIDING_WINDOW:
-            qpos_lo = q_block_local_idx * BLOCK_Q
-            sw_mask = (context_len + qpos_lo - seq_offset) < SLIDING_WINDOW
-            V_lo = tl.where(sw_mask[:, None], V_lo, 0.0)
-            V_hi = tl.where(sw_mask[:, None], V_hi, 0.0)
-        P_v = (P * v_token_head_scales[None, :]).to(V_lo.dtype)
-        Pv_zp_sum = tl.sum(P_v * v_zp[None, :], axis=1)
-        acc_even += tl.dot(P_v, V_lo) - Pv_zp_sum[:, None]
-        acc_odd += tl.dot(P_v, V_hi) - Pv_zp_sum[:, None]
-
-    # ---- 3D epilogue: store interleaved into segm_output ------------------
-    segm_base = (
-        query_offset_0[:, None].to(tl.int64)
-        * (num_query_heads * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-        + query_offset_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
-        + segm_idx * HEAD_SIZE_PADDED
-    )
-    out_mask = query_mask_0[:, None] & query_mask_1[:, None]
-    tl.store(
-        segm_output_ptr + segm_base + even_head_offs[None, :],
-        acc_even,
-        mask=even_head_mask[None, :] & out_mask,
-    )
-    tl.store(
-        segm_output_ptr + segm_base + odd_head_offs[None, :],
-        acc_odd,
-        mask=odd_head_mask[None, :] & out_mask,
-    )
-    segm_offset = (
-        query_offset_0.to(tl.int64) * (num_query_heads * NUM_SEGMENTS_PER_SEQ)
-        + query_offset_1 * NUM_SEGMENTS_PER_SEQ
-        + segm_idx
-    )
-    tl.store(segm_max_ptr + segm_offset, M, mask=query_mask_0 & query_mask_1)
-    tl.store(segm_expsum_ptr + segm_offset, L, mask=query_mask_0 & query_mask_1)
 
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +723,6 @@ class Int4PerTokenHeadBackend(QuantKVBackend):
         head_size = q.shape[2]
         softmax_scale = softmax_scale / head_size
 
-        # ---- Launch params (mirror core) -----------------------------------
         use_mm_prefix = False
         max_mm_ranges = 0
         if mm_prefix_range is not None:
@@ -1073,63 +764,87 @@ class Int4PerTokenHeadBackend(QuantKVBackend):
             or is_batch_invariant
         )
 
+        # Same kernel handles both modes; only the launch grid +
+        # IS_3D constexpr + a couple of pointer/integer args differ.
+        # 3D never reads ``output_ptr`` and 2D never reads the segm
+        # tensors, but Triton needs a non-null pointer everywhere; reuse
+        # ``out`` as the placeholder for the unused side.
+        segm_output_ptr = softmax_segm_output if use_3d else out
+        segm_max_ptr = softmax_segm_max if use_3d else out
+        segm_expsum_ptr = softmax_segm_expsum if use_3d else out
+        num_segments = num_par_softmax_segments if use_3d else 1
+
         if use_3d:
-            _attn_int4_3d[(total_num_q_blocks, num_kv_heads, num_par_softmax_segments)](
-                segm_output_ptr=softmax_segm_output,
-                segm_max_ptr=softmax_segm_max,
-                segm_expsum_ptr=softmax_segm_expsum,
-                query_ptr=q,
-                key_cache_ptr=k_cache,
-                value_cache_ptr=v_cache,
-                sink_ptr=sinks,
-                block_tables_ptr=block_table,
-                seq_lens_ptr=seqused_k,
-                alibi_slopes_ptr=alibi_slopes,
-                qq_bias_ptr=qq_bias,
-                scale=softmax_scale,
-                softcap=softcap,
-                k_scale_cache_ptr=k_scale_cache,
-                v_scale_cache_ptr=v_scale_cache,
-                num_query_heads=num_query_heads,
-                num_queries_per_kv=num_queries_per_kv,
-                block_table_stride=block_table.stride(0),
-                query_stride_0=q.stride(0),
-                query_stride_1=q.stride(1),
-                qq_bias_stride_0=qq_bias.stride(0) if qq_bias is not None else 0,
-                BLOCK_SIZE=block_size,
-                TILE_SIZE=TILE_SIZE_DECODE,
-                HEAD_SIZE=head_size,
-                HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-                HALF_HEAD_PADDED=triton.next_power_of_2(head_size) // 2,
-                USE_ALIBI_SLOPES=alibi_slopes is not None,
-                USE_ALIBI_SQRT=use_alibi_sqrt,
-                USE_QQ_BIAS=qq_bias is not None,
-                USE_SOFTCAP=(softcap > 0),
-                USE_SINKS=(sinks is not None),
-                SLIDING_WINDOW=(1 + window_size[0]),
-                stride_k_cache_0=k_cache.stride(0),
-                stride_k_cache_1=k_cache.stride(1),
-                stride_k_cache_2=k_cache.stride(2),
-                stride_k_cache_3=k_cache.stride(3),
-                stride_v_cache_0=v_cache.stride(0),
-                stride_v_cache_1=v_cache.stride(1),
-                stride_v_cache_2=v_cache.stride(2),
-                stride_v_cache_3=v_cache.stride(3),
-                stride_ks_blk=k_scale_cache.stride(0),
-                stride_ks_slot=k_scale_cache.stride(1),
-                stride_ks_head=k_scale_cache.stride(2),
-                stride_vs_blk=v_scale_cache.stride(0),
-                stride_vs_slot=v_scale_cache.stride(1),
-                stride_vs_head=v_scale_cache.stride(2),
-                query_start_len_ptr=cu_seqlens_q,
-                BLOCK_Q=BLOCK_Q,
-                num_seqs=num_seqs,
-                BLOCK_M=BLOCK_M,
-                NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
-                USE_MM_PREFIX=use_mm_prefix,
-                MAX_MM_RANGES=max_mm_ranges,
-                mm_prefix_range_ptr=mm_prefix_range,
-            )
+            grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
+            tile_size = TILE_SIZE_DECODE
+        else:
+            grid = (total_num_q_blocks, num_kv_heads)
+            tile_size = TILE_SIZE_PREFILL
+
+        _attn_int4[grid](
+            output_ptr=out,
+            segm_output_ptr=segm_output_ptr,
+            segm_max_ptr=segm_max_ptr,
+            segm_expsum_ptr=segm_expsum_ptr,
+            query_ptr=q,
+            key_cache_ptr=k_cache,
+            value_cache_ptr=v_cache,
+            sink_ptr=sinks,
+            block_tables_ptr=block_table,
+            seq_lens_ptr=seqused_k,
+            alibi_slopes_ptr=alibi_slopes,
+            qq_bias_ptr=qq_bias,
+            scale=softmax_scale,
+            out_scale=1 / output_scale if output_scale is not None else 1.0,
+            softcap=softcap,
+            k_scale_cache_ptr=k_scale_cache,
+            v_scale_cache_ptr=v_scale_cache,
+            num_query_heads=num_query_heads,
+            num_queries_per_kv=num_queries_per_kv,
+            block_table_stride=block_table.stride(0),
+            query_stride_0=q.stride(0),
+            query_stride_1=q.stride(1),
+            output_stride_0=out.stride(0),
+            output_stride_1=out.stride(1),
+            qq_bias_stride_0=qq_bias.stride(0) if qq_bias is not None else 0,
+            BLOCK_SIZE=block_size,
+            TILE_SIZE=tile_size,
+            HEAD_SIZE=head_size,
+            HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
+            HALF_HEAD_PADDED=triton.next_power_of_2(head_size) // 2,
+            USE_ALIBI_SLOPES=alibi_slopes is not None,
+            USE_ALIBI_SQRT=use_alibi_sqrt,
+            USE_QQ_BIAS=qq_bias is not None,
+            USE_SOFTCAP=(softcap > 0),
+            USE_SINKS=(sinks is not None),
+            SLIDING_WINDOW=(1 + window_size[0]),
+            USE_MM_PREFIX=use_mm_prefix,
+            MAX_MM_RANGES=max_mm_ranges,
+            mm_prefix_range_ptr=mm_prefix_range,
+            stride_k_cache_0=k_cache.stride(0),
+            stride_k_cache_1=k_cache.stride(1),
+            stride_k_cache_2=k_cache.stride(2),
+            stride_k_cache_3=k_cache.stride(3),
+            stride_v_cache_0=v_cache.stride(0),
+            stride_v_cache_1=v_cache.stride(1),
+            stride_v_cache_2=v_cache.stride(2),
+            stride_v_cache_3=v_cache.stride(3),
+            stride_ks_blk=k_scale_cache.stride(0),
+            stride_ks_slot=k_scale_cache.stride(1),
+            stride_ks_head=k_scale_cache.stride(2),
+            stride_vs_blk=v_scale_cache.stride(0),
+            stride_vs_slot=v_scale_cache.stride(1),
+            stride_vs_head=v_scale_cache.stride(2),
+            query_start_len_ptr=cu_seqlens_q,
+            BLOCK_Q=BLOCK_Q,
+            num_seqs=num_seqs,
+            BLOCK_M=BLOCK_M,
+            NUM_SEGMENTS_PER_SEQ=num_segments,
+            USE_FP8=output_scale is not None,
+            IS_3D=use_3d,
+        )
+
+        if use_3d:
             reduce_segments[(q.shape[0], num_query_heads)](
                 output_ptr=out,
                 segm_output_ptr=softmax_segm_output,
@@ -1148,64 +863,6 @@ class Int4PerTokenHeadBackend(QuantKVBackend):
                 query_start_len_ptr=cu_seqlens_q,
                 BLOCK_Q=BLOCK_Q,
                 NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
-                USE_FP8=output_scale is not None,
-            )
-        else:
-            _attn_int4_2d[(total_num_q_blocks, num_kv_heads)](
-                output_ptr=out,
-                query_ptr=q,
-                key_cache_ptr=k_cache,
-                value_cache_ptr=v_cache,
-                sink_ptr=sinks,
-                block_tables_ptr=block_table,
-                seq_lens_ptr=seqused_k,
-                alibi_slopes_ptr=alibi_slopes,
-                qq_bias_ptr=qq_bias,
-                scale=softmax_scale,
-                out_scale=1 / output_scale if output_scale is not None else 1.0,
-                softcap=softcap,
-                k_scale_cache_ptr=k_scale_cache,
-                v_scale_cache_ptr=v_scale_cache,
-                num_query_heads=num_query_heads,
-                num_queries_per_kv=num_queries_per_kv,
-                block_table_stride=block_table.stride(0),
-                query_stride_0=q.stride(0),
-                query_stride_1=q.stride(1),
-                output_stride_0=out.stride(0),
-                output_stride_1=out.stride(1),
-                qq_bias_stride_0=qq_bias.stride(0) if qq_bias is not None else 0,
-                BLOCK_SIZE=block_size,
-                TILE_SIZE=TILE_SIZE_PREFILL,
-                HEAD_SIZE=head_size,
-                HEAD_SIZE_PADDED=triton.next_power_of_2(head_size),
-                HALF_HEAD_PADDED=triton.next_power_of_2(head_size) // 2,
-                USE_ALIBI_SLOPES=alibi_slopes is not None,
-                USE_ALIBI_SQRT=use_alibi_sqrt,
-                USE_QQ_BIAS=qq_bias is not None,
-                USE_SOFTCAP=(softcap > 0),
-                USE_SINKS=(sinks is not None),
-                SLIDING_WINDOW=(1 + window_size[0]),
-                USE_MM_PREFIX=use_mm_prefix,
-                MAX_MM_RANGES=max_mm_ranges,
-                mm_prefix_range_ptr=mm_prefix_range,
-                stride_k_cache_0=k_cache.stride(0),
-                stride_k_cache_1=k_cache.stride(1),
-                stride_k_cache_2=k_cache.stride(2),
-                stride_k_cache_3=k_cache.stride(3),
-                stride_v_cache_0=v_cache.stride(0),
-                stride_v_cache_1=v_cache.stride(1),
-                stride_v_cache_2=v_cache.stride(2),
-                stride_v_cache_3=v_cache.stride(3),
-                stride_ks_blk=k_scale_cache.stride(0),
-                stride_ks_slot=k_scale_cache.stride(1),
-                stride_ks_head=k_scale_cache.stride(2),
-                stride_vs_blk=v_scale_cache.stride(0),
-                stride_vs_slot=v_scale_cache.stride(1),
-                stride_vs_head=v_scale_cache.stride(2),
-                query_start_len_ptr=cu_seqlens_q,
-                BLOCK_Q=BLOCK_Q,
-                num_seqs=num_seqs,
-                BLOCK_M=BLOCK_M,
                 USE_FP8=output_scale is not None,
             )
 
