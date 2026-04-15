@@ -85,6 +85,7 @@ class CPUWorker(Worker):
             self.distributed_init_method,
             self.local_rank,
             current_platform.dist_backend,
+            self.distributed_listen_socket,
         )
         # Set random seed.
         set_random_seed(self.model_config.seed)

@@ -10,6 +10,7 @@ from collections.abc import (
     Iterator,
     Sequence,
 )
+from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -22,6 +23,12 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class DistributedInitEndpoint:
+    init_method: str
+    listen_socket: socket.socket | None = None
 
 
 def close_sockets(sockets: Sequence[zmq.Socket | zmq.asyncio.Socket]):
@@ -129,6 +136,27 @@ def join_host_port(host: str, port: int) -> str:
 
 def get_distributed_init_method(ip: str, port: int) -> str:
     return get_tcp_uri(ip, port)
+
+
+def create_distributed_init_endpoint(
+    host: str,
+    *,
+    reserve_listen_socket: bool,
+) -> DistributedInitEndpoint:
+    if not reserve_listen_socket:
+        return DistributedInitEndpoint(
+            init_method=get_distributed_init_method(host, get_open_port())
+        )
+
+    socket_family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    listen_socket = socket.socket(socket_family, socket.SOCK_STREAM)
+    listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listen_socket.bind((host, 0))
+    listen_socket.listen()
+    return DistributedInitEndpoint(
+        init_method=get_distributed_init_method(host, listen_socket.getsockname()[1]),
+        listen_socket=listen_socket,
+    )
 
 
 def get_tcp_uri(ip: str, port: int) -> str:

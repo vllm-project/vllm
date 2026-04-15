@@ -26,6 +26,8 @@ If you only need to use the distributed environment without model/pipeline
 import contextlib
 import gc
 import pickle
+import socket
+import traceback
 import weakref
 from collections import namedtuple
 from collections.abc import Callable
@@ -35,6 +37,7 @@ from datetime import timedelta
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Any, Protocol
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 import torch
 import torch.distributed
@@ -48,11 +51,15 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 )
 from vllm.distributed.utils import (
     StatelessProcessGroup,
+    create_tcp_store,
     get_cached_tcp_store_client,
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.network_utils import get_distributed_init_method
+from vllm.utils.network_utils import (
+    find_process_using_port,
+    get_distributed_init_method,
+)
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
@@ -1310,6 +1317,76 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
+def _get_dist_init_host_port(
+    distributed_init_method: str,
+) -> tuple[str, int] | None:
+    parsed = urlparse(distributed_init_method)
+    if parsed.scheme != "tcp" or parsed.hostname is None or parsed.port is None:
+        return None
+    return parsed.hostname, parsed.port
+
+
+def _format_port_conflict_details(port: int) -> str:
+    process = find_process_using_port(port)
+    if process is None:
+        return (
+            "port owner unavailable (unsupported on this platform or process "
+            "already exited)"
+        )
+
+    try:
+        process_name = process.name()
+    except Exception:
+        process_name = "<unknown>"
+
+    try:
+        cmdline = " ".join(process.cmdline())
+    except Exception:
+        cmdline = "<unavailable>"
+
+    return f"pid={process.pid} name={process_name} cmdline={cmdline}"
+
+
+def _init_process_group_with_optional_listen_socket(
+    backend: str,
+    world_size: int,
+    rank: int,
+    timeout: timedelta | None,
+    distributed_init_method: str,
+    distributed_listen_socket: socket.socket | None,
+) -> tuple[str, int] | None:
+    dist_init_host_port = _get_dist_init_host_port(distributed_init_method)
+    process_group_kwargs: dict[str, Any] = {
+        "backend": backend,
+        "world_size": world_size,
+        "rank": rank,
+        "timeout": timeout,
+    }
+    if dist_init_host_port is None:
+        torch.distributed.init_process_group(
+            init_method=distributed_init_method,
+            **process_group_kwargs,
+        )
+        return dist_init_host_port
+
+    host, port = dist_init_host_port
+    store_kwargs: dict[str, Any] = {
+        "world_size": world_size,
+        "is_master": rank == 0,
+    }
+    if timeout is not None:
+        store_kwargs["timeout"] = timeout
+    if distributed_listen_socket is not None:
+        assert rank == 0, "Only rank 0 may own the distributed listen socket"
+        store_kwargs["listen_socket"] = distributed_listen_socket
+    store = create_tcp_store(host, port, **store_kwargs)
+    torch.distributed.init_process_group(
+        store=store,
+        **process_group_kwargs,
+    )
+    return dist_init_host_port
+
+
 def _init_elastic_ep_world(
     config, local_rank: int, backend: str, rank: int, world_size: int
 ) -> None:
@@ -1352,6 +1429,7 @@ def init_distributed_environment(
     local_rank: int = -1,
     backend: str = "nccl",
     timeout: timedelta | None = None,
+    distributed_listen_socket: socket.socket | None = None,
 ):
     logger.debug(
         "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1419,13 +1497,28 @@ def init_distributed_environment(
             )
             backend = "gloo"
         # this backend is used for WORLD
-        torch.distributed.init_process_group(
-            backend=backend,
-            init_method=distributed_init_method,
-            world_size=world_size,
-            rank=rank,
-            timeout=timeout,
-        )
+        dist_init_host_port = None
+        try:
+            dist_init_host_port = _init_process_group_with_optional_listen_socket(
+                backend=backend,
+                world_size=world_size,
+                rank=rank,
+                timeout=timeout,
+                distributed_init_method=distributed_init_method,
+                distributed_listen_socket=distributed_listen_socket,
+            )
+        except Exception:
+            exc_msg = traceback.format_exc()
+            if dist_init_host_port is not None and (
+                "EADDRINUSE" in exc_msg or "Address already in use" in exc_msg
+            ):
+                _, port = dist_init_host_port
+                logger.error(
+                    "Distributed init port conflict detected for %s; %s",
+                    distributed_init_method,
+                    _format_port_conflict_details(port),
+                )
+            raise
         if enable_elastic_ep:
             tp_pp_cpu_group = torch.distributed.new_group(
                 backend="gloo", timeout=timeout
@@ -1437,6 +1530,9 @@ def init_distributed_environment(
                 raise RuntimeError(
                     "Elastic EP is not yet supported with multi-node TP/PP"
                 )
+
+    elif distributed_listen_socket is not None:
+        distributed_listen_socket.close()
 
     # set the local rank
     # local_rank is not available in torch ProcessGroup,

@@ -5,6 +5,7 @@ import os
 import pickle
 import queue
 import signal
+import socket
 import threading
 import time
 import traceback
@@ -46,10 +47,9 @@ from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
-    get_distributed_init_method,
+    create_distributed_init_endpoint,
     get_ip,
     get_loopback_ip,
-    get_open_port,
 )
 from vllm.utils.system_utils import (
     _maybe_force_spawn,
@@ -123,9 +123,8 @@ class MultiprocExecutor(Executor):
         set_multiprocessing_worker_envs()
 
         # use the loopback address get_loopback_ip() for communication.
-        distributed_init_method = get_distributed_init_method(
-            get_loopback_ip(), get_open_port()
-        )
+        distributed_host = get_loopback_ip()
+        distributed_listen_socket: socket.socket | None = None
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
@@ -162,6 +161,12 @@ class MultiprocExecutor(Executor):
             global_start_rank = (
                 self.local_world_size * self.parallel_config.node_rank_within_dp
             )
+            distributed_endpoint = create_distributed_init_endpoint(
+                distributed_host,
+                reserve_listen_socket=(global_start_rank == 0),
+            )
+            distributed_init_method = distributed_endpoint.init_method
+            distributed_listen_socket = distributed_endpoint.listen_socket
             # When using fork, keep track of socket file descriptors that are
             # inherited by the worker, so that we can close them in subsequent
             # workers
@@ -181,6 +186,9 @@ class MultiprocExecutor(Executor):
                         local_rank=local_rank,
                         rank=global_rank,
                         distributed_init_method=distributed_init_method,
+                        distributed_listen_socket=(
+                            distributed_listen_socket if global_rank == 0 else None
+                        ),
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
                         is_driver_worker=is_driver_worker,
@@ -192,12 +200,20 @@ class MultiprocExecutor(Executor):
                         local_rank=local_rank,
                         rank=global_rank,
                         distributed_init_method=distributed_init_method,
+                        distributed_listen_socket=(
+                            distributed_listen_socket if global_rank == 0 else None
+                        ),
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
                         is_driver_worker=is_driver_worker,
                         inherited_fds=inherited_fds,
                     )
                 unready_workers.append(unready_worker_handle)
+                if global_rank == 0 and distributed_listen_socket is not None:
+                    # Drop the parent's copy immediately so later forked workers
+                    # do not inherit the reserved rendezvous socket.
+                    distributed_listen_socket.close()
+                    distributed_listen_socket = None
                 if inherited_fds is not None:
                     inherited_fds.append(unready_worker_handle.death_writer.fileno())
                     inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
@@ -243,6 +259,8 @@ class MultiprocExecutor(Executor):
 
             success = True
         finally:
+            if distributed_listen_socket is not None:
+                distributed_listen_socket.close()
             if not success:
                 # Clean up the worker procs if there was a failure.
                 # Close death_writers first to signal workers to exit
@@ -591,6 +609,7 @@ class WorkerProc:
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        distributed_listen_socket: socket.socket | None,
         input_shm_handle: Handle,
         shared_worker_lock: LockType,
         is_driver_worker: bool,
@@ -610,6 +629,7 @@ class WorkerProc:
             "shared_worker_lock": shared_worker_lock,
         }
         wrapper.init_worker(all_kwargs)
+        wrapper.worker.distributed_listen_socket = distributed_listen_socket
         self.worker = wrapper
 
         self.setup_proc_title_and_log_prefix(
@@ -655,6 +675,7 @@ class WorkerProc:
         local_rank: int,
         rank: int,
         distributed_init_method: str,
+        distributed_listen_socket: socket.socket | None,
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
         is_driver_worker: bool,
@@ -673,6 +694,7 @@ class WorkerProc:
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
+            "distributed_listen_socket": distributed_listen_socket,
             "input_shm_handle": input_shm_handle,
             "ready_pipe": ready_writer,
             "death_pipe": death_reader,

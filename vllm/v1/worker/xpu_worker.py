@@ -83,6 +83,7 @@ class XPUWorker(Worker):
             self.distributed_init_method,
             self.local_rank,
             current_platform.dist_backend,
+            self.distributed_listen_socket,
         )
 
         # global all_reduce needed for overall oneccl warm up

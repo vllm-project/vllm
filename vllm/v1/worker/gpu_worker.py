@@ -4,6 +4,7 @@
 
 import gc
 import os
+import socket
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
 from datetime import timedelta
@@ -266,6 +267,7 @@ class Worker(WorkerBase):
                 self.distributed_init_method,
                 self.local_rank,
                 current_platform.dist_backend,
+                self.distributed_listen_socket,
             )
 
             if self.use_v2_model_runner:
@@ -1023,6 +1025,7 @@ def init_worker_distributed_environment(
     distributed_init_method: str | None = None,
     local_rank: int = -1,
     backend: str = "nccl",
+    distributed_listen_socket: socket.socket | None = None,
 ) -> None:
     """Initialize the distributed environment."""
     attention_config = vllm_config.attention_config
@@ -1046,6 +1049,7 @@ def init_worker_distributed_environment(
         local_rank,
         backend,
         timeout,
+        distributed_listen_socket=distributed_listen_socket,
     )
 
     ensure_model_parallel_initialized(
