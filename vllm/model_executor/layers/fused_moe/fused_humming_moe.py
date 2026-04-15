@@ -74,6 +74,7 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
                 max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
                 num_dispatchers = prepare_finalize.num_dispatchers()
 
+            assert quant_method.moe_quant_config is not None
             super().__init__(
                 moe_config=quant_method.moe,
                 quant_config=quant_method.moe_quant_config,
