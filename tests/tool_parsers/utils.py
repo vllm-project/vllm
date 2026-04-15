@@ -119,9 +119,7 @@ def split_string_into_token_deltas(tokenizer: TokenizerLike, text: str) -> list[
     deltas = []
     for i in range(1, len(token_ids) + 1):
         current_tokens = token_ids[:i]
-        current_text = tokenizer.decode(
-            current_tokens, clean_up_tokenization_spaces=False
-        )
+        current_text = tokenizer.decode(current_tokens)
         new_text = current_text[len(previously_decoded_text) :]
         previously_decoded_text = current_text
         deltas.append(new_text)

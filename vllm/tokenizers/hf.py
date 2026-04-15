@@ -7,12 +7,9 @@ from typing import TypeAlias
 
 from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
 
-from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
-
-logger = init_logger(__name__)
 
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
@@ -73,53 +70,6 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     return cached_tokenizer
 
 
-def _restore_original_pretokenizer(
-    tokenizer: "HfTokenizer",
-    path_or_repo_id: str | Path,
-    revision: str | None,
-) -> None:
-    """Fix pre-tokenizer override by LlamaTokenizerFast in transformers v5.
-
-    LlamaTokenizerFast.__init__ unconditionally replaces the pre-tokenizer
-    from tokenizer.json with Metaspace.  For models whose tokenizer.json
-    uses a different pre-tokenizer (e.g. ByteLevel), this causes spaces
-    to be silently dropped during encoding.
-
-    Detect the mismatch and restore the original pre-tokenizer and decoder
-    from tokenizer.json in-place.
-    """
-    if not isinstance(tokenizer, PreTrainedTokenizerFast):
-        return
-
-    backend = tokenizer.backend_tokenizer
-    if not str(backend.pre_tokenizer).startswith("Metaspace("):
-        return
-
-    try:
-        from huggingface_hub import hf_hub_download
-        from tokenizers import Tokenizer
-
-        tj_path = hf_hub_download(
-            str(path_or_repo_id),
-            "tokenizer.json",
-            revision=revision,
-        )
-        original = Tokenizer.from_file(tj_path)
-    except Exception:
-        return
-
-    if str(original.pre_tokenizer) == str(backend.pre_tokenizer):
-        return
-
-    logger.debug(
-        "Restoring original pre-tokenizer for %s "
-        "(was overridden by LlamaTokenizerFast)",
-        path_or_repo_id,
-    )
-    backend.pre_tokenizer = original.pre_tokenizer
-    backend.decoder = original.decoder
-
-
 class CachedHfTokenizer(TokenizerLike):
     @classmethod
     def from_pretrained(
@@ -171,7 +121,5 @@ class CachedHfTokenizer(TokenizerLike):
                 k: v.lower() for k, v in tokenizer.special_tokens_map.items()
             }
             tokenizer.add_special_tokens(special_tokens_map)
-
-        _restore_original_pretokenizer(tokenizer, path_or_repo_id, revision)
 
         return get_cached_tokenizer(tokenizer)
