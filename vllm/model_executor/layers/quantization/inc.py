@@ -429,7 +429,22 @@ class INCConfig(QuantizationConfig):
             raise NotImplementedError(
                 "INC W4A16 on XPU only supports symmetric quantization for now."
             )
+
         if isinstance(layer, (LinearBase, ParallelLMHead)):
+            try:
+                return INCXPULinearARKMethod(
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    sym=sym,
+                )
+            except ImportError as error:
+                logger.warning(
+                    "Failed to initialize ARK backend for layer %s; "
+                    "falling back to the default XPU INC path. Error: %s",
+                    prefix,
+                    error,
+                )
+
             return INCXPULinearMethod(
                 weight_bits=weight_bits,
                 group_size=group_size,
@@ -462,6 +477,260 @@ class INCConfig(QuantizationConfig):
         return None
 
 
+def _create_inc_weights(
+    layer: torch.nn.Module,
+    input_size_per_partition: int,
+    output_partition_sizes: list[int],
+    params_dtype: torch.dtype,
+    weight_loader: Any,
+    group_size: int,
+    pack_factor: int,
+    *,
+    set_layer_attrs: bool = False,
+) -> None:
+    output_size_per_partition = sum(output_partition_sizes)
+    scales_and_zp_size = input_size_per_partition // group_size
+
+    if set_layer_attrs:
+        layer.in_features = input_size_per_partition
+        layer.out_features = output_size_per_partition
+        layer.params_dtype = params_dtype
+
+    qweight = PackedvLLMParameter(
+        data=torch.empty(
+            input_size_per_partition // pack_factor,
+            output_size_per_partition,
+            dtype=torch.int32,
+        ),
+        input_dim=0,
+        output_dim=1,
+        packed_dim=0,
+        packed_factor=pack_factor,
+        weight_loader=weight_loader,
+    )
+
+    scales = GroupQuantScaleParameter(
+        data=torch.empty(
+            scales_and_zp_size,
+            output_size_per_partition,
+            dtype=params_dtype,
+        ),
+        input_dim=0,
+        output_dim=1,
+        weight_loader=weight_loader,
+    )
+
+    qzeros = PackedvLLMParameter(
+        data=torch.empty(
+            scales_and_zp_size,
+            output_size_per_partition // pack_factor,
+            dtype=torch.int32,
+        ),
+        input_dim=0,
+        output_dim=1,
+        packed_dim=1,
+        packed_factor=pack_factor,
+        weight_loader=weight_loader,
+    )
+
+    layer.register_parameter("qweight", qweight)
+    layer.register_parameter("scales", scales)
+    layer.register_parameter("qzeros", qzeros)
+
+    g_idx = RowvLLMParameter(
+        data=torch.tensor(
+            [i // group_size for i in range(input_size_per_partition)],
+            dtype=torch.int32,
+        ),
+        input_dim=0,
+        weight_loader=weight_loader,
+    )
+    layer.register_parameter("g_idx", g_idx)
+
+
+def _get_ark_type_str(dtype: torch.dtype) -> str:
+    """Helper: Convert PyTorch's dtype to a string format recognized by ARK"""
+    if dtype == torch.float16:
+        return "fp16"
+    elif dtype == torch.bfloat16:
+        return "bf16"
+    elif dtype == torch.float32:
+        return "fp32"
+    else:
+        raise ValueError(f"Unsupported dtype for ARK: {dtype}")
+
+
+class INCXPULinearARKMethod(LinearMethodBase):
+    """XPU linear method for INC quantization utilizing the ARK backend.
+
+    Repacks GPTQ/INC weights into ARK's layout.
+    """
+
+    _ark_instance: Any | None = None
+
+    def __init__(self, weight_bits: int, group_size: int, sym: bool):
+        self.weight_bits = weight_bits
+        self.group_size = group_size
+        self.sym = sym
+        self.pack_factor = 32 // weight_bits
+
+        self.weight_type = f"int{weight_bits}"
+        self.asym = not sym
+
+        self.ark = self._get_ark_instance()
+
+    @classmethod
+    def _get_ark_instance(cls):
+        if cls._ark_instance is None:
+            try:
+                from auto_round_extension.ark import auto_round_kernel
+
+                cls._ark_instance = auto_round_kernel.ARK()
+            except ImportError:
+                try:
+                    import auto_round_kernel
+
+                    ark_inst = auto_round_kernel._ark_instance()
+                    cls._ark_instance = ark_inst
+                except ImportError as e:
+                    raise ImportError("Failed to import auto_round_kernel.") from e
+
+        assert cls._ark_instance is not None
+        return cls._ark_instance
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del output_size
+        _create_inc_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            params_dtype=params_dtype,
+            weight_loader=extra_weight_attrs.get("weight_loader"),
+            group_size=self.group_size,
+            pack_factor=self.pack_factor,
+            set_layer_attrs=True,
+        )
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        device = layer.qweight.device
+
+        compute_type = _get_ark_type_str(layer.params_dtype)
+        scale_type = _get_ark_type_str(layer.scales.dtype)
+        bits = self.weight_bits
+
+        # ==========================================
+        # Core logic: unpack vLLM int32-packed weights into the full int8
+        # tensor layout expected by ARK.
+        # ==========================================
+        qw = layer.qweight.data  # Shape: [K // pack_factor, N]
+        K_packed, N = qw.shape
+
+        # Precompute bit shifts, e.g. int4 -> [0, 4, 8, 12, 16, 20, 24, 28].
+        shifts = torch.arange(0, 32, bits, device=device)
+
+        # 1. Broadcast shifts and apply bit masking to extract values in
+        # the range [0, (1 << bits) - 1].
+        # Shape change: [K_packed, N, 1] -> [K_packed, N, pack_factor]
+        unpacked_w = (qw.unsqueeze(-1) >> shifts) & ((1 << bits) - 1)
+
+        # 2. Convert into an int8 container.
+        unpacked_w = unpacked_w.to(torch.int8)
+
+        # 3. Restore the sign bits.
+        # For symmetric quantization, the real int4 range is [-8, 7].
+        if self.sym:
+            # INC/GPTQ symmetric quantization stores values with a default
+            # offset of 2**(bits - 1). For INT4, stored_value = real_value + 8,
+            # so decoding must subtract 8.
+            offset = 1 << (bits - 1)  # For bits=4, offset = 8.
+            unpacked_w = unpacked_w - offset
+
+        # 4. Reorder dimensions to restore the real [K, N] layout.
+        # transpose(1, 2) keeps values from the same packed group contiguous
+        # along the K dimension.
+        unpacked_w = unpacked_w.transpose(1, 2).reshape(-1, N).contiguous()
+
+        scale = layer.scales.data.contiguous()
+
+        if self.asym:
+            qz = layer.qzeros.data  # [groups, N // pack_factor]
+            groups, N_packed = qz.shape
+            unpacked_z = (qz.unsqueeze(-1) >> shifts) & ((1 << bits) - 1)
+            zp = unpacked_z.view(groups, -1).to(torch.int8).contiguous()
+        else:
+            # Per the ARK C++ implementation, symmetric quantization passes
+            # an empty tensor here.
+            zp = torch.empty(0, dtype=torch.int8, device=device)
+
+        assert self.ark is not None
+        packw = self.ark.repack_quantized_weight(
+            unpacked_w,
+            scale,
+            zp,
+            self.group_size,
+            compute_type,
+            self.weight_type,
+            scale_type,
+            self.asym,
+        )
+
+        # Wrap as a Parameter and disable gradients.
+        layer.packed_weight = Parameter(packw, requires_grad=False)
+
+        layer.compute_type = compute_type
+        layer.scale_type = scale_type
+
+        # Release the original temporary tensors loaded by vLLM.
+        del layer.qweight
+        del layer.scales
+        del layer.qzeros
+        if hasattr(layer, "g_idx"):
+            del layer.g_idx
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # Preserve the original shape and flatten the input to a 2D matrix
+        # of shape [batch * seq_len, K].
+        out_shape = x.shape[:-1] + (layer.out_features,)
+        reshaped_x = x.reshape(-1, x.shape[-1]).contiguous()
+
+        # Ensure bias has no grad requirement and is contiguous to avoid C++
+        # pointer handling issues.
+        if bias is not None:
+            safe_bias = bias.detach().contiguous()
+        else:
+            safe_bias = torch.empty(0, dtype=x.dtype, device=x.device)
+
+        assert self.ark is not None
+        out = self.ark.woqgemm(
+            reshaped_x,  # Input activations [M, K]
+            layer.packed_weight,  # Repacked low-level weight buffer
+            safe_bias,  # Bias [1, N] or empty
+            layer.out_features,  # N
+            layer.in_features,  # K
+            self.group_size,  # Block size
+            layer.compute_type,  # fp16 / bf16
+            self.weight_type,  # int4
+            layer.scale_type,  # fp16 / bf16
+            self.asym,  # False
+        )
+
+        return out.reshape(out_shape)
+
+
 class INCXPULinearMethod(LinearMethodBase):
     """XPU linear method for INC w4a16 GPTQ quantization (symmetric only).
 
@@ -492,63 +761,15 @@ class INCXPULinearMethod(LinearMethodBase):
         **extra_weight_attrs,
     ):
         del output_size  # Unused.
-        output_size_per_partition = sum(output_partition_sizes)
-        weight_loader = extra_weight_attrs.get("weight_loader")
-        scales_and_zp_size = input_size_per_partition // self.group_size
-
-        # GPTQ: qweight [in // pack_factor, out] packed along input dim
-        qweight = PackedvLLMParameter(
-            data=torch.empty(
-                input_size_per_partition // self.pack_factor,
-                output_size_per_partition,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=0,
-            packed_factor=self.pack_factor,
-            weight_loader=weight_loader,
+        _create_inc_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            params_dtype=params_dtype,
+            weight_loader=extra_weight_attrs.get("weight_loader"),
+            group_size=self.group_size,
+            pack_factor=self.pack_factor,
         )
-        # scales: [num_groups, out] params_dtype
-        scales = GroupQuantScaleParameter(
-            data=torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition,
-                dtype=params_dtype,
-            ),
-            input_dim=0,
-            output_dim=1,
-            weight_loader=weight_loader,
-        )
-        # qzeros: [num_groups, out // pack_factor] int32
-        qzeros = PackedvLLMParameter(
-            data=torch.empty(
-                scales_and_zp_size,
-                output_size_per_partition // self.pack_factor,
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            output_dim=1,
-            packed_dim=1,
-            packed_factor=self.pack_factor,
-            weight_loader=weight_loader,
-        )
-
-        layer.register_parameter("qweight", qweight)
-        layer.register_parameter("scales", scales)
-        layer.register_parameter("qzeros", qzeros)
-
-        # GPTQ checkpoints may include g_idx for activation reordering.
-        # Register it so the weight loader doesn't error on unexpected keys.
-        g_idx = RowvLLMParameter(
-            data=torch.tensor(
-                [i // self.group_size for i in range(input_size_per_partition)],
-                dtype=torch.int32,
-            ),
-            input_dim=0,
-            weight_loader=weight_loader,
-        )
-        layer.register_parameter("g_idx", g_idx)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Repack GPTQ weights into kernel-ready NT layout."""
