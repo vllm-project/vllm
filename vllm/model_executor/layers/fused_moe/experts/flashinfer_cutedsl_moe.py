@@ -433,6 +433,15 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         output_shape = (M, K)
         return (workspace1, workspace2, output_shape)
 
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        # cute_dsl_fused_moe_nvfp4 expects BF16 hidden states and performs
+        # its own FP4 quantization internally.  Returning True prevents the
+        # modular kernel from pre-quantizing activations, which would produce
+        # an FP4-packed tensor with size(-1)=k//2 and break the scale-factor
+        # conversion that expects size(-1)=k.
+        return True
+
     def apply(
         self,
         output: torch.Tensor,
