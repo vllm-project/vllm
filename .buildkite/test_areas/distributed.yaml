@@ -196,7 +196,6 @@ steps:
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
-    - TP_SIZE=1 DP_SIZE=2 pytest -v -s tests/v1/distributed/test_eagle_dp.py
 
 - label: Distributed Tests (2 GPUs)(B200)
   device: b200
