@@ -44,7 +44,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .mimo_v2_flash import MiMoV2FlashForCausalLM
+from .mimo_v2 import MiMoV2FlashForCausalLM
 from .qwen2_5_vl import (
     Qwen2_5_VisionMLP,
     Qwen2_5_VisionPatchEmbed,
