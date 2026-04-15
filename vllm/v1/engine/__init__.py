@@ -115,7 +115,6 @@ class EngineCoreRequest(
 
     reasoning_ended: bool | None = None
 
-
     @property
     def params(self) -> SamplingParams | PoolingParams:
         """Return the processed params (sampling or pooling)."""
