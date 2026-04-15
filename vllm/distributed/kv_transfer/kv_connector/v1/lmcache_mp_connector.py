@@ -123,8 +123,6 @@ def create_scheduler_adapter(
     server_url: str,
     zmq_context: zmq.Context,
     vllm_config: VllmConfig,
-    mq_timeout: float,
-    heartbeat_interval: float,
 ) -> LMCacheMPSchedulerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -139,15 +137,7 @@ def create_scheduler_adapter(
     if _adapter_accepts_tp_size():
         kwargs["tp_size"] = tp_size
 
-    # TODO(baoloongmao): Once LMCacheMPSchedulerAdapter supports extra_config, move all
-    # lmcache-specific config reading (mq_timeout, heartbeat_interval, host,
-    # port, etc.) out of this connector and into the adapter itself.
-    assert vllm_config.kv_transfer_config is not None
-    if _adapter_accepts_extra_config(LMCacheMPSchedulerAdapter):
-        kwargs["extra_config"] = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config
-        )
-
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPSchedulerAdapter(
         server_url,
         zmq_context,
@@ -155,8 +145,7 @@ def create_scheduler_adapter(
         world_size,
         kv_rank,
         vllm_config.cache_config.block_size,
-        mq_timeout=mq_timeout,
-        heartbeat_interval=heartbeat_interval,
+        extra_config=extra_config,
         **kwargs,
     )
 
@@ -165,8 +154,6 @@ def create_worker_adapter(
     server_url: str,
     zmq_context: zmq.Context,
     vllm_config: VllmConfig,
-    mq_timeout: float,
-    heartbeat_interval: float,
 ) -> LMCacheMPWorkerAdapter:
     world_size, kv_rank = extract_world_size_and_kv_rank(
         vllm_config.parallel_config.world_size,
@@ -174,16 +161,7 @@ def create_worker_adapter(
         vllm_config,
     )
 
-    # TODO(baoloongmao): Once LMCacheMPWorkerAdapter supports extra_config, move all
-    # lmcache-specific config reading (mq_timeout, heartbeat_interval, host,
-    # port, etc.) out of this connector and into the adapter itself.
-    kwargs: dict[str, Any] = {}
-    assert vllm_config.kv_transfer_config is not None
-    if _adapter_accepts_extra_config(LMCacheMPWorkerAdapter):
-        kwargs["extra_config"] = (
-            vllm_config.kv_transfer_config.kv_connector_extra_config
-        )
-
+    extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
     return LMCacheMPWorkerAdapter(
         server_url,
         zmq_context,
@@ -191,9 +169,7 @@ def create_worker_adapter(
         world_size,
         kv_rank,
         vllm_config.cache_config.block_size,
-        mq_timeout=mq_timeout,
-        heartbeat_interval=heartbeat_interval,
-        **kwargs,
+        extra_config=extra_config,
     )
 
 
@@ -479,22 +455,11 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         super().__init__(vllm_config, role, kv_cache_config)
 
         assert vllm_config.kv_transfer_config is not None
-        # TODO(baoloongmao): Remove this after pass extra_config
         server_host = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.host", "tcp://localhost"
         )
         server_port = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.port", 5555
-        )
-        mq_timeout = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.mq_timeout", 300.0
-            )
-        )
-        heartbeat_interval = float(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.heartbeat_interval", 10.0
-            )
         )
 
         server_url = f"{server_host}:{server_port}"
@@ -504,8 +469,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 server_url,
                 zmq_context,
                 vllm_config,
-                mq_timeout,
-                heartbeat_interval,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
         elif self.role == KVConnectorRole.WORKER:
@@ -513,8 +476,6 @@ class LMCacheMPConnector(KVConnectorBase_V1):
                 server_url,
                 zmq_context,
                 vllm_config,
-                mq_timeout,
-                heartbeat_interval,
             )
         else:
             raise ValueError(f"Unknown KVConnectorRole: {self.role}")
