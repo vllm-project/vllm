@@ -31,10 +31,10 @@ from .utils import (
         (False, [0]),
     ],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
 def test_sw_sizes(mock_platform, swa_enabled, expected_sw_sizes):
     """Test sw_sizes is correctly computed based on SWA enabled/disabled."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
 
@@ -65,7 +65,7 @@ def test_logical_to_kernel_block_ids_with_hma():
     When HMA is enabled, the logical block size may differ from the kernel
     block size. Each logical block maps to multiple kernel blocks.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
 
@@ -169,7 +169,7 @@ def test_nixl_metadata_hma_block_ids_structure():
     Test that NixlConnectorMetadata correctly stores block IDs for multiple
     KV cache groups when HMA is enabled.
     """
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
 
@@ -211,7 +211,7 @@ def test_nixl_metadata_hma_block_ids_structure():
 def test_get_block_descs_ids_hybrid_ssm():
     """Test _get_block_descs_ids uses per-group strides for hybrid FA+SSM
     when ratio=1 (no kernel block size mismatch)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
 
@@ -224,6 +224,8 @@ def test_get_block_descs_ids_hybrid_ssm():
     worker._has_mamba = True
     worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = 1
+    worker._mamba_phys_ratio = {engine_id: 1}
+    worker.block_len_per_layer = [100]
     # num_descs = num_regions * num_blocks (no blocks_first doubling)
     worker.num_descs = 2 * num_blocks
 
@@ -234,9 +236,10 @@ def test_get_block_descs_ids_hybrid_ssm():
     # FA group: stride=num_blocks=100, offset=0
     #   region0: [3, 5],  region1: [103, 105]
     # SSM group: stride=logical_blocks=100 (=num_blocks/ratio=100/1),
-    #   offset=num_descs=200
-    #   region0: [201, 202],  region1: [301, 302]
-    expected = [3, 5, 103, 105, 201, 202, 301, 302]
+    #   offset=num_fa_descs=200, 4 regions per Mamba layer (x, B, C, ssm)
+    #   region0: [201, 202], region1: [301, 302],
+    #   region2: [401, 402], region3: [501, 502]
+    expected = [3, 5, 103, 105, 201, 202, 301, 302, 401, 402, 501, 502]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 
 
@@ -244,7 +247,7 @@ def test_get_block_descs_ids_hybrid_ssm():
 def test_get_block_descs_ids_kernel_block_mismatch():
     """Test _get_block_descs_ids uses different strides for FA (kernel blocks)
     vs SSM (logical blocks) when ratio > 1."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
         NixlConnectorWorker,
     )
 
@@ -259,6 +262,8 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     worker._has_mamba = True
     worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = ratio
+    worker._mamba_phys_ratio = {engine_id: ratio}
+    worker.block_len_per_layer = [100]
     worker.num_descs = 2 * num_blocks  # 800
 
     fa_blocks = [3, 7]  # kernel-level block IDs
@@ -267,9 +272,11 @@ def test_get_block_descs_ids_kernel_block_mismatch():
 
     # FA group: stride=num_blocks=400, offset=0
     #   region0: [3, 7],  region1: [403, 407]
-    # SSM group: stride=logical_blocks=400//4=100, offset=num_descs=800
-    #   region0: [801, 802],  region1: [901, 902]
-    expected = [3, 7, 403, 407, 801, 802, 901, 902]
+    # SSM group: stride=logical_blocks=400//4=100, offset=num_fa_descs=800,
+    #   4 regions per Mamba layer (x, B, C, ssm)
+    #   region0: [801, 802], region1: [901, 902],
+    #   region2: [1001, 1002], region3: [1101, 1102]
+    expected = [3, 7, 403, 407, 801, 802, 901, 902, 1001, 1002, 1101, 1102]
     assert list(result) == expected, f"Expected {expected}, got {list(result)}"
 
 
@@ -277,7 +284,7 @@ def test_get_block_descs_ids_kernel_block_mismatch():
 def test_nixl_metadata_hybrid_ssm_block_ids():
     """Test NixlConnectorMetadata correctly stores block IDs for FA + SSM
     groups with different block counts (kernel mismatch active)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
         NixlConnectorMetadata,
     )
 
@@ -385,7 +392,7 @@ def test_mamba_n1_p_side_truncation():
     ],
     ids=["fa_swa_mamba", "fa_swa_only", "fa_only"],
 )
-@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector.current_platform")
+@patch("vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler.current_platform")
 def test_has_mamba_init(
     mock_platform,
     swa_enabled,
@@ -394,7 +401,7 @@ def test_has_mamba_init(
     expected_is_hma,
 ):
     """Test _has_mamba / _is_hma_required derived from kv_cache_groups."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.scheduler import (
         NixlConnectorScheduler,
     )
 
@@ -418,3 +425,29 @@ def test_has_mamba_init(
     )
     assert scheduler._has_mamba is expected_has_mamba
     assert scheduler._is_hma_required is expected_is_hma
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "ssm_sizes,block_len,expected_ratio",
+    [
+        # Nemotron 30B TP=1: ceil((36864 + 2097152) / 8192) = 261
+        ((36864, 2097152), 8192, 261),
+        # Nemotron 30B TP=2: ceil((18432 + 1048576) / 4096) = 261
+        ((18432, 1048576), 4096, 261),
+        # Nemotron 30B TP=4: ceil((9216 + 524288) / 4096) = 131
+        ((9216, 524288), 4096, 131),
+    ],
+)
+def test_compute_mamba_phys_ratio(ssm_sizes, block_len, expected_ratio):
+    """Verify that compute_mamba_phys_ratio is TP-dependent.
+
+    With dimension-sharded Mamba state, the ratio differs across TP sizes
+    (e.g. TP=1 → 261, TP=4 → 131 for Nemotron 30B). This is why
+    _mamba_phys_ratio must be stored per-engine.
+    """
+    from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
+        compute_mamba_phys_ratio,
+    )
+
+    assert compute_mamba_phys_ratio(ssm_sizes, block_len) == expected_ratio
