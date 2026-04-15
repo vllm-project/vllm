@@ -181,7 +181,6 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    encoder_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -240,6 +239,40 @@ class FinishedRequestStats:
 
 
 @dataclass
+class PrefillStats:
+    """Breakdown of a scheduled prefill computation.
+
+    Fields:
+        num_prompt_tokens: Total number of tokens to be prefilled.
+        num_computed_tokens: Tokens to be prefilled locally (actual compute work).
+        num_cached_tokens: Tokens to be prefilled without actual compute work.
+        num_local_cached_tokens: Tokens to be prefilled from local prefix cache.
+        num_external_cached_tokens: Tokens to be prefilled from external KV transfer.
+    """
+
+    num_prompt_tokens: int = 0
+    num_computed_tokens: int = 0
+    num_cached_tokens: int = 0
+    num_local_cached_tokens: int = 0
+    num_external_cached_tokens: int = 0
+
+    def set(
+        self,
+        num_prompt_tokens: int,
+        num_local_cached_tokens: int,
+        num_external_cached_tokens: int,
+    ):
+        num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens
+        assert num_cached_tokens <= num_prompt_tokens
+
+        self.num_prompt_tokens = num_prompt_tokens
+        self.num_computed_tokens = num_prompt_tokens - num_cached_tokens
+        self.num_cached_tokens = num_cached_tokens
+        self.num_local_cached_tokens = num_local_cached_tokens
+        self.num_external_cached_tokens = num_external_cached_tokens
+
+
+@dataclass
 class PromptTokenStats:
     """Breakdown of prompt tokens by source.
 
@@ -267,28 +300,14 @@ class PromptTokenStats:
     cached_tokens: int = 0
     total: int = 0
 
-    def update_from_output(
-        self,
-        num_cached_tokens: int,
-        num_external_computed_tokens: int,
-        prompt_len: int,
-    ) -> None:
+    def update_from_output(self, prefill_stats: PrefillStats) -> None:
         """Update stats from a prefill output."""
-        self.computed += prompt_len - num_cached_tokens
-        self.external_kv_transfer += num_external_computed_tokens
-        # FIXME(yifan): local_cache_hit can go negative after preemption.
-        # num_cached_tokens is a one-time snapshot from first scheduling and
-        # is never reset on preemption, while num_external_computed_tokens is
-        # overwritten on re-scheduling. If CPU offload finds more tokens on
-        # the second pass than the original total, the subtraction underflows.
-        # A fundamental fix is to track the first-time num_external_computed_tokens
-        # as a separate metric rather than reusing num_external_computed_tokens
-        # for metric directly.
-        self.local_cache_hit += max(
-            0, (num_cached_tokens - num_external_computed_tokens)
-        )
-        self.cached_tokens += num_cached_tokens
-        self.total += prompt_len
+        self.computed += prefill_stats.num_computed_tokens
+        self.cached_tokens += prefill_stats.num_cached_tokens
+        self.total += prefill_stats.num_prompt_tokens
+
+        self.local_cache_hit += prefill_stats.num_local_cached_tokens
+        self.external_kv_transfer += prefill_stats.num_external_cached_tokens
 
     def get_by_source(self, source: str) -> int:
         """Get token count by source label."""
@@ -335,7 +354,6 @@ class IterationStats:
         output: "EngineCoreOutput",
         engine_core_timestamp: float,
         is_prefilling: bool,
-        prompt_len: int,
         req_stats: RequestStateStats,
         lora_states: "LoRARequestStates",
         lora_name: str | None,
@@ -344,11 +362,8 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            self.prompt_token_stats.update_from_output(
-                num_cached_tokens=output.num_cached_tokens,
-                num_external_computed_tokens=output.num_external_computed_tokens,
-                prompt_len=prompt_len,
-            )
+            if output.prefill_stats is not None:
+                self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)
