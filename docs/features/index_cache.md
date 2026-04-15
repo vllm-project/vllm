@@ -19,11 +19,11 @@ vllm serve deepseek-ai/DeepSeek-V3.2 \
 
 ### Configuration Reference
 
-| Parameter            | Type   | Default | Description |
-|---------------------|--------|---------|-------------|
-| `use_index_cache`   | bool   | false   | Enable IndexCache. Must be set to true to use this feature |
-| `index_topk_freq`   | int    | 1       | Frequency (in layers) at which top-k is computed. 1 = compute on every layer (disabled), 4 = compute on 1/4 of layers |
-| `index_topk_pattern`| str    | null    | Per-layer F/S pattern. Overrides index_topk_freq if set. Each character maps to one DSA layer: F = Full, S = Shared |
+| Parameter            | Type | Default | Description                                                                                                                                      |
+|----------------------|------|---------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| `use_index_cache`    | bool | false   | Enable IndexCache. Must be set to true to use this feature                                                                                       |
+| `index_topk_freq`    | int  | 1       | Frequency (in layers) at which top-k is computed. 1 = compute on every layer (disabled), 4 = compute on 1/4 of layers                            |
+| `index_topk_pattern` | str  | null    | Per-layer F/S pattern. Overrides index_topk_freq if set. Each character maps to one DSA layer: F = Full, S = Shared                              |
 
 ### Configuration Examples
 
@@ -47,7 +47,6 @@ vllm serve deepseek-ai/DeepSeek-V3.2 \
 1. When IndexCache is enabled, layers marked with `"F"` (Full) calculate and store top-k indices
 2. Subsequent layers marked with `"S"` (Shared) receive the cached indices from the previous layer instead of recomputing
 3. The cached indices are passed through the layer stack, reducing total computation
-
 
 ## Requirements
 
