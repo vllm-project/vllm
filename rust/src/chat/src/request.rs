@@ -244,10 +244,6 @@ impl ChatTool {
             },
         }
     }
-
-    pub(crate) fn to_template_value(&self) -> Value {
-        serde_json::to_value(self.to_openai_tool()).expect("tool definition must serialize")
-    }
 }
 
 /// Tool-choice semantics supported by `vllm-chat`.
@@ -323,13 +319,6 @@ impl ChatRequest {
             return Err(Error::ConflictingGenerationPromptMode);
         }
         Ok(())
-    }
-
-    /// Return the list of tools in the shape that can be passed to the chat template, based on the
-    /// tool choice and tool list.
-    pub(crate) fn template_tools(&self) -> Option<Vec<Value>> {
-        self.tool_parsing_enabled()
-            .then(|| self.tools.iter().map(ChatTool::to_template_value).collect())
     }
 
     /// Return true if this request should enable tool parsing based on the tool choice and tool

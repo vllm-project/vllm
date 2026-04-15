@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 
 use crate::error::{Error, Result};
@@ -30,6 +30,15 @@ pub enum NamedSpecialToken {
     WithContent { content: String },
 }
 
+impl Serialize for NamedSpecialToken {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
 impl From<NamedSpecialToken> for String {
     fn from(value: NamedSpecialToken) -> Self {
         match value {
@@ -49,15 +58,13 @@ impl NamedSpecialToken {
 }
 
 /// Minimal set of special-token entries needed by chat/EOS handling.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct HfSpecialTokens {
-    #[serde(default)]
     pub bos_token: Option<NamedSpecialToken>,
-    #[serde(default)]
     pub eos_token: Option<NamedSpecialToken>,
-    #[serde(default)]
     pub unk_token: Option<NamedSpecialToken>,
-    #[serde(default)]
     pub pad_token: Option<NamedSpecialToken>,
 }
 

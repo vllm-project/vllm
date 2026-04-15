@@ -1,29 +1,40 @@
+use openai_protocol::common::Tool as OpenAiTool;
 use serde::Serialize;
 use serde_json::Value;
-use smg_tokenizer::SpecialTokens;
-use smg_tokenizer::chat_template::{
-    ChatTemplateContentFormat, ChatTemplateParams, ChatTemplateState,
-};
 use thiserror_ext::AsReport as _;
 use tracing::trace;
+use vllm_text::backends::hf::HfSpecialTokens;
 
+use self::format::ChatTemplateContentFormat;
+use self::template::{CompiledChatTemplate, TemplateContext};
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
-use crate::{AssistantMessageExt, Error};
+use crate::{AssistantContentBlock, AssistantMessageExt, ChatTool, Error};
 
-/// Hugging Face chat-template renderer backed by smg's [`ChatTemplateState`].
+mod error;
+mod format;
+mod template;
+mod tojson;
+
+pub use template::load_chat_template;
+
+/// Hugging Face chat-template renderer backed by the local Jinja chat-template state.
 pub struct HfChatRenderer {
-    inner: ChatTemplateState,
-    special_tokens: Option<SpecialTokens>,
+    default_template: Option<CompiledChatTemplate>,
+    special_tokens: Option<HfSpecialTokens>,
 }
 
 impl HfChatRenderer {
     /// Create a renderer from the given template string.
-    pub fn new(template: Option<String>, special_tokens: Option<SpecialTokens>) -> Result<Self> {
+    pub fn new(template: Option<String>, special_tokens: Option<HfSpecialTokens>) -> Result<Self> {
         Ok(Self {
-            inner: ChatTemplateState::new(template)
-                .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
+            default_template: template
+                .map(|template| {
+                    CompiledChatTemplate::new(template)
+                        .map_err(|error| Error::ChatTemplate(error.to_report_string()))
+                })
+                .transpose()?,
             special_tokens,
         })
     }
@@ -34,22 +45,39 @@ impl HfChatRenderer {
     /// If the request carries a per-request `chat_template` override, a temporary template is
     /// compiled from that string and used instead of the model's default.
     fn apply_chat_template(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
-        if let Some(override_template) = &request.chat_options.chat_template {
-            let overridden =
-                Self::new(Some(override_template.clone()), self.special_tokens.clone())?;
-            return overridden.apply_chat_template_inner(request);
-        }
-        self.apply_chat_template_inner(request)
+        let override_template = request
+            .chat_options
+            .chat_template
+            .as_ref()
+            .map(|template| {
+                CompiledChatTemplate::new(template.clone())
+                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))
+            })
+            .transpose()?;
+        let template = override_template
+            .as_ref()
+            .or(self.default_template.as_ref())
+            .ok_or(Error::MissingChatTemplate)?;
+
+        self.apply_chat_template_inner(template, request)
     }
 
-    fn apply_chat_template_inner(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
-        let messages = template_messages_to_json(&request.messages, self.inner.content_format())?;
-        let tools = request.template_tools();
+    fn apply_chat_template_inner(
+        &self,
+        effective_template: &CompiledChatTemplate,
+        request: &ChatRequest,
+    ) -> Result<RenderedPrompt> {
+        let messages =
+            to_template_messages(&request.messages, effective_template.content_format())?;
+        let tools = request
+            .tool_parsing_enabled()
+            .then(|| to_template_tools(&request.tools));
         trace!(
             request_id = %request.request_id,
             message_count = messages.len(),
-            content_format = ?self.inner.content_format(),
+            content_format = ?effective_template.content_format(),
             ?messages,
+            ?tools,
             "applying chat template"
         );
 
@@ -62,26 +90,16 @@ impl HfChatRenderer {
             kwargs
         };
 
-        let prompt = self
-            .inner
-            .apply(
-                &messages,
-                ChatTemplateParams {
-                    add_generation_prompt: request.chat_options.add_generation_prompt,
-                    tools: tools.as_deref(),
-                    documents: request.documents.as_deref(),
-                    template_kwargs: Some(&merged_template_kwargs),
-                    special_tokens: self.special_tokens.as_ref(),
-                },
-            )
-            .map_err(|error| {
-                let message = error.to_report_string();
-                if message.contains("tokenizer.chat_template is not set") {
-                    Error::MissingChatTemplate
-                } else {
-                    Error::ChatTemplate(message)
-                }
-            })?;
+        let prompt = effective_template
+            .apply(TemplateContext {
+                messages: &messages,
+                add_generation_prompt: request.chat_options.add_generation_prompt,
+                tools: tools.as_deref(),
+                documents: request.documents.as_deref(),
+                template_kwargs: Some(&merged_template_kwargs),
+                special_tokens: self.special_tokens.as_ref(),
+            })
+            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
 
         trace!(
             request_id = %request.request_id,
@@ -101,70 +119,85 @@ impl ChatRenderer for HfChatRenderer {
 }
 
 /// Chat message in the JSON shape expected by Jinja chat templates.
-#[derive(Serialize)]
-struct AssistantTemplateMessage {
+#[serde_with::skip_serializing_none]
+#[derive(Debug, Serialize)]
+pub(super) struct TemplateMessage {
     role: &'static str,
-    content: Value,
+    content: TemplateContent,
     // Reasoning-capable HF templates are inconsistent on the exact field name,
     // so expose both variants for compatibility.
-    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_content: Option<String>,
     // Function-call-capable templates commonly expect assistant tool calls
     // under this OpenAI-compatible field name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<Value>>,
+    tool_calls: Option<Vec<TemplateToolCall>>,
     // Tool-role messages refer back to the assistant call they are answering.
-    #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
 }
 
-impl AssistantTemplateMessage {
-    fn placeholder() -> Self {
-        Self {
-            role: "",
-            content: Value::Null,
+/// Chat content in the two shapes HF templates commonly expect.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum TemplateContent {
+    String(String),
+    OpenAi(ChatContent),
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateToolCall {
+    id: String,
+    r#type: &'static str, // always "function"
+    function: TemplateToolFunction,
+}
+
+#[derive(Debug, Serialize)]
+struct TemplateToolFunction {
+    name: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub(super) struct TemplateTool(OpenAiTool);
+
+/// Convert chat messages into the JSON shape expected by Jinja chat templates.
+fn to_template_messages(
+    messages: &[ChatMessage],
+    content_format: ChatTemplateContentFormat,
+) -> Result<Vec<TemplateMessage>> {
+    messages
+        .iter()
+        .map(|message| to_template_message(message, content_format))
+        .collect()
+}
+
+fn to_template_message(
+    message: &ChatMessage,
+    content_format: ChatTemplateContentFormat,
+) -> Result<TemplateMessage> {
+    Ok(match message {
+        ChatMessage::System { content } => TemplateMessage {
+            role: "system",
+            content: to_template_content(content, content_format)?,
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
-        }
-    }
-}
-
-/// Convert chat messages into the JSON shape expected by Jinja chat templates.
-fn template_messages_to_json(
-    messages: &[ChatMessage],
-    content_format: ChatTemplateContentFormat,
-) -> Result<Vec<Value>> {
-    messages
-        .iter()
-        .map(|message| template_message_to_json(message, content_format))
-        .collect()
-}
-
-fn template_message_to_json(
-    message: &ChatMessage,
-    content_format: ChatTemplateContentFormat,
-) -> Result<Value> {
-    let msg = match message {
-        ChatMessage::System { content } => AssistantTemplateMessage {
-            role: "system",
-            content: template_content_to_json(content, content_format)?,
-            ..AssistantTemplateMessage::placeholder()
         },
-        ChatMessage::User { content } => AssistantTemplateMessage {
+        ChatMessage::User { content } => TemplateMessage {
             role: "user",
-            content: template_content_to_json(content, content_format)?,
-            ..AssistantTemplateMessage::placeholder()
+            content: to_template_content(content, content_format)?,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
         },
         ChatMessage::Assistant { content } => {
             let text = content.text();
             let reasoning = content.reasoning();
-            let tool_calls = template_tool_calls_to_json(content)?;
-            let content = template_content_to_json(&ChatContent::Text(text), content_format)?;
-            AssistantTemplateMessage {
+            let tool_calls = to_template_tool_calls(content)?;
+            let content = to_template_content(&ChatContent::Text(text), content_format)?;
+            TemplateMessage {
                 role: "assistant",
                 content,
                 reasoning: reasoning.clone(),
@@ -176,20 +209,20 @@ fn template_message_to_json(
         ChatMessage::ToolResponse {
             content,
             tool_call_id,
-        } => AssistantTemplateMessage {
+        } => TemplateMessage {
             role: "tool",
-            content: template_content_to_json(content, content_format)?,
+            content: to_template_content(content, content_format)?,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
             tool_call_id: Some(tool_call_id.clone()),
-            ..AssistantTemplateMessage::placeholder()
         },
-    };
-
-    Ok(serde_json::to_value(msg).expect("chat message should serialize to valid JSON"))
+    })
 }
 
-fn template_tool_calls_to_json(
-    content: &[crate::AssistantContentBlock],
-) -> Result<Option<Vec<Value>>> {
+fn to_template_tool_calls(
+    content: &[AssistantContentBlock],
+) -> Result<Option<Vec<TemplateToolCall>>> {
     let mut tool_calls = Vec::new();
 
     for tool_call in content.tool_calls() {
@@ -201,35 +234,43 @@ fn template_tool_calls_to_json(
             ))
         })?;
 
-        tool_calls.push(serde_json::json!({
-            "id": tool_call.id,
-            "type": "function",
-            "function": {
-                "name": tool_call.name,
-                "arguments": arguments,
-            }
-        }));
+        tool_calls.push(TemplateToolCall {
+            id: tool_call.id.clone(),
+            r#type: "function",
+            function: TemplateToolFunction {
+                name: tool_call.name.clone(),
+                arguments,
+            },
+        });
     }
 
     Ok((!tool_calls.is_empty()).then_some(tool_calls))
 }
 
-fn template_content_to_json(
+fn to_template_content(
     content: &ChatContent,
     content_format: ChatTemplateContentFormat,
-) -> Result<Value> {
+) -> Result<TemplateContent> {
     Ok(match content_format {
-        ChatTemplateContentFormat::String => Value::String(content.try_flatten_to_text()?),
-        ChatTemplateContentFormat::OpenAI => serde_json::to_value(content)
-            .expect("text-only chat content should serialize to valid JSON"),
+        ChatTemplateContentFormat::String => {
+            TemplateContent::String(content.try_flatten_to_text()?)
+        }
+        ChatTemplateContentFormat::OpenAi => TemplateContent::OpenAi(content.clone()),
     })
+}
+
+fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
+    tools
+        .iter()
+        .map(|tool| TemplateTool(tool.to_openai_tool()))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
     use serde_json::Value;
-    use smg_tokenizer::SpecialTokens;
+    use vllm_text::backends::hf::{HfSpecialTokens, NamedSpecialToken};
 
     use super::HfChatRenderer;
     use crate::request::{
@@ -237,8 +278,8 @@ mod tests {
     };
     use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
-    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../tests/templates/qwen3.jinja");
-    const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../tests/templates/qwen35.jinja");
+    const QWEN3_0_6B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen3.jinja");
+    const QWEN3_5_0_8B_TEMPLATE: &str = include_str!("../../../tests/templates/qwen35.jinja");
 
     fn sample_request(messages: Vec<ChatMessage>) -> ChatRequest {
         ChatRequest {
@@ -358,6 +399,16 @@ mod tests {
     }
 
     #[test]
+    fn chat_template_per_request_override_without_default_template() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request.chat_options.chat_template = Some("override:{{ messages[0].content }}".to_string());
+
+        let rendered = render(None, &request).unwrap();
+
+        assert_eq!(rendered, "override:hello");
+    }
+
+    #[test]
     fn chat_template_requires_a_template() {
         let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
         let error = render(None, &request).unwrap_err();
@@ -368,8 +419,8 @@ mod tests {
     #[test]
     fn chat_template_injects_special_tokens_into_context() {
         let request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        let special_tokens = SpecialTokens {
-            bos_token: Some("<bos>".to_string()),
+        let special_tokens = HfSpecialTokens {
+            bos_token: Some(NamedSpecialToken::Text("<bos>".to_string())),
             ..Default::default()
         };
 

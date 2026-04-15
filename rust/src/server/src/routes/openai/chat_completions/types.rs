@@ -388,7 +388,6 @@ impl ChatCompletionStreamResponse {
 pub(super) struct ChatCompletionStreamChoice {
     pub index: u32,
     pub delta: ChatMessageDelta,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<ChatLogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,

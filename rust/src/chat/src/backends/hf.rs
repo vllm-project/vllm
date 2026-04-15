@@ -1,19 +1,17 @@
 use std::sync::Arc;
 
-use smg_tokenizer::SpecialTokens;
-use smg_tokenizer::chat_template::load_chat_template_from_file;
 use thiserror_ext::AsReport as _;
 use tracing::{info, warn};
 use vllm_text::DynTextBackend;
 use vllm_text::backends::hf::{
-    HfSpecialTokens, HfTextBackend, ResolvedModelFiles, load_tokenizer_config,
+    HfTextBackend, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
 };
 
 use crate::backend::{ChatBackend, DynChatBackend};
 use crate::backends::LoadedModelBackends;
 use crate::error::{Error, Result};
 use crate::renderers::DynChatRenderer;
-use crate::renderers::hf::HfChatRenderer;
+use crate::renderers::hf::{HfChatRenderer, load_chat_template};
 
 /// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
@@ -29,20 +27,19 @@ impl HfChatBackend {
 
     /// Load the chat backend from resolved Hugging Face model files.
     pub fn from_resolved_model_files(files: ResolvedModelFiles, model_id: String) -> Result<Self> {
-        let tokenizer_config = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
-        let special_tokens = to_chat_template_special_tokens(tokenizer_config.special_tokens);
-
-        let mut template = tokenizer_config.chat_template;
+        let HfTokenizerConfig {
+            special_tokens,
+            chat_template,
+            ..
+        } = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
+        let mut template = chat_template;
+        let special_tokens = (!special_tokens.is_empty()).then_some(special_tokens);
 
         // If independent chat template file(s) exist and contain non-empty content, they take
         // priority over template entries in the tokenizer config
         if let Some(chat_template_path) = files.chat_template_path.as_deref() {
-            let file_template = load_chat_template_from_file(
-                chat_template_path
-                    .to_str()
-                    .expect("chat template path should be valid UTF-8"),
-            )
-            .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+            let file_template = load_chat_template(chat_template_path)
+                .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
 
             if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
                 info!(
@@ -89,19 +86,5 @@ pub(super) async fn load_model_backends(model_id: &str) -> Result<LoadedModelBac
     Ok(LoadedModelBackends {
         text_backend,
         chat_backend,
-    })
-}
-
-fn to_chat_template_special_tokens(tokens: HfSpecialTokens) -> Option<SpecialTokens> {
-    if tokens.is_empty() {
-        return None;
-    }
-
-    Some(SpecialTokens {
-        bos_token: tokens.bos_token.map(Into::into),
-        eos_token: tokens.eos_token.map(Into::into),
-        unk_token: tokens.unk_token.map(Into::into),
-        pad_token: tokens.pad_token.map(Into::into),
-        ..Default::default()
     })
 }

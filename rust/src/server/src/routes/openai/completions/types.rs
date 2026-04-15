@@ -223,7 +223,6 @@ impl CompletionStreamResponse {
 pub(super) struct CompletionStreamChoice {
     pub index: u32,
     pub text: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<LogProbs>,
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
