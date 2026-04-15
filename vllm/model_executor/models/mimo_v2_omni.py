@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
+from typing import Any
 
 import einops
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import PretrainedConfig
+from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
@@ -25,6 +27,17 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
+from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.processing import (
+    PromptReplacement,
+    PromptUpdate,
+    PromptUpdateDetails,
+)
+from vllm.transformers_utils.processors.mimo_omni import (
+    MiMoOmniProcessor,
+    _format_timestamp,
+)
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -67,7 +80,7 @@ class Mimo_VLVisionConfig(PretrainedConfig):
         tokens_per_second=2,
         window_size=128,
         out_hidden_size=2048,
-        fullatt_block_indexes=[7, 15, 23, 31],
+        fullatt_block_indexes=None,
         initializer_range=0.02,
         kv_channels=64,  # HACK
         qk_channels=64,
@@ -84,7 +97,8 @@ class Mimo_VLVisionConfig(PretrainedConfig):
         self.hidden_act = hidden_act
         self.intermediate_size = intermediate_size
         self.num_heads = num_heads
-        # Support GQA: if num_key_value_heads is not provided, default to num_heads (MHA)
+        # Support GQA: if num_key_value_heads is not provided,
+        # default to num_heads (MHA)
         if num_key_value_heads is None:
             num_key_value_heads = num_heads
         self.num_key_value_heads = num_key_value_heads
@@ -94,7 +108,11 @@ class Mimo_VLVisionConfig(PretrainedConfig):
         self.temporal_patch_size = temporal_patch_size
         self.tokens_per_second = tokens_per_second
         self.window_size = window_size
-        self.fullatt_block_indexes = fullatt_block_indexes
+        self.fullatt_block_indexes = (
+            fullatt_block_indexes
+            if fullatt_block_indexes is not None
+            else [7, 15, 23, 31]
+        )
         self.out_hidden_size = out_hidden_size
         self.initializer_range = initializer_range
         self.kv_channels = kv_channels
@@ -650,11 +668,191 @@ class MiMoV2OmniProcessingInfo(Qwen2_5_VLProcessingInfo):
             config.vision_config = Mimo_VLVisionConfig.from_dict(config.vision_config)
         return config
 
+    def get_hf_processor(self, **kwargs: object) -> MiMoOmniProcessor:
+        hf_config = self.get_hf_config()
+        tokenizer = self.get_tokenizer()
+        return MiMoOmniProcessor.from_hf_config(tokenizer, hf_config)
+
+    def get_image_processor(self, **kwargs: object):
+        return self.get_hf_processor(**kwargs).image_processor
+
+
+class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
+    """vLLM multimodal processor for MiMo-Omni (image + video).
+
+    Key differences from Qwen2.5-VL:
+    - Videos use timestamp tokens between temporal grid positions.
+    - The HF processor expects ``(TCHW_tensor, timestamps_T_tensor)`` video
+      tuples rather than plain numpy arrays.
+    - ``video_start_times`` is tracked so prompt-update reconstruction can
+      regenerate the exact same timestamp token IDs.
+    """
+
+    # fps assumed for vllm-decoded video (numpy T,H,W,C arrays).
+    # The video loader samples ~32 frames; treat each frame as 1 s apart so
+    # MiMoVLProcessor sees 1 fps input and resamples internally.
+    _INPUT_FPS: float = 1.0
+
+    def _get_mm_fields_config(
+        self,
+        hf_inputs: BatchFeature,
+        hf_processor_mm_kwargs: Mapping[str, object],
+    ) -> Mapping[str, MultiModalFieldConfig]:
+        return dict(
+            **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
+            video_start_times=MultiModalFieldConfig.batched("video"),
+        )
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo."""
+        if "videos" in mm_data:
+            converted: list[tuple[torch.Tensor, torch.Tensor]] = []
+            for video in mm_data["videos"]:
+                if (
+                    isinstance(video, tuple)
+                    and len(video) == 2
+                    and isinstance(video[0], torch.Tensor)
+                    and isinstance(video[1], torch.Tensor)
+                ):
+                    # already in MiMo format
+                    converted.append(video)
+                else:
+                    # numpy (T, H, W, C) or torch (T, H, W, C) / (T, C, H, W)
+                    if isinstance(video, np.ndarray):
+                        frames = torch.from_numpy(video)
+                    elif isinstance(video, torch.Tensor):
+                        frames = video
+                    else:
+                        frames = torch.tensor(np.array(video))
+
+                    if frames.ndim == 4 and frames.shape[-1] in (1, 3, 4):
+                        # THWC → TCHW
+                        frames = frames.permute(0, 3, 1, 2).float()
+                    else:
+                        frames = frames.float()
+
+                    T = frames.shape[0]
+                    timestamps = torch.arange(
+                        T, dtype=torch.float32
+                    ) / self._INPUT_FPS
+                    converted.append((frames, timestamps))
+
+            mm_data = {**mm_data, "videos": converted}
+
+        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
+
+    def _get_prompt_updates(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, Any],
+        out_mm_kwargs: MultiModalKwargsItems,
+    ) -> Sequence[PromptUpdate]:
+        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        hf_config = self.info.get_hf_config()
+        tokenizer = self.info.get_tokenizer()
+        vocab = tokenizer.get_vocab()
+
+        merge_size = hf_config.vision_config.spatial_merge_size
+        p = hf_processor.mimo_processor
+
+        image_pad_id = vocab[hf_processor.image_token]
+        video_pad_id = vocab[hf_processor.video_token]
+        vision_start_id = p.vision_start_token_id
+        vision_end_id = p.vision_end_token_id
+        video_start_id = p.video_start_token_id
+        video_end_id = p.video_end_token_id
+
+        def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
+            out_item = out_mm_kwargs["image"][item_idx]
+            grid_thw = out_item["image_grid_thw"].data
+            T = int(grid_thw[0])
+            H = int(grid_thw[1])
+            W = int(grid_thw[2])
+            n_tokens = T * H * W // (merge_size * merge_size)
+            full = (
+                [vision_start_id]
+                + [image_pad_id] * n_tokens
+                + [vision_end_id]
+            )
+            embed_mask = (
+                [False] + [True] * n_tokens + [False]
+            )
+            embed_t = torch.tensor(embed_mask)
+            return PromptUpdateDetails(
+                full=full,
+                is_embed=lambda _tok, _seq: embed_t,
+            )
+
+        def get_video_replacement(item_idx: int) -> PromptUpdateDetails:
+            out_item = out_mm_kwargs["video"][item_idx]
+            grid_thw = out_item["video_grid_thw"].data
+            spt = float(out_item["second_per_grid_ts"].data)
+            start = float(out_item["video_start_times"].data)
+
+            T = int(grid_thw[0])
+            H = int(grid_thw[1])
+            W = int(grid_thw[2])
+            n_per_grid = H * W // (merge_size * merge_size)
+
+            full: list[int] = [video_start_id]
+            is_embed_mask: list[bool] = [False]
+
+            for j in range(T):
+                ts_text = _format_timestamp(start + j * spt)
+                ts_ids = tokenizer.encode(
+                    ts_text, add_special_tokens=False
+                )
+                full.extend(ts_ids)
+                is_embed_mask.extend([False] * len(ts_ids))
+                full.append(vision_start_id)
+                is_embed_mask.append(False)
+                full.extend([video_pad_id] * n_per_grid)
+                is_embed_mask.extend([True] * n_per_grid)
+                full.append(vision_end_id)
+                is_embed_mask.append(False)
+
+            full.append(video_end_id)
+            is_embed_mask.append(False)
+
+            embed_t = torch.tensor(is_embed_mask)
+            return PromptUpdateDetails(
+                full=full,
+                is_embed=lambda _tok, _seq: embed_t,
+            )
+
+        return [
+            PromptReplacement(
+                modality="image",
+                target=[image_pad_id],
+                replacement=get_image_replacement,
+            ),
+            PromptReplacement(
+                modality="video",
+                target=[video_pad_id],
+                replacement=get_video_replacement,
+            ),
+        ]
+
+
+class MiMoV2OmniDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        image_ph = "<|vision_start|><|image_pad|><|vision_end|>"
+        video_ph = "<|vision_start|><|video_pad|><|vision_end|>"
+        return image_ph * num_images + video_ph * num_videos
+
 
 @MULTIMODAL_REGISTRY.register_processor(
-    Qwen2_5_VLMultiModalProcessor,
+    MiMoV2OmniMultiModalProcessor,
     info=MiMoV2OmniProcessingInfo,
-    dummy_inputs=Qwen2_5_VLDummyInputsBuilder,
+    dummy_inputs=MiMoV2OmniDummyInputsBuilder,
 )
 class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     # To ensure correct weight loading and mapping.
@@ -668,6 +866,15 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             "model.": "language_model.model.",
         }
     )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<|vision_start|><|image_pad|><|vision_end|>"
+        if modality.startswith("video"):
+            return "<|vision_start|><|video_pad|><|vision_end|>"
+
+        raise ValueError("Only image or video modality is supported")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -789,7 +996,9 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             #         rope_type="rope_3d",
             #     )
             # else:
-            #     video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
+            #     video_embeds = self.visual(
+            #         pixel_values_videos, grid_thw=grid_thw_list
+            #     )
             video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw_list)
 
         # Split concatenated embeddings for each video item.
@@ -877,5 +1086,8 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["audio_encoder.", "speech_embeddings."])
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=["audio_encoder.", "speech_embeddings."],
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
