@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
 from collections.abc import Callable
 
 import deep_ep
@@ -120,6 +121,20 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # time. This setting is handled by post_init_setup.
         self.use_ue8m0_dispatch = False
 
+        # Check if DeepEP supports use_nvfp4 in low_latency_dispatch.
+        # This requires the hybrid-ep branch of DeepEP.
+        self.has_nvfp4_support = (
+            "use_nvfp4" in inspect.signature(buffer.low_latency_dispatch).parameters
+        )
+        if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH and not self.has_nvfp4_support:
+            logger.warning(
+                "VLLM_DEEPEPLL_NVFP4_DISPATCH=1 but DeepEP does not support "
+                "use_nvfp4 in low_latency_dispatch. Falling back to FP8/BF16 "
+                "dispatch. Install DeepEP from the hybrid-ep branch for "
+                "NvFP4 dispatch support: "
+                "https://github.com/deepseek-ai/DeepEP/tree/hybrid-ep"
+            )
+
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
@@ -183,27 +198,29 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         assert isinstance(x, (torch.Tensor, tuple))
         q_dtype = quant_config.quant_dtype
 
-        if q_dtype == "nvfp4" and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH:
+        nvfp4_quant_path = (
+            q_dtype == "nvfp4"
+            and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
+            and self.has_nvfp4_support
+        )
+        if nvfp4_quant_path:
             logger.info_once(
-                "Since VLLM_DEEPEPLL_NVFP4_DISPATCH==1, make sure "
-                "using the hybrid-ep branch of DeepEP"
-                "(https://github.com/deepseek-ai/DeepEP/tree/hybrid-ep)"
+                "Quantization is fused with DeepEP nvfp4 dispatch (hybrid-ep branch)"
             )
             assert isinstance(x, tuple)
             x_scales = x[1]
             x = x[0].permute(2, 0, 1)
             num_experts, max_tokens, hidden_dim_by_2 = x.shape
             hidden_dim = hidden_dim_by_2 * 2
-            logger.info_once(
-                "Quantization is fused with DeepEP nvfp4 dispatch for "
-                "FlashInfer CUTEDSL as VLLM_DEEPEPLL_NVFP4_DISPATCH==1"
-            )
         else:
             if q_dtype == "nvfp4":
                 q_dtype = None
                 logger.info_once(
-                    "Using DeepEP bfloat16 dispatch for FlashInfer CUTEDSL as "
-                    "VLLM_DEEPEPLL_NVFP4_DISPATCH==0"
+                    "Using DeepEP bfloat16 dispatch for FlashInfer CUTEDSL "
+                    "(nvfp4 dispatch %s)",
+                    "not supported by this DeepEP build"
+                    if not self.has_nvfp4_support
+                    else "disabled",
                 )
             assert isinstance(x, torch.Tensor)
             num_experts, max_tokens, hidden_dim = x.size()
@@ -260,7 +277,9 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         use_nvfp4 = False
         nvfp4_dispatch = (
-            quant_config.quant_dtype == "nvfp4" and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
+            quant_config.quant_dtype == "nvfp4"
+            and envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
+            and self.has_nvfp4_support
         )
         if nvfp4_dispatch:
             use_nvfp4 = True
