@@ -683,11 +683,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/cutlass_extensions/common.cpp"
+      "csrc/cuda_utils_kernels.cu"
       "csrc/libtorch_stable/permute_cols.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
-      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu")
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
+      "csrc/libtorch_stable/quantization/w8a8/int8/per_token_group_quant.cu")
     set_gencode_flags_for_srcs(
       SRCS "${VLLM_STABLE_EXT_SRC}"
       CUDA_ARCHS "${CUDA_ARCHS}")
