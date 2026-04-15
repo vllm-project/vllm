@@ -59,6 +59,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -149,6 +150,12 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float4_e2m1f,
+        "group_blocks": [2],
+    },
+    # MXFP8
+    {
+        "a_type": [scalar_types.bfloat16],
+        "b_type": scalar_types.float8_e4m3fn,
         "group_blocks": [2],
     },
     # AWQ-INT4 with INT8 activation
@@ -1025,7 +1032,7 @@ def test_fused_marlin_moe(
     act_order: bool,
     is_k_full: bool,
 ):
-    torch.cuda.manual_seed(1)
+    set_random_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
 
     if c_type == scalar_types.float16:
@@ -1125,7 +1132,7 @@ def test_fused_marlin_moe(
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 @pytest.mark.parametrize("m", [1, 256])
 def test_fused_marlin_moe_with_bias(m):
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     e, topk = 32, 4
     n, k = 2048, 2048
@@ -1207,7 +1214,7 @@ def test_fused_marlin_moe_non_gated(
     Non-gated activations like relu2 don't have the gate-up projection pattern,
     so w1 has shape (e, n, k) instead of (e, 2*n, k).
     """
-    torch.cuda.manual_seed(42)
+    set_random_seed(42)
 
     group_size = 16  # NVFP4 group size
     is_k_full = True
@@ -1391,7 +1398,7 @@ def test_cpu_fused_moe_basic(
     from vllm.model_executor.layers.fused_moe.cpu_fused_moe import CPUFusedMOE
 
     device = "cpu"
-    torch.manual_seed(7)
+    set_random_seed(7)
 
     a = torch.randn((m, k), device=device, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10
@@ -1463,7 +1470,7 @@ def test_batched_fused_marlin_moe(
         f"topk={topk}, "
         f"max_tokens_per_batch={max_tokens_per_batch}"
     )
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     dtype = torch.bfloat16
     quant_dtype = scalar_types.float4_e2m1f
@@ -1664,13 +1671,13 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         intermediate_size_per_partition=n,
         num_local_experts=e,
         num_logical_experts=e,
-        activation="silu",
+        activation=MoEActivation.SILU,
         device="cuda",
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=dtype,
         is_act_and_mul=True,
         routing_method=RoutingMethodType.Renormalize,
-        max_num_tokens=m,
+        max_num_tokens=next_power_of_2(m),
     )
 
     with set_current_vllm_config(vllm_config):
@@ -1695,13 +1702,25 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         layer.topk_group = 1
         layer.intermediate_size_per_partition = n
         layer.ep_rank = 0
-        layer.activation = "silu"
+        layer.activation = MoEActivation.SILU
         layer.e_score_correction_bias = None
         layer.routing_method_type = RoutingMethodType.Renormalize
+        layer.expert_map = None
+        layer.apply_router_weight_on_input = False
+        layer.routed_scaling_factor = None
+        layer.shared_experts = None
+        layer._maybe_init_expert_routing_tables = lambda: None
 
         quant_method.process_weights_after_loading(layer)
 
-        trtllm_output = quant_method.forward_monolithic_cuda(
+        assert quant_method.moe_kernel is not None, (
+            "moe_kernel should be set after process_weights_after_loading"
+        )
+        assert quant_method.supports_internal_mk, (
+            "supports_internal_mk should be True after setup"
+        )
+
+        trtllm_output = quant_method.apply_monolithic(
             layer=layer,
             x=a,
             router_logits=router_logits,

@@ -80,8 +80,15 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 "image/jpeg",
             )
 
+            if self.num_frames > 0:
+                frame_parts = data.split(",", self.num_frames)[: self.num_frames]
+            elif self.num_frames == 0:
+                raise ValueError("num_frames must be greater than 0 or -1")
+            else:
+                frame_parts = data.split(",")
+
             frames = np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
+                [np.asarray(load_frame(frame_data)) for frame_data in frame_parts]
             )
             total = int(frames.shape[0])
             fps = float(self.kwargs.get("fps", 1))

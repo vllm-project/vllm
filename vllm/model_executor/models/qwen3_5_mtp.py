@@ -75,13 +75,22 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             config.hidden_size,
         )
 
+        # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
+        # missing from hf_quant_config.json exclude_modules. Force unquantized.
+        # Ref: https://github.com/vllm-project/vllm/pull/38650
+        # Ref: https://github.com/NVIDIA/Model-Optimizer/pull/1124
+        fc_quant = (
+            None
+            if (quant_config and quant_config.get_name() == "modelopt_fp4")
+            else quant_config
+        )
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
             gather_output=True,
             bias=False,
             return_bias=False,
-            quant_config=quant_config,
+            quant_config=fc_quant,
             prefix=f"{prefix}.fc",
         )
 
