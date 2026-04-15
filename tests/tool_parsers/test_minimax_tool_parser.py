@@ -23,7 +23,7 @@ MODEL = "MiniMaxAi/MiniMax-M1-40k"
 
 @pytest.fixture(scope="module")
 def minimax_tokenizer():
-    return get_tokenizer(tokenizer_name=MODEL)
+    return get_tokenizer(tokenizer_name=MODEL, trust_remote_code=True)
 
 
 @pytest.fixture
