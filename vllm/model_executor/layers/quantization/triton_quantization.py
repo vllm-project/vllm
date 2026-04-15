@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernels for fused activation + quantization.
-
-Generated and optimized by KernelAgent
-(https://github.com/meta-pytorch/KernelAgent).
-"""
+"""Triton kernels for fused activation + quantization."""
 
 import torch
 
@@ -27,6 +23,9 @@ def fused_silu_mul_per_token_quant_kernel(
     HAS_SCALE_UB: tl.constexpr,
 ):
     """Fused SiLU+Mul + per-token dynamic FP8 quantization.
+
+    Generated and optimized by KernelAgent
+    (https://github.com/meta-pytorch/KernelAgent).
 
     Each program handles one token (row). Two-pass:
     1. Compute silu(gate)*up per chunk, track row-wise amax
