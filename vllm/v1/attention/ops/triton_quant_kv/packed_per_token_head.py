@@ -34,6 +34,8 @@ quant-specific constexprs of each mode.
 
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 
 from vllm.platforms import current_platform
@@ -978,6 +980,7 @@ def _launch_packed_attn(
     segm_expsum_ptr = softmax_segm_expsum if use_3d else out
     num_segments = num_par_softmax_segments if use_3d else 1
 
+    grid: tuple[Any, ...]
     if use_3d:
         grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
         tile_size = TILE_SIZE_DECODE

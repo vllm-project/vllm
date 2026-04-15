@@ -7,6 +7,8 @@
 #  - Chih-Chieh Yang <chih.chieh.yang@ibm.com>
 #  - Thomas Parnell <tpa@zurich.ibm.com>
 
+from typing import Any
+
 import torch
 
 import vllm.envs as envs
@@ -644,6 +646,7 @@ def unified_attention(
     segm_expsum_ptr = softmax_segm_expsum if use_3d else out
     num_segments = num_par_softmax_segments if use_3d else 1
 
+    grid: tuple[Any, ...]
     if not use_3d:
         grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
