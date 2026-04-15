@@ -583,7 +583,6 @@ class TritonAttentionImpl(AttentionImpl):
             and not self.use_alibi_sqrt
             and self.sinks is None
             and self.logits_soft_cap == 0
-            and self.sliding_window == (-1, -1)
             and attn_metadata.mm_prefix_range_tensor is None
             and output_scale is None
         ):
@@ -597,6 +596,8 @@ class TritonAttentionImpl(AttentionImpl):
                 max_input_len=attn_metadata.max_query_len,
                 is_causal=True,
                 softmax_scale=self.scale,
+                sliding_window_q=self.sliding_window[0],
+                sliding_window_k=self.sliding_window[1],
             )
             return output
 
