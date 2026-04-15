@@ -87,9 +87,7 @@ class TritonAttentionMetadata:
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
 
-    # True iff every request in this batch has query_len == seq_len, i.e.
-    # no request has prior cached KV.  Computed on CPU at build time.
-    # Used to guard the per-token-head prefill fast-path in forward().
+    # True iff every request has query_len == seq_len (no prior cached KV).
     all_pure_first_prefill: bool = False
 
     @staticmethod
@@ -211,9 +209,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
-        # Graph captures target the decode path; the prefill fast-path
-        # must never be burned into a captured graph since the Python-
-        # level branch is frozen at capture time and decodes at replay
+        # Captured graphs must never take the prefill fast-path: the
+        # Python branch is frozen at capture time, but decodes at replay
         # do have prior cached context.
         attn_metadata.all_pure_first_prefill = False
         return attn_metadata
@@ -235,12 +232,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         use_cascade = common_prefix_len > 0
 
-        # Per-request check on CPU metadata: every sequence must have
-        # query_len == seq_len for the fast-path to be safe.  A batch-
-        # level `max_query_len == max_seq_len` check is NOT sufficient —
-        # it permits other sequences with prior cached context to sneak
-        # in, which would make context_attention_fwd read out-of-bounds
-        # K/V and ignore the real context.
+        # Per-request check: batch-level max comparisons would let
+        # sequences with cached context sneak into the fast-path.
         qsl_cpu = common_attn_metadata.query_start_loc_cpu
         query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
         all_pure_first_prefill = bool(
