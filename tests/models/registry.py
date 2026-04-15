@@ -857,14 +857,29 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
         trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "hf": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FireRedLIDForConditionalGeneration": _HfExamplesInfo(
         "PatchyTisa/FireRedLID-vllm",
         trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "hf": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
         trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "hf": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
