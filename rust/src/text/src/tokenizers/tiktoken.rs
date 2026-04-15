@@ -271,6 +271,12 @@ impl Tokenizer for TiktokenTokenizer {
         let ids = self.inner.encode_with_special_tokens(token);
         if ids.len() == 1 { Some(ids[0]) } else { None }
     }
+
+    fn is_special_id(&self, token_id: u32) -> bool {
+        token_id >= self.num_base_tokens
+            && token_id < self.vocab_upper_bound
+            && !self.non_special_added_ids.contains(&token_id)
+    }
 }
 
 /// Read `vocab_size` from a model `config.json` value, falling back to a single-level nested

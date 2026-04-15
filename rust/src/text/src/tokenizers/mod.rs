@@ -22,6 +22,11 @@ pub trait Tokenizer: Send + Sync {
     /// tokenizer vocabulary.
     fn token_to_id(&self, token: &str) -> Option<u32>;
 
+    /// Return whether the given token ID is special.
+    fn is_special_id(&self, _token_id: u32) -> bool {
+        false
+    }
+
     /// Create a stateful incremental decoder primed with the given prompt tokens.
     ///
     /// The prompt tokens provide left context for the first generated token; the decoder does not

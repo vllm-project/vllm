@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use vllm_text::tokenizers::Tokenizer;
 
 use super::{
@@ -30,13 +32,17 @@ impl Tokenizer for FakeTokenizer {
             _ => None,
         }
     }
+
+    fn is_special_id(&self, token_id: u32) -> bool {
+        token_id == 7
+    }
 }
 
 #[test]
 fn delimited_content_only_stream() {
-    let tokenizer = FakeTokenizer;
+    let tokenizer = Arc::new(FakeTokenizer);
     let mut parser =
-        DelimitedReasoningParser::new(&tokenizer, "<think>", "</think>", false).unwrap();
+        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
 
     assert_eq!(
         parser.push("plain content").content.as_deref(),
@@ -46,9 +52,9 @@ fn delimited_content_only_stream() {
 
 #[test]
 fn delimited_single_chunk_with_reasoning_and_content() {
-    let tokenizer = FakeTokenizer;
+    let tokenizer = Arc::new(FakeTokenizer);
     let mut parser =
-        DelimitedReasoningParser::new(&tokenizer, "<think>", "</think>", false).unwrap();
+        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
 
     let delta = parser.push("<think>reason</think>answer");
     assert_eq!(delta.reasoning.as_deref(), Some("reason"));
@@ -57,9 +63,9 @@ fn delimited_single_chunk_with_reasoning_and_content() {
 
 #[test]
 fn delimited_partial_tokens_across_chunks() {
-    let tokenizer = FakeTokenizer;
+    let tokenizer = Arc::new(FakeTokenizer);
     let mut parser =
-        DelimitedReasoningParser::new(&tokenizer, "<think>", "</think>", false).unwrap();
+        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
 
     assert!(parser.push("<thi").is_empty());
     let delta = parser.push("nk>reason</think>answer");
@@ -69,9 +75,9 @@ fn delimited_partial_tokens_across_chunks() {
 
 #[test]
 fn delimited_finish_flushes_buffer() {
-    let tokenizer = FakeTokenizer;
+    let tokenizer = Arc::new(FakeTokenizer);
     let mut parser =
-        DelimitedReasoningParser::new(&tokenizer, "<think>", "</think>", false).unwrap();
+        DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", false).unwrap();
     parser.initialize(&[1]);
 
     let delta = parser.push("unfinished</thi");
@@ -82,8 +88,8 @@ fn delimited_finish_flushes_buffer() {
 
 #[test]
 fn qwen3_without_prompt_markers_expects_start_token() {
-    let tokenizer = FakeTokenizer;
-    let mut parser = Qwen3ReasoningParser::new(&tokenizer).unwrap();
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
 
     let delta = parser.push("reason</think>answer").unwrap();
     assert_eq!(delta.reasoning, None);
@@ -92,8 +98,8 @@ fn qwen3_without_prompt_markers_expects_start_token() {
 
 #[test]
 fn qwen3_prompt_end_marker_starts_in_content() {
-    let tokenizer = FakeTokenizer;
-    let mut parser = Qwen3ReasoningParser::new(&tokenizer).unwrap();
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
     parser.initialize(&[2]).unwrap();
 
     let delta = parser.push("answer").unwrap();
@@ -103,14 +109,14 @@ fn qwen3_prompt_end_marker_starts_in_content() {
 
 #[test]
 fn qwen3_tolerates_old_and_new_formats() {
-    let tokenizer = FakeTokenizer;
+    let tokenizer = Arc::new(FakeTokenizer);
 
-    let mut old_parser = Qwen3ReasoningParser::new(&tokenizer).unwrap();
+    let mut old_parser = Qwen3ReasoningParser::new(tokenizer.clone()).unwrap();
     let old = old_parser.push("<think>reason</think>answer").unwrap();
     assert_eq!(old.reasoning.as_deref(), Some("reason"));
     assert_eq!(old.content.as_deref(), Some("answer"));
 
-    let mut new_parser = Qwen3ReasoningParser::new(&tokenizer).unwrap();
+    let mut new_parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
     new_parser.initialize(&[1]).unwrap();
     let new = new_parser.push("reason</think>answer").unwrap();
     assert_eq!(new.reasoning.as_deref(), Some("reason"));
@@ -118,9 +124,33 @@ fn qwen3_tolerates_old_and_new_formats() {
 }
 
 #[test]
+fn qwen3_stops_scanning_at_last_special_token() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = Qwen3ReasoningParser::new(tokenizer).unwrap();
+
+    parser.initialize(&[1, 7]).unwrap();
+
+    let delta = parser.push("answer").unwrap();
+    assert_eq!(delta.reasoning, None);
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
 fn deepseek_r1_defaults_to_reasoning_without_prompt_boundary() {
-    let tokenizer = FakeTokenizer;
-    let mut parser = DeepSeekR1ReasoningParser::new(&tokenizer).unwrap();
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
+
+    let delta = parser.push("reason</think>answer").unwrap();
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
+}
+
+#[test]
+fn deepseek_r1_stops_scanning_at_last_special_token() {
+    let tokenizer = Arc::new(FakeTokenizer);
+    let mut parser = DeepSeekR1ReasoningParser::new(tokenizer).unwrap();
+
+    parser.initialize(&[2, 7]).unwrap();
 
     let delta = parser.push("reason</think>answer").unwrap();
     assert_eq!(delta.reasoning.as_deref(), Some("reason"));
@@ -136,9 +166,9 @@ fn factory_contains_and_lists_registered_parsers() {
 
 #[test]
 fn factory_rejects_unknown_parser_names() {
-    let tokenizer = FakeTokenizer;
+    let tokenizer = Arc::new(FakeTokenizer);
     let factory = ReasoningParserFactory::new();
-    let error = match factory.create("missing", &tokenizer) {
+    let error = match factory.create("missing", tokenizer) {
         Ok(_) => panic!("expected parser lookup to fail"),
         Err(error) => error,
     };
@@ -147,9 +177,9 @@ fn factory_rejects_unknown_parser_names() {
 
 #[test]
 fn factory_rejects_unknown_models() {
-    let tokenizer = FakeTokenizer;
+    let tokenizer = Arc::new(FakeTokenizer);
     let factory = ReasoningParserFactory::new();
-    let error = match factory.create_for_model("definitely-unknown-model", &tokenizer) {
+    let error = match factory.create_for_model("definitely-unknown-model", tokenizer) {
         Ok(_) => panic!("expected model lookup to fail"),
         Err(error) => error,
     };

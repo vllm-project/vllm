@@ -1,4 +1,4 @@
-use vllm_text::tokenizers::Tokenizer;
+use vllm_text::tokenizers::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 
@@ -13,7 +13,7 @@ pub struct DeepSeekR1ReasoningParser {
 
 impl DeepSeekR1ReasoningParser {
     /// Create a DeepSeek R1 parser backed by the shared delimited state machine.
-    pub fn new(tokenizer: &dyn Tokenizer) -> Result<Self> {
+    pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
             inner: DelimitedReasoningParser::new(tokenizer, "<think>", "</think>", true)?,
         })
@@ -21,7 +21,7 @@ impl DeepSeekR1ReasoningParser {
 }
 
 impl ReasoningParser for DeepSeekR1ReasoningParser {
-    fn create(tokenizer: &dyn Tokenizer) -> Result<Box<dyn ReasoningParser>>
+    fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static,
     {

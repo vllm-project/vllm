@@ -270,7 +270,7 @@ impl ChatLlm {
 
         let parser = self
             .reasoning_parser_factory
-            .create(&parser_name, &*self.text.tokenizer())
+            .create(&parser_name, self.text.tokenizer())
             .map_err(|error| Error::ReasoningParserInitialization {
                 name: parser_name.clone(),
                 message: error.to_report_string(),

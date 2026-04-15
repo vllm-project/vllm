@@ -1,4 +1,4 @@
-use vllm_text::tokenizers::Tokenizer;
+use vllm_text::tokenizers::{DynTokenizer, Tokenizer};
 
 use super::{ReasoningDelta, ReasoningError, Result};
 
@@ -9,11 +9,12 @@ use super::{ReasoningDelta, ReasoningError, Result};
 /// request-facing [`super::ReasoningParser`] trait.
 ///
 /// The shared state machine stays generic by deriving its initial
-/// `current_in_reasoning` state from the rendered prompt instead of hardcoding
-/// model-family conventions. That means families with the same delimiters can
-/// often reuse this implementation even if one template prefills `<think>` and
-/// another expects the model to emit it (like Qwen3 vs Qwen3 Thinking vs Qwen3.5).
+/// `current_in_reasoning` state from the prompt token boundary instead of
+/// hardcoding model-family conventions. That means families with the same
+/// delimiters can often reuse this implementation even if their chat templates
+/// prefill different prompts.
 pub(crate) struct DelimitedReasoningParser {
+    tokenizer: DynTokenizer,
     current_in_reasoning: bool,
     buffer: String,
     start_token: String,
@@ -30,7 +31,7 @@ impl DelimitedReasoningParser {
     /// reasoning boundary token at all. If the prompt contains either the
     /// start or end delimiter, that prompt boundary always wins.
     pub(crate) fn new(
-        tokenizer: &dyn Tokenizer,
+        tokenizer: DynTokenizer,
         start_token: &'static str,
         end_token: &'static str,
         default_in_reasoning: bool,
@@ -49,6 +50,7 @@ impl DelimitedReasoningParser {
                 })?;
 
         Ok(Self {
+            tokenizer,
             current_in_reasoning: default_in_reasoning,
             buffer: String::new(),
             start_token: start_token.to_string(),
@@ -61,9 +63,13 @@ impl DelimitedReasoningParser {
 
     /// Initialize the starting state from prompt token IDs.
     pub(crate) fn initialize(&mut self, prompt_token_ids: &[u32]) {
-        self.current_in_reasoning =
-            last_reasoning_boundary(prompt_token_ids, self.start_token_id, self.end_token_id)
-                .unwrap_or(self.default_in_reasoning);
+        self.current_in_reasoning = last_reasoning_boundary(
+            prompt_token_ids,
+            self.start_token_id,
+            self.end_token_id,
+            self.tokenizer.as_ref(),
+        )
+        .unwrap_or(self.default_in_reasoning);
     }
 
     /// Parse one decoded text delta and return its reasoning/content split.
@@ -140,6 +146,7 @@ fn last_reasoning_boundary(
     prompt_token_ids: &[u32],
     start_token_id: u32,
     end_token_id: u32,
+    tokenizer: &dyn Tokenizer,
 ) -> Option<bool> {
     for token_id in prompt_token_ids.iter().rev() {
         if *token_id == start_token_id {
@@ -147,6 +154,9 @@ fn last_reasoning_boundary(
         }
         if *token_id == end_token_id {
             return Some(false);
+        }
+        if tokenizer.is_special_id(*token_id) {
+            return None;
         }
     }
 

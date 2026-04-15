@@ -1,4 +1,4 @@
-use vllm_text::tokenizers::Tokenizer;
+use vllm_text::tokenizers::DynTokenizer;
 
 use super::{DelimitedReasoningParser, ReasoningDelta, ReasoningParser, Result};
 use crate::request::ChatRequest;
@@ -22,7 +22,7 @@ pub struct Gemma4ReasoningParser {
 
 impl Gemma4ReasoningParser {
     /// Create a Gemma4 parser.
-    pub fn new(tokenizer: &dyn Tokenizer) -> Result<Self> {
+    pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
         Ok(Self {
             inner: DelimitedReasoningParser::new(tokenizer, "<|channel>", "<channel|>", false)?,
             reasoning_text: String::new(),
@@ -85,7 +85,7 @@ impl Gemma4ReasoningParser {
 }
 
 impl ReasoningParser for Gemma4ReasoningParser {
-    fn create(tokenizer: &dyn Tokenizer) -> Result<Box<dyn ReasoningParser>>
+    fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static,
     {
@@ -119,6 +119,8 @@ impl ReasoningParser for Gemma4ReasoningParser {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use vllm_text::tokenizers::Tokenizer;
 
     use super::Gemma4ReasoningParser;
@@ -153,8 +155,8 @@ mod tests {
     }
 
     fn run_streaming(output: &[&str]) -> (Option<String>, Option<String>) {
-        let tokenizer = FakeTokenizer;
-        let mut parser = Gemma4ReasoningParser::new(&tokenizer).unwrap();
+        let tokenizer = Arc::new(FakeTokenizer);
+        let mut parser = Gemma4ReasoningParser::new(tokenizer).unwrap();
         let mut reasoning = String::new();
         let mut content = String::new();
 
@@ -265,8 +267,8 @@ mod tests {
 
     #[test]
     fn gemma4_adjust_request_keeps_special_tokens() {
-        let tokenizer = FakeTokenizer;
-        let parser = Gemma4ReasoningParser::new(&tokenizer).unwrap();
+        let tokenizer = Arc::new(FakeTokenizer);
+        let parser = Gemma4ReasoningParser::new(tokenizer).unwrap();
         let mut request = ChatRequest::for_test();
 
         assert!(request.decode_options.skip_special_tokens);

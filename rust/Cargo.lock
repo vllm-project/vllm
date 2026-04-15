@@ -1136,7 +1136,7 @@ dependencies = [
 [[package]]
 name = "fastokens"
 version = "0.1.0"
-source = "git+https://github.com/Atero-ai/fastokens.git?rev=ff12e3f555b30d08dbd3390ad6f61ff64b9ee78b#ff12e3f555b30d08dbd3390ad6f61ff64b9ee78b"
+source = "git+https://github.com/BugenZhao/fastokens.git?rev=12a865a1f13aaae8f7b14bab1f177bba30577ad7#12a865a1f13aaae8f7b14bab1f177bba30577ad7"
 dependencies = [
  "daachorse",
  "fancy-regex 0.17.0",

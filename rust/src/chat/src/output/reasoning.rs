@@ -187,12 +187,14 @@ pub(crate) async fn reasoning_event_stream(
 #[cfg(test)]
 mod tests {
 
+    use std::sync::Arc;
+
     use futures::{StreamExt as _, stream};
     use vllm_llm::FinishReason;
     use vllm_text::output::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedTextEvent, DecodedTokenLogprob,
     };
-    use vllm_text::tokenizers::Tokenizer;
+    use vllm_text::tokenizers::{DynTokenizer, Tokenizer};
 
     use super::super::ContentEvent;
     use super::reasoning_event_stream;
@@ -233,7 +235,7 @@ mod tests {
     }
 
     impl ReasoningParser for FailingReasoningParser {
-        fn create(_tokenizer: &dyn Tokenizer) -> Result<Box<dyn ReasoningParser>, ReasoningError>
+        fn create(_tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>, ReasoningError>
         where
             Self: Sized + 'static,
         {
@@ -254,7 +256,7 @@ mod tests {
     fn test_reasoning_parser(factory: &mut ReasoningParserFactory) -> Box<dyn ReasoningParser> {
         factory.register_parser::<FailingReasoningParser>("failing");
 
-        factory.create("failing", &FakeTokenizer).unwrap()
+        factory.create("failing", Arc::new(FakeTokenizer)).unwrap()
     }
 
     #[tokio::test]
@@ -379,7 +381,7 @@ mod tests {
 
     #[tokio::test]
     async fn qwen3_parser_uses_prompt_end_marker_to_switch_to_content() {
-        let tokenizer = std::sync::Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(FakeTokenizer);
         let events = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![2].into(),
@@ -402,7 +404,7 @@ mod tests {
         let factory = ReasoningParserFactory::new();
         let collected = reasoning_event_stream(
             events,
-            Some(factory.create(names::QWEN3, &*tokenizer).unwrap()),
+            Some(factory.create(names::QWEN3, tokenizer).unwrap()),
         )
         .collect::<Vec<_>>()
         .await;
@@ -433,7 +435,7 @@ mod tests {
 
     #[tokio::test]
     async fn qwen3_parser_tolerates_prompt_prefill_reasoning() {
-        let tokenizer = std::sync::Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(FakeTokenizer);
         let events = stream::iter(vec![
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids: vec![1].into(),
@@ -456,7 +458,7 @@ mod tests {
         let factory = ReasoningParserFactory::new();
         let collected = reasoning_event_stream(
             events,
-            Some(factory.create(names::QWEN3, &*tokenizer).unwrap()),
+            Some(factory.create(names::QWEN3, tokenizer).unwrap()),
         )
         .collect::<Vec<_>>()
         .await;

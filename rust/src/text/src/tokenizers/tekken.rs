@@ -53,4 +53,8 @@ impl Tokenizer for TekkenTokenizer {
             if ids.len() == 1 { Some(ids[0]) } else { None }
         })
     }
+
+    fn is_special_id(&self, token_id: u32) -> bool {
+        self.inner.is_special_token(token_id)
+    }
 }

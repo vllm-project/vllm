@@ -24,7 +24,7 @@ mod qwen3;
 use std::collections::HashMap;
 
 use thiserror::Error;
-use vllm_text::tokenizers::Tokenizer;
+use vllm_text::tokenizers::DynTokenizer;
 
 pub use self::cohere_cmd::CohereCmdReasoningParser;
 pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
@@ -106,7 +106,7 @@ impl ReasoningDelta {
 /// Incremental parser that splits decoded text deltas into reasoning and content.
 pub trait ReasoningParser: Send {
     /// Construct a boxed parser instance for one request stream.
-    fn create(tokenizer: &dyn Tokenizer) -> Result<Box<dyn ReasoningParser>>
+    fn create(tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>>
     where
         Self: Sized + 'static;
 
@@ -159,7 +159,7 @@ fn available_parser_hint(available_names: &[String]) -> String {
 }
 
 /// Constructor signature for one registered reasoning parser implementation.
-type ParserCreator = fn(&dyn Tokenizer) -> Result<Box<dyn ReasoningParser>>;
+type ParserCreator = fn(DynTokenizer) -> Result<Box<dyn ReasoningParser>>;
 
 /// Registry and model matcher for reasoning stream parsers.
 #[derive(Clone, Default)]
@@ -245,11 +245,7 @@ impl ReasoningParserFactory {
     }
 
     /// Construct a parser from an exact name.
-    pub fn create(
-        &self,
-        name: &str,
-        tokenizer: &dyn Tokenizer,
-    ) -> Result<Box<dyn ReasoningParser>> {
+    pub fn create(&self, name: &str, tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>> {
         let creator = self
             .creators
             .get(name)
@@ -264,7 +260,7 @@ impl ReasoningParserFactory {
     pub fn create_for_model(
         &self,
         model_id: &str,
-        tokenizer: &dyn Tokenizer,
+        tokenizer: DynTokenizer,
     ) -> Result<Box<dyn ReasoningParser>> {
         let parser_name =
             self.find_parser_for_model(model_id)
