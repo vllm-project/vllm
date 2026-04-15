@@ -480,7 +480,7 @@ class RocmPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TURBOQUANT and (
             kv_dt is None or not kv_dt.startswith("turboquant_")
         ):
-            selected_backend = None
+            selected_backend = None  # type: ignore[assignment]
 
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:

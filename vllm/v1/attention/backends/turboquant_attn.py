@@ -66,8 +66,10 @@ if _HAS_FLASH_ATTN:
         _FA_SUPPORTS_OUT = False
 
     def flash_attn_varlen_func(*args, out=None, **kwargs):
+        kwargs.pop("out", None)
         if _FA_SUPPORTS_OUT and out is not None:
-            return _flash_attn_varlen_func(*args, out=out, **kwargs)
+            kwargs["out"] = out
+            return _flash_attn_varlen_func(*args, **kwargs)
         result = _flash_attn_varlen_func(*args, **kwargs)
         if out is not None:
             out.copy_(result)

@@ -212,13 +212,12 @@ class TestHybridAttentionIndices:
 
     @staticmethod
     def _fake_model_config(text_cfg=None, hf_cfg=None):
-        class _Obj:
-            pass
+        from types import SimpleNamespace
 
-        m = _Obj()
-        m.hf_text_config = text_cfg if text_cfg is not None else _Obj()
-        m.hf_config = hf_cfg if hf_cfg is not None else _Obj()
-        return m
+        return SimpleNamespace(
+            hf_text_config=text_cfg if text_cfg is not None else SimpleNamespace(),
+            hf_config=hf_cfg if hf_cfg is not None else SimpleNamespace(),
+        )
 
     def test_layer_types_full_attention(self):
         from vllm.engine.arg_utils import _get_full_attention_layer_indices
