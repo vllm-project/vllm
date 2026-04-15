@@ -205,7 +205,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
         # For gemma3 we check `token_type_ids` as the key
         mm_token_type_ids = processed_data.get(
-            "mm_token_type_ids", processed_data.pop("token_type_ids")
+            "mm_token_type_ids", processed_data.pop("token_type_ids", None)
         )
 
         # We can infer vLLM style placeholder from token type ids, if we split
