@@ -1,5 +1,5 @@
 [build-system]
-# Should be mirrored in requirements/build.txt
+# Should be mirrored in requirements/build/cuda.txt
 requires = [
     "cmake>=3.26.1",
     "ninja",
@@ -170,6 +170,9 @@ eles = "eles"
 datas = "datas"
 ser = "ser"
 ure = "ure"
+# Walsh-Hadamard Transform
+wht = "wht"
+WHT = "WHT"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
