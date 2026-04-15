@@ -1642,6 +1642,31 @@ class EngineArgs:
             kv_offloading_backend=self.kv_offloading_backend,
         )
 
+        # TurboQuant: auto-skip first/last 2 layers (boundary protection).
+        # These layers are most sensitive to quantization error.
+        # Users can add extra layers via --kv-cache-dtype-skip-layers.
+        if resolved_cache_dtype.startswith("turboquant_"):
+            if model_config.is_hybrid:
+                raise NotImplementedError(
+                    "TurboQuant KV cache is not supported for hybrid "
+                    "(attention + Mamba) models. Boundary layer protection "
+                    "requires uniform attention layers."
+                )
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            num_layers = model_config.hf_text_config.num_hidden_layers
+            boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            merged = sorted(existing | set(boundary), key=lambda x: int(x))
+            cache_config.kv_cache_dtype_skip_layers = merged
+            logger.info(
+                "TQ: skipping layers %s for boundary protection (num_layers=%d)",
+                merged,
+                num_layers,
+            )
+
         ray_runtime_env = None
         if is_ray_initialized():
             # Ray Serve LLM calls `create_engine_config` in the context
@@ -1947,6 +1972,19 @@ class EngineArgs:
             attention_config.backend = AttentionConfig.validate_backend_before(
                 self.attention_backend
             )
+
+        # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
+        # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
+        if resolved_cache_dtype.startswith("turboquant_") and (
+            attention_config.flash_attn_version is None
+            or attention_config.flash_attn_version >= 3
+        ):
+            logger.warning(
+                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "Overriding flash_attn_version to 2. To silence this "
+                "warning, pass --attention-config.flash_attn_version=2"
+            )
+            attention_config.flash_attn_version = 2
 
         # Mamba config overrides
         mamba_config = copy.deepcopy(self.mamba_config)
