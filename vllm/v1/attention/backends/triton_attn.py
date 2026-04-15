@@ -604,7 +604,7 @@ class TritonAttentionImpl(AttentionImpl):
                     max_seqlen_k=attn_metadata.max_query_len,
                     softmax_scale=self.scale,
                     causal=True,
-                    window_size=self.sliding_window,
+                    window_size=list(self.sliding_window),
                 )
                 if isinstance(fa_out, tuple):
                     fa_out = fa_out[0]
