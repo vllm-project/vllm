@@ -152,11 +152,11 @@ class PyNcclCommunicator:
             # ranks to participate. During uncoordinated shutdown, peer
             # ranks may already be gone, causing ncclCommDestroy to hang
             # indefinitely and orphan GPU worker processes. The OS reclaims
-            # NCCL resources when the process exits, so explicitly destruction
+            # NCCL resources when the process exits, so explicit destruction
             # is unnecessary.
-            self.comm = None
-            self.available = False
             self.disabled = True
+            self.available = False
+            self.comm = None
 
     def all_reduce(
         self,
