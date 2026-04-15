@@ -29,12 +29,13 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.fa_utils import (
-    flash_attn_varlen_func,
-    is_flash_attn_varlen_func_available,
-)
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+
+_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
+if _HAS_FLASH_ATTN:
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
@@ -47,8 +48,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
-
-_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 
 
 # constants
@@ -94,6 +93,15 @@ class TritonAttentionMetadata:
     mm_prefix_range_tensor: torch.Tensor | None = None
 
     all_pure_first_prefill: bool = False
+
+    # Decode/prefill split (per_token_head only). Populated when the batch
+    # is reordered so decodes come first — enables routing decodes to
+    # unified_attention (paged cache) and first-chunk prefills to flash-attn
+    # on raw Q/K/V in the same forward. When not applicable, num_decodes == 0
+    # and prefill_is_first_chunk == False so the fast path is skipped.
+    num_decodes: int = 0
+    num_decode_tokens: int = 0
+    prefill_is_first_chunk: bool = False
 
     @staticmethod
     def compute_mm_prefix_range_tensor(
@@ -142,6 +150,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
+        # Per-token-head quant: enable decode-first reordering so forward()
+        # can split decodes (paged cache) from first-chunk prefills
+        # (raw Q/K/V → flash-attn). Other kv_cache dtypes keep default
+        # (no reorder) to avoid behavior change.
+        self._is_per_token_head = kv_cache_spec.kv_quant_mode.is_per_token_head
+        if self._is_per_token_head:
+            self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
 
         self.block_size = kv_cache_spec.block_size
 
@@ -215,6 +231,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
         attn_metadata.all_pure_first_prefill = False
+        attn_metadata.prefill_is_first_chunk = False
         return attn_metadata
 
     def build(
@@ -238,12 +255,35 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # materialized the CPU copy of seq_lens — otherwise we skip the
         # fast-path gate to avoid triggering a D2H sync here.
         seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        num_decodes = 0
+        num_decode_tokens = 0
+        prefill_is_first_chunk = False
         if seq_lens_cpu is not None:
             qsl_cpu = common_attn_metadata.query_start_loc_cpu
             query_lens_cpu = qsl_cpu[1:] - qsl_cpu[:-1]
             all_pure_first_prefill = bool(
                 torch.equal(query_lens_cpu, seq_lens_cpu.to(query_lens_cpu.dtype))
             )
+            # Per-token-head split: with reorder_batch_threshold=1 the model
+            # runner guarantees decodes (q_len <= 1) come first. Find the
+            # boundary and check whether the prefill portion is all
+            # first-chunk (q_len == seq_len) — the only shape where we can
+            # safely feed raw Q/K/V to flash-attn.
+            if self._is_per_token_head:
+                decode_mask = query_lens_cpu <= 1
+                # Boundary: first index where decode_mask is False
+                if bool(decode_mask.all()):
+                    num_decodes = int(query_lens_cpu.shape[0])
+                elif not bool(decode_mask[0]):
+                    num_decodes = 0
+                else:
+                    # all True up to some k, then all False (reorder guarantees)
+                    num_decodes = int(decode_mask.to(torch.int32).sum().item())
+                num_decode_tokens = int(qsl_cpu[num_decodes].item())
+                if num_decodes < query_lens_cpu.shape[0]:
+                    ql_pref = query_lens_cpu[num_decodes:]
+                    sl_pref = seq_lens_cpu[num_decodes:].to(ql_pref.dtype)
+                    prefill_is_first_chunk = bool(torch.equal(ql_pref, sl_pref))
         else:
             all_pure_first_prefill = False
 
@@ -282,6 +322,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
             all_pure_first_prefill=all_pure_first_prefill,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
+            prefill_is_first_chunk=prefill_is_first_chunk,
         )
         return attn_metadata
 
@@ -580,9 +623,11 @@ class TritonAttentionImpl(AttentionImpl):
                 layer,
             )
 
+        # Per-token-head fast paths. All share the same preconditions and
+        # route work to flash-attn (for first-chunk prefills) / unified_attention
+        # (for decodes). Continuations still go through unified_attention below.
         if (
             self._is_per_token_head_quant
-            and attn_metadata.all_pure_first_prefill
             and self.alibi_slopes is None
             and not self.use_alibi_sqrt
             and self.sinks is None
@@ -593,37 +638,114 @@ class TritonAttentionImpl(AttentionImpl):
             and key is not None
             and value is not None
         ):
-            if _HAS_FLASH_ATTN:
+            num_dec = attn_metadata.num_decodes
+            num_dec_tok = attn_metadata.num_decode_tokens
+            pref_first_chunk = attn_metadata.prefill_is_first_chunk
+            all_first_chunk = attn_metadata.all_pure_first_prefill
+
+            # Case 1: pure first-chunk prefill (no decodes). Flash-attn on
+            # raw Q/K/V — no cache read at all. Triton fallback if flash-attn
+            # unavailable. Matches what TurboQuant does for first-chunk.
+            if num_dec == 0 and all_first_chunk:
+                if _HAS_FLASH_ATTN:
+                    fa_out = flash_attn_varlen_func(
+                        q=query[:num_actual_tokens],
+                        k=key[:num_actual_tokens],
+                        v=value[:num_actual_tokens],
+                        cu_seqlens_q=attn_metadata.query_start_loc,
+                        cu_seqlens_k=attn_metadata.query_start_loc,
+                        max_seqlen_q=attn_metadata.max_query_len,
+                        max_seqlen_k=attn_metadata.max_query_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        window_size=list(self.sliding_window),
+                    )
+                    if isinstance(fa_out, tuple):
+                        fa_out = fa_out[0]
+                    output[:num_actual_tokens].copy_(fa_out)
+                else:
+                    context_attention_fwd(
+                        q=query[:num_actual_tokens],
+                        k=key[:num_actual_tokens],
+                        v=value[:num_actual_tokens],
+                        o=output[:num_actual_tokens],
+                        b_start_loc=attn_metadata.query_start_loc,
+                        b_seq_len=attn_metadata.seq_lens,
+                        max_input_len=attn_metadata.max_query_len,
+                        is_causal=True,
+                        softmax_scale=self.scale,
+                        sliding_window_q=self.sliding_window[0],
+                        sliding_window_k=self.sliding_window[1],
+                    )
+                return output
+
+            # Case 2: mixed batch — decodes first, then first-chunk prefills,
+            # no continuations. Route decodes to unified_attention (paged cache)
+            # and prefills to flash-attn on raw K/V. Requires flash-attn.
+            if (
+                _HAS_FLASH_ATTN
+                and num_dec > 0
+                and num_dec_tok < num_actual_tokens
+                and pref_first_chunk
+            ):
+                self._ensure_scale_caches(kv_cache)
+                key_cache, value_cache = kv_cache.unbind(1)
+                if key_cache.dtype == torch.uint8:
+                    key_cache = key_cache.view(self.fp8_dtype)
+                    value_cache = value_cache.view(self.fp8_dtype)
+
+                # --- Decode slice via unified_attention ---
+                unified_attention(
+                    q=query[:num_dec_tok],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_dec_tok],
+                    cu_seqlens_q=attn_metadata.query_start_loc[: num_dec + 1],
+                    max_seqlen_q=1,
+                    seqused_k=attn_metadata.seq_lens[:num_dec],
+                    max_seqlen_k=attn_metadata.max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=None,
+                    use_alibi_sqrt=False,
+                    window_size=self.sliding_window,
+                    block_table=attn_metadata.block_table[:num_dec],
+                    softcap=0,
+                    q_descale=None,
+                    k_descale=None,
+                    v_descale=None,
+                    seq_threshold_3D=attn_metadata.seq_threshold_3D,
+                    num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
+                    softmax_segm_output=attn_metadata.softmax_segm_output,
+                    softmax_segm_max=attn_metadata.softmax_segm_max,
+                    softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+                    sinks=None,
+                    output_scale=None,
+                    mm_prefix_range=None,
+                    kv_quant_mode=self._kv_quant_mode,
+                    k_scale_cache=self._k_scale_cache,
+                    v_scale_cache=self._v_scale_cache,
+                )
+
+                # --- Prefill slice via flash-attn on raw Q/K/V ---
+                pref_qsl = attn_metadata.query_start_loc[num_dec:] - num_dec_tok
+                pref_max_q = attn_metadata.max_query_len  # conservative upper bound
                 fa_out = flash_attn_varlen_func(
-                    q=query[:num_actual_tokens],
-                    k=key[:num_actual_tokens],
-                    v=value[:num_actual_tokens],
-                    cu_seqlens_q=attn_metadata.query_start_loc,
-                    cu_seqlens_k=attn_metadata.query_start_loc,
-                    max_seqlen_q=attn_metadata.max_query_len,
-                    max_seqlen_k=attn_metadata.max_query_len,
+                    q=query[num_dec_tok:num_actual_tokens],
+                    k=key[num_dec_tok:num_actual_tokens],
+                    v=value[num_dec_tok:num_actual_tokens],
+                    cu_seqlens_q=pref_qsl,
+                    cu_seqlens_k=pref_qsl,
+                    max_seqlen_q=pref_max_q,
+                    max_seqlen_k=pref_max_q,
                     softmax_scale=self.scale,
                     causal=True,
                     window_size=list(self.sliding_window),
                 )
                 if isinstance(fa_out, tuple):
                     fa_out = fa_out[0]
-                output[:num_actual_tokens].copy_(fa_out)
-            else:
-                context_attention_fwd(
-                    q=query[:num_actual_tokens],
-                    k=key[:num_actual_tokens],
-                    v=value[:num_actual_tokens],
-                    o=output[:num_actual_tokens],
-                    b_start_loc=attn_metadata.query_start_loc,
-                    b_seq_len=attn_metadata.seq_lens,
-                    max_input_len=attn_metadata.max_query_len,
-                    is_causal=True,
-                    softmax_scale=self.scale,
-                    sliding_window_q=self.sliding_window[0],
-                    sliding_window_k=self.sliding_window[1],
-                )
-            return output
+                output[num_dec_tok:num_actual_tokens].copy_(fa_out)
+                return output
 
         # Per-token-head quantized KV cache: use separate scale caches.
         if self._is_per_token_head_quant:
