@@ -556,13 +556,7 @@ class TritonAttentionImpl(AttentionImpl):
                 attn_metadata,
                 layer,
             )
-
-        # Per-token-head prefill fast-path: on first-chunk pure prefills
-        # (no prior cached KV), skip the quantized cache read entirely and
-        # run a Triton prefill kernel on the raw K/V tensors.  The
-        # quantized cache was already written by do_kv_cache_update, so
-        # subsequent decode steps still see the stored KV.  Avoids
-        # per-tile scale lookups and dequant inside the kernel loop.
+            
         if (
             self._is_per_token_head_quant
             and attn_metadata.max_query_len == attn_metadata.max_seq_len
