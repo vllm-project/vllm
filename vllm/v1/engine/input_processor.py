@@ -172,17 +172,18 @@ class InputProcessor:
             return mm_hash
         return f"{lora_request.lora_name}:{mm_hash}"
 
-    def _inject_into_mm_cache(
+    def inject_into_mm_cache(
         self,
         mm_hashes: dict[str, list[str]],
         mm_kwargs: dict[str, list],
     ) -> None:
         """Inject pre-processed mm_kwargs into the processor cache.
 
-        When ``externally_processed`` is set, mm_kwargs have already been
-        through the HF processor. This method injects them into the
-        processor cache so that MM cache hit rate metrics are reported
-        accurately.
+        Call this when mm_kwargs have already been through the HF processor
+        externally (e.g. by a frontend that transfers pre-processed tensors
+        to the backend).  This ensures MM cache hit rate metrics are reported
+        accurately and avoids redundant processing on subsequent requests
+        with the same images.
 
         Uses ``get_and_update_item()`` with an empty prompt_updates list,
         since token expansion has already been handled externally.
@@ -338,14 +339,6 @@ class InputProcessor:
                     f"mm_hashes must contain only strings, got: {decoder_mm_hashes}. "
                     "This is likely due to an incorrect custom implementation of "
                     "MultiModalProcessor.apply method."
-                )
-
-            # If mm_kwargs were pre-processed externally, inject into
-            # the processor cache so that MM cache hit rate metrics are
-            # reported accurately.
-            if decoder_inputs.get("externally_processed"):
-                self._inject_into_mm_cache(
-                    decoder_mm_hashes, decoder_mm_inputs
                 )
 
             # Merge and flatten multimodal placeholders, hashes and inputs

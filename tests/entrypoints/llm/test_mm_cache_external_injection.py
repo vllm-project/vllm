@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-Test that externally processed mm_kwargs (i.e., mm_kwargs that have already
-been through the HF processor) are correctly injected into the processor
-cache and reported in MM cache hit rate metrics.
+Test that ``InputProcessor.inject_into_mm_cache()`` correctly injects
+pre-processed mm_kwargs into the processor cache and reports MM cache
+hit rate metrics accurately.
 
-This covers the ``_inject_into_mm_cache`` path in InputProcessor, triggered
-by the ``externally_processed`` flag in decoder inputs.
+This is used by frameworks like Dynamo that run the HF processor on a
+frontend and transfer pre-processed mm_kwargs to the backend, avoiding
+redundant processing.
 """
 
 import logging
@@ -63,19 +64,19 @@ def _get_mm_cache_log(llm: LLM, caplog_vllm: pytest.LogCaptureFixture) -> float:
 
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_ASSETS[:2]], indirect=True)
 @pytest.mark.parametrize("mm_processor_cache_type", ["lru", "shm"])
-def test_externally_processed_mm_kwargs_cache_injection(
+def test_inject_into_mm_cache(
     num_gpus_available,
     image_urls,
     mm_processor_cache_type,
     caplog_vllm,
 ):
-    """Test that externally processed mm_kwargs are injected into the
-    processor cache and MM cache hit metrics are updated correctly.
+    """Test that inject_into_mm_cache() injects pre-processed mm_kwargs into
+    the processor cache and MM cache hit metrics are updated correctly.
 
     Steps:
     1. Two normal requests (same image) -> cache miss then hit (baseline)
-    2. Extract cached kwargs, build a pre-rendered input with a new hash
-       and externally_processed=True -> verifies injection works
+    2. Extract cached kwargs, call inject_into_mm_cache with a new hash,
+       then generate with a pre-rendered input -> verifies injection works
     """
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
@@ -110,16 +111,19 @@ def test_externally_processed_mm_kwargs_cache_injection(
     )
     eng_input = eng_prompts[0]
 
-    # Build externally processed input with a NEW hash
+    # Inject pre-processed mm_kwargs with a NEW hash via public API
     new_mm_hash = "deadbeef" * 8
+    mm_hashes = {"image": [new_mm_hash]}
+    mm_kwargs = eng_input["mm_kwargs"]
+
+    llm.llm_engine.input_processor.inject_into_mm_cache(mm_hashes, mm_kwargs)
+
+    # Build pre-rendered input (no externally_processed flag needed)
     pre_rendered_input = {
         "type": "multimodal",
-        "externally_processed": True,
         "prompt_token_ids": eng_input["prompt_token_ids"],
-        "mm_kwargs": eng_input["mm_kwargs"],
-        "mm_hashes": {
-            "image": [new_mm_hash],
-        },
+        "mm_kwargs": mm_kwargs,
+        "mm_hashes": mm_hashes,
         "mm_placeholders": eng_input["mm_placeholders"],
     }
 
@@ -138,13 +142,12 @@ def test_externally_processed_mm_kwargs_cache_injection(
 
 
 @pytest.mark.parametrize("image_urls", [TEST_IMAGE_ASSETS[:1]], indirect=True)
-def test_externally_processed_without_cache(
+def test_inject_into_mm_cache_without_cache(
     num_gpus_available,
     image_urls,
 ):
-    """Test that externally_processed works gracefully when processor cache
-    is disabled (mm_processor_cache_gb=0). The engine should not crash and
-    should produce valid output.
+    """Test that inject_into_mm_cache works gracefully when processor cache
+    is disabled (mm_processor_cache_gb=0). Should not crash.
     """
     llm = LLM(
         model="llava-hf/llava-1.5-7b-hf",
@@ -167,18 +170,21 @@ def test_externally_processed_without_cache(
     )
     eng_input = eng_prompts[0]
 
+    mm_hashes = {"image": ["abcd1234" * 8]}
+    mm_kwargs = eng_input["mm_kwargs"]
+
+    # inject_into_mm_cache should not crash even without cache
+    llm.llm_engine.input_processor.inject_into_mm_cache(mm_hashes, mm_kwargs)
+
+    # Build and generate with pre-rendered input
     pre_rendered_input = {
         "type": "multimodal",
-        "externally_processed": True,
         "prompt_token_ids": eng_input["prompt_token_ids"],
-        "mm_kwargs": eng_input["mm_kwargs"],
-        "mm_hashes": {
-            "image": ["abcd1234" * 8],
-        },
+        "mm_kwargs": mm_kwargs,
+        "mm_hashes": mm_hashes,
         "mm_placeholders": eng_input["mm_placeholders"],
     }
 
-    # Should not crash even without cache
     result = llm.generate(
         pre_rendered_input,
         sampling_params=SamplingParams(max_tokens=1),
