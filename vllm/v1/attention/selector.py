@@ -61,6 +61,7 @@ def get_attn_backend(
     use_per_head_quant_scales: bool = False,
     attn_type: str | None = None,
     num_heads: int | None = None,
+    use_non_causal: bool = False,
 ) -> type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
 
@@ -80,11 +81,6 @@ def get_attn_backend(
         block_size = cache_config.block_size
     else:
         block_size = None
-
-    speculative_config = vllm_config.speculative_config
-    use_non_causal = (
-        speculative_config is not None and speculative_config.method == "dflash"
-    )
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,
