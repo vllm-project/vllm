@@ -109,9 +109,10 @@ def default_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
+    num_tokens = x.numel() // x.shape[-1]
     if (
         _tinygemm_bf16_available()
-        and x.shape[0] <= 8
+        and num_tokens <= 8
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
         and weight.shape[0] % 16 == 0
@@ -120,10 +121,11 @@ def default_unquantized_gemm(
         and (bias is None or bias.dtype == torch.bfloat16)
     ):
         from vllm.utils.flashinfer import flashinfer_tinygemm_bf16
-        out = torch.empty(
-            x.shape[0], weight.shape[0], dtype=torch.bfloat16, device=x.device
+        out = x.new_empty((*x.shape[:-1], weight.shape[0]))
+        flashinfer_tinygemm_bf16(
+            x.view(num_tokens, -1), weight,
+            out.view(num_tokens, -1), bias=bias,
         )
-        flashinfer_tinygemm_bf16(x, weight, out, bias=bias)
         return out
     return torch.nn.functional.linear(x, weight, bias)
 
