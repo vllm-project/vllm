@@ -414,9 +414,11 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
             num_qps_per_rank=num_qps_per_rank,
         )
         if not current_platform.is_rocm():
+            use_mnnvl = envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL
             kwargs.update(
                 allow_nvlink_for_low_latency_mode=True,
-                allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
+                allow_mnnvl=use_mnnvl,
+                use_fabric=use_mnnvl,
                 explicitly_destroy=True,
             )
         return kwargs

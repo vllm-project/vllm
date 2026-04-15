@@ -53,7 +53,7 @@
       "default": "cuda"
     },
     "DEEPEP_COMMIT_HASH": {
-      "default": "73b6ea4"
+      "default": "9249c25"
     },
     "GIT_REPO_CHECK": {
       "default": "0"
