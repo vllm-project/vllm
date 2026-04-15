@@ -154,7 +154,7 @@ class PyNcclCommunicator:
             # indefinitely and orphan GPU worker processes. The OS reclaims
             # NCCL resources when the process exits, so explicit destruction
             # is unnecessary.
-            self.comm = None
+            self.comm = ncclComm_t()
             self.available = False
             self.disabled = True
 
