@@ -762,11 +762,14 @@ class HummingMoEMethod(FusedMoEMethodBase):
         weight_scale_group_size_n = self.weight_schema.weight_scale_group_size_n
         weight_group_shape: tuple[int, ...] = ()
         if weight_scale_group_size_n > 1:
-            weight_group_shape = (weight_scale_group_size, weight_scale_group_size_n)
+            weight_group_shape = GroupShape(
+                row=weight_scale_group_size,
+                col=weight_scale_group_size_n,
+            )
         elif weight_scale_group_size == 0:
-            weight_group_shape = (-1, 1)
-        elif weight_scale_group_size > 0:
-            weight_group_shape = (weight_scale_group_size, 1)
+            weight_group_shape = GroupShape(row=-1, col=1)
+        else:
+            weight_group_shape = GroupShape(row=weight_scale_group_size, col=1)
 
         w1_quant_desc = FusedMoEQuantDesc(
             dtype=str(self.weight_schema.b_dtype),
