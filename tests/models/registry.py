@@ -1038,6 +1038,50 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
+    # NemotronH_Nano_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2
+    # Use the same registry test as NemotronH_Nano_VL_V2 above
+    "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
+    ),
+    # NemotronH_Super_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2 as well
+    # Use the same registry test as NemotronH_Nano_VL_V2 above
+    "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
         "xlangai/OpenCUA-7B", trust_remote_code=True
     ),
