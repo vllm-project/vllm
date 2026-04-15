@@ -350,21 +350,17 @@ class cmake_build_ext(build_ext):
             bundle_tcmalloc(self.build_lib)
 
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
-        # directory so that they can be included in the editable build.
-        # Skip __init__.py and flash_attn_interface.py which are
-        # source-controlled in vllm (matching the cmake install exclusions).
+        # directory so that they can be included in the editable build
         import glob
 
-        vllm_fa_source_controlled = {"__init__.py", "flash_attn_interface.py"}
         files = glob.glob(
             os.path.join(self.build_lib, "vllm", "vllm_flash_attn", "**", "*.py"),
             recursive=True,
         )
         for file in files:
-            rel_path = file.split("vllm/vllm_flash_attn/")[-1]
-            if rel_path in vllm_fa_source_controlled:
-                continue
-            dst_file = os.path.join("vllm/vllm_flash_attn", rel_path)
+            dst_file = os.path.join(
+                "vllm/vllm_flash_attn", file.split("vllm/vllm_flash_attn/")[-1]
+            )
             print(f"Copying {file} to {dst_file}")
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             self.copy_file(file, dst_file)
