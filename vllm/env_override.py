@@ -128,7 +128,14 @@ if "DG_JIT_CACHE_DIR" not in os.environ:
         "deep_gemm",
     )
     os.environ["DG_JIT_CACHE_DIR"] = _dg_cache
-os.makedirs(os.environ["DG_JIT_CACHE_DIR"], exist_ok=True)
+try:
+    os.makedirs(os.environ["DG_JIT_CACHE_DIR"], exist_ok=True)
+except OSError:
+    logger.warning(
+        "Failed to create DeepGEMM JIT cache directory %s. "
+        "Falling back to in-memory JIT cache.",
+        os.environ["DG_JIT_CACHE_DIR"],
+    )
 
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
