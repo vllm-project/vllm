@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
-import inspect
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
@@ -28,12 +27,25 @@ try:
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
+        ParallelStrategy,
     )
+
+    try:
+        from lmcache.v1.multiprocess.custom_types import RequestAllocationRecord
+    except ImportError:
+        from lmcache.v1.multiprocess.custom_types import (
+            BlockAllocationRecord as RequestAllocationRecord,
+        )
 except ImportError:
+    from lmcache.v1.multiprocess.custom_types import (
+        BlockAllocationRecord as RequestAllocationRecord,
+    )
+
     from vllm.distributed.kv_transfer.kv_connector.v1.lmcache_integration import (
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         LoadStoreOp,
+        ParallelStrategy,
     )
 
 if TYPE_CHECKING:
@@ -51,12 +63,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
-
-
-def _adapter_accepts_tp_size() -> bool:
-    """Check if the imported adapter accepts tp_size."""
-    sig = inspect.signature(LMCacheMPSchedulerAdapter.__init__)
-    return "tp_size" in sig.parameters
 
 
 # Helper functions
@@ -94,8 +100,8 @@ def extract_world_size_and_kv_rank(
         # vLLM constructs TP groups first, and then construct other
         # parallel groups on top of TP groups.
         # for example, TP=4, PP=2,
-        # TP group: [0, 1, 2, 3], [4, 5, 6, 7]
-        # PP group: [0, 4], [1, 5], [2, 6], [3, 7]
+        # PP group: [0, 1, 2, 3], [4, 5, 6, 7]
+        # TP group: [0, 4], [1, 5], [2, 6], [3, 7]
         # So we can "exclude" the effect of TP by rank // tp_size.
         return world_size // tp_size, rank // tp_size
 
@@ -112,24 +118,24 @@ def create_scheduler_adapter(
         vllm_config.parallel_config.rank,
         vllm_config,
     )
-    tp_size = vllm_config.parallel_config.tensor_parallel_size
-
-    # Pass tp_size only when the adapter accepts it so that
-    # a newer vllm can still work with an older LMCache.
-    kwargs: dict[str, Any] = {}
-    if _adapter_accepts_tp_size():
-        kwargs["tp_size"] = tp_size
-
-    return LMCacheMPSchedulerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
+    parallel_strategy = ParallelStrategy(
+        mla_enabled(vllm_config.model_config),
         world_size,
         kv_rank,
-        vllm_config.cache_config.block_size,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.parallel_config.tensor_parallel_size,
+        vllm_config.parallel_config.pipeline_parallel_size,
+    )
+
+    return LMCacheMPSchedulerAdapter(
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
-        **kwargs,
     )
 
 
@@ -145,13 +151,22 @@ def create_worker_adapter(
         vllm_config.parallel_config.rank,
         vllm_config,
     )
-    return LMCacheMPWorkerAdapter(
-        server_url,
-        zmq_context,
-        vllm_config.model_config.model,
+    parallel_strategy = ParallelStrategy(
+        mla_enabled(vllm_config.model_config),
         world_size,
         kv_rank,
-        vllm_config.cache_config.block_size,
+        vllm_config.parallel_config.world_size,
+        vllm_config.parallel_config.rank,
+        vllm_config.parallel_config.tensor_parallel_size,
+        vllm_config.parallel_config.pipeline_parallel_size,
+    )
+
+    return LMCacheMPWorkerAdapter(
+        server_url=server_url,
+        context=zmq_context,
+        model_name=vllm_config.model_config.model,
+        vllm_block_size=vllm_config.cache_config.block_size,
+        parallel_strategy=parallel_strategy,
         mq_timeout=mq_timeout,
         heartbeat_interval=heartbeat_interval,
     )
@@ -293,10 +308,31 @@ class LMCacheMPRequestMetadata:
         # NOTE: the invariant here is that `num_stored_blocks` should
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
+        #
+        # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
+        #
+        # Both values represent a prefix of blocks whose KV data is already
+        # available (either from vLLM APC or from LMCache), so they must NOT
+        # be summed (that would double-count the overlapping prefix).
+        #
+        # * num_lmcache_hit_blocks: LMCache-hit blocks are already counted in
+        #   num_stored_blocks (set during lookup), so they must be included
+        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        # * num_vllm_hit_blocks: LMCache stores in units of chunks (N blocks),
+        #   so num_lmcache_hit_blocks is rounded DOWN to the nearest chunk
+        #   boundary.  When vLLM APC hits more blocks than that rounded value
+        #   (e.g. APC=44 blocks, LMCache=32 blocks after chunk alignment),
+        #   using only num_lmcache_hit_blocks would set the upper bound too
+        #   low and silently skip the APC-hit blocks that fall between the
+        #   two values, causing under-storing.  Taking the max ensures we
+        #   always use the tighter (larger) of the two hit counts.
+        computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
+            tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
+        )
         min_available_blocks = min(
             len(tracker.block_hashes),
             len(tracker.allocated_block_ids),
-            tracker.num_scheduled_tokens // vllm_block_size,
+            computed_blocks,
         )
         num_staging_blocks = min_available_blocks - tracker.num_stored_blocks
         num_chunks = num_staging_blocks // blocks_in_chunk
@@ -591,6 +627,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        # In MLA scenario, only the first rank of the pipeline group
+        # needs to save the KV cache.
+        if (
+            self.worker_adapter.use_mla
+            and not self.worker_adapter.is_first_rank_of_pp_group
+        ):
+            return
+
         metadata = self._get_connector_metadata()
         assert isinstance(metadata, LMCacheMPConnectorMetadata)
 
@@ -837,6 +881,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(metadata) > 0:
             logger.debug("Final connector metadata: %s", metadata)
 
+        # Report block allocation deltas to LMCache for observability
+        self._report_block_allocation_deltas(scheduler_output)
+
         return metadata
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -996,8 +1043,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             if request_id not in cached_reqs.resumed_req_ids:
                 request_tracker.append_block_ids(new_block_ids)
 
-            # Update new scheduled tokens
-            num_new_tokens = cached_reqs.num_computed_tokens[idx]
+            # Use the incremental num_scheduled_tokens to
+            # stay consistent with _process_new_requests.
+            num_new_tokens = scheduler_output.num_scheduled_tokens[request_id]
             request_tracker.increase_num_scheduled_tokens(num_new_tokens)
 
             r_meta = LMCacheMPRequestMetadata.GetStoreMetadata(
@@ -1006,6 +1054,64 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
             if r_meta is not None:
                 metadata.add_request_metadata(r_meta)
+
+    def _report_block_allocation_deltas(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> None:
+        """Gather per-request block allocation deltas and report to LMCache.
+
+        For new requests: all allocated_block_ids and token_ids are new.
+        For cached requests: only newly appended block_ids and token_ids.
+        """
+        records: list[RequestAllocationRecord] = []
+
+        # New requests: send all tokens covering all allocated blocks so
+        # the L0 metrics subscriber can correctly map each block to its
+        # actual token content (not just the newly-scheduled slice).
+        for new_request in scheduler_output.scheduled_new_reqs:
+            tracker = self.request_trackers.get(new_request.req_id)
+            if tracker is None:
+                continue
+            num_blocks = len(tracker.allocated_block_ids)
+            total_tokens = num_blocks * self.vllm_block_size
+            records.append(
+                RequestAllocationRecord(
+                    req_id=new_request.req_id,
+                    new_block_ids=list(tracker.allocated_block_ids),
+                    new_token_ids=list(tracker.all_token_ids[:total_tokens]),
+                )
+            )
+
+        # Cached requests: only the newly added blocks and their full
+        # token content.  We send all tokens covered by the new blocks
+        # (not just the tokens scheduled this step) so the L0 subscriber
+        # can correctly identify block content.
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for idx, request_id in enumerate(cached_reqs.req_ids):
+            new_block_ids = reformat_block_ids(cached_reqs.new_block_ids[idx])
+            if not new_block_ids:
+                continue
+            tracker = self.request_trackers.get(request_id)
+            if tracker is None:
+                continue
+            # The new blocks sit at the end of the request's block list.
+            # Compute the token range they cover.
+            total_blocks = len(tracker.allocated_block_ids)
+            num_new_blocks = len(new_block_ids)
+            start_token = (total_blocks - num_new_blocks) * self.vllm_block_size
+            end_token = total_blocks * self.vllm_block_size
+            new_token_ids = list(tracker.all_token_ids[start_token:end_token])
+            records.append(
+                RequestAllocationRecord(
+                    req_id=request_id,
+                    new_block_ids=new_block_ids,
+                    new_token_ids=new_token_ids,
+                )
+            )
+
+        if records:
+            self.scheduler_adapter.report_block_allocations(records)
 
     def _get_request_tracker(self, request_id: str) -> LMCacheMPRequestTracker:
         assert request_id in self.request_trackers, (

@@ -79,7 +79,6 @@ class PrepareStoreOutput:
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
-    block_size: int
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
@@ -178,3 +177,7 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
+
+    def shutdown(self) -> None:
+        """Shutdown the manager and release any resources."""
+        return

@@ -65,7 +65,6 @@ class OpenAIServingRender:
         self,
         model_config: ModelConfig,
         renderer: BaseRenderer,
-        io_processor: Any,
         model_registry: OpenAIModelRegistry,
         *,
         request_logger: RequestLogger | None,
@@ -81,7 +80,6 @@ class OpenAIServingRender:
     ) -> None:
         self.model_config = model_config
         self.renderer = renderer
-        self.io_processor = io_processor
         self.model_registry = model_registry
         self.request_logger = request_logger
         self.chat_template = chat_template
@@ -550,7 +548,9 @@ class OpenAIServingRender:
 
         if reasoning_parser is not None:
             tokenizer = renderer.get_tokenizer()
-            request = reasoning_parser(tokenizer).adjust_request(request=request)
+            request = reasoning_parser(
+                tokenizer, model_config=self.model_config
+            ).adjust_request(request=request)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser

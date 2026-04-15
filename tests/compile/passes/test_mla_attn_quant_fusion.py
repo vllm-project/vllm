@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+DEVICE_TYPE = current_platform.device_type
 
 
 class MLAAttentionQuantPatternModel(torch.nn.Module):
@@ -356,7 +357,7 @@ def test_mla_attention_quant_pattern(
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
