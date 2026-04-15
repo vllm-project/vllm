@@ -87,7 +87,6 @@ class TritonAttentionMetadata:
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
 
-    # True iff every request has query_len == seq_len (no prior cached KV).
     all_pure_first_prefill: bool = False
 
     @staticmethod
@@ -209,9 +208,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # max_model_len will cause graph capture to be extremely
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
-        # Captured graphs must never take the prefill fast-path: the
-        # Python branch is frozen at capture time, but decodes at replay
-        # do have prior cached context.
         attn_metadata.all_pure_first_prefill = False
         return attn_metadata
 
