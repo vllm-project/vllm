@@ -34,6 +34,7 @@ logger = init_logger(__name__)
 MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
+    "mimo_v2_mtp",
     "glm4_moe_mtp",
     "glm4_moe_lite_mtp",
     "glm_ocr_mtp",
@@ -257,6 +258,46 @@ class SpeculativeConfig:
                     "num_hidden_layers": 0,
                     "n_predict": n_predict,
                     "architectures": ["MiMoMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2ProForCausalLM":
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_PRO_NUM_MTP_LAYERS,
+            )
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # num_nextn_predict_layers is absent from the MiMo-V2-Pro config.json;
+            # fall back to the known checkpoint value.
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            if n_predict is None:
+                n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["MiMoV2MTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "MiMoV2FlashForCausalLM":
+            from vllm.model_executor.models.mimo_v2_mtp import (
+                _MIMO_V2_FLASH_NUM_MTP_LAYERS,
+            )
+
+            hf_config.model_type = "mimo_v2_mtp"
+            # num_nextn_predict_layers is absent from the MiMo-V2-Flash config.json;
+            # fall back to the known checkpoint value.
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            if n_predict is None:
+                n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "num_nextn_predict_layers": n_predict,
+                    "architectures": ["MiMoV2MTPModel"],
                 }
             )
 
