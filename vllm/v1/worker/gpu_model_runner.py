@@ -4983,6 +4983,16 @@ class GPUModelRunner(
                 param.copy_(loaded_weight)
                 loaded_weights.add(name)
 
+        # After reload, zero LoRA stacked tensors whose GPU memory was
+        # discarded during level-2 sleep and now contains garbage.
+        # These tensors are not nn.Parameters or registered buffers,
+        # so they are not restored by the reload machinery above.
+        if self.lora_config:
+            from vllm.lora.layers.base import BaseLayerWithLoRA
+            for module in model.modules():
+                if isinstance(module, BaseLayerWithLoRA):
+                    module.zero_lora_state()
+
         # logging and validation
         counter_after_reloading = time.perf_counter()
         diff_seconds = counter_after_reloading - counter_before_reloading
