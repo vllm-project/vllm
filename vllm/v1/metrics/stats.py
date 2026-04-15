@@ -172,14 +172,15 @@ class SchedulerStats:
     """Stats associated with the scheduler."""
 
     num_running_reqs: int = 0
-    num_waiting_reqs: int = 0
+
+    num_waiting_reqs: int = 0  # length of the "waiting" request queue
+    num_skipped_waiting_reqs: int = 0  # length of the "skipped waiting" queue
 
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
-    encoder_cache_usage: float = 0.0
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
     connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -238,6 +239,40 @@ class FinishedRequestStats:
 
 
 @dataclass
+class PrefillStats:
+    """Breakdown of a scheduled prefill computation.
+
+    Fields:
+        num_prompt_tokens: Total number of tokens to be prefilled.
+        num_computed_tokens: Tokens to be prefilled locally (actual compute work).
+        num_cached_tokens: Tokens to be prefilled without actual compute work.
+        num_local_cached_tokens: Tokens to be prefilled from local prefix cache.
+        num_external_cached_tokens: Tokens to be prefilled from external KV transfer.
+    """
+
+    num_prompt_tokens: int = 0
+    num_computed_tokens: int = 0
+    num_cached_tokens: int = 0
+    num_local_cached_tokens: int = 0
+    num_external_cached_tokens: int = 0
+
+    def set(
+        self,
+        num_prompt_tokens: int,
+        num_local_cached_tokens: int,
+        num_external_cached_tokens: int,
+    ):
+        num_cached_tokens = num_local_cached_tokens + num_external_cached_tokens
+        assert num_cached_tokens <= num_prompt_tokens
+
+        self.num_prompt_tokens = num_prompt_tokens
+        self.num_computed_tokens = num_prompt_tokens - num_cached_tokens
+        self.num_cached_tokens = num_cached_tokens
+        self.num_local_cached_tokens = num_local_cached_tokens
+        self.num_external_cached_tokens = num_external_cached_tokens
+
+
+@dataclass
 class PromptTokenStats:
     """Breakdown of prompt tokens by source.
 
@@ -246,12 +281,11 @@ class PromptTokenStats:
         local_cache_hit: Tokens from local prefix cache.
         external_kv_transfer: Tokens from external KV transfer.
         cached_tokens: Tokens skipped during prefill (from scheduler).
-        recomputed_tokens: Cached tokens that were recomputed (see below).
         total: Total prompt tokens.
 
     Invariants:
-        computed + local_cache_hit + external_kv_transfer - recomputed_tokens = total
-        local_cache_hit + external_kv_transfer - recomputed_tokens = cached_tokens
+        computed + local_cache_hit + external_kv_transfer = total
+        local_cache_hit + external_kv_transfer = cached_tokens
     """
 
     ALL_SOURCES: tuple[str, ...] = (
@@ -264,29 +298,16 @@ class PromptTokenStats:
     local_cache_hit: int = 0
     external_kv_transfer: int = 0
     cached_tokens: int = 0
-    recomputed_tokens: int = 0
     total: int = 0
 
-    def update_from_output(
-        self,
-        num_cached_tokens: int,
-        num_external_computed_tokens: int,
-        prompt_len: int,
-    ) -> None:
+    def update_from_output(self, prefill_stats: PrefillStats) -> None:
         """Update stats from a prefill output."""
-        # When all tokens are cached, the scheduler reduces num_cached_tokens
-        # by 1 to force the model to recompute the last token, since the model
-        # needs at least one input token to run a forward pass.
-        recomputed = 1 if (num_cached_tokens + 1 == prompt_len) else 0
+        self.computed += prefill_stats.num_computed_tokens
+        self.cached_tokens += prefill_stats.num_cached_tokens
+        self.total += prefill_stats.num_prompt_tokens
 
-        self.computed += prompt_len - num_cached_tokens
-        self.external_kv_transfer += num_external_computed_tokens
-        self.local_cache_hit += (
-            num_cached_tokens + recomputed - num_external_computed_tokens
-        )
-        self.cached_tokens += num_cached_tokens
-        self.recomputed_tokens += recomputed
-        self.total += prompt_len
+        self.local_cache_hit += prefill_stats.num_local_cached_tokens
+        self.external_kv_transfer += prefill_stats.num_external_cached_tokens
 
     def get_by_source(self, source: str) -> int:
         """Get token count by source label."""
@@ -333,7 +354,6 @@ class IterationStats:
         output: "EngineCoreOutput",
         engine_core_timestamp: float,
         is_prefilling: bool,
-        prompt_len: int,
         req_stats: RequestStateStats,
         lora_states: "LoRARequestStates",
         lora_name: str | None,
@@ -342,11 +362,8 @@ class IterationStats:
 
         self.num_generation_tokens += num_new_generation_tokens
         if is_prefilling:
-            self.prompt_token_stats.update_from_output(
-                num_cached_tokens=output.num_cached_tokens,
-                num_external_computed_tokens=output.num_external_computed_tokens,
-                prompt_len=prompt_len,
-            )
+            if output.prefill_stats is not None:
+                self.prompt_token_stats.update_from_output(output.prefill_stats)
 
             first_token_latency = self._time_since(req_stats.arrival_time)
             self.time_to_first_tokens_iter.append(first_token_latency)

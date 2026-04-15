@@ -24,7 +24,7 @@ from vllm.platforms import current_platform
     ],
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
+    "vllm.utils.flashinfer.has_flashinfer",
     return_value=False,
 )
 @patch(
@@ -54,14 +54,29 @@ def test_select_default_backend_by_platform(
         # Set only the specified platform to True
         getattr(mock_platform, platform_method).return_value = True
 
+    with (
+        patch.object(current_platform, "is_cuda", return_value=False),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, platform_method, return_value=True),
+    ):
         moe_config = make_dummy_moe_config()
-        selected_backend = select_unquantized_moe_backend(
-            moe_config=moe_config,
-            use_ep=False,
-            use_dp=False,
+        selected_backend, expert_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
         )
 
         assert selected_backend == expected_backend
+        if expected_backend in [
+            UnquantizedMoeBackend.CPU,
+            UnquantizedMoeBackend.OOT,
+            UnquantizedMoeBackend.TPU,
+        ]:
+            assert expert_cls is None
+        else:
+            assert expert_cls is not None
 
 
 @patch(
@@ -88,91 +103,90 @@ def test_select_rocm_aiter_backend(mock_aiter_enabled, mock_has_flashinfer):
         mock_platform.is_out_of_tree.return_value = False
 
         moe_config = make_dummy_moe_config()
-        selected_backend = select_unquantized_moe_backend(
+        selected_backend, expert_cls = select_unquantized_moe_backend(
             moe_config=moe_config,
-            use_ep=False,
-            use_dp=False,
         )
 
         assert selected_backend == UnquantizedMoeBackend.AITER
+        assert expert_cls is not None
 
 
 @patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
-    return_value=True,
-)
-@patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.is_supported_config_trtllm_bf16",
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
     return_value=(True, None),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
-def test_select_cuda_flashinfer_trtllm_backend(
-    mock_has_flashinfer, mock_is_supported_trtllm, monkeypatch
-):
+def test_select_cuda_flashinfer_trtllm_backend(mock_is_supported_trtllm, monkeypatch):
     """Test CUDA backend selection when FlashInfer TRTLLM is available and enabled."""
-    with patch(
-        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
-    ) as mock_platform:
-        # Set as CUDA platform
-        mock_platform.is_cuda.return_value = True
-        mock_platform.is_rocm.return_value = False
-        mock_platform.is_cpu.return_value = False
-        mock_platform.is_xpu.return_value = False
-        mock_platform.is_tpu.return_value = False
-        mock_platform.is_out_of_tree.return_value = False
-
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, "has_device_capability", return_value=True),
+    ):
         monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
 
         moe_config = make_dummy_moe_config()
+        # TRTLLM requires EP and does not support DP
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.use_dp = False
 
-        selected_backend = select_unquantized_moe_backend(
-            moe_config=moe_config,
-            use_ep=True,
-            use_dp=False,
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
         )
 
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        assert experts_cls is not None
 
 
 @patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.has_flashinfer",
+    "vllm.utils.flashinfer.has_flashinfer",
     return_value=True,
 )
 @patch(
-    "vllm.model_executor.layers.fused_moe.oracle.unquantized.is_supported_config_trtllm_bf16",
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16Experts.is_supported_config",
     return_value=(False, None),
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe.FlashInferExperts.is_supported_config",
+    return_value=(True, None),
 )
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
 )
 def test_select_cuda_flashinfer_cutlass_backend(
-    mock_has_flashinfer, mock_is_supported_trtllm, monkeypatch
+    mock_has_flashinfer,
+    mock_is_supported_trtllm,
+    mock_is_supported_cutlass,
+    monkeypatch,
 ):
     """Test CUDA backend selection when FlashInfer TRTLLM is not available
     and FlashInfer CUTLASS is available."""
-    with patch(
-        "vllm.model_executor.layers.fused_moe.oracle.unquantized.current_platform"
-    ) as mock_platform:
-        # Set as CUDA platform with Hopper capability
-        mock_platform.is_cuda.return_value = True
-        mock_platform.is_rocm.return_value = False
-        mock_platform.is_cpu.return_value = False
-        mock_platform.is_xpu.return_value = False
-        mock_platform.is_tpu.return_value = False
-        mock_platform.is_out_of_tree.return_value = False
-        mock_platform.has_device_capability.return_value = True  # SM90+
-
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(current_platform, "has_device_capability", return_value=True),
+    ):
         # Enable FlashInfer via env var
         monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
 
         moe_config = make_dummy_moe_config()
+        # CUTLASS requires EP and does not support DP
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.use_dp = False
 
-        selected_backend = select_unquantized_moe_backend(
-            moe_config=moe_config,
-            use_ep=True,  # CUTLASS requires EP
-            use_dp=False,  # CUTLASS doesn't support DP
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
         )
 
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS
+        assert experts_cls is not None

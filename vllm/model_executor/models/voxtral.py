@@ -55,7 +55,11 @@ from vllm.multimodal.processing.processor import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.tokenizers.mistral import MistralTokenizer
-from vllm.transformers_utils.processors.voxtral import MistralCommonVoxtralProcessor
+from vllm.transformers_utils.processors.voxtral import (
+    MistralCommonFeatureExtractor,
+    MistralCommonVoxtralProcessor,
+)
+from vllm.utils.collection_utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsTranscription
 from .utils import init_vllm_registered_model, maybe_prefix
@@ -83,15 +87,19 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
 
         return tokenizer
 
+    def get_feature_extractor(self) -> MistralCommonFeatureExtractor:
+        return MistralCommonFeatureExtractor(
+            self.get_tokenizer().instruct.audio_encoder
+        )
+
     def get_hf_processor(self, **kwargs) -> MistralCommonVoxtralProcessor:
-        return self.ctx.init_processor(
-            MistralCommonVoxtralProcessor,
+        return MistralCommonVoxtralProcessor(
             tokenizer=self.get_tokenizer(),
-            **kwargs,
+            feature_extractor=self.get_feature_extractor(),
         )
 
     def get_data_parser(self):
-        feature_extractor = self.get_hf_processor().feature_extractor
+        feature_extractor = self.get_feature_extractor()
 
         return MultiModalDataParser(
             target_sr=feature_extractor.sampling_rate,
@@ -113,7 +121,7 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return self.ctx.model_config.max_model_len
 
     def get_max_audio_array_len(self) -> int:
-        feature_extractor = self.get_hf_processor().feature_extractor
+        feature_extractor = self.get_feature_extractor()
 
         return self.get_max_audio_tokens() * int(
             feature_extractor.sampling_rate // feature_extractor.frame_rate
@@ -152,7 +160,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
-        feature_extractor = self.info.get_hf_processor().feature_extractor
+        feature_extractor = self.info.get_feature_extractor()
 
         dummy_text = self.get_dummy_text(mm_counts)
         dummy_mm_data = (
@@ -208,7 +216,7 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
     ) -> None:
         # mistral_common's tokenizer's does not follow HF's placeholder norms
         # skip validation here
-        ...
+        pass
 
     def _call_hf_processor(
         self,
@@ -224,12 +232,19 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
             # MistralCommonVoxtralProcessor accepts "audio"
             mm_data["audio"] = audios
 
-        return super()._call_hf_processor(
+        outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
             mm_kwargs=mm_kwargs,
-            tok_kwargs=tok_kwargs,
+            # Avoid padding issue
+            tok_kwargs={**tok_kwargs, "return_tensors": None},
         )
+
+        # Missing batch dimension
+        if is_list_of(outputs["input_ids"], int):
+            outputs["input_ids"] = [outputs["input_ids"]]
+
+        return outputs
 
     def _get_prompt_updates(
         self,
@@ -472,8 +487,10 @@ class VoxtralForConditionalGeneration(
         This is used for estimating the amount of processing for this audio.
         """
         tokenizer = cached_tokenizer_from_config(model_config)
-        adapter = MistralCommonVoxtralProcessor(tokenizer)
-        return adapter.feature_extractor.get_num_audio_tokens(
+        feature_extractor = MistralCommonFeatureExtractor(
+            tokenizer.instruct.audio_encoder
+        )
+        return feature_extractor.get_num_audio_tokens(
             int(audio_duration_s * stt_config.sample_rate)
         )
 

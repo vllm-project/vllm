@@ -41,20 +41,24 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
+logger = init_logger(__name__)
+
 try:
     from mooncake.engine import TransferEngine
-except ImportError as e:
-    raise ImportError(
+except ImportError:
+    logger.warning(
         "Please install mooncake by following the instructions at "
         "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
         "to run VLLM with MooncakeTransferEngine."
-    ) from e
+    )
+    TransferEngine = None
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -63,8 +67,6 @@ if TYPE_CHECKING:
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -638,9 +640,16 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
+        if TransferEngine is None:
+            logger.error("Mooncake is not available")
+            raise RuntimeError("Mooncake is not available")
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
+        # may change the current CUDA device during engine.initialize().
+        self.device_id = torch.accelerator.current_device_index()
+        current_platform.set_device(self.device_id)
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
@@ -701,9 +710,12 @@ class MooncakeConnectorWorker:
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
             # Background threads for sending kvcaches to D.
+            # Each pool thread must be bound to the correct CUDA device
+            # because CUDA device selection is thread-local.
             self._sender_executor = ThreadPoolExecutor(
                 max_workers=self.num_sender_workers,
                 thread_name_prefix="vllm-mooncake-sender",
+                initializer=self._bind_sender_thread_device,
             )
             logger.debug(
                 "Mooncake Prefiller: use %d workers to send kvcaches",
@@ -721,9 +733,7 @@ class MooncakeConnectorWorker:
             # Start bootstrap server on global rank 0.
             if should_launch_bootstrap_server(vllm_config):
                 _, port = get_mooncake_bootstrap_addr(vllm_config)
-                self.bootstrap_server = MooncakeBootstrapServer(
-                    vllm_config, "0.0.0.0", port
-                )
+                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
                 self.bootstrap_server.start()
 
         if not self.is_kv_producer:
@@ -778,7 +788,9 @@ class MooncakeConnectorWorker:
             if self.sender_loop.is_running():
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
                 self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config):
+            if should_launch_bootstrap_server(self.vllm_config) and hasattr(
+                self, "bootstrap_server"
+            ):
                 self.bootstrap_server.shutdown()
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
@@ -1188,6 +1200,12 @@ class MooncakeConnectorWorker:
             )
 
         return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
+
+    def _bind_sender_thread_device(self) -> None:
+        """ThreadPoolExecutor initializer — binds each pool thread to the
+        correct CUDA device.  CUDA device selection is thread-local, so
+        without this, NVLink transfers fail for TP ranks > 0."""
+        current_platform.set_device(self.device_id)
 
     def _send_blocks(
         self,

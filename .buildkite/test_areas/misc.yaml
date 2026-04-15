@@ -19,6 +19,7 @@ steps:
 
 - label: V1 Sample + Logits
   timeout_in_minutes: 30
+  device: h200_18gb
   source_file_dependencies:
     - vllm/
     - tests/v1/sample
@@ -86,6 +87,7 @@ steps:
 
 - label: Regression
   timeout_in_minutes: 20
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -174,6 +176,7 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/tokenizers_
+  - tests/reasoning
   - tests/tool_parsers
   - tests/transformers_utils
   - tests/config
@@ -187,6 +190,7 @@ steps:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
+  - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py --ignore=reasoning/test_gemma4_reasoning_parser.py
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
@@ -205,6 +209,22 @@ steps:
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
+
+- label: Batch Invariance (B200)
+  timeout_in_minutes: 30
+  device: b200
+  source_file_dependencies:
+    - vllm/v1/attention
+    - vllm/model_executor/layers
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
+    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
+    - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
+    - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
   
 - label: Acceptance Length Test (Large Models) # optional
   timeout_in_minutes: 25

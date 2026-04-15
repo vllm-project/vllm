@@ -6,7 +6,6 @@ import os
 import random
 import threading
 from collections.abc import Callable, Collection
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -39,6 +38,8 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "int8_per_token_head": torch.int8,
+    "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
 }
@@ -61,6 +62,15 @@ MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
 }
 
 T = TypeVar("T")
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return kv_cache_dtype.startswith("fp8") or kv_cache_dtype.endswith("per_token_head")
+
+
+def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+    """Return True if *kv_cache_dtype* needs per-token-head scales."""
+    return kv_cache_dtype.endswith("per_token_head")
 
 
 def is_strictly_contiguous(t: torch.Tensor) -> bool:
@@ -356,8 +366,9 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
+        from vllm.platforms import current_platform
+
+        current_platform.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
@@ -590,49 +601,6 @@ def aux_stream() -> torch.cuda.Stream | None:
     return _aux_stream
 
 
-@lru_cache(maxsize=8)
-def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
-    # Note: cuda_visible_devices is not used, but we keep it as an argument for
-    # LRU Cache purposes.
-
-    # Code below is based on
-    # https://github.com/pytorch/pytorch/blob/
-    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
-    # torch/cuda/__init__.py#L831C1-L831C17
-    import torch.cuda
-    import torch.version
-
-    from vllm.platforms import current_platform
-
-    if not torch.cuda._is_compiled():
-        return 0
-    if current_platform.is_rocm():
-        # ROCm uses amdsmi instead of nvml for stateless device count
-        # This requires a sufficiently modern version of Torch 2.4.0
-        raw_count = (
-            torch.cuda._device_count_amdsmi()
-            if (hasattr(torch.cuda, "_device_count_amdsmi"))
-            else -1
-        )
-    else:
-        raw_count = torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
-    return r
-
-
-def cuda_device_count_stateless() -> int:
-    """Get number of CUDA devices, caching based on the value of
-    CUDA_VISIBLE_DEVICES at the time of call.
-
-    This should be used instead of torch.accelerator.device_count()
-    unless CUDA_VISIBLE_DEVICES has already been set to the desired
-    value."""
-
-    # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
@@ -742,37 +710,62 @@ def is_torch_equal(target: str) -> bool:
 
 HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
 
+# Allow toggling LayerName usage via environment variable.
+# Defaults to True on torch >= 2.11, False otherwise.
+# Set VLLM_USE_LAYERNAME=0 to disable even on torch >= 2.11.
+_USE_LAYERNAME = HAS_OPAQUE_TYPE and envs.VLLM_USE_LAYERNAME
+
 if HAS_OPAQUE_TYPE:
     from torch._opaque_base import OpaqueBase
 else:
     OpaqueBase = object  # type: ignore[misc, assignment]
 
 
-class ModuleName(OpaqueBase):  # type: ignore[misc]
+class LayerName(OpaqueBase):  # type: ignore[misc]
     """Wraps a module name string for use as a torch opaque type.
 
     When torch >= 2.11, this is registered as a hoisted value-type opaque
     object so that torch.compile lifts it as a graph input instead of baking
-    it as a constant.  This avoids per-layer recompilation for MOE ops.
+    it as a constant.  This avoids per-layer recompilation for custom ops
+    that accept layer name strings (attention, MOE, KV cache, etc.).
     """
 
     def __init__(self, value: str):
         self.value = value
 
     def __eq__(self, other):
-        return isinstance(other, ModuleName) and self.value == other.value
+        return isinstance(other, LayerName) and self.value == other.value
 
     def __hash__(self):
         return hash(self.value)
 
     def __fx_repr__(self):
-        return (f"ModuleName({self.value!r})", {ModuleName})
+        return (f"LayerName({self.value!r})", {"LayerName": LayerName})
 
 
 if HAS_OPAQUE_TYPE:
     from torch._library.opaque_object import register_opaque_type
 
-    register_opaque_type(ModuleName, typ="value", hoist=True)
+    register_opaque_type(LayerName, typ="value", hoist=True)
+
+# On torch >= 2.11 (with VLLM_USE_LAYERNAME enabled), custom op
+# layer_name parameters use LayerName; otherwise they remain plain str.
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    LayerNameType: TypeAlias = str | LayerName
+else:
+    LayerNameType = LayerName if _USE_LAYERNAME else str
+
+
+def _resolve_layer_name(layer_name: str | LayerName) -> str:
+    """Unwrap a LayerName to str, or return str unchanged."""
+    return layer_name.value if isinstance(layer_name, LayerName) else layer_name
+
+
+def _encode_layer_name(layer_name: str) -> str | LayerName:
+    """Wrap a str layer name as LayerName when enabled."""
+    return LayerName(layer_name) if _USE_LAYERNAME else layer_name
 
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform

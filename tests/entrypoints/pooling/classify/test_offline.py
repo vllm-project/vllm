@@ -105,13 +105,16 @@ def test_pooling_params(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_score_api(llm: LLM):
-    err_msg = "Score API is only enabled for num_labels == 1."
+    err_msg = "Scoring API is only enabled for num_labels == 1."
     with pytest.raises(ValueError, match=err_msg):
         llm.score("ping", "pong", use_tqdm=False)
 
 
-@pytest.mark.parametrize("task", ["embed", "token_embed"])
+@pytest.mark.parametrize("task", ["embed", "token_embed", "plugin"])
 def test_unsupported_tasks(llm: LLM, task: PoolingTask):
-    err_msg = "Embedding API is not supported by this model.+"
+    if task == "plugin":
+        err_msg = "No IOProcessor plugin installed."
+    else:
+        err_msg = "Embedding API is not supported by this model.+"
     with pytest.raises(ValueError, match=err_msg):
         llm.encode(prompt, pooling_task=task, use_tqdm=False)
