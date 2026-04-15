@@ -1839,6 +1839,61 @@ def test_store_completion_emits_cpu_block_stored_event() -> None:
     assert len(stored[0].block_hashes) == num_blocks
 
 
+def test_eager_multi_request_emits_per_request_block_stored() -> None:
+    """Eager mode with two requests in one step emits separate BlockStored
+    events per request, not one merged event."""
+    fix = make_scheduler_with_events(num_cpu_blocks=16, num_gpu_blocks=32)
+    sched = fix.scheduler
+
+    # Create two requests with different block counts
+    req_a = make_request(num_blocks=2)
+    req_b = make_request(num_blocks=3)
+
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    kv_b = _alloc_and_register(fix, req_b, 3)
+    ids_a = kv_a.get_block_ids()
+    ids_b = kv_b.get_block_ids()
+
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched.update_state_after_alloc(req_b, kv_b, num_external_tokens=0)
+
+    # Schedule both requests in one step — eager mode merges them
+    so = make_scheduler_output(
+        {
+            req_a.request_id: 2 * BLOCK_SIZE,
+            req_b.request_id: 3 * BLOCK_SIZE,
+        },
+        new_reqs={
+            req_a.request_id: ids_a,
+            req_b.request_id: ids_b,
+        },
+    )
+    meta = sched.build_connector_meta(so)
+    assert meta.store_event != INVALID_JOB_ID
+
+    # Complete the (merged) store
+    simulate_store_completion(sched, meta.store_event)
+
+    events = list(sched.take_events())
+    stored = [e for e in events if isinstance(e, BlockStored)]
+
+    # Should get two separate events, one per request
+    assert len(stored) == 2, (
+        f"Expected 2 per-request BlockStored events, got {len(stored)}"
+    )
+
+    # One event should have 2 block hashes (req_a), the other 3 (req_b)
+    hash_counts = sorted(len(e.block_hashes) for e in stored)
+    assert hash_counts == [2, 3], (
+        f"Expected block hash counts [2, 3], got {hash_counts}"
+    )
+
+    # All events should have medium='CPU'
+    for event in stored:
+        assert event.medium == "CPU"
+        assert event.block_size == BLOCK_SIZE
+
+
 def test_cpu_eviction_emits_block_removed_with_cpu_medium() -> None:
     """Evicting CPU blocks emits BlockRemoved with medium='CPU'."""
     # 3 CPU blocks total: fill with 2, then store 3 more to force eviction.
