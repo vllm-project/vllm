@@ -154,21 +154,19 @@ def _xpu_mxfp4_quantize_impl(
         f"last dimension {x.shape[-1]} must be divisible by group_size "
         f"{MXFP4_BLOCK_SIZE}"
     )
-    assert x.stride(-1) == 1, "input groups must be contiguous"
+    assert x.is_contiguous(), "input groups must be contiguous"
 
     M, N = x.shape
 
     # Packed FP4 output: two nibbles per byte
-    out_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
-    out_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
 
-    torch.ops._C.per_token_group_quant_mxfp4(
-        x.contiguous(), out_q, out_s, MXFP4_BLOCK_SIZE, eps
-    )
+    torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE, eps)
 
-    out_q = out_q.view(torch.float4_e2m1fn_x2)
-    out_s = out_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
-    return out_q, out_s
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
 
 
 def _xpu_mxfp4_quantize_fake(
@@ -178,12 +176,12 @@ def _xpu_mxfp4_quantize_fake(
     M, N = x.shape
 
     # Packed FP4 output: two nibbles per byte
-    out_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
-    out_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
 
-    out_q = out_q.view(torch.float4_e2m1fn_x2)
-    out_s = out_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
-    return out_q, out_s
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
 
 
 # Global flag to ensure ops are registered only once
