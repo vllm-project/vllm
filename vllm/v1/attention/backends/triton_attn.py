@@ -29,13 +29,12 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.backends.fa_utils import (
+    flash_attn_varlen_func,
+    is_flash_attn_varlen_func_available,
+)
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
-
-_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
-if _HAS_FLASH_ATTN:
-    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
@@ -48,6 +47,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+_HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 
 
 # constants
@@ -581,12 +582,11 @@ class TritonAttentionImpl(AttentionImpl):
 
         if (
             self._is_per_token_head_quant
-            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+            and attn_metadata.all_pure_first_prefill
             and self.alibi_slopes is None
             and not self.use_alibi_sqrt
             and self.sinks is None
-            and self.logits_soft_cap == 0
-            and self.sliding_window == (-1, -1)
+            and not self.logits_soft_cap
             and attn_metadata.mm_prefix_range_tensor is None
             and output_scale is None
             and self.kv_sharing_target_layer_name is None
@@ -604,13 +604,11 @@ class TritonAttentionImpl(AttentionImpl):
                     max_seqlen_k=attn_metadata.max_query_len,
                     softmax_scale=self.scale,
                     causal=True,
+                    window_size=self.sliding_window,
                 )
                 if isinstance(fa_out, tuple):
                     fa_out = fa_out[0]
-                out_view = output[:num_actual_tokens].view(
-                    num_actual_tokens, self.num_heads, self.head_size
-                )
-                out_view.copy_(fa_out)
+                output[:num_actual_tokens].copy_(fa_out)
             else:
                 context_attention_fwd(
                     q=query[:num_actual_tokens],
