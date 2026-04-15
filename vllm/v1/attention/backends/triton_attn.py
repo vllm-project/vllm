@@ -584,9 +584,12 @@ class TritonAttentionImpl(AttentionImpl):
             and self.alibi_slopes is None
             and not self.use_alibi_sqrt
             and self.sinks is None
-            and self.logits_soft_cap == 0
+            and not self.logits_soft_cap
             and attn_metadata.mm_prefix_range_tensor is None
             and output_scale is None
+            and self.kv_sharing_target_layer_name is None
+            and key is not None
+            and value is not None
         ):
             context_attention_fwd(
                 q=query[:num_actual_tokens],
