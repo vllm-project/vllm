@@ -44,9 +44,7 @@ def compute_kv_seq_mask(
             )
             is_valid = range_start < range_end
             q_in_range = (
-                (query_abs_pos >= range_start)
-                & (query_abs_pos <= range_end)
-                & is_valid
+                (query_abs_pos >= range_start) & (query_abs_pos <= range_end) & is_valid
             )
             k_in_range = (
                 (seq_offset[None, :] >= range_start)

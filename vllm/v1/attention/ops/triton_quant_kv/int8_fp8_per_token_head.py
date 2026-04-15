@@ -16,7 +16,7 @@ storage dtype (which Triton infers from the cache pointer).
 Symmetric quantization::
 
     scale = absmax / QUANT_MAX
-    q     = clamp(round(x / scale), QUANT_MIN, QUANT_MAX)
+    q = clamp(round(x / scale), QUANT_MIN, QUANT_MAX)
     x_hat = q * scale
 """
 
