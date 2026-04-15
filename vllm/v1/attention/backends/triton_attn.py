@@ -556,7 +556,7 @@ class TritonAttentionImpl(AttentionImpl):
                 attn_metadata,
                 layer,
             )
-            
+
         if (
             self._is_per_token_head_quant
             and attn_metadata.max_query_len == attn_metadata.max_seq_len
