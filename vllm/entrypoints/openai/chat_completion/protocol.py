@@ -58,7 +58,7 @@ class ChatMessage(OpenAIBaseModel):
     annotations: OpenAIAnnotation | None = None
     audio: OpenAIChatCompletionAudio | None = None
     function_call: FunctionCall | None = None
-    tool_calls: list[ToolCall] = Field(default_factory=list)
+    tool_calls: list[ToolCall] | None = None
 
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
