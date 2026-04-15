@@ -36,13 +36,12 @@ from transformers import BatchFeature, PretrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs import MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -75,12 +74,14 @@ from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 # NOTE lang support is based on what is written here:
 # https://huggingface.co/ibm-granite/granite-speech-3.3-2b
+# https://huggingface.co/ibm-granite/granite-4.0-1b-speech
 # Though this may vary from model to model, and also many langs
 # work pretty well with zero shot.
 ISO639_1_SUPPORTED_LANGS = {
     "en": "English",
     "fr": "French",
     "de": "German",
+    "ja": "Japanese",
     "pt": "Portuguese",
     "es": "Spanish",
 }

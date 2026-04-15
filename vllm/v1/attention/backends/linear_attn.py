@@ -27,6 +27,10 @@ class LinearAttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["LinearAttentionMetadataBuilder"]:
         return LinearAttentionMetadataBuilder
 
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return True
+
 
 @dataclass
 class LinearAttentionMetadata:

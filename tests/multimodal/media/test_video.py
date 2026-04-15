@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import io
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
+import pybase64
 import pytest
 from PIL import Image
 
@@ -235,3 +237,105 @@ def test_video_media_io_backend_env_var_fallback(monkeypatch: pytest.MonkeyPatch
         frames_missing, metadata_missing = videoio_missing.load_bytes(b"test")
         np.testing.assert_array_equal(frames_missing, FAKE_OUTPUT_2)
         assert metadata_missing["video_backend"] == "test_video_backend_override_2"
+
+
+def _make_jpeg_b64_frames(n: int, width: int = 8, height: int = 8) -> list[str]:
+    """Return *n* tiny base64-encoded JPEG frames."""
+    frames: list[str] = []
+    for i in range(n):
+        img = Image.new("RGB", (width, height), color=(i % 256, 0, 0))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        frames.append(pybase64.b64encode(buf.getvalue()).decode("ascii"))
+    return frames
+
+
+def test_load_base64_jpeg_returns_metadata():
+    """Regression test: load_base64 with video/jpeg must return metadata.
+
+    Previously, base64 JPEG frame sequences returned an empty dict for
+    metadata, which broke downstream consumers that rely on fields like
+    total_num_frames and fps. See PR #37301.
+    """
+
+    num_test_frames = 3
+
+    b64_frames = _make_jpeg_b64_frames(num_test_frames)
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=num_test_frames)
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    # Frames array shape: (num_frames, H, W, 3)
+    assert frames.shape[0] == num_test_frames
+
+    # All required metadata keys must be present
+    required_keys = {
+        "total_num_frames",
+        "fps",
+        "duration",
+        "video_backend",
+        "frames_indices",
+        "do_sample_frames",
+    }
+    assert required_keys.issubset(metadata.keys()), (
+        f"Missing metadata keys: {required_keys - metadata.keys()}"
+    )
+
+    assert metadata["total_num_frames"] == num_test_frames
+    assert metadata["video_backend"] == "jpeg_sequence"
+    assert metadata["frames_indices"] == list(range(num_test_frames))
+    assert metadata["do_sample_frames"] is False
+    # Default fps=1 → duration == num_frames
+    assert metadata["fps"] == 1.0
+    assert metadata["duration"] == float(num_test_frames)
+
+
+def test_load_base64_jpeg_enforces_num_frames_limit():
+    """Frames beyond num_frames must be truncated in the video/jpeg path.
+
+    Without the limit an attacker can send thousands of base64 JPEG frames
+    in a single request and exhaust server memory (OOM).
+    """
+    num_frames_limit = 4
+    sent_frames = 20
+
+    b64_frames = _make_jpeg_b64_frames(sent_frames)
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=num_frames_limit)
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    assert frames.shape[0] == num_frames_limit
+    assert metadata["total_num_frames"] == num_frames_limit
+    assert metadata["frames_indices"] == list(range(num_frames_limit))
+
+
+def test_load_base64_jpeg_no_limit_when_num_frames_negative():
+    """When num_frames is -1, all frames should be loaded without truncation."""
+    sent_frames = 10
+
+    b64_frames = _make_jpeg_b64_frames(sent_frames)
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=-1)
+    frames, metadata = videoio.load_base64("video/jpeg", data)
+
+    assert frames.shape[0] == sent_frames
+    assert metadata["total_num_frames"] == sent_frames
+    assert metadata["frames_indices"] == list(range(sent_frames))
+
+
+def test_load_base64_jpeg_raises_on_zero_num_frames():
+    """num_frames=0 is invalid and should raise ValueError."""
+    b64_frames = _make_jpeg_b64_frames(3)
+    data = ",".join(b64_frames)
+
+    imageio = ImageMediaIO()
+    videoio = VideoMediaIO(imageio, num_frames=0)
+
+    with pytest.raises(ValueError, match="num_frames must be greater than 0 or -1"):
+        videoio.load_base64("video/jpeg", data)

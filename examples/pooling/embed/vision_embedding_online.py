@@ -7,10 +7,10 @@ Refer to each `run_*` function for the command to run the server for that model.
 """
 
 import argparse
-import base64
 import io
 from typing import Literal
 
+import pybase64 as base64
 from openai import OpenAI
 from openai._types import NOT_GIVEN, NotGiven
 from openai.types.chat import ChatCompletionMessageParam
