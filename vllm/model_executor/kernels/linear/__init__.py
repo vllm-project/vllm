@@ -71,6 +71,9 @@ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.xpu import (
+    XPUMxFp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4 import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
@@ -241,6 +244,10 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         EmulationMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        EmulationMxfp8LinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUMxFp8LinearKernel,
         EmulationMxfp8LinearKernel,
     ],
 }
@@ -594,7 +601,13 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
 
     # Env-var overrides.
     force_kernel: type[NvFp4LinearKernel] | None = None
-    if envs.VLLM_USE_FBGEMM:
+    if envs.VLLM_BATCH_INVARIANT:
+        logger.info_once(
+            "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+            "emulation backend for deterministic execution."
+        )
+        force_kernel = EmulationNvFp4LinearKernel
+    elif envs.VLLM_USE_FBGEMM:
         force_kernel = FbgemmNvFp4LinearKernel
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
         force_kernel = EmulationNvFp4LinearKernel
@@ -742,6 +755,7 @@ __all__ = [
     "Mxfp8LinearLayerConfig",
     "FlashInferCutlassMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
+    "XPUMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",

@@ -297,7 +297,7 @@ def test_multi_block_correctness():
 
 
 def test_cold_decode_no_cache_hit_metrics():
-    """Cold decode: external_kv_transfer==P, local_cache_hit==0."""
+    """Cold decode: external_kv_transfer==P, local_cache_hit==0, local_compute==0."""
     n0 = _fetch_nixl_bytes(DECODE_HOST, DECODE_PORT)
     m0 = _fetch_decode_metrics()
     proxy_text, P = _complete(proxy_client, MEDIUM_PROMPT)
@@ -312,8 +312,8 @@ def test_cold_decode_no_cache_hit_metrics():
     assert d["external_kv_transfer"] == P, (
         f"expected external_kv_transfer={P}, got {d['external_kv_transfer']}"
     )
-    assert d["local_compute"] == 1, (
-        f"expected local_compute=1, got {d['local_compute']}"
+    assert d["local_compute"] == 0, (
+        f"expected local_compute=0, got {d['local_compute']}"
     )
     assert d["local_cache_hit"] == 0, (
         f"expected local_cache_hit=0, got {d['local_cache_hit']}"
@@ -348,8 +348,8 @@ def test_full_decode_gpu_cache_hit_metrics():
         f"expected external_kv_transfer={expected_nixl}, "
         f"got {d['external_kv_transfer']}"
     )
-    assert d["local_compute"] == 1, (
-        f"expected local_compute=1 (recomputed last token), got {d['local_compute']}"
+    assert d["local_compute"] == 0, (
+        f"expected local_compute=0, got {d['local_compute']}"
     )
     assert n1 - n0 > 0, (
         f"expected nixl_bytes_transferred to increase (partial NIXL for "
@@ -386,8 +386,8 @@ def test_partial_decode_gpu_cache_hit_metrics():
     assert d["local_cache_hit"] == cached, (
         f"expected local_cache_hit={cached}, got {d['local_cache_hit']}"
     )
-    assert d["local_compute"] == 1, (
-        f"expected local_compute=1 (recomputed last token), got {d['local_compute']}"
+    assert d["local_compute"] == 0, (
+        f"expected local_compute=0, got {d['local_compute']}"
     )
     assert n1 - n0 > 0, (
         f"expected nixl_bytes_transferred to increase (NIXL for uncached "
