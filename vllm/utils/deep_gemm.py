@@ -203,6 +203,9 @@ def _lazy_init() -> None:
         os.environ[DEEP_GEMM_JIT_CACHE_ENV_NAME] = os.path.join(
             envs.VLLM_CACHE_ROOT, "deep_gemm"
         )
+    # Directory must exist before DeepGEMM's C++ init, otherwise it
+    # silently falls back to in-memory-only JIT cache.
+    os.makedirs(os.environ[DEEP_GEMM_JIT_CACHE_ENV_NAME], exist_ok=True)
 
     _dg = _import_deep_gemm()
     if _dg is None:
