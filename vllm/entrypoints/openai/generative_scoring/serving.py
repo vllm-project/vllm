@@ -480,12 +480,10 @@ class OpenAIServingGenerativeScoring(OpenAIServing):
         self,
         headers: Mapping[str, str],
     ) -> Mapping[str, str] | None:
-        """Extract trace headers from request headers."""
-        if not contains_trace_headers(headers):
-            return None
+        if await self.engine_client.is_tracing_enabled():
+            return extract_trace_headers(headers)
 
-        if not await self.engine_client.is_tracing_enabled():
+        if contains_trace_headers(headers):
             log_tracing_disabled_warning()
-            return None
 
-        return extract_trace_headers(headers)
+        return None

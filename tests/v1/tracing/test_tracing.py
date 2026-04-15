@@ -5,9 +5,10 @@
 import pytest
 import time
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
+from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState, use_span
 
 from vllm import LLM, SamplingParams
-from vllm.tracing import SpanAttributes
+from vllm.tracing import SpanAttributes, extract_trace_headers
 
 # Import shared fixtures from the tracing conftest
 from tests.tracing.conftest import (  # noqa: F401
@@ -85,3 +86,26 @@ def test_traces(
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE) > 0
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN) > 0
         assert attributes.get(SpanAttributes.GEN_AI_LATENCY_E2E) > 0
+
+
+def test_forwarded_trace_headers_use_current_span_context():
+    current_span_context = SpanContext(
+        trace_id=int("4bf92f3577b34da6a3ce929d0e0e4736", 16),
+        span_id=int("00f067aa0ba902b7", 16),
+        is_remote=False,
+        trace_flags=TraceFlags(0x01),
+        trace_state=TraceState(),
+    )
+    incoming_headers = {
+        "traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01",
+    }
+
+    with use_span(
+        NonRecordingSpan(current_span_context),
+        end_on_exit=False,
+    ):
+        trace_headers = extract_trace_headers(incoming_headers)
+
+    assert trace_headers == {
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    }
