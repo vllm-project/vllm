@@ -141,13 +141,6 @@ def matmul_nvfp4_kernel_persistent(
         block_shape=[1, SCALE_N_TILES, SCALE_K_TILES, 2, 256],
         padding_option="zero",
     )
-    c_desc = tl.make_tensor_descriptor(
-        c_ptr,
-        shape=[M, N],
-        strides=[stride_cm, stride_cn],
-        block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_N],
-        padding_option="zero",
-    )
 
     alpha = tl.load(alpha_ptr).to(tl.float32)
 
@@ -161,13 +154,11 @@ def matmul_nvfp4_kernel_persistent(
         # Scale offsets use block-aligned indices (scale tensors are pre-padded
         # to multiples of 128 rows and SCALE_K_TILE columns, so no masking).
         accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-        for ki in range(k_tiles):
+        for ki in tl.range(k_tiles, warp_specialize=True):
             k_start_bytes = _maybe_widen(ki, A_LARGE or B_LARGE) * K_BYTES
-            a_m_start = start_m
-            b_n_start = start_n
 
-            a = a_desc.load([a_m_start, k_start_bytes])
-            b = b_desc.load([b_n_start, k_start_bytes]).T
+            a = a_desc.load([start_m, k_start_bytes])
+            b = b_desc.load([start_n, k_start_bytes]).T
 
             scale_tile_k = _maybe_widen(ki, A_LARGE or B_LARGE) * SCALE_K_TILES
             scale_tile_m = _maybe_widen(pid_m, A_LARGE)
@@ -203,8 +194,15 @@ def matmul_nvfp4_kernel_persistent(
             bias_mask = bias_offsets < N
             bias_vec = tl.load(bias_ptr + bias_offsets, mask=bias_mask, other=0.0)
             accumulator += bias_vec[None, :].to(tl.float32)
+
+        offs_cm = start_m + tl.arange(0, BLOCK_SIZE_M)
+        offs_cn = start_n + tl.arange(0, BLOCK_SIZE_N)
+
+        c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+        c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+
         c = accumulator.to(c_ptr.dtype.element_ty)
-        c_desc.store([start_m, start_n], c)
+        tl.store(c_ptrs, c, mask=c_mask)
 
 
 def matmul_nvfp4_persistent(
