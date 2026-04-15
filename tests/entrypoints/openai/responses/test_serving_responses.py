@@ -27,7 +27,9 @@ from openai.types.responses.tool import (
 import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaFunctionCall,
     DeltaMessage,
+    DeltaToolCall,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -928,3 +930,197 @@ class TestStreamingReasoningToContentTransition:
         ]
         assert len(item_done_events) == 1
         assert isinstance(item_done_events[0].item, ResponseReasoningItem)
+
+
+class TestAutoToolStreaming:
+    @staticmethod
+    async def _collect_events(delta_sequence: list[DeltaMessage]):
+        serving = _make_serving_instance_with_reasoning()
+        _mock_parser_with_reasoning(serving, delta_sequence)
+
+        contexts = [
+            _make_simple_context_with_output("chunk", [i])
+            for i in range(len(delta_sequence))
+        ]
+
+        async def result_generator():
+            for ctx in contexts:
+                yield ctx
+
+        request = ResponsesRequest(
+            input="hi",
+            tools=[
+                {
+                    "type": "function",
+                    "name": "get_weather",
+                    "description": "Get weather.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"location": {"type": "string"}},
+                        "required": ["location"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            tool_choice="auto",
+            stream=True,
+        )
+        sampling_params = SamplingParams(max_tokens=64)
+        metadata = RequestResponseMetadata(request_id="req")
+        _identity_increment._counter = 0  # type: ignore
+
+        events = []
+        async for event in serving._process_simple_streaming_events(
+            request=request,
+            sampling_params=sampling_params,
+            result_generator=result_generator(),
+            context=SimpleContext(),
+            model_name="test-model",
+            tokenizer=MagicMock(),
+            request_metadata=metadata,
+            created_time=0,
+            _increment_sequence_number_and_return=_identity_increment,
+        ):
+            events.append(event)
+        return events
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_auto_multi_tool_streaming_opens_one_item_per_tool(self, monkeypatch):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+        delta_sequence = [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_vienna",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments="",
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(
+                            arguments='{"location":"Vienna"}',
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_berlin",
+                        type="function",
+                        index=1,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments='{"location":"Berlin"}',
+                        ),
+                    )
+                ]
+            ),
+        ]
+        events = await self._collect_events(delta_sequence)
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 2
+        assert [event.item.name for event in function_items] == [
+            "get_weather",
+            "get_weather",
+        ]
+        assert [event.output_index for event in function_items] == [0, 1]
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+
+        argument_done = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.done"
+        ]
+        assert [event.arguments for event in argument_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in argument_done] == [0, 1]
+
+        function_done = [
+            event
+            for event in events
+            if event.type == "response.output_item.done"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert [event.item.arguments for event in function_done] == [
+            '{"location":"Vienna"}',
+            '{"location":"Berlin"}',
+        ]
+        assert [event.output_index for event in function_done] == [0, 1]
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_auto_tool_choice_first_delta_tool_call_does_not_duplicate_item(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+        delta_sequence = [
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_test",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments="",
+                        ),
+                    )
+                ]
+            ),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        index=0,
+                        function=DeltaFunctionCall(
+                            arguments='{"location":"Berlin"}',
+                        ),
+                    )
+                ]
+            ),
+        ]
+        events = await self._collect_events(delta_sequence)
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 1
+        assert function_items[0].item.name == "get_weather"
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert "".join(argument_deltas) == '{"location":"Berlin"}'
