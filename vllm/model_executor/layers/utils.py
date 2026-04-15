@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
-import functools
 from collections.abc import Callable
 
 import torch
@@ -90,18 +89,61 @@ def apply_penalties(
     return logits
 
 
-@torch._dynamo.assume_constant_result
-@functools.cache
-def _tinygemm_bf16_available() -> bool:
-    """Check if FlashInfer's tinygemm_bf16 kernel is available (SM90+)."""
-    from vllm.utils.flashinfer import has_flashinfer
-    if not has_flashinfer():
-        return False
+_TINYGEMM_AVAILABLE = False
+
+
+def _init_tinygemm():
+    """Eagerly check tinygemm availability and JIT-compile the custom op.
+
+    Must run before torch.compile so that:
+    1. _TINYGEMM_AVAILABLE is a plain bool (dynamo-safe guard)
+    2. flashinfer::tinygemm2_op is registered (dynamo-safe custom op call)
+    """
+    global _TINYGEMM_AVAILABLE
     try:
+        from vllm.utils.flashinfer import has_flashinfer
+        if not has_flashinfer():
+            return
         capability = current_platform.get_device_capability()
-        return capability is not None and capability[0] >= 9
+        if capability is None or capability[0] < 9:
+            return
+        from flashinfer.gemm.routergemm import get_tinygemm2_module
+        get_tinygemm2_module()
+        _TINYGEMM_AVAILABLE = True
     except Exception:
-        return False
+        pass
+
+
+_init_tinygemm()
+
+
+def _tinygemm_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    num_tokens = x.numel() // x.shape[-1]
+    if (
+        num_tokens <= 8
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and weight.shape[0] % 16 == 0
+        and x.is_contiguous()
+        and weight.is_contiguous()
+        and (bias is None or bias.dtype == torch.bfloat16)
+    ):
+        if bias is None:
+            bias = torch.zeros(
+                weight.shape[0], dtype=torch.bfloat16, device=x.device
+            )
+        out = x.new_empty((*x.shape[:-1], weight.shape[0]))
+        torch.ops.flashinfer.tinygemm2_op(
+            x.view(num_tokens, -1), weight, bias,
+            out.view(num_tokens, -1), False,
+        )
+        return out
+    return torch.nn.functional.linear(x, weight, bias)
 
 
 def default_unquantized_gemm(
@@ -110,24 +152,6 @@ def default_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
-    num_tokens = x.numel() // x.shape[-1]
-    if (
-        _tinygemm_bf16_available()
-        and num_tokens <= 8
-        and x.dtype == torch.bfloat16
-        and weight.dtype == torch.bfloat16
-        and weight.shape[0] % 16 == 0
-        and x.is_contiguous()
-        and weight.is_contiguous()
-        and (bias is None or bias.dtype == torch.bfloat16)
-    ):
-        from vllm.utils.flashinfer import flashinfer_tinygemm_bf16
-        out = x.new_empty((*x.shape[:-1], weight.shape[0]))
-        flashinfer_tinygemm_bf16(
-            x.view(num_tokens, -1), weight,
-            out.view(num_tokens, -1), bias=bias,
-        )
-        return out
     return torch.nn.functional.linear(x, weight, bias)
 
 
@@ -337,5 +361,7 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
+    elif _TINYGEMM_AVAILABLE:
+        return _tinygemm_unquantized_gemm
     else:
         return default_unquantized_gemm
