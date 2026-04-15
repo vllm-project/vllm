@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm import envs
 from vllm._custom_ops import (
     cutlass_scaled_fp4_mm,
     scaled_fp4_quant,
@@ -71,6 +72,7 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight_scale,
             layer.alpha,
             output_dtype,
+            batch_invariant=envs.VLLM_BATCH_INVARIANT,
         )
 
         out = slice_nvfp4_output(out, output_size)

@@ -93,7 +93,8 @@ void cutlass_scaled_fp4_mm(torch::stable::Tensor& D,
                            torch::stable::Tensor const& B,
                            torch::stable::Tensor const& A_sf,
                            torch::stable::Tensor const& B_sf,
-                           torch::stable::Tensor const& alpha);
+                           torch::stable::Tensor const& alpha,
+                           bool batch_invariant);
 
 void cutlass_fp4_group_mm(torch::stable::Tensor& output,
                           const torch::stable::Tensor& a,

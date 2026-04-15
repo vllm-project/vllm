@@ -108,7 +108,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "cutlass_scaled_fp4_mm(Tensor! out, Tensor a, Tensor b,"
       "                      Tensor block_scale_a, Tensor block_scale_b,"
-      "                      Tensor alpha) -> ()");
+      "                      Tensor alpha, bool batch_invariant=False) -> ()");
 
   // cutlass nvfp4 block scaled group GEMM
   ops.def(

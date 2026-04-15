@@ -22,6 +22,8 @@
 
 #include "cutlass/cutlass.h"
 
+#include <type_traits>
+
 #include "cutlass/gemm/collective/collective_builder.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/device/gemm_universal_adapter.h"
@@ -37,6 +39,16 @@ using namespace cute;
 
 // Configuration for M in (256, inf)
 struct sm100_fp4_config_default {
+  using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileShape = Shape<_256, _256, _256>;
+  using ClusterShape = Shape<_2, _1, _1>;
+  using PerSmTileShape_MNK = Shape<_128, _256, _256>;
+};
+
+// Fixed large-M tiling for all batch sizes (batch-invariant mode; matches
+// sm100_fp4_config_default numerics without branching on M).
+struct sm100_fp4_config_batch_invariant {
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   using TileShape = Shape<_256, _256, _256>;
@@ -204,7 +216,18 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
                                torch::stable::Tensor const& A_sf,
                                torch::stable::Tensor const& B_sf,
                                torch::stable::Tensor const& alpha, int64_t m,
-                               int64_t n, int64_t k, cudaStream_t stream) {
+                               int64_t n, int64_t k, cudaStream_t stream,
+                               bool batch_invariant) {
+  if (batch_invariant) {
+    using BiGemm = Fp4GemmSm100<sm100_fp4_config_batch_invariant, OutType>;
+    static_assert(
+        std::is_void_v<typename BiGemm::Gemm::GemmKernel::TileScheduler>,
+        "batch_invariant requires a data-parallel tile scheduler (void); "
+        "stream-K or split-K would break numerical invariance");
+    runGemm<BiGemm>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
+    return;
+  }
+
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
 
   if (mp2 <= 16) {
@@ -230,7 +253,8 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
                                torch::stable::Tensor const& A_sf,
                                torch::stable::Tensor const& B_sf,
                                torch::stable::Tensor const& alpha, int64_t m,
-                               int64_t n, int64_t k, cudaStream_t stream) {
+                               int64_t n, int64_t k, cudaStream_t stream,
+                               bool /*batch_invariant*/) {
   STD_TORCH_CHECK(false,
                   "Unsupported CUTLASS version. Set VLLM_CUTLASS_SRC_DIR to "
                   "a CUTLASS 3.8 source directory to enable support.");
@@ -257,7 +281,8 @@ void cutlass_scaled_fp4_mm_sm100a(torch::stable::Tensor& D,
                                   torch::stable::Tensor const& B,
                                   torch::stable::Tensor const& A_sf,
                                   torch::stable::Tensor const& B_sf,
-                                  torch::stable::Tensor const& alpha) {
+                                  torch::stable::Tensor const& alpha,
+                                  bool batch_invariant) {
   CHECK_INPUT(A, FLOAT4_E2M1X2, "a");
   CHECK_INPUT(B, FLOAT4_E2M1X2, "b");
 
@@ -313,10 +338,10 @@ void cutlass_scaled_fp4_mm_sm100a(torch::stable::Tensor& D,
 
   if (out_dtype == torch::headeronly::ScalarType::Half) {
     cutlass_fp4_gemm_dispatch<cutlass::half_t>(D, A, B, A_sf, B_sf, alpha, m, n,
-                                               k, stream);
+                                               k, stream, batch_invariant);
   } else if (out_dtype == torch::headeronly::ScalarType::BFloat16) {
-    cutlass_fp4_gemm_dispatch<cutlass::bfloat16_t>(D, A, B, A_sf, B_sf, alpha,
-                                                   m, n, k, stream);
+    cutlass_fp4_gemm_dispatch<cutlass::bfloat16_t>(
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream, batch_invariant);
   } else {
     STD_TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm (",
                     out_dtype, ")");
