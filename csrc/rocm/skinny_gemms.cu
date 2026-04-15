@@ -28,15 +28,19 @@
 
 #if defined(__HIPCC__) &&                                                    \
     (defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1150__) || \
-     defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__))
+     defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__) || \
+     defined(__gfx1250__))
   #define __HIP__GFX1X__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
+// gfx1250 is RDNA4-class: use the same FP8 dot path as gfx1200/1201, not MI300 MFMA
+// (MFMA fp8 builtins require target feature fp8-insts and match CDNA3, not gfx1250).
+#if defined(__HIPCC__) &&                                                    \
+    (defined(__gfx1200__) || defined(__gfx1201__) || defined(__gfx1250__))
   #define __HIP__GFX12__
 #endif
 
-#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__) || defined(__gfx1250__))
+#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__MI3XX__
 #endif
 
