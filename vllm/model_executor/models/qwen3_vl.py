@@ -1297,6 +1297,15 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     select_token_id=select_token_id,
                 )
 
+                max_model_len = self.info.ctx.model_config.max_model_len
+                if len(video_repl.full) > max_model_len:
+                    raise ValueError(
+                        "Video placeholder token length "
+                        f"({len(video_repl.full)}) exceeds max_model_len "
+                        f"({max_model_len}). Reduce video resolution/fps/num_frames "
+                        "or enable stronger video pruning."
+                    )
+
                 # Convert token IDs to text for the HF processor flow
                 video_placeholder = tokenizer.decode(
                     video_repl.full, skip_special_tokens=False
