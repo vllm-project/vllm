@@ -293,6 +293,64 @@ The new format of `--lora-modules` is mainly to support the display of parent mo
     }
     ```
 
+## LoRA for Encoder-Decoder Models (Whisper)
+
+vLLM supports Multi-LoRA for encoder-decoder models such as [Whisper](https://huggingface.co/openai/whisper-large-v3-turbo). This allows you to serve multiple fine-tuned Whisper adapters (e.g., domain-specific ASR for medical, legal, or call-center) from a single base model on one GPU.
+
+### Offline Inference
+
+```python
+from vllm import LLM, SamplingParams
+from vllm.assets.audio import AudioAsset
+from vllm.lora.request import LoRARequest
+
+base_model = "openai/whisper-large-v3-turbo"
+
+llm = LLM(
+    model=base_model,
+    enable_lora=True,
+    max_lora_rank=16,
+    max_loras=2,
+    max_model_len=448,
+)
+
+prompt = "<|startoftranscript|>"
+audio = AudioAsset("mary_had_lamb").audio_and_sample_rate
+
+outputs = llm.generate(
+    {
+        "encoder_prompt": {
+            "prompt": "",
+            "multi_modal_data": {"audio": audio},
+        },
+        "decoder_prompt": {
+            "prompt": prompt,
+        },
+    },
+    sampling_params=SamplingParams(
+        temperature=0,
+        max_tokens=200,
+    ),
+    lora_request=LoRARequest("whisper-lora", 1, "/path/to/whisper-lora-adapter"),
+)
+```
+
+### Online Serving
+
+```bash
+vllm serve openai/whisper-large-v3-turbo \
+    --enable-lora \
+    --lora-modules whisper-lora=/path/to/whisper-lora-adapter
+```
+
+Requests can then specify the LoRA adapter via the `model` parameter in the transcription API:
+
+```bash
+curl http://localhost:8000/v1/audio/transcriptions \
+    -F "file=@/path/to/audio.wav" \
+    -F "model=whisper-lora"
+```
+
 ## LoRA Support for Tower and Connector of Multi-Modal Model
 
 Currently, vLLM experimentally supports LoRA for the Tower and Connector components of multi-modal models. To enable this feature, you need to implement the corresponding token helper functions for the tower and connector. For more details on the rationale behind this approach, please refer to [PR 26674](https://github.com/vllm-project/vllm/pull/26674). We welcome contributions to extend LoRA support to additional models' tower and connector. Please refer to [Issue 31479](https://github.com/vllm-project/vllm/issues/31479) to check the current model support status.
