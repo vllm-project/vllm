@@ -117,6 +117,9 @@ class AttentionSpec(KVCacheSpec):
     dtype: torch.dtype
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
+    # Custom page size from attention backend (e.g., quantized KV cache).
+    # If set, overrides the default head_size-based calculation.
+    custom_page_size: int | None = None
 
     @property
     def page_size_bytes(self) -> int:
@@ -135,6 +138,8 @@ class AttentionSpec(KVCacheSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.custom_page_size is not None:
+            return self.custom_page_size
         return (
             2
             * self.block_size
@@ -218,6 +223,7 @@ class FullAttentionSpec(AttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            custom_page_size=specs[0].custom_page_size,
             sliding_window=cls.merge_window_sizes(sliding_window),
             attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
         )
@@ -237,6 +243,8 @@ class FullAttentionSpec(AttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.custom_page_size is not None:
+            return self.custom_page_size
         return (
             self.block_size
             * self.num_kv_heads
@@ -252,9 +260,9 @@ class MLAAttentionSpec(FullAttentionSpec):
 
     @property
     def real_page_size_bytes(self) -> int:
+        if self.custom_page_size is not None:
+            return self.custom_page_size
         if self.cache_dtype_str == "fp8_ds_mla":
-            # See `vllm/v1/attention/backends/mla/flashmla_sparse.py`
-            #  for details.
             return self.block_size * 656
         return (
             self.block_size
@@ -280,6 +288,7 @@ class MLAAttentionSpec(FullAttentionSpec):
             dtype=specs[0].dtype,
             kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
+            custom_page_size=specs[0].custom_page_size,
             cache_dtype_str=cache_dtype_str_set.pop(),
         )
 

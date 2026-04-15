@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import math
 import threading
 import time
 from collections import defaultdict
@@ -6566,11 +6567,15 @@ class GPUModelRunner(
                         kv_cache_stride_order.index(i)
                         for i in range(len(kv_cache_stride_order))
                     ]
+                    # Allow backends that pack KV more tightly than
+                    # head_size*dtype_size bytes per entry (e.g., quantized
+                    # backends) to view a prefix of the raw allocation.
+                    typed = kv_cache_raw_tensors[layer_name].view(dtype)
+                    shape_elements = math.prod(kv_cache_shape)
+                    if shape_elements < typed.numel():
+                        typed = typed[:shape_elements]
                     kv_caches[layer_name] = (
-                        kv_cache_raw_tensors[layer_name]
-                        .view(dtype)
-                        .view(kv_cache_shape)
-                        .permute(*inv_order)
+                        typed.view(kv_cache_shape).permute(*inv_order)
                     )
                 elif isinstance(kv_cache_spec, MambaSpec):
                     has_mamba = True
@@ -6884,6 +6889,15 @@ class GPUModelRunner(
                 continue
             # Skip modules that don't need KV cache (eg encoder-only attention)
             if spec := attn_module.get_kv_cache_spec(self.vllm_config):
+                # Let backends override page size for compressed KV.
+                backend = getattr(attn_module, 'attn_backend', None)
+                if isinstance(spec, AttentionSpec) and backend is not None:
+                    custom_ps = backend.get_kv_cache_page_size(
+                        spec.block_size, spec.num_kv_heads,
+                        spec.head_size, spec.dtype,
+                        self.cache_config.cache_dtype)
+                    if custom_ps is not None:
+                        spec = replace(spec, custom_page_size=custom_ps)
                 kv_cache_spec[layer_name] = spec
 
         return kv_cache_spec

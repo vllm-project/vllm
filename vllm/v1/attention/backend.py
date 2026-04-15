@@ -94,6 +94,28 @@ class AttentionBackend(ABC):
         raise NotImplementedError
 
     @classmethod
+    def get_kv_cache_page_size(
+        cls,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        dtype: "torch.dtype",
+        cache_dtype_str: str = "auto",
+    ) -> int | None:
+        """Return the page size in bytes for KV cache allocation.
+
+        If None (default), the standard formula is used:
+            2 * block_size * num_kv_heads * head_size * dtype_size
+
+        Custom backends (e.g., quantized KV) can override this to return
+        a smaller page size, enabling more cache blocks in the same memory.
+
+        Returns:
+            Page size in bytes, or None for default behavior.
+        """
+        return None
+
+    @classmethod
     def get_kv_cache_block_dim(
         cls,
         block_size: int,
