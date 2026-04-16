@@ -161,7 +161,6 @@ def ref_nvfp4_quant_dequant(
     x_fp4 = x_fp4.reshape(x_m, x_k // block_size, block_size)
     x_blockscale = x_blockscale.unsqueeze(-1) / global_scale
     x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
-    del x_fp4, x_blockscale
 
     return x_dq, None
 
@@ -192,5 +191,4 @@ def run_nvfp4_emulations(
 
     # matmul
     out = torch.matmul(x_dq, w_dq.t())
-    del w_dq, x_dq
     return out

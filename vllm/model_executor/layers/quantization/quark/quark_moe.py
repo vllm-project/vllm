@@ -31,11 +31,11 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
     backend_to_kernel_cls,
-    convert_to_mxfp4_moe_kernel_format,
+    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
-    select_mxfp4_moe_backend,
+    select_gpt_oss_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     convert_to_nvfp4_moe_kernel_format,
@@ -1006,7 +1006,6 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # TODO(bowenbao): refactor and introduce backends for other OCP MX schemes,
         # use kernel abstraction for all OCP MX MOE implementations.
         self.mxfp4_backend: Mxfp4MoeBackend = Mxfp4MoeBackend.NONE
-
         self.experts_cls: type[mk.FusedMoEExperts] | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
@@ -1050,7 +1049,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         if self.ocp_mx_scheme == "w_mxfp4":
-            self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, self.experts_cls = select_gpt_oss_mxfp4_moe_backend(moe)
 
         if self.emulate:
             # We use the same code path between MXFP4/MXFP6 emulation.
@@ -1275,6 +1274,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             self._setup_kernel_via_oracle(layer)
             return
 
+        # TODO(bowenbao): gradually migrate to oracles.
         # Existing AITER path for w_mxfp4_a_mxfp4 and other schemes
         from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -1323,7 +1323,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # Convert weights to kernel format
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_to_mxfp4_moe_kernel_format(
+            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
                 layer=layer,
                 w13_weight=w13,
@@ -1507,9 +1507,9 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
         layer.w2_bias = torch.nn.Parameter(w2_bias, requires_grad=False)
 
         # FIXME warp need to be adjusted based on batch size
-        # only apply to  batched mode
+        # only apply to batched mode
         if self.moe.use_ep:
-            num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
+            num_warps = 4 if self.moe.max_num_tokens <= 512 else 8
         else:
             num_warps = 8
 
@@ -1596,7 +1596,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
                 "EPLB not supported for `QuarkW4MXFp4MoEMethod_OSS` yet."
             )
 
-        from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
+        from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (  # noqa: E501
             triton_kernel_moe_forward,
         )
 
