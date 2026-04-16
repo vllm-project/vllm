@@ -34,8 +34,10 @@ from vllm.model_executor.model_loader.weight_utils import (
     pt_weights_iterator,
     safetensors_weights_iterator,
 )
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import list_filtered_repo_files
+from vllm.utils.import_utils import has_instanttensor
 
 logger = init_logger(__name__)
 
@@ -228,7 +230,13 @@ class DefaultModelLoader(BaseModelLoader):
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
                 )
-            elif self.load_config.load_format == "instanttensor":
+            elif self.load_config.load_format == "instanttensor" or (
+                self.load_config.load_format == "auto"
+                and has_instanttensor()
+                and current_platform.is_cuda()
+            ):
+                if self.load_config.load_format == "auto":
+                    logger.info("Using InstantTensor weight loader (auto-detected).")
                 weights_iterator = instanttensor_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,

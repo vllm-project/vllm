@@ -401,7 +401,7 @@ inflect==5.6.2
     # via datamodel-code-generator
 iniconfig==2.0.0
     # via pytest
-instanttensor==0.1.5
+instanttensor==0.1.8
     # via -r requirements/test/cuda.in
 isodate==0.7.2
     # via azure-storage-blob

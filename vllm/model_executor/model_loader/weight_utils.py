@@ -1167,18 +1167,44 @@ def instanttensor_weights_iterator(
 
     device = current_platform.current_device()
 
+    # Cap InstantTensor's GPU buffer. Since we clone every yielded tensor out
+    # of the buffer on the next line, a large ring buffer is wasted GPU memory
+    # InstantTensor auto-enlarges this to ``max(tensor_sizes)`` if it's smaller
+    # than the largest tensor, so the cap is safe for any model.
+    buffer_size = 128 * 1024 * 1024
     with instanttensor.safe_open(
-        hf_weights_files, framework="pt", device=device, process_group=process_group
+        hf_weights_files,
+        framework="pt",
+        device=device,
+        process_group=process_group,
+        buffer_size=buffer_size,
     ) as f:
-        yield from tqdm(
-            f.tensors(),
+        pbar = tqdm(
+            total=f.total_tensor_size,
             desc="Loading safetensors using InstantTensor loader",
             disable=not enable_tqdm(use_tqdm_on_load),
             bar_format=_BAR_FORMAT,
             position=tqdm._get_free_pos(),
-            total=len(f.keys()),
+            unit="B",
+            unit_scale=True,
+            unit_divisor=1024,
             mininterval=1.0,
         )
+        try:
+            for name, tensor in f.tensors():
+                # InstantTensor tensors are views into the ``safe_open`` ring
+                # buffer above and are invalidated when the context exits or
+                # the buffer is reused for a later tensor. Callers such as
+                # ``RobertaEmbeddingModel.load_weights`` fully materialize the
+                # iterator into a list before consuming it, which would leave
+                # those tensors dangling. Clone so each tensor owns its GPU
+                # storage independently of InstantTensor's buffer.
+                # Reference: https://github.com/scitix/InstantTensor/blob/45763a4a2eb4d1df7f05b988c01c76111c821b59/instanttensor/_impl.py#L535-L540
+                cloned = tensor.clone()
+                pbar.update(cloned.numel() * cloned.element_size())
+                yield name, cloned
+        finally:
+            pbar.close()
 
 
 def pt_weights_iterator(
