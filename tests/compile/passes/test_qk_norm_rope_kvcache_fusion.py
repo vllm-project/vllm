@@ -10,7 +10,7 @@ import vllm.config
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.compilation.passes.fusion.matcher_utils import RMS_OP, ROTARY_OP
+from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
 from vllm.compilation.passes.fusion.qk_norm_rope_kvcache_fusion import (
     QkNormRopeKvCacheFusionPass,
 )
@@ -96,7 +96,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         )
 
         self.enable_rope_custom_op = self.rotary_emb.enabled()
-        self.enable_rms_custom_op = self.q_norm.enabled()
 
         self.attn = Attention(
             num_heads=num_heads,
@@ -170,7 +169,11 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         raw_tensor = raw_tensor.view(kv_cache_shape)
         kv_cache = raw_tensor.permute(*inv_order)
 
-        self.attn.kv_cache = [kv_cache]
+        # Store as a bare tensor (not wrapped in a list) to match production
+        # `bind_kv_cache` behavior.  `get_attention_context` returns this
+        # attribute directly to the fused/unfused `do_kv_cache_update` impls,
+        # which call `kv_cache.unbind(0)` and therefore require a tensor.
+        self.attn.kv_cache = kv_cache
 
         attn_metadata = self.builder.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
@@ -206,17 +209,15 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         return q, k, v, kv_cache_dummy_dep
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
+        # Note: RMSNorm is no longer asserted here.  After the vLLM IR
+        # migration (#33825), `RMSNorm` dispatches through `ir.ops.rms_norm`
+        # which resolves via `IrOpPriorityConfig`.  The op that actually
+        # appears in the pre-pass graph depends on the platform's priority
+        # (native / vllm_c / aiter / oink / ...) and is outside the scope of
+        # this fusion test.
         ops: list[torch._ops.OpOverload] = []
-        # RMSNorm custom op: when enabled on ROCm with AITER, the AITER
-        # RMSNorm op appears in the graph.  When disabled (custom_ops has
-        # "none"), it decomposes into primitive aten ops with no single
-        # identifiable op node.
-        if self.enable_rms_custom_op:
-            if rocm_aiter_ops.is_rmsnorm_enabled():
-                ops.append(rocm_aiter_ops.get_rmsnorm_op())
-            else:
-                ops.append(RMS_OP)
-        # RoPE op
+        # RoPE is not yet IR-migrated, so its custom op still surfaces
+        # directly in the graph based on `enable_rope_custom_op`.
         if self.enable_rope_custom_op:
             if rocm_aiter_ops.is_triton_rotary_embed_enabled():
                 ops.append(torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default)
@@ -239,7 +240,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
         AttentionBackendEnum.ROCM_AITER_FA,
     ],
 )
-@pytest.mark.parametrize("enable_rms_custom_op", [True, False])
 @pytest.mark.parametrize("enable_aiter_triton_rope", [True, False])
 @pytest.mark.parametrize("num_heads", [64])
 @pytest.mark.parametrize("num_kv_heads", [8])
@@ -255,7 +255,6 @@ class QKNormRoPEKVCacheTestModel(torch.nn.Module):
 )
 def test_qk_norm_rope_kvcache_fusion(
     attn_backend: AttentionBackendEnum,
-    enable_rms_custom_op: bool,
     enable_aiter_triton_rope: bool,
     num_heads: int,
     num_kv_heads: int,
@@ -272,9 +271,11 @@ def test_qk_norm_rope_kvcache_fusion(
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 
-    custom_ops: list[str] = ["+rotary_embedding"]
-    if enable_rms_custom_op:
-        custom_ops.append("+rms_norm")
+    # Note: `+rms_norm` toggles between RMSNorm.forward_custom and
+    # forward_native, but both paths now dispatch through `ir.ops.rms_norm`
+    # (post #33825), so the graph is identical either way.  We always enable
+    # it here to exercise the "custom op on" flavor.
+    custom_ops: list[str] = ["+rotary_embedding", "+rms_norm"]
 
     vllm_config = VllmConfig(
         model_config=ModelConfig(dtype=dtype),
@@ -343,7 +344,7 @@ def test_qk_norm_rope_kvcache_fusion(
             }
             q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_unfused = attn_layer.kv_cache[forward_context.virtual_engine]
+            kv_cache_unfused = attn_layer.kv_cache
         del dummy
 
         # Run fused (compiled) forward
@@ -358,7 +359,7 @@ def test_qk_norm_rope_kvcache_fusion(
             }
             q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
-            kv_cache_fused = attn_layer.kv_cache[forward_context.virtual_engine]
+            kv_cache_fused = attn_layer.kv_cache
         del dummy
 
         assert fusion_pass.matched_count == 1
@@ -507,11 +508,6 @@ def test_qk_norm_rope_kvcache_pattern_match_smoke(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            # `build_attn_metadata` wraps the kv_cache in a list (legacy API).
-            # In production, `bind_kv_cache` replaces `attn.kv_cache` with a
-            # single tensor; unwrap here so `get_attention_context` returns
-            # a tensor (matching what `do_qk_norm_rope_kvcache_update` expects).
-            model.attn.kv_cache = model.attn.kv_cache[0]
             model_fused = torch.compile(model, backend=backend)
             model_fused(qkv, pos)
 
