@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 import io
 from typing import Final
 from unittest import mock
@@ -58,6 +59,25 @@ _SIMPLE_CHAT_TEMPLATE: Final[str] = (
     "{% else %}{% for p in m['content'] %}{{p['text']}}{% endfor %}"
     "{% endif %}\n{% endfor %}"
 )
+
+
+async def _maybe_await(fn, *args, **kwargs):
+    """Call *fn* and `await` the result if it's a coroutine."""
+    result = fn(*args, **kwargs)
+    if inspect.iscoroutine(result):
+        result = await result
+    return result
+
+
+# Parametrize over sync / async parse paths so every end-to-end test
+# exercises both.
+_PARSE_FUNCTIONS = [parse_chat_messages, parse_chat_messages_async]
+
+
+@pytest.fixture(params=_PARSE_FUNCTIONS, ids=["sync", "async"])
+def parse_fn(request):
+    """Either the sync or async `parse_chat_messages` callable."""
+    return request.param
 
 
 def _encode_tensor(t: torch.Tensor) -> str:
@@ -374,37 +394,15 @@ def test_build_mixed_prompt_embeds(stream):
     assert torch.all(embeds[expected_mask] == 0)
 
 
+# End-to-end tests: each runs both sync and async parse paths via the
+# `parse_fn` fixture.
+
+
 @pytest.mark.asyncio
-async def test_parse_chat_messages_async_matches_sync():
-    N, H = 3, 8
-    t = torch.randn(N, H)
-    b64 = _encode_tensor(t)
-    mc = _make_mock_model_config()
-
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "prompt_embeds", "data": b64},
-                {"type": "text", "text": "hi"},
-            ],
-        }
-    ]
-    conv, mm_data, _ = await parse_chat_messages_async(
-        messages,
-        mc,
-        content_format="openai",
-    )
-    # Parser emits one sentinel; renderer expands post-tokenization.
-    assert conv[0]["content"][0]["text"] == PROMPT_EMBEDS_PLACEHOLDER_TOKEN
-    assert conv[0]["content"][1]["text"] == "hi"
-    assert torch.equal(mm_data["prompt_embeds"][0], t)
-
-
 @pytest.mark.parametrize("role", ["user", "system"])
-def test_end_to_end_expand_and_build(tokenizer, role):
-    """Test the full renderer pipeline: parse -> chat template -> expand
-    -> find positions -> build mixed prompt across tokenizers and roles."""
+async def test_end_to_end_expand_and_build(tokenizer, parse_fn, role):
+    """Full renderer pipeline: parse -> chat template -> expand -> locate
+    -> build mixed prompt, across tokenizers, roles, and sync/async."""
     tokenizer.chat_template = _SIMPLE_CHAT_TEMPLATE
     tid = _ensure_prompt_embeds_placeholder_token(tokenizer)
 
@@ -412,7 +410,7 @@ def test_end_to_end_expand_and_build(tokenizer, role):
     LEN_A, LEN_B = 3, 2
     t_a = torch.randn(LEN_A, H)
     t_b = torch.randn(LEN_B, H)
-    NUM_TENSORS = 2  # t_a and t_b.
+    NUM_TENSORS = 2
 
     mc = _make_mock_model_config()
 
@@ -429,47 +427,36 @@ def test_end_to_end_expand_and_build(tokenizer, role):
         }
     ]
 
-    conv, mm_data, _ = parse_chat_messages(
-        messages,
-        mc,
-        content_format="openai",
+    conv, mm_data, _ = await _maybe_await(
+        parse_fn, messages, mc, content_format="openai"
     )
     tensors = list(mm_data["prompt_embeds"])
-    assert len(tensors) == NUM_TENSORS  # t_a and t_b.
+    assert len(tensors) == NUM_TENSORS
 
     # Tokenize: each prompt_embeds part becomes 1 placeholder token.
     token_ids = tokenizer.apply_chat_template(conv, tokenize=True)
-    num_sentinels = sum(t == tid for t in token_ids)
-    assert num_sentinels == NUM_TENSORS, (
-        f"Expected {NUM_TENSORS} sentinels, got {num_sentinels}"
-    )
+    assert sum(t == tid for t in token_ids) == NUM_TENSORS
 
-    # Expand: 1-token sentinels becomes N-token spans.
+    # Expand, locate, and build.
     mm_updates = _build_prompt_embeds_updates(tensors, tid)
     expanded = _expand_prompt_embeds_placeholders(token_ids, mm_updates)
     assert len(expanded) == len(token_ids) + LEN_A + LEN_B - NUM_TENSORS
-    num_placeholders = sum(t == tid for t in expanded)
-    assert num_placeholders == LEN_A + LEN_B
 
-    # Locate + build mask on the expanded stream (reuses same updates).
     positions = _build_prompt_embeds_positions(expanded, len(tensors), mm_updates)
-    assert len(positions) == NUM_TENSORS
     assert positions[0][1] == LEN_A
     assert positions[1][1] == LEN_B
 
     embeds, mask = _build_mixed_prompt_embeds(expanded, tensors, positions)
     assert embeds.shape == (len(expanded), H)
     assert mask.count(False) == LEN_A + LEN_B
-    s0 = positions[0][0]
-    s1 = positions[1][0]
-    assert torch.equal(embeds[s0 : s0 + LEN_A], t_a)
-    assert torch.equal(embeds[s1 : s1 + LEN_B], t_b)
+    assert torch.equal(embeds[positions[0][0] : positions[0][0] + LEN_A], t_a)
+    assert torch.equal(embeds[positions[1][0] : positions[1][0] + LEN_B], t_b)
 
 
-def test_end_to_end_multi_message_conversation(tokenizer):
-    """Full pipeline with prompt_embeds spread across multiple messages
-    (system + user), verifying that tensors from different messages are
-    correctly ordered and positioned in the final token stream."""
+@pytest.mark.asyncio
+async def test_end_to_end_multi_message_conversation(tokenizer, parse_fn):
+    """Full pipeline with prompt_embeds spread across system + user messages,
+    verifying ordering and positioning in the final token stream."""
     tokenizer.chat_template = _SIMPLE_CHAT_TEMPLATE
     tid = _ensure_prompt_embeds_placeholder_token(tokenizer)
 
@@ -478,6 +465,7 @@ def test_end_to_end_multi_message_conversation(tokenizer):
     t_sys = torch.randn(LEN_SYS, H)
     t_usr = torch.randn(LEN_USR, H)
     NUM_TENSORS = 2  # t_sys and t_usr.
+
     mc = _make_mock_model_config()
 
     messages = [
@@ -497,7 +485,9 @@ def test_end_to_end_multi_message_conversation(tokenizer):
         },
     ]
 
-    conv, mm_data, _ = parse_chat_messages(messages, mc, content_format="openai")
+    conv, mm_data, _ = await _maybe_await(
+        parse_fn, messages, mc, content_format="openai"
+    )
     tensors = list(mm_data["prompt_embeds"])
     assert len(tensors) == NUM_TENSORS
 
