@@ -1831,6 +1831,59 @@ def test_reset_prefix_cache():
     assert all([blk.block_hash is None for blk in manager.block_pool.blocks])
 
 
+def test_hybrid_swa_cap_does_not_crash_allocator():
+    block_size = 16
+    sliding_window = 64
+    num_tokens = 200
+    request_id = "r"
+
+    manager = KVCacheManager(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=26,  # 25 usable blocks + 1 null block.
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["full"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                ),
+                KVCacheGroupSpec(
+                    ["swa"],
+                    SlidingWindowSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                        sliding_window=sliding_window,
+                    ),
+                ),
+            ],
+        ),
+        max_model_len=4096,
+        hash_block_size=block_size,
+        max_num_batched_tokens=32,
+        enable_caching=True,
+    )
+
+    req = make_request(request_id, [1] * num_tokens, block_size, sha256)
+    full_required_blocks = (num_tokens + block_size - 1) // block_size
+    allocated = manager.block_pool.get_new_blocks(
+        manager.block_pool.num_gpu_blocks - 1)
+    full_mgr, swa_mgr = manager.coordinator.single_type_managers
+
+    full_mgr.req_to_blocks[request_id] = allocated[:full_required_blocks]
+    swa_mgr.req_to_blocks[request_id] = allocated[
+        full_required_blocks:full_required_blocks + (full_required_blocks - 1)
+    ]
+
+    assert manager.block_pool.get_num_free_blocks() == 0
+    assert manager.allocate_slots(req, num_new_tokens=num_tokens) is None
+
+
 def test_prefix_cache_stats_disabled():
     """Test that prefix_cache_stats is None when log_stats is False."""
     block_size = 16

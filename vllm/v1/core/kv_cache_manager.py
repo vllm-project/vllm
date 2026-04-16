@@ -377,7 +377,7 @@ class KVCacheManager:
             request.request_id, total_computed_tokens
         )
 
-        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+        block_allocation_kwargs = dict(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
@@ -387,8 +387,22 @@ class KVCacheManager:
             num_tokens_main_model=num_tokens_main_model,
         )
 
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
+        num_blocks_to_allocate = (
+            self.coordinator.get_num_blocks_needed_for_admission(
+                **block_allocation_kwargs))
+
+        num_free_blocks = self.block_pool.get_num_free_blocks()
+        if num_blocks_to_allocate > num_free_blocks:
             # Cannot allocate new blocks
+            return None
+
+        # The SWA-capped admission estimate can be lower than the actual
+        # allocator demand when a request already owns some blocks. Re-check
+        # with the uncapped token count so we fail cleanly instead of throwing
+        # out of BlockPool.get_new_blocks().
+        actual_num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+            **block_allocation_kwargs)
+        if actual_num_blocks_to_allocate > num_free_blocks:
             return None
 
         if (

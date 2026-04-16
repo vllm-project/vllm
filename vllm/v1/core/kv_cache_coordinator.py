@@ -71,7 +71,7 @@ class KVCacheCoordinator(ABC):
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
 
-    def get_num_blocks_to_allocate(
+    def get_num_blocks_needed_for_admission(
         self,
         request_id: str,
         num_tokens: int,
@@ -81,7 +81,12 @@ class KVCacheCoordinator(ABC):
         num_tokens_main_model: int,
     ) -> int:
         """
-        Get the number of blocks needed to be allocated for the request.
+        Get the number of blocks needed for admission.
+
+        This is an admission estimate, not the exact allocator demand. For SWA
+        groups, cap the token count at sliding_window + one prefill chunk.
+        OOW blocks are freed between chunks by remove_skipped_blocks(), so the
+        scheduler does not need to budget the full sequence length here.
 
         Args:
             request_id: The request ID.
@@ -108,19 +113,39 @@ class KVCacheCoordinator(ABC):
                     request_id, num_encoder_tokens, [], 0, num_encoder_tokens
                 )
             else:
-                # Cap num_tokens for SWA: a sliding window layer never
-                # holds more than sliding_window blocks at steady state.
-                # OOW blocks are freed between chunks by
-                # remove_skipped_blocks(), so the admission check only
-                # needs to budget for the window, not the full sequence.
-                effective_num_tokens = num_tokens
-                if isinstance(manager, SlidingWindowManager):
-                    effective_num_tokens = min(
-                        num_tokens, manager.sliding_window + self.max_num_batched_tokens
-                    )
+                effective_num_tokens = self._get_admission_num_tokens(
+                    manager, num_tokens)
                 num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
                     request_id,
                     effective_num_tokens,
+                    new_computed_blocks[i],
+                    total_computed_tokens,
+                    num_tokens_main_model,
+                )
+        return num_blocks_to_allocate
+
+    def get_num_blocks_to_allocate(
+        self,
+        request_id: str,
+        num_tokens: int,
+        new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
+        num_encoder_tokens: int,
+        total_computed_tokens: int,
+        num_tokens_main_model: int,
+    ) -> int:
+        """
+        Get the exact number of blocks needed to allocate for the request.
+        """
+        num_blocks_to_allocate = 0
+        for i, manager in enumerate(self.single_type_managers):
+            if isinstance(manager, CrossAttentionManager):
+                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                    request_id, num_encoder_tokens, [], 0, num_encoder_tokens
+                )
+            else:
+                num_blocks_to_allocate += manager.get_num_blocks_to_allocate(
+                    request_id,
+                    num_tokens,
                     new_computed_blocks[i],
                     total_computed_tokens,
                     num_tokens_main_model,
@@ -187,6 +212,17 @@ class KVCacheCoordinator(ABC):
             )
             for manager in self.single_type_managers
         )
+
+    def _get_admission_num_tokens(
+        self,
+        manager: SingleTypeKVCacheManager,
+        num_tokens: int,
+    ) -> int:
+        # SWA layers never need more than their window plus one prefill chunk.
+        if isinstance(manager, SlidingWindowManager):
+            return min(num_tokens,
+                       manager.sliding_window + self.max_num_batched_tokens)
+        return num_tokens
 
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         """
