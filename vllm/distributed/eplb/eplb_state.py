@@ -927,8 +927,6 @@ class EplbState:
             )
 
             transferred_layer = model_state.layer_to_transfer
-
-            transferred_layer = model_state.layer_to_transfer
             assert model_state.new_physical_to_logical_map is not None
             _commit_eplb_maps_for_layer(
                 model_state,
