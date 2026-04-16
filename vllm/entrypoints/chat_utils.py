@@ -1718,12 +1718,9 @@ def _parse_chat_message_content_part(
     if wrap_dicts:
         if modality == "prompt_embeds":
             # Chat templates don't know about the "prompt_embeds" modality,
-            # emit the rendered placeholder as text so the template handles
-            # it like any other text span.
-            placeholders = mm_parser.mm_placeholder_storage()[
-                MODALITY_PLACEHOLDERS_MAP["prompt_embeds"]
-            ]
-            return {"type": "text", "text": placeholders[-1]}
+            # emit the single sentinel token as text so the template renders
+            # it inline. The renderer later expands it to N tokens post-tokenize.
+            return {"type": "text", "text": PROMPT_EMBEDS_PLACEHOLDER_TOKEN}
         return {"type": modality}
     return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
 
