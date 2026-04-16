@@ -62,6 +62,9 @@ from vllm.model_executor.kernels.linear.mxfp4 import (
     Mxfp4LinearKernel,
     Mxfp4LinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.mxfp4.emulation import (
+    EmulationMxfp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxfp4LinearKernel,
 )
@@ -279,8 +282,15 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
 }
 
 _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[Mxfp4LinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        EmulationMxfp4LinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        EmulationMxfp4LinearKernel,
+    ],
     PlatformEnum.XPU: [
         XPUMxfp4LinearKernel,
+        EmulationMxfp4LinearKernel,
     ],
 }
 

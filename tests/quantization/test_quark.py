@@ -25,9 +25,11 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkW8A8Int8MoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    dq_mxfp4_torch,
+    qdq_mxfp4_torch,
+)
 from vllm.platforms import current_platform
-
-from .reference_mxfp4 import dq_mxfp4_torch, qdq_mxfp4_torch
 
 # Minimum amd-quark version for MXFP4/OCP_MX tests (single source of truth).
 QUARK_MXFP4_MIN_VERSION = "0.8.99"
