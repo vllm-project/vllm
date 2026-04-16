@@ -1365,26 +1365,9 @@ def _get_full_multimodal_text_prompt(
     # Pass interleaved text further in case the user used image placeholders
     # himself, but forgot to disable the 'interleave_strings' flag
 
-    # prompt_embeds that weren't substituted in-place during interleave are
-    # "missing". `_get_interleaved_text_prompt` pops `placeholder_storage[pe_key]`
-    # in place, so whatever's left are the unmatched ones.
-    pe_key = MODALITY_PLACEHOLDERS_MAP["prompt_embeds"]
-    pe_missing: list[str] = list(placeholder_storage.get(pe_key, []))
-
     # Look through the text prompt to check for missing placeholders
     missing_placeholders: list[str] = []
     for placeholder in placeholder_counts:
-        # `startswith` is O(len(PROMPT_EMBEDS_PLACEHOLDER_TOKEN))
-        # regardless of `placeholder` length, which matters because
-        # prompt_embeds strings can be very long.
-        if placeholder.startswith(PROMPT_EMBEDS_PLACEHOLDER_TOKEN):
-            # prompt_embeds placeholders are repeated spans of the same special
-            # token (`"<prompt_embeds>" * N`), so shorter spans are substrings
-            # of longer ones. The `text_prompt.count(...)` validation below
-            # assumes placeholder strings are disjoint and would over-count
-            # when mixed-size prompt_embeds parts appear in the same message.
-            # Skip them here, they're accounted for via `pe_missing`.
-            continue
         # For any existing placeholder in the text prompt, we leave it as is
         placeholder_counts[placeholder] -= text_prompt.count(placeholder)
 
@@ -1403,10 +1386,6 @@ def _get_full_multimodal_text_prompt(
             )
 
         missing_placeholders.extend([placeholder] * placeholder_counts[placeholder])
-
-    # prompt_embeds leftovers lead so their tensors line up with the token
-    # positions of the prepended placeholders in the final prompt.
-    missing_placeholders = pe_missing + missing_placeholders
 
     # NOTE: Default behaviour: we always add missing placeholders
     # at the front of the prompt, if interleave_strings=False
