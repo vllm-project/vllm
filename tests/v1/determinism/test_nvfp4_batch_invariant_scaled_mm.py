@@ -18,6 +18,8 @@ bugs; the batch-invariance check catches schedule-dependent bugs that affect
 full-batch and single-row runs equally.
 """
 
+import os
+
 import pytest
 import torch
 
@@ -40,9 +42,6 @@ DTYPES = [torch.float16, torch.bfloat16]
 SHAPES = [(128, 128, 64), (128, 128, 128), (256, 128, 64), (128, 256, 128)]
 PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
-
-SEED = 42
-CUDA_DEVICE = "cuda:0"
 
 
 def get_ref_results(
@@ -82,12 +81,13 @@ def test_nvfp4_gemm_correctness_vs_reference_batch_invariant_path(
     produces correct results. Covers ``(M, N, packed_K)`` shapes including
     non-aligned dims in ``PAD_SHAPES``, both fp16 and bf16 output.
     """
-    set_random_seed(SEED)
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    set_random_seed(seed)
     m, n, packed_k = shape
     k = packed_k * 2
     block_size = 16
-    a_dtype = torch.randn((m, k), dtype=dtype, device=CUDA_DEVICE)
-    b_dtype = torch.randn((n, k), dtype=dtype, device=CUDA_DEVICE)
+    a_dtype = torch.randn((m, k), dtype=dtype, device="cuda")
+    b_dtype = torch.randn((n, k), dtype=dtype, device="cuda")
 
     a_global_scale = (
         (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a_dtype.flatten(), dim=-1)
@@ -108,7 +108,7 @@ def test_nvfp4_gemm_correctness_vs_reference_batch_invariant_path(
         b_global_scale,
         dtype,
         block_size,
-        CUDA_DEVICE,
+        "cuda",
     )
     out = ops.cutlass_scaled_fp4_mm(
         a_fp4,
@@ -143,12 +143,13 @@ def test_nvfp4_gemm_batch_invariance(
     Catches kernels whose reduction or scheduling depends on ``M`` or adjacent
     rows. Uses larger ``CONSISTENCY_SHAPES`` than the reference test.
     """
-    set_random_seed(SEED)
+    seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
+    set_random_seed(seed)
     m, n, packed_k = shape
     k = packed_k * 2  # real K (FP4 elements)
 
-    a_dtype = torch.randn((m, k), dtype=dtype, device=CUDA_DEVICE)
-    b_dtype = torch.randn((n, k), dtype=dtype, device=CUDA_DEVICE)
+    a_dtype = torch.randn((m, k), dtype=dtype, device="cuda")
+    b_dtype = torch.randn((n, k), dtype=dtype, device="cuda")
 
     a_global_scale = (
         (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a_dtype.flatten(), dim=-1)
