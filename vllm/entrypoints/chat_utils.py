@@ -936,15 +936,18 @@ class MultiModalContentParser(BaseMultiModalContentParser):
 
     @override
     def parse_prompt_embeds(self, data: str) -> None:
-        """Decode a base64 tensor and record a placeholder of matching length."""
+        """Decode a base64 prompt embeds tensor and store it in the tracker.
+
+        Emits a single `PROMPT_EMBEDS_PLACEHOLDER_TOKEN` sentinel per
+        content part. The renderer later expands each sentinel to a span of
+        `tensor.shape[0]` placeholder tokens after tokenization.
+        """
         if not self.model_config.enable_prompt_embeds:
             raise ValueError(_ENABLE_PROMPT_EMBEDS_ERROR)
-        tensor = safe_load_prompt_embeds(self.model_config, data.encode())
-        num_tokens = tensor.shape[0]
 
+        tensor = safe_load_prompt_embeds(self.model_config, data.encode())
         self._tracker.add("prompt_embeds", (tensor, None))
-        placeholder_str = PROMPT_EMBEDS_PLACEHOLDER_TOKEN * num_tokens
-        self._add_placeholder("prompt_embeds", placeholder_str)
+        self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
         image = self._connector.fetch_image(image_url) if image_url else None
@@ -1072,19 +1075,27 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
 
     @override
     def parse_prompt_embeds(self, data: str) -> None:
-        """Decode the prompt_embeds tensor and register it with the tracker."""
+        """Schedule async prompt embeds decode and store the coroutine in the tracker.
+
+        Like the sync variant, emits a single sentinel `PROMPT_EMBEDS_PLACEHOLDER_TOKEN`
+        per content part. Unlike the sync variant, the tensor decode is deferred to a
+        thread-pool executor via `run_in_executor`.
+        """
         if not self.model_config.enable_prompt_embeds:
             raise ValueError(_ENABLE_PROMPT_EMBEDS_ERROR)
 
-        tensor = safe_load_prompt_embeds(self.model_config, data.encode())
-        num_tokens = tensor.shape[0]
+        model_config = self.model_config
+        data_bytes = data.encode()
 
-        future = asyncio.Future[tuple[torch.Tensor, str | None]]()
-        future.set_result((tensor, None))
-        self._tracker.add("prompt_embeds", future)
+        async def _decode() -> tuple[torch.Tensor, str | None]:
+            loop = asyncio.get_running_loop()
+            tensor = await loop.run_in_executor(
+                None, safe_load_prompt_embeds, model_config, data_bytes
+            )
+            return (tensor, None)
 
-        placeholder_str = PROMPT_EMBEDS_PLACEHOLDER_TOKEN * num_tokens
-        self._add_placeholder("prompt_embeds", placeholder_str)
+        self._tracker.add("prompt_embeds", _decode())
+        self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     async def _image_with_uuid_async(self, image_url: str | None, uuid: str | None):
         image = (
