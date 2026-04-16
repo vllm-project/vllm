@@ -168,26 +168,20 @@ class MatcherRMSNorm(MatcherCustomOp):
     follows the same IR lowering path as the model's ``RMSNorm`` layer
     (native / vllm_c / aiter / oink / ...), whichever one the current
     ``IrOpPriorityConfig`` selects.  This keeps the pattern aligned with
-    whatever impl actually appears in the target graph at runtime.
-
-    The ``match_rocm_aiter`` flag is accepted for API compatibility with
-    callers that previously toggled between the plain and AITER RMS norm
-    ops directly.  With the IR dispatcher, backend selection happens via
-    the priority config, so this flag is currently a no-op.
+    whatever impl actually appears in the target graph at runtime; callers
+    therefore do not need to register per-backend variants.
     """
 
     def __init__(
         self,
         epsilon: float,
         enabled: bool | None = None,
-        match_rocm_aiter: bool = False,
     ) -> None:
         if enabled is None:
             enabled = RMSNorm.enabled()
 
         super().__init__(enabled)
         self.epsilon = epsilon
-        self.match_rocm_aiter = match_rocm_aiter
 
     def inputs(self) -> list[torch.Tensor]:
         input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)

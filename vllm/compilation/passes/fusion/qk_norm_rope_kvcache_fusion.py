@@ -121,7 +121,6 @@ class QkNormRopeKvCachePattern:
         eps: float,
         is_neox: bool,
         rope_flashinfer: bool = False,
-        match_rocm_aiter_rms: bool = False,
         match_rocm_aiter_rope: bool = False,
     ) -> None:
         self.layer_name = layer.layer_name
@@ -137,9 +136,7 @@ class QkNormRopeKvCachePattern:
         self.k_size = self.num_kv_heads * self.head_size
         self.v_size = self.num_kv_heads * self.head_size_v
 
-        self.rmsnorm_matcher = MatcherRMSNorm(
-            eps, match_rocm_aiter=match_rocm_aiter_rms
-        )
+        self.rmsnorm_matcher = MatcherRMSNorm(eps)
         self.rope_matcher = MatcherRotaryEmbedding(
             is_neox=is_neox,
             head_size=self.head_size,
@@ -292,10 +289,11 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             rms_custom_enabled,
         )
 
-        aiter_rms_variants = [False]
-        if rocm_aiter_ops.is_rmsnorm_enabled():
-            aiter_rms_variants.append(True)
-
+        # RMS norm variants are no longer iterated: after the vLLM IR
+        # migration (#33825), `MatcherRMSNorm` dispatches via
+        # `ir.ops.rms_norm`, which resolves to the same backend (native /
+        # vllm_c / aiter / oink / ...) that the model's RMSNorm layer
+        # picks.  The pattern graph tracks the target graph automatically.
         aiter_rope_variants = [False]
         if rocm_aiter_ops.is_triton_rotary_embed_enabled():
             aiter_rope_variants.append(True)
@@ -304,57 +302,50 @@ class QkNormRopeKvCacheFusionPass(VllmPatternMatcherPass):
             if not layer.impl.fused_qk_norm_rope_kvcache_supported():
                 continue
             layer.impl.set_fused_kv_cache_layout()
-            for aiter_rms in aiter_rms_variants:
-                for aiter_rope in aiter_rope_variants:
-                    for epsilon in [1e-5, 1e-6]:
-                        for neox in [True, False]:
-                            if RotaryEmbedding.enabled():
-                                for rope_flashinfer in [False, True]:
-                                    try:
-                                        QkNormRopeKvCachePattern(
-                                            layer=layer,
-                                            eps=epsilon,
-                                            is_neox=neox,
-                                            rope_flashinfer=rope_flashinfer,
-                                            match_rocm_aiter_rms=aiter_rms,
-                                            match_rocm_aiter_rope=aiter_rope,
-                                        ).register(self.patterns)
-                                    except RuntimeError as e:
-                                        if "Duplicate pattern" in str(e):
-                                            logger.debug(
-                                                "Skipping duplicate pattern: "
-                                                "aiter_rms=%s aiter_rope=%s "
-                                                "eps=%s neox=%s fi=%s",
-                                                aiter_rms,
-                                                aiter_rope,
-                                                epsilon,
-                                                neox,
-                                                rope_flashinfer,
-                                            )
-                                        else:
-                                            raise
-                            else:
+            for aiter_rope in aiter_rope_variants:
+                for epsilon in [1e-5, 1e-6]:
+                    for neox in [True, False]:
+                        if RotaryEmbedding.enabled():
+                            for rope_flashinfer in [False, True]:
                                 try:
                                     QkNormRopeKvCachePattern(
                                         layer=layer,
                                         eps=epsilon,
                                         is_neox=neox,
-                                        match_rocm_aiter_rms=aiter_rms,
+                                        rope_flashinfer=rope_flashinfer,
                                         match_rocm_aiter_rope=aiter_rope,
                                     ).register(self.patterns)
                                 except RuntimeError as e:
                                     if "Duplicate pattern" in str(e):
                                         logger.debug(
                                             "Skipping duplicate pattern: "
-                                            "aiter_rms=%s aiter_rope=%s "
-                                            "eps=%s neox=%s fi=N/A",
-                                            aiter_rms,
+                                            "aiter_rope=%s eps=%s neox=%s fi=%s",
                                             aiter_rope,
                                             epsilon,
                                             neox,
+                                            rope_flashinfer,
                                         )
                                     else:
                                         raise
+                        else:
+                            try:
+                                QkNormRopeKvCachePattern(
+                                    layer=layer,
+                                    eps=epsilon,
+                                    is_neox=neox,
+                                    match_rocm_aiter_rope=aiter_rope,
+                                ).register(self.patterns)
+                            except RuntimeError as e:
+                                if "Duplicate pattern" in str(e):
+                                    logger.debug(
+                                        "Skipping duplicate pattern: "
+                                        "aiter_rope=%s eps=%s neox=%s fi=N/A",
+                                        aiter_rope,
+                                        epsilon,
+                                        neox,
+                                    )
+                                else:
+                                    raise
 
         # Backends that set _use_interleaved_v_cache (e.g. ROCM_ATTN)
         # require a consistent V-cache layout across ALL compile ranges.
