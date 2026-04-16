@@ -216,7 +216,7 @@ RUN apt-get -y update && apt-get -y install autoconf libtool pkg-config \
     ibverbs-providers \
     && rm -rf /var/lib/apt/lists/*
 
-RUN uv pip install --system meson auditwheel patchelf tomlkit
+RUN uv pip install meson auditwheel patchelf tomlkit
 
 RUN cd /usr/local/src && \
     git clone ${UCX_REPO} &&  \
@@ -402,13 +402,13 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system --upgrade 'ray[cgraph]>=2.48.0' \
-    && uv pip install --system -r requirements/rocm.txt \
-    && uv pip install --system -r requirements/rocm-test.txt \
+    && uv pip install --upgrade 'ray[cgraph]>=2.48.0' \
+    && uv pip install -r requirements/rocm.txt \
+    && uv pip install -r requirements/rocm-test.txt \
     && uv pip uninstall -y torch torchvision torchaudio || true \
-    && uv pip install --system --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install *.whl
 
 # Verify that PyTorch is the ROCm build, not CUDA
 RUN python3 -c "import torch; assert torch.version.hip is not None, \
@@ -417,11 +417,11 @@ RUN python3 -c "import torch; assert torch.version.hip is not None, \
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
-    uv pip install --system /rixl_install/*.whl
+    uv pip install /rixl_install/*.whl
 
 # Install DeepEP wheel
 RUN --mount=type=bind,from=build_deep,src=/app/deep_install,target=/deep_install \
-    uv pip install --system /deep_install/*.whl
+    uv pip install /deep_install/*.whl
 COPY --from=build_deep /opt/rocshmem /opt/rocshmem
 
 # RIXL/MoRIIO runtime dependencies (RDMA userspace libraries)
@@ -443,7 +443,7 @@ RUN cd /vllm-workspace \
 
 # enable fast downloads from hf (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
+    uv pip install hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
 # install audio decode package `torchcodec` from source (required due to 
@@ -517,12 +517,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system --upgrade 'ray[cgraph]>=2.48.0' \
-    && uv pip install --system -r requirements/rocm.txt \
+    && uv pip install --upgrade 'ray[cgraph]>=2.48.0' \
+    && uv pip install -r requirements/rocm.txt \
     && uv pip uninstall -y torch torchvision torchaudio || true \
-    && uv pip install --system --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
+    && uv pip install --index-url ${PIP_EXTRA_INDEX_URL} torch torchvision torchaudio \
     && pip uninstall -y vllm \
-    && uv pip install --system *.whl
+    && uv pip install *.whl
 
 RUN pip install amdsmi
 
