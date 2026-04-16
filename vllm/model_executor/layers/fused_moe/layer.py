@@ -8,7 +8,6 @@ from typing import Literal, cast, get_args, overload
 import torch
 from torch.nn.parameter import UninitializedParameter
 
-import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
@@ -19,7 +18,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.logger import init_logger
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -214,8 +213,8 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
 
 
 # --8<-- [start:fused_moe]
-@CustomOp.register("fused_moe")
-class FusedMoE(CustomOp):
+@PluggableLayer.register("fused_moe")
+class FusedMoE(PluggableLayer):
     """FusedMoE layer for MoE models.
 
     This layer contains both MergedColumnParallel weights (gate_up_proj /
@@ -275,6 +274,7 @@ class FusedMoE(CustomOp):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
+        zero_expert_type: str | None = None,
     ):
         super().__init__()
 
@@ -463,6 +463,8 @@ class FusedMoE(CustomOp):
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            zero_expert_type=zero_expert_type,
+            num_logical_experts=self.logical_num_experts,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
@@ -479,7 +481,7 @@ class FusedMoE(CustomOp):
             in_dtype=moe_in_dtype,
             moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
-            max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
+            max_num_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
@@ -1533,7 +1535,7 @@ class FusedMoE(CustomOp):
         """
         return self.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
 
-    def forward_native(
+    def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -1548,13 +1550,6 @@ class FusedMoE(CustomOp):
         return (
             self._expert_map if not self.rocm_aiter_fmoe_enabled else self.expert_mask
         )
-
-    def forward_cuda(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        return self.forward_native(hidden_states, router_logits)
 
     @classmethod
     def make_expert_params_mapping(
