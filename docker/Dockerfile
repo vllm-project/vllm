@@ -510,7 +510,8 @@ RUN apt-get update -y \
     else \
         for i in 1 2 3; do \
             add-apt-repository -y ppa:deadsnakes/ppa && break || \
-            { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
+            { if [ $i -eq 3 ]; then echo "add-apt-repository failed after 3 attempts"; exit 1; fi; \
+              echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
         done ; \
     fi \
     && apt-get update -y \
@@ -533,7 +534,8 @@ RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
     CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2) && \
     for i in 1 2 3; do \
         apt-get update -y && break || \
-        { echo "apt-get update attempt $i failed, retrying in 5s..."; sleep 5; }; \
+        { if [ $i -eq 3 ]; then echo "apt-get update failed after 3 attempts"; exit 1; fi; \
+          echo "apt-get update attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done && \
     apt-get install -y --no-install-recommends --allow-change-held-packages \
         cuda-nvcc-${CUDA_VERSION_DASH} \
