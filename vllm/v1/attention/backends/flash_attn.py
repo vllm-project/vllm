@@ -20,6 +20,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import (
     flash_attn_supports_fp8,
+    flash_attn_supports_quant_query_input,
     get_flash_attn_version,
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
@@ -656,7 +657,7 @@ class FlashAttentionImpl(AttentionImpl):
                 "heads in the layer"
             )
 
-        self.supports_quant_query_input = True
+        self.supports_quant_query_input = flash_attn_supports_quant_query_input()
 
         vllm_config = get_current_vllm_config_or_none()
         dcp_a2a = (
@@ -757,7 +758,11 @@ class FlashAttentionImpl(AttentionImpl):
 
             descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
 
-            q_descale = layer._q_scale.expand(descale_shape)
+            q_descale = (
+                layer._q_scale.expand(descale_shape)
+                if self.supports_quant_query_input
+                else None
+            )
             k_descale = layer._k_scale.expand(descale_shape)
             v_descale = layer._v_scale.expand(descale_shape)
 
@@ -1026,7 +1031,9 @@ class FlashAttentionImpl(AttentionImpl):
             window_size=sliding_window_size,
             softcap=self.logits_soft_cap,
             fa_version=self.vllm_flash_attn_version,
-            q_descale=layer._q_scale.expand(descale_shape),
+            q_descale=layer._q_scale.expand(descale_shape)
+            if self.supports_quant_query_input
+            else None,
             k_descale=layer._k_scale.expand(descale_shape),
             v_descale=layer._v_scale.expand(descale_shape),
             num_splits=1 if self.batch_invariant_enabled else 0,

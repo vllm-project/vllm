@@ -69,9 +69,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     raw_request: Request | None = None
     model_name: str
     request_id: str
+    pooling_params: PoolingParams | list[PoolingParams]
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    pooling_params: PoolingParams | list[PoolingParams] | None = None
     engine_inputs: Sequence[EngineInput] | None = None
     prompt_request_ids: list[str] | None = None
     intermediates: Any | None = None
@@ -88,6 +88,9 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
     ## for IOProcessorResponse
     response: Any | None = None
+
+    ## for flash-late-interaction
+    query_final_res_batch: list[PoolingRequestOutput] | None = None
 
 
 @dataclass
