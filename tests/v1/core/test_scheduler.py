@@ -2386,6 +2386,125 @@ def test_priority_scheduling_waiting_queue_order():
     assert waiting_priorities == [1, 2, 3]
 
 
+def test_priority_preemption_at_max_num_seqs():
+    """High-priority waiting request preempts a low-priority running request
+    when max_num_seqs is the bottleneck (no KV-cache pressure).
+
+    Setup: max_num_seqs=2, ample KV blocks.
+    Step 1: lo1 and lo2 (priority 5) enter running.
+    Step 2: hi1 (priority 0) arrives.  max_num_seqs is full, but hi1 has
+            higher priority than both running requests → lo1 or lo2 is
+            preempted and hi1 is scheduled in its place.
+    """
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+    )
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[5, 5],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1", "lo2"],
+        req_id_to_index={"lo1": 0, "lo2": 1},
+        sampled_token_ids=[[100], [100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # Now max_num_seqs is full.  Add a high-priority request.
+    hi1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[0],
+        arrival_times=[3.0],
+        num_tokens=10,
+        req_ids=["hi1"],
+    )[0]
+    scheduler.add_request(hi1)
+
+    output = scheduler.schedule()
+
+    # hi1 must be running.
+    running_ids = {r.request_id for r in scheduler.running}
+    assert "hi1" in running_ids, "hi1 should have been admitted via preemption"
+
+    # Exactly one of the low-priority requests must have been preempted.
+    lo1_req = scheduler.requests["lo1"]
+    lo2_req = scheduler.requests["lo2"]
+    preempted = sum(
+        1
+        for r in (lo1_req, lo2_req)
+        if r.status == RequestStatus.PREEMPTED
+    )
+    assert preempted == 1, "Exactly one low-priority request should be preempted"
+
+    # Total running count must not exceed max_num_seqs.
+    assert len(scheduler.running) <= 2
+
+
+def test_priority_no_capacity_preemption_equal_priority():
+    """No capacity-triggered preemption when the waiting request has the
+    same (or lower) priority as all running requests."""
+    scheduler = create_scheduler_with_priority(
+        max_num_seqs=2,
+        max_num_batched_tokens=512,
+        num_blocks=10000,
+    )
+
+    lo1, lo2 = create_requests_with_priority(
+        num_requests=2,
+        priorities=[2, 2],
+        arrival_times=[1.0, 2.0],
+        num_tokens=10,
+        req_ids=["lo1", "lo2"],
+    )
+    scheduler.add_request(lo1)
+    scheduler.add_request(lo2)
+
+    output = scheduler.schedule()
+    assert len(scheduler.running) == 2
+
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1", "lo2"],
+        req_id_to_index={"lo1": 0, "lo2": 1},
+        sampled_token_ids=[[100], [100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # Add a request with the *same* priority — must not trigger preemption.
+    eq = create_requests_with_priority(
+        num_requests=1,
+        priorities=[2],
+        arrival_times=[3.0],
+        num_tokens=10,
+        req_ids=["eq1"],
+    )[0]
+    scheduler.add_request(eq)
+
+    output = scheduler.schedule()
+
+    # eq1 must still be waiting; lo1 and lo2 keep running.
+    assert "eq1" not in {r.request_id for r in scheduler.running}
+    assert scheduler.requests["lo1"].status == RequestStatus.RUNNING
+    assert scheduler.requests["lo2"].status == RequestStatus.RUNNING
+
+
 def test_priority_scheduling_fcfs_fallback():
     """Test that FCFS behavior is maintained when all
     requests have same priority."""
