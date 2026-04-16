@@ -28,10 +28,15 @@ steps:
   device: amd-zen-cpu-inference
   no_plugin: true
   source_file_dependencies:
+  - setup.py
+  - vllm/docker/Dockerfile.cpu
+  - vllm/requirements/cpu.txt
+  - vllm/requirements/build/cpu.txt
   - csrc/cpu/
   - cmake/cpu_extension.cmake
   - CMakeLists.txt
   - vllm/model_executor/layers/utils.py
+  - vllm/platforms/cpu.py
   - vllm/platforms/zen_cpu.py
   - vllm/platforms/__init__.py
   - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
@@ -60,6 +65,9 @@ steps:
   no_plugin: true
   source_file_dependencies:
   - setup.py
+  - vllm/docker/Dockerfile.cpu
+  - vllm/requirements/cpu.txt
+  - vllm/requirements/build/cpu.txt
   - vllm/platforms/cpu.py
   - vllm/platforms/zen_cpu.py
   - vllm/platforms/interface.py
@@ -91,6 +99,10 @@ steps:
   device: amd-zen-cpu-inference
   no_plugin: true
   source_file_dependencies:
+  - setup.py
+  - vllm/docker/Dockerfile.cpu
+  - vllm/requirements/cpu.txt
+  - vllm/requirements/build/cpu.txt
   - csrc/cpu/
   - vllm/model_executor/layers/utils.py
   - vllm/platforms/zen_cpu.py
@@ -161,6 +173,10 @@ steps:
   device: amd-zen-cpu-inference
   no_plugin: true
   source_file_dependencies:
+  - setup.py
+  - vllm/docker/Dockerfile.cpu
+  - vllm/requirements/cpu.txt
+  - vllm/requirements/build/cpu.txt
   - csrc/cpu/shm.cpp
   - vllm/v1/worker/cpu_worker.py
   - vllm/v1/worker/gpu_worker.py
@@ -168,6 +184,7 @@ steps:
   - vllm/v1/worker/gpu_model_runner.py
   - vllm/platforms/cpu.py
   - vllm/platforms/zen_cpu.py
+  - vllm/platforms/cpu.py
   - vllm/distributed/parallel_state.py
   - vllm/distributed/device_communicators/cpu_communicator.py
   commands:
