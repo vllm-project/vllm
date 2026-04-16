@@ -43,8 +43,7 @@ class CPUWorker(Worker):
         cpu_core = allowed_cpu_list[0]
 
         assert cpu_core.numa_node in allowed_memory_nodes, (
-            "Node "
-            f"{cpu_core.numa_node} is not in available memory nodes "
+            f"Node {cpu_core.numa_node} is not in available memory nodes "
             f"{allowed_memory_nodes}"
         )
 
