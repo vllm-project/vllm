@@ -995,7 +995,7 @@ tomli==2.2.1
     # via schemathesis
 tomli-w==1.2.0
     # via schemathesis
-torch==2.11.0+cu130
+torch==2.12.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -1020,7 +1020,7 @@ torchaudio==2.11.0+cu130
     #   -r requirements/test/cuda.in
     #   encodec
     #   vocos
-torchvision==0.26.0+cu130
+torchvision==0.27.0+cu130
     # via
     #   -c requirements/cuda.txt
     #   -r requirements/test/cuda.in
@@ -1052,7 +1052,7 @@ transformers==5.5.3
     #   transformers-stream-generator
 transformers-stream-generator==0.0.5
     # via -r requirements/test/cuda.in
-triton==3.6.0
+triton==3.7.0
     # via torch
 tritonclient==2.64.0
     # via -r requirements/test/cuda.in

@@ -1,10 +1,11 @@
+--extra-index-url https://download.pytorch.org/whl/test/cu130
 # Should be mirrored in pyproject.toml
 cmake>=3.26.1
 ninja
 packaging>=24.2
 setuptools>=77.0.3,<81.0.0
 setuptools-scm>=8
-torch==2.11.0
+torch==2.12.0
 wheel
 jinja2>=3.1.6
 regex
