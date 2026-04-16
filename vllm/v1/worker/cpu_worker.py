@@ -153,10 +153,8 @@ class CPUWorker(Worker):
     def determine_available_memory(self) -> int:
         self.model_runner.warming_up_model()
 
-        allowed_memory_nodes = get_visible_memory_node()
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
-        assert cpu_core.numa_node in allowed_memory_nodes
 
         memory_status = get_memory_node_info(cpu_core.numa_node)
         available_memory = memory_status.available_memory
