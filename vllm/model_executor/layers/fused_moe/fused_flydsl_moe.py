@@ -63,113 +63,113 @@ logger = init_logger(__name__)
 _FLYDSL_MOE_GEMM1_CACHE = {}
 _FLYDSL_MOE_GEMM2_CACHE = {}
 
-FLYDSL_MOE_TUNED_CONFIG = {
-    "1": {
+FLYDSL_MOE_TUNED_CONFIGS = {
+    1: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 512,
         "tile_n2": 256,
         "tile_k2": 128
     },
-    "2": {
+    2: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 512,
         "tile_n2": 512,
         "tile_k2": 256
     },
-    "4": {
+    4: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 512,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "8": {
+    8: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 512,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "16": {
+    16: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 256,
         "tile_n2": 128,
         "tile_k2": 256
     },
-    "24": {
+    24: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 256,
         "tile_n2": 128,
         "tile_k2": 256
     },
-    "32": {
+    32: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 256,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "48": {
+    48: {
         "tile_m": 16,
         "tile_n": 128,
         "tile_k": 256,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "64": {
+    64: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 128,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "128": {
+    128: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 256,
         "tile_n2": 128,
         "tile_k2": 256
     },
-    "256": {
+    256: {
         "tile_m": 16,
         "tile_n": 64,
         "tile_k": 256,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "512": {
+    512: {
         "tile_m": 32,
         "tile_n": 64,
         "tile_k": 128,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "1024": {
+    1024: {
         "tile_m": 32,
         "tile_n": 64,
         "tile_k": 128,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "2048": {
+    2048: {
         "tile_m": 64,
         "tile_n": 64,
         "tile_k": 64,
         "tile_n2": 512,
         "tile_k2": 256
     },
-    "4096": {
+    4096: {
         "tile_m": 32,
         "tile_n": 64,
         "tile_k": 128,
         "tile_n2": 256,
         "tile_k2": 256
     },
-    "8192": {
+    8192: {
         "tile_m": 64,
         "tile_n": 64,
         "tile_k": 64,
@@ -237,7 +237,7 @@ def build_routing_buffers(
 
 @functools.lru_cache
 def get_flydsl_config(M):
-    return FLYDSL_MOE_TUNED_CONFIG[str(M)]
+    return FLYDSL_MOE_TUNED_CONFIGS[min(FLYDSL_MOE_TUNED_CONFIGS.keys(), key=lambda x: abs(x - M))]
 
 def _fused_flydsl_moe(
     hidden_states,
@@ -258,8 +258,7 @@ def _fused_flydsl_moe(
 ):  
     device = hidden_states.device
     tokens = hidden_states.shape[0]
-    tuned_configs = get_flydsl_config(tokens)
-    tuned_config = tuned_configs[min(tuned_configs.keys(), key=lambda x: abs(x - tokens))]
+    tuned_config = get_flydsl_config(tokens)
     model_dim = hidden_states.shape[1]
     out_torch_dtype = torch.bfloat16 if out_dtype == "bf16" else torch.float16
 
