@@ -105,7 +105,7 @@ ENV SCCACHE_S3_NO_CREDENTIALS=${USE_SCCACHE:+${SCCACHE_S3_NO_CREDENTIALS}}
 ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 # torch profiler hotfix for 7.2.2: rebuild CLR with https://github.com/ROCm/rocm-systems/pull/5062
-# will be removed once we move to ROCm 7.13
+# will be removed once we move to ROCm 7.2.3
 RUN git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-systems /tmp/rocm-systems \
     && cd /tmp/rocm-systems \
     && git sparse-checkout init --cone \
