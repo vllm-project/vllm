@@ -32,25 +32,21 @@
 #include "cutlass/util/packed_stride.hpp"
 
 #include "core/math.hpp"
+#include "core/batch_invariant.hpp"
 
 using namespace cute;
 
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
 
-// Configuration for M in (256, inf)
+// Configuration for M in (256, inf), also reused for batch-invariant mode
+// to keep a fixed large-M tiling across all batch sizes.
+// Do not change the tile K or tile scheduler here unless you are also
+// updating the batch-invariant behavior; if batch-invariant mode needs a
+// different schedule, add a dedicated batch-invariant config/path instead.
 struct sm100_fp4_config_default {
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
-  using TileShape = Shape<_256, _256, _256>;
-  using ClusterShape = Shape<_2, _1, _1>;
-  using PerSmTileShape_MNK = Shape<_128, _256, _256>;
-};
-
-// Fixed large-M tiling for all batch sizes (batch-invariant mode; matches
-// sm100_fp4_config_default numerics without branching on M).
-struct sm100_fp4_config_batch_invariant {
-  using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
-  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileScheduler = cutlass::gemm::PersistentScheduler;
   using TileShape = Shape<_256, _256, _256>;
   using ClusterShape = Shape<_2, _1, _1>;
   using PerSmTileShape_MNK = Shape<_128, _256, _256>;
@@ -60,6 +56,7 @@ struct sm100_fp4_config_batch_invariant {
 struct sm100_fp4_config_M256 {
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileScheduler = void;
   using TileShape = Shape<_256, _128, _256>;
   using ClusterShape = Shape<_2, _1, _1>;
   using PerSmTileShape_MNK = Shape<_128, _128, _256>;
@@ -69,6 +66,7 @@ struct sm100_fp4_config_M256 {
 struct sm100_fp4_config_M16 {
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileScheduler = void;
   using TileShape = Shape<_128, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
   using PerSmTileShape_MNK = Shape<_128, _128, _256>;
@@ -110,7 +108,7 @@ struct Fp4GemmSm100 {
           cutlass::epilogue::collective::EpilogueTileAuto, ElementAccumulator,
           ElementAccumulator, ElementC, LayoutCTag, AlignmentC, ElementD,
           LayoutDTag, AlignmentD,
-          cutlass::epilogue::collective::EpilogueScheduleAuto>::CollectiveOp;
+          typename Config::EpilogueSchedule>::CollectiveOp;
 
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
@@ -119,14 +117,13 @@ struct Fp4GemmSm100 {
           ClusterShape,
           cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
-          cutlass::gemm::collective::KernelScheduleAuto>::CollectiveOp;
+          typename Config::KernelSchedule>::CollectiveOp;
 
-  // Must stay void (data-parallel) for batch_invariant correctness; stream-K
-  // or split-K would make output depend on total grid size.
-  using TileSchedulerTag = void;
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
-      TileSchedulerTag>;
+  using TileScheduler = typename Config::TileScheduler;
+  using GemmKernel =
+      cutlass::gemm::kernel::GemmUniversal<Shape<int, int, int, int>,
+                                           CollectiveMainloop,
+                                           CollectiveEpilogue, TileScheduler>;
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   using StrideA = typename Gemm::GemmKernel::StrideA;
   using LayoutA = decltype(cute::make_layout(make_shape(0, 0, 0), StrideA{}));
@@ -220,14 +217,14 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
                                torch::stable::Tensor const& A_sf,
                                torch::stable::Tensor const& B_sf,
                                torch::stable::Tensor const& alpha, int64_t m,
-                               int64_t n, int64_t k, cudaStream_t stream,
-                               bool batch_invariant) {
-  if (batch_invariant) {
-    using BiGemm = Fp4GemmSm100<sm100_fp4_config_batch_invariant, OutType>;
+                               int64_t n, int64_t k, cudaStream_t stream) {
+  if (vllm::vllm_is_batch_invariant()) {
+    using BiGemm = Fp4GemmSm100<sm100_fp4_config_default, OutType>;
     static_assert(
-        std::is_void_v<typename BiGemm::TileSchedulerTag>,
-        "batch_invariant requires a data-parallel tile scheduler (void); "
-        "stream-K or split-K would break numerical invariance");
+        cute::is_same_v<typename BiGemm::TileScheduler,
+                        cutlass::gemm::PersistentScheduler>,
+        "batch_invariant requires a persistent tile scheduler; stream-K or "
+        "split-K would break numerical invariance");
     runGemm<BiGemm>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
     return;
   }
@@ -257,8 +254,7 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
                                torch::stable::Tensor const& A_sf,
                                torch::stable::Tensor const& B_sf,
                                torch::stable::Tensor const& alpha, int64_t m,
-                               int64_t n, int64_t k, cudaStream_t stream,
-                               bool /*batch_invariant*/) {
+                               int64_t n, int64_t k, cudaStream_t stream) {
   STD_TORCH_CHECK(false,
                   "Unsupported CUTLASS version. Set VLLM_CUTLASS_SRC_DIR to "
                   "a CUTLASS 3.8 source directory to enable support.");
@@ -285,8 +281,7 @@ void cutlass_scaled_fp4_mm_sm100a(torch::stable::Tensor& D,
                                   torch::stable::Tensor const& B,
                                   torch::stable::Tensor const& A_sf,
                                   torch::stable::Tensor const& B_sf,
-                                  torch::stable::Tensor const& alpha,
-                                  bool batch_invariant) {
+                                  torch::stable::Tensor const& alpha) {
   CHECK_INPUT(A, FLOAT4_E2M1X2, "a");
   CHECK_INPUT(B, FLOAT4_E2M1X2, "b");
 
@@ -342,10 +337,10 @@ void cutlass_scaled_fp4_mm_sm100a(torch::stable::Tensor& D,
 
   if (out_dtype == torch::headeronly::ScalarType::Half) {
     cutlass_fp4_gemm_dispatch<cutlass::half_t>(D, A, B, A_sf, B_sf, alpha, m, n,
-                                               k, stream, batch_invariant);
+                                               k, stream);
   } else if (out_dtype == torch::headeronly::ScalarType::BFloat16) {
-    cutlass_fp4_gemm_dispatch<cutlass::bfloat16_t>(
-        D, A, B, A_sf, B_sf, alpha, m, n, k, stream, batch_invariant);
+    cutlass_fp4_gemm_dispatch<cutlass::bfloat16_t>(D, A, B, A_sf, B_sf, alpha,
+                                                   m, n, k, stream);
   } else {
     STD_TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm (",
                     out_dtype, ")");
