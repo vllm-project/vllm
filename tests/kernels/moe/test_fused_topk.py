@@ -140,7 +140,7 @@ def test_fused_topk_bias(
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
-@pytest.mark.parametrize("num_experts", [8, 16])
+@pytest.mark.parametrize("num_experts", [6, 8, 16])
 @pytest.mark.parametrize("topk", [3, 4])
 @pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
 @pytest.mark.parametrize("bad_value", [float("nan"), float("inf")])

@@ -126,7 +126,9 @@ __launch_bounds__(TPB) __global__
     {
         const int idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
-        const float softmax_val = expf(val - float_max) * normalizing_factor;
+        float softmax_val = expf(val - float_max) * normalizing_factor;
+        // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
+        if (isnan(softmax_val) || isinf(softmax_val)) softmax_val = 0.f;
         output[idx] = softmax_val;
     }
 }
@@ -147,7 +149,9 @@ __launch_bounds__(TPB) __global__
     {
         const int idx = thread_row_offset + ii;
         const float val = toFloat(input[idx]);
-        const float sigmoid_val = 1.0f / (1.0f + __expf(-val));
+        float sigmoid_val = 1.0f / (1.0f + __expf(-val));
+        // Clamp NaN/Inf to 0 to prevent duplicate expert IDs downstream.
+        if (isnan(sigmoid_val) || isinf(sigmoid_val)) sigmoid_val = 0.f;
         output[idx] = sigmoid_val;
     }
 }
