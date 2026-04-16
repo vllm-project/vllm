@@ -721,6 +721,10 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         return moe_parallel_config.ep_size == 1
 
     @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return True
+
+    @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
