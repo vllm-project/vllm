@@ -125,8 +125,12 @@ class Gemma4AudioInputs(TensorSchema):
     """
 
     type: Literal["audio"] = "audio"
-    input_features_padded: Annotated[torch.Tensor, TensorShape("bn", "s", "f")]
-    input_features_mask: Annotated[torch.Tensor, TensorShape("bn", "s")]
+    input_features_padded: Annotated[
+        torch.Tensor, TensorShape("bn", "s", "f", dynamic_dims={"s"})
+    ]
+    input_features_mask: Annotated[
+        torch.Tensor, TensorShape("bn", "s", dynamic_dims={"s"})
+    ]
 
 
 Gemma4ImageInputs = Gemma4ImagePixelInputs
@@ -510,6 +514,8 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             video_timestamps_per_video: list[list[float]] = []
             video_frame_counts: list[int] = []
 
+            video_replacements: list[str] = []
+
             for item in videos:
                 video_array, metadata = item
 
@@ -562,10 +568,7 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                 video_timestamps_per_video.append(timestamps)
                 video_frame_counts.append(len(frames))
 
-                # Build expanded replacement text and replace the
-                # <|video|> placeholder in the prompt.
-                # Use split(token, 1) to avoid collision — the
-                # replacement text itself contains <|video|> tokens.
+                # Build expanded replacement text for this video.
                 ts_strs = [f"{int(s // 60):02d}:{int(s % 60):02d}" for s in timestamps]
                 replacement = " ".join(
                     f"{t} {processor.boi_token}"
@@ -573,9 +576,23 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
                     f"{processor.eoi_token}"
                     for t, n in zip(ts_strs, num_soft_per_frame)
                 )
-                parts = prompt.split(processor.video_token, 1)
-                if len(parts) == 2:
-                    prompt = parts[0] + replacement + parts[1]
+                video_replacements.append(replacement)
+
+            # Replace all <|video|> placeholders at once. We split on
+            # video_token to get N+1 parts, then interleave with the
+            # N replacement strings. This avoids the iterative
+            # split-replace bug where replacement text (which itself
+            # contains <|video|> tokens) collides with later splits.
+            vt = processor.video_token
+            parts = prompt.split(vt, len(video_replacements))
+
+            # NOTE: len(parts) <= len(video_replacements) + 1
+            parts_with_repl: list[str] = []
+            for part, repl in zip(parts, video_replacements):
+                parts_with_repl.extend([part, repl])
+            parts_with_repl.extend(parts[len(video_replacements) :])
+
+            prompt = "".join(parts_with_repl)
 
             video_outputs = {
                 "pixel_values_videos": torch.cat(all_video_pixel_values, dim=0),
@@ -638,19 +655,23 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
             )
 
         if "input_features" in processed_outputs:
-            # Keep padded features for batched audio tower execution.
-            processed_outputs["input_features_padded"] = processed_outputs[
-                "input_features"
-            ]
-            # Unpad per-item so each item's cache entry is self-contained.
+            # Unpad per-item so each item's cache entry is
+            # self-contained. The batched() field config in
+            # _get_mm_fields_config will re-pad all fields to the
+            # batch's max length at batch time, ensuring consistent
+            # padding regardless of cache history.
+            masks = processed_outputs["input_features_mask"]
             unpadded_features = [
                 f[mask]
                 for f, mask in zip(
                     processed_outputs["input_features"],
-                    processed_outputs["input_features_mask"],
+                    masks,
                 )
             ]
+            unpadded_masks = [mask[mask] for mask in masks]
             processed_outputs["input_features"] = unpadded_features
+            processed_outputs["input_features_padded"] = unpadded_features
+            processed_outputs["input_features_mask"] = unpadded_masks
 
         # Merge video outputs into the final result
         combined_outputs = dict(processed_outputs, **video_outputs)
