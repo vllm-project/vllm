@@ -7,19 +7,27 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 from .chunk import chunk_gated_delta_rule
-from .fused_gdn_prefill_post_conv import fused_post_conv_prep
 from .fused_recurrent import (
     fused_recurrent_gated_delta_rule,
     fused_recurrent_gated_delta_rule_packed_decode,
 )
 from .fused_sigmoid_gating import fused_sigmoid_gating_delta_rule_update
 from .layernorm_guard import RMSNormGated
+from .rwkv7 import (
+    fused_mul_recurrent_rwkv7,
+    fused_mul_recurrent_rwkv7_with_checkpoints,
+    rwkv7_recurrent_reference,
+    rwkv7_recurrent_reference_with_checkpoints,
+)
 
 __all__ = [
     "RMSNormGated",
     "chunk_gated_delta_rule",
     "fused_recurrent_gated_delta_rule",
     "fused_recurrent_gated_delta_rule_packed_decode",
-    "fused_post_conv_prep",
     "fused_sigmoid_gating_delta_rule_update",
+    "fused_mul_recurrent_rwkv7",
+    "fused_mul_recurrent_rwkv7_with_checkpoints",
+    "rwkv7_recurrent_reference",
+    "rwkv7_recurrent_reference_with_checkpoints",
 ]

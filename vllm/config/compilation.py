@@ -735,6 +735,7 @@ class CompilationConfig:
         "vllm::gdn_attention_core",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
+        "vllm::rwkv7_block_forward",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
     ]

@@ -3,6 +3,8 @@
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
+from vllm.config.compilation import CUDAGraphMode
+
 from vllm.logger import init_logger
 from vllm.utils.math_utils import round_up
 
@@ -621,6 +623,37 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
+class RWKV7ForCausalLMConfig(MambaModelConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        cache_config = vllm_config.cache_config
+        requested_mamba_cache_mode = cache_config.mamba_cache_mode
+        if cache_config.enable_prefix_caching and requested_mamba_cache_mode == "none":
+            cache_config.mamba_cache_mode = "align"
+        super().verify_and_update_config(vllm_config)
+        if (
+            cache_config.enable_prefix_caching
+            and requested_mamba_cache_mode == "none"
+            and cache_config.mamba_cache_mode == "align"
+        ):
+            logger.info(
+                "RWKV7 default mamba cache mode is set to 'align' until "
+                "cache-all checkpoint emission is optimized."
+            )
+
+    @staticmethod
+    def apply_post_optimization_level_defaults(
+        vllm_config: "VllmConfig",
+    ) -> None:
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE:
+            logger.info(
+                "Overriding RWKV7 cudagraph mode from FULL_AND_PIECEWISE "
+                "to PIECEWISE to avoid unsafe full decode graph capture."
+            )
+            compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
@@ -653,6 +686,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "RWKV7ForCausalLM": RWKV7ForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }
