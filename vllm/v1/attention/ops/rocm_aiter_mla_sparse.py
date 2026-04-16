@@ -473,15 +473,22 @@ def rocm_aiter_sparse_attn_indexer_fake(
     total_seq_lens: int,
     topk_indices_buffer: torch.Tensor | None,
 ) -> torch.Tensor:
-    # profile run
+    # Reserve workspace during profiling run
     # NOTE(Chen): create the max possible flattened_kv. So that
     # profile_run can get correct memory usage.
-    _flattened_kv = torch.empty(
-        [total_seq_lens, head_dim + 4], device=k.device, dtype=torch.uint8
-    )
     fp8_dtype = current_platform.fp8_dtype()
-    _k_fp8 = _flattened_kv[..., :head_dim].view(fp8_dtype).contiguous()
-    _k_scale = _flattened_kv[..., head_dim:].view(torch.float32).contiguous()
+    from vllm.v1.worker.workspace import current_workspace_manager
+
+    current_workspace_manager().get_simultaneous(
+        ((total_seq_lens, head_dim), fp8_dtype),
+        ((total_seq_lens, 4), torch.uint8),
+    )
+    _k_fp8 = torch.empty(
+        [total_seq_lens, head_dim], device=k.device, dtype=fp8_dtype
+    )
+    _k_scale = torch.empty(
+        [total_seq_lens, 4], device=k.device, dtype=torch.uint8
+    )
     return topk_indices_buffer
 
 
@@ -549,25 +556,26 @@ def rocm_aiter_sparse_attn_indexer(
     if has_prefill:
         prefill_metadata = layer_attn_metadata.prefill
         assert prefill_metadata is not None
-        for chunk in prefill_metadata.chunks:
-            k_fp8 = torch.empty(
-                [chunk.total_seq_lens, head_dim],
-                device=k.device,
-                dtype=fp8_dtype,
-            )
-            k_scale = torch.empty(
-                [chunk.total_seq_lens, 4],
-                device=k.device,
-                dtype=torch.uint8,
-            )
+        # Get shared workspace buffers once (allocate on first use)
+        from vllm.v1.worker.workspace import current_workspace_manager
 
-            ops.cp_gather_indexer_k_quant_cache(
-                kv_cache,
-                k_fp8,
-                k_scale,
-                chunk.block_table,
-                chunk.cu_seq_lens,
-            )
+        workspace_manager = current_workspace_manager()
+        k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
+            ((total_seq_lens, head_dim), fp8_dtype),
+            ((total_seq_lens, 4), torch.uint8),
+        )
+        for chunk in prefill_metadata.chunks:
+            k_fp8 = k_fp8_full[: chunk.total_seq_lens]
+            k_scale = k_scale_full[: chunk.total_seq_lens]
+
+            if not chunk.skip_kv_gather:
+                ops.cp_gather_indexer_k_quant_cache(
+                    kv_cache,
+                    k_fp8,
+                    k_scale,
+                    chunk.block_table,
+                    chunk.cu_seq_lens,
+                )
 
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
