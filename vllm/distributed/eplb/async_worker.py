@@ -98,7 +98,7 @@ async def transfer_run_periodically(
             layer_idx = 0
             # Set the async worker's CUDA stream on the communicator
             model_state.communicator.set_stream(cuda_stream)
-            current_num_layers = model_state.model.num_moe_layers
+            num_layers = model_state.model.num_moe_layers
 
             # Snapshot the physical_to_logical_map (synchronized with
             # rearrange_event) and copy it to CPU
@@ -117,7 +117,7 @@ async def transfer_run_periodically(
             # of this loop will copy the new set of expert weights into
             # model_state.expert_buffer, which will be consumed by the main thread in
             # move_to_workspace
-            while model_state.rebalanced and layer_idx < current_num_layers:
+            while model_state.rebalanced and layer_idx < num_layers:
                 (
                     is_unchanged,
                     is_received_locally,

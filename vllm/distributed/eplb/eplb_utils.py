@@ -18,6 +18,10 @@ class CpuGpuEvent:
     Combines a CUDA event with a CPU threading event to enforce record->wait
     ordering across two threads.
 
+    This class is designed for exactly two threads: one producer that calls
+    record() and one consumer that calls wait(). Using it with more than two
+    threads is not supported and will produce undefined behavior.
+
     CUDA events alone are insufficient for cross-thread synchronization because
     waiting on an unrecorded CUDA event is a no-op. The wait will return
     immediately instead of blocking. This class adds a threading.Event so
@@ -47,7 +51,11 @@ class CpuGpuEvent:
 
         Should only be called by the main thread.
         """
-        assert not self._recorded.is_set()
+        if self._recorded.is_set():
+            raise RuntimeError(
+                "CpuGpuEvent.record() called before the previous event was "
+                "consumed by wait()"
+            )
         self._event = torch.cuda.Event()
         self._event.record(stream)
         self._recorded.set()
