@@ -771,6 +771,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         max_num_tiles: int | None = None,
         video_token: str | None = None,
         video_pruning_rate: float | None = None,
+        use_audio_in_video: bool = False,
     ) -> None:
         super().__init__(
             config=config,
@@ -781,6 +782,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         # add extra video token for video processing
         self.video_token = video_token
         self.video_pruning_rate = video_pruning_rate
+        self.use_audio_in_video = use_audio_in_video
 
         # Video params live exclusively in vision_config
         vision_config = getattr(config, "vision_config", config)
@@ -990,17 +992,7 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
                 parts[idx] = audio_repl.full
                 audio_index += 1
         text = ["".join(parts)]
-        audio_inputs = extractor(
-            audios,
-            sampling_rate=extractor.sampling_rate,
-            return_tensors="pt",
-        )
-        audio_inputs = {
-            "input_audio_features": audio_inputs.input_features,
-            "feature_attention_mask": audio_inputs.attention_mask,
-            "audio_num_clips": audio_inputs.audio_num_clips,
-        }
-
+        audio_inputs = extractor(audios)
         return text, audio_inputs
 
     def __call__(

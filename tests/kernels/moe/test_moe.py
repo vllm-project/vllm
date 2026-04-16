@@ -59,6 +59,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -1031,7 +1032,7 @@ def test_fused_marlin_moe(
     act_order: bool,
     is_k_full: bool,
 ):
-    torch.cuda.manual_seed(1)
+    set_random_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
 
     if c_type == scalar_types.float16:
@@ -1131,7 +1132,7 @@ def test_fused_marlin_moe(
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 @pytest.mark.parametrize("m", [1, 256])
 def test_fused_marlin_moe_with_bias(m):
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     e, topk = 32, 4
     n, k = 2048, 2048
@@ -1213,7 +1214,7 @@ def test_fused_marlin_moe_non_gated(
     Non-gated activations like relu2 don't have the gate-up projection pattern,
     so w1 has shape (e, n, k) instead of (e, 2*n, k).
     """
-    torch.cuda.manual_seed(42)
+    set_random_seed(42)
 
     group_size = 16  # NVFP4 group size
     is_k_full = True
@@ -1397,7 +1398,7 @@ def test_cpu_fused_moe_basic(
     from vllm.model_executor.layers.fused_moe.cpu_fused_moe import CPUFusedMOE
 
     device = "cpu"
-    torch.manual_seed(7)
+    set_random_seed(7)
 
     a = torch.randn((m, k), device=device, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10
@@ -1469,7 +1470,7 @@ def test_batched_fused_marlin_moe(
         f"topk={topk}, "
         f"max_tokens_per_batch={max_tokens_per_batch}"
     )
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     dtype = torch.bfloat16
     quant_dtype = scalar_types.float4_e2m1f
@@ -1676,7 +1677,7 @@ def test_unquantized_bf16_flashinfer_trtllm_backend(
         in_dtype=dtype,
         is_act_and_mul=True,
         routing_method=RoutingMethodType.Renormalize,
-        max_num_tokens=m,
+        max_num_tokens=next_power_of_2(m),
     )
 
     with set_current_vllm_config(vllm_config):

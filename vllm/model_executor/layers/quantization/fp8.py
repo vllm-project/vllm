@@ -397,8 +397,6 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert not self.act_q_static
 
-            self.fp8_linear.process_weights_after_loading(layer)
-
         # If checkpoint not serialized fp8, quantize the weights.
         else:
             # If checkpoint is fp8 per-tensor, handle that there are N scales for N
@@ -427,6 +425,8 @@ class Fp8LinearMethod(LinearMethodBase):
             replace_parameter(layer, "input_scale", input_scale)
         else:
             layer.input_scale = None
+
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -517,10 +517,10 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         # TODO: remove this check once the following RFC is resolved.
         # https://github.com/vllm-project/vllm/issues/33314
-        # This check is required because Mxfp8OnlineLinearMethod inherits from
-        # Fp8OnlineLinearMethod but only calls super().create_weights(), so we must
-        # skip the fp8_linear kernel creation.
-        if hasattr(self, "mxfp8_linear"):
+        # Subclasses (e.g. Mxfp8OnlineLinearMethod) only need the weight
+        # registration above and manage their own kernel, so skip fp8_linear
+        # kernel creation for them.
+        if type(self) is not Fp8OnlineLinearMethod:
             return
 
         self.fp8_linear = init_fp8_linear_kernel(

@@ -31,10 +31,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_update,
 )
 from vllm.model_executor.layers.mamba.ops.layernorm_gated import rms_norm_gated
-from vllm.model_executor.layers.mamba.ops.mamba_ssm import selective_state_update
 from vllm.model_executor.layers.mamba.ops.ssd_combined import (
     mamba_chunk_scan_combined_varlen,
 )
+from vllm.model_executor.layers.mamba.ops.ssu_dispatch import selective_state_update
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import (
     LoaderFunction,
@@ -44,7 +44,12 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
 
@@ -536,7 +541,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         torch.ops.vllm.mamba_mixer2(
             projected_states,
             ssm_output,
-            self.prefix,
+            _encode_layer_name(self.prefix),
         )
 
         # 4. gated MLP
@@ -885,8 +890,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 B_d,
                 C_d,
                 D_d,
-                z=None,
-                dt_bias=dt_bias,
+                dt_bias,
                 dt_softplus=True,
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
@@ -894,8 +898,6 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=query_start_loc_d,
                 is_blackwell=self.is_blackwell,
-                enable_stochastic_rounding=self.cache_config.enable_mamba_cache_stochastic_rounding,
-                cache_philox_rounds=self.cache_config.mamba_cache_philox_rounds,
             )
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
@@ -927,8 +929,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
 def mamba_mixer2(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
+    layer_name = _resolve_layer_name(layer_name)
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
     self.conv_ssm_forward(projected_states=projected_states, output=output)
@@ -937,7 +940,7 @@ def mamba_mixer2(
 def mamba_mixer2_fake(
     projected_states: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
 ) -> None:
     return
 
