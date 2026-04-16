@@ -85,6 +85,9 @@ at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
                               at::Tensor& w_scales,
                               std::optional<at::Tensor> bias);
 
+void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
+                         const std::string& activation);
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -230,6 +233,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Quick GELU implementation.
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCPU, &gelu_quick);
+
+#if (defined(__aarch64__) && !defined(__APPLE__))
+
+  ops.def(
+      "activation_lut_bf16(Tensor! out, Tensor input, str activation)"
+      " -> ()");
+  ops.impl("activation_lut_bf16", torch::kCPU, &activation_lut_bf16);
+
+#endif  // (defined(__aarch64__) && !defined(__APPLE__))
 
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
