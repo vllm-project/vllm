@@ -348,6 +348,7 @@ def test_kv_transfer_handshake(dist_init):
                 ["layer0", "layer1", "layer2"],
                 FullAttentionSpec(
                     block_size=16,
+                    num_q_heads=4,
                     num_kv_heads=4,
                     head_size=16,
                     dtype=torch.float16,
@@ -1545,6 +1546,7 @@ def test_register_kv_caches(
         )
         kv_cache_spec = FullAttentionSpec(
             block_size=block_size,
+            num_q_heads=num_heads,
             num_kv_heads=num_heads,
             head_size=head_size,
             dtype=torch.float16,

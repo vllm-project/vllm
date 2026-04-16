@@ -1878,6 +1878,7 @@ def create_scheduler_with_priority(
                 ["layer"],
                 FullAttentionSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -3984,6 +3985,7 @@ def _create_encoder_decoder_scheduler(
                 ["self_attn_layer"],
                 FullAttentionSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,
@@ -3993,6 +3995,7 @@ def _create_encoder_decoder_scheduler(
                 ["cross_attn_layer"],
                 CrossAttentionSpec(
                     block_size=block_size,
+                    num_q_heads=1,
                     num_kv_heads=1,
                     head_size=1,
                     dtype=torch.float32,

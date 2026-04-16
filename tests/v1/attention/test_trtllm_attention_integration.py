@@ -267,6 +267,7 @@ def _run_trtllm_integration(batch_spec):
     try:
         kv_cache_spec = FullAttentionSpec(
             block_size=BLOCK_SIZE,
+            num_q_heads=num_q_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
             dtype=dtype,

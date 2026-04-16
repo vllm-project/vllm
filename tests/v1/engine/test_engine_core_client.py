@@ -1181,7 +1181,11 @@ def test_engine_core_proc_instantiation_cuda_empty(monkeypatch: pytest.MonkeyPat
         from vllm.v1.kv_cache_interface import FullAttentionSpec
 
         mock_spec = FullAttentionSpec(
-            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float16
+            block_size=16,
+            num_q_heads=1,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.float16,
         )
 
         mock_executor.get_kv_cache_specs.return_value = [{"default": mock_spec}]

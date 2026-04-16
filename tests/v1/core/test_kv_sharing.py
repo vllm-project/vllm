@@ -12,7 +12,7 @@ pytestmark = pytest.mark.cpu_test
 
 def new_kv_cache_spec():
     return FullAttentionSpec(
-        block_size=16, num_kv_heads=1, head_size=1, dtype=torch.float32
+        block_size=16, num_q_heads=1, num_kv_heads=1, head_size=1, dtype=torch.float32
     )
 
 

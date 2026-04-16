@@ -45,6 +45,7 @@ def test_chunked_local_attention_possible_cached_prefix():
     block_size = 2
     chunked_local_attention_spec = ChunkedLocalAttentionSpec(
         block_size=block_size,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -118,6 +119,7 @@ def test_sliding_window_possible_cached_prefix():
     block_size = 2
     sliding_window_spec = SlidingWindowSpec(
         block_size=block_size,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -188,6 +190,7 @@ def test_sliding_window_possible_cached_prefix():
 def test_chunked_local_attention_remove_skipped_blocks():
     attention_spec = ChunkedLocalAttentionSpec(
         block_size=2,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -249,6 +252,7 @@ def test_chunked_local_attention_remove_skipped_blocks():
 def test_sliding_window_remove_skipped_blocks():
     sliding_window_spec = SlidingWindowSpec(
         block_size=2,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -326,6 +330,7 @@ def test_get_num_blocks_to_allocate():
     block_size = 2
     sliding_window_spec = SlidingWindowSpec(
         block_size=block_size,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -360,6 +365,7 @@ def test_evictable_cached_blocks_not_double_allocated():
     sliding_window_length = 2 * block_size
     sliding_window_spec = SlidingWindowSpec(
         block_size=block_size,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,
@@ -402,6 +408,7 @@ def test_chunked_local_attention_get_num_blocks_to_allocate():
     block_size = 2
     attention_spec = ChunkedLocalAttentionSpec(
         block_size=block_size,
+        num_q_heads=1,
         num_kv_heads=1,
         head_size=1,
         dtype=torch.float32,

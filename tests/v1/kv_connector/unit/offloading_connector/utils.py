@@ -190,6 +190,7 @@ class RequestRunner:
                     ["layer"],
                     FullAttentionSpec(
                         block_size=block_size,
+                        num_q_heads=1,
                         num_kv_heads=1,
                         head_size=1,
                         dtype=torch.float32,

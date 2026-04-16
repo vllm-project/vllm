@@ -146,6 +146,9 @@ def create_standard_kv_cache_spec(vllm_config: VllmConfig) -> FullAttentionSpec:
     """Create a FullAttentionSpec from ModelParams only."""
     return FullAttentionSpec(
         block_size=vllm_config.cache_config.block_size,
+        num_q_heads=vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        ),
         num_kv_heads=vllm_config.model_config.get_num_kv_heads(
             vllm_config.parallel_config
         ),

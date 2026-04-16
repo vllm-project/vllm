@@ -84,6 +84,7 @@ class AttentionQuantPatternModel(torch.nn.Module):
         self.builder = self.attn.attn_backend.get_builder_cls()(
             kv_cache_spec=AttentionSpec(
                 block_size=self.block_size,
+                num_q_heads=self.num_qo_heads,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
                 dtype=self.attn.kv_cache_torch_dtype,

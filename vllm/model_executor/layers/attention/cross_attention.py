@@ -221,6 +221,7 @@ class CrossAttention(Attention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         return CrossAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
+            num_q_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
             head_size=self.head_size,
             dtype=self.kv_cache_torch_dtype,

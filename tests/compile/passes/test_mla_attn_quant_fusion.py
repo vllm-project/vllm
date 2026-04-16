@@ -121,6 +121,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         self.builder = self.mla_attn.attn_backend.get_builder_cls()(
             kv_cache_spec=MLAAttentionSpec(
                 block_size=self.block_size,
+                num_q_heads=self.num_heads,
                 num_kv_heads=1,
                 head_size=self.head_size,
                 dtype=self.kv_cache_dtype,

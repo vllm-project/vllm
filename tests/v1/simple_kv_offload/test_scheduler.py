@@ -75,6 +75,7 @@ def _make_kv_cache_config(
                 layer_names,
                 FullAttentionSpec(
                     block_size=BLOCK_SIZE,
+                    num_q_heads=NUM_KV_HEADS,
                     num_kv_heads=NUM_KV_HEADS,
                     head_size=HEAD_SIZE,
                     dtype=DTYPE,
