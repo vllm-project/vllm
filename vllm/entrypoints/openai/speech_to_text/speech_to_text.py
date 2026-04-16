@@ -178,11 +178,11 @@ class OpenAISpeechToText(OpenAIServing):
         return lang
 
     async def _preprocess_speech_to_text(
-        self,
-        request: SpeechToTextRequest,
-        audio_data: bytes,
-        request_id: str,
-    ) -> tuple[list[EngineInput], float]:
+            self,
+            request: SpeechToTextRequest,
+            audio_data: bytes,
+            request_id: str,
+    ) -> tuple[list[EngineInput], float, list[float]]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -218,6 +218,7 @@ class OpenAISpeechToText(OpenAIServing):
 
         if not do_split_audio:
             chunks = [y]
+            chunk_start_times = [0.0]
         else:
             assert self.asr_config.max_audio_clip_s is not None
             assert self.asr_config.min_energy_split_window_size is not None
@@ -228,6 +229,11 @@ class OpenAISpeechToText(OpenAIServing):
                 overlap_duration_s=self.asr_config.overlap_chunk_second,
                 min_energy_window_size=self.asr_config.min_energy_split_window_size,
             )
+            # Compute actual start times from chunk lengths to fix timestamp drift
+            chunk_start_times = [0.0]
+            for chunk in chunks[:-1]:
+                chunk_duration = get_audio_duration(y=chunk, sr=sr)
+                chunk_start_times.append(chunk_start_times[-1] + chunk_duration)
 
         if language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
