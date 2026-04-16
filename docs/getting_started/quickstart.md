@@ -195,6 +195,9 @@ curl http://localhost:8000/v1/models
 You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
 You can pass multiple keys after `--api-key`, and the server will accept any of the keys passed, this can be useful for key rotation.
 
+!!! note
+    API key authentication is only enforced on `/v1` routes and requires the `Authorization: Bearer <token>` header format. Non-`/v1` routes (e.g., `/health`) and `OPTIONS` requests bypass authentication.
+
 ### OpenAI Completions API with vLLM
 
 Once your server is started, you can query the model with input prompts:

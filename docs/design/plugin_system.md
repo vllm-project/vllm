@@ -4,7 +4,10 @@ The community frequently requests the ability to extend vLLM with custom feature
 
 ## How Plugins Work in vLLM
 
-Plugins are user-registered code that vLLM executes. Given vLLM's architecture (see [Arch Overview](arch_overview.md)), multiple processes may be involved, especially when using distributed inference with various parallelism techniques. To enable plugins successfully, every process created by vLLM needs to load the plugin. This is done by the [load_plugins_by_group][vllm.plugins.load_plugins_by_group] function in the `vllm.plugins` module.
+Plugins are user-registered code that vLLM executes. Given vLLM's architecture (see [Arch Overview](arch_overview.md)), multiple processes may be involved, especially when using distributed inference with various parallelism techniques. To enable plugins successfully, they need to be loaded via the [load_plugins_by_group][vllm.plugins.load_plugins_by_group] function in the `vllm.plugins` module. Note that different plugin groups are loaded in different scopes:
+
+- **General plugins** and **platform plugins** are loaded in all processes (process 0, engine core, and workers).
+- **IO processor plugins** and **stat logger plugins** are loaded only in process 0.
 
 ## How vLLM Discovers Plugins
 
@@ -40,7 +43,7 @@ For more information on adding entry points to your package, please check the [o
 Every plugin has three parts:
 
 1. **Plugin group**: The name of the entry point group. vLLM uses the entry point group `vllm.general_plugins` to register general plugins. This is the key of `entry_points` in the `setup.py` file. Always use `vllm.general_plugins` for vLLM's general plugins.
-2. **Plugin name**: The name of the plugin. This is the value in the dictionary of the `entry_points` dictionary. In the example above, the plugin name is `register_dummy_model`. Plugins can be filtered by their names using the `VLLM_PLUGINS` environment variable. To load only a specific plugin, set `VLLM_PLUGINS` to the plugin name.
+2. **Plugin name**: The name of the plugin. This is the value in the dictionary of the `entry_points` dictionary. In the example above, the plugin name is `register_dummy_model`. Plugins can be filtered by their names using the `VLLM_PLUGINS` environment variable. To load only a specific plugin, set `VLLM_PLUGINS` to the plugin name. Note that `VLLM_PLUGINS` applies to all plugin groups (general, platform, IO processor, and stat logger), not just general plugins.
 3. **Plugin value**: The fully qualified name of the function or module to register in the plugin system. In the example above, the plugin value is `vllm_add_dummy_model:register`, which refers to a function named `register` in the `vllm_add_dummy_model` module.
 
 ## Types of supported plugins

@@ -173,7 +173,14 @@ Our online Server provides endpoints that correspond to the offline APIs:
 - Corresponding to `LLM.score`:
     - [Score API](scoring.md#score-api)(`/score`)
     - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+
+    !!! note
+        The `/score` and rerank endpoints are only available for scoring-capable models. Specifically, they are enabled automatically for models that support `embed` or `token_embed` tasks, and for classification models only when `num_labels == 1` in the model config.
+
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
+
+    !!! note
+        When no `task` is specified, the server automatically selects a default pooling task based on the model architecture using a priority order: `embed&token_classify` > `embed` > `classify` > `token_embed` > `token_classify` > `plugin`. This may be relevant when a model supports multiple pooling tasks.
 
 The following introduces the Pooling API. For other APIs, please refer to the link above.
 
