@@ -108,12 +108,3 @@ impl<C> ParserFactory<C> {
         self.creators.get(name)
     }
 }
-
-/// Format the available-parser suffix used in user-facing error messages.
-pub(crate) fn available_parser_hint(available_names: &[String]) -> String {
-    if available_names.is_empty() {
-        String::new()
-    } else {
-        format!(" (choose from: {})", available_names.join(", "))
-    }
-}

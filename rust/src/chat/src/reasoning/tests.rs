@@ -174,14 +174,3 @@ fn factory_rejects_unknown_parser_names() {
     };
     assert!(error.to_string().contains("choose from"));
 }
-
-#[test]
-fn factory_rejects_unknown_models() {
-    let tokenizer = Arc::new(FakeTokenizer);
-    let factory = ReasoningParserFactory::new();
-    let error = match factory.create_for_model("definitely-unknown-model", tokenizer) {
-        Ok(_) => panic!("expected model lookup to fail"),
-        Err(error) => error,
-    };
-    assert!(error.to_string().contains("not available for model"));
-}

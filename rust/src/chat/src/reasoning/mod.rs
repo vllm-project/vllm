@@ -30,7 +30,7 @@ pub(crate) use self::delimited::DelimitedReasoningParser;
 pub use self::gemma4::Gemma4ReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
-use crate::parser::{ParserFactory, available_parser_hint};
+use crate::parser::ParserFactory;
 use crate::request::ChatRequest;
 
 /// Canonical public names for registered reasoning parsers.
@@ -134,16 +134,6 @@ pub trait ReasoningParser: Send {
 /// Errors produced while creating or running reasoning parsers.
 #[derive(Debug, Error)]
 pub enum ReasoningError {
-    #[error(
-        "reasoning parser `{name}` is not registered{}",
-        available_parser_hint(.available_names)
-    )]
-    UnknownParser {
-        name: String,
-        available_names: Vec<String>,
-    },
-    #[error("reasoning parsing is not available for model `{model_id}`")]
-    UnknownModel { model_id: String },
     #[error("tokenizer is missing reasoning delimiter token `{token}`")]
     MissingToken { token: String },
 }
@@ -202,28 +192,24 @@ impl ReasoningParserFactory {
     }
 
     /// Construct a parser from an exact name.
-    pub fn create(&self, name: &str, tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>> {
+    pub fn create(
+        &self,
+        name: &str,
+        tokenizer: DynTokenizer,
+    ) -> crate::Result<Box<dyn ReasoningParser>> {
         let creator = self
             .creator(name)
-            .ok_or_else(|| ReasoningError::UnknownParser {
+            .ok_or_else(|| crate::Error::ParserUnavailableByName {
+                kind: "reasoning",
                 name: name.to_string(),
                 available_names: self.list(),
             })?;
-        creator(tokenizer)
-    }
 
-    /// Resolve a parser from model ID and then construct it.
-    pub fn create_for_model(
-        &self,
-        model_id: &str,
-        tokenizer: DynTokenizer,
-    ) -> Result<Box<dyn ReasoningParser>> {
-        let name =
-            self.resolve_name_for_model(model_id)
-                .ok_or_else(|| ReasoningError::UnknownModel {
-                    model_id: model_id.to_string(),
-                })?;
-        self.create(name, tokenizer)
+        creator(tokenizer).map_err(|error| crate::Error::ParserInitialization {
+            kind: "reasoning",
+            name: name.to_string(),
+            error: error.into(),
+        })
     }
 }
 

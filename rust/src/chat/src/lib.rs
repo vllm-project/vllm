@@ -47,16 +47,6 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
-fn available_tool_parser_names(tool_parser_factory: &ToolParserFactory) -> Vec<String> {
-    tool_parser_factory.list()
-}
-
-fn available_reasoning_parser_names(
-    reasoning_parser_factory: &ReasoningParserFactory,
-) -> Vec<String> {
-    reasoning_parser_factory.list()
-}
-
 /// Validate explicit parser override names without starting request processing.
 pub fn validate_parser_overrides(
     tool_call_parser: &ParserSelection,
@@ -66,10 +56,10 @@ pub fn validate_parser_overrides(
     if let ParserSelection::Explicit(name) = tool_call_parser
         && !tool_parser_factory.contains(name)
     {
-        let available_names = available_tool_parser_names(&tool_parser_factory);
-        return Err(Error::ToolParserUnavailableByName {
+        return Err(Error::ParserUnavailableByName {
+            kind: "tool",
             name: name.clone(),
-            available_names,
+            available_names: tool_parser_factory.list(),
         });
     }
 
@@ -77,10 +67,10 @@ pub fn validate_parser_overrides(
     if let ParserSelection::Explicit(name) = reasoning_parser
         && !reasoning_parser_factory.contains(name)
     {
-        let available_names = available_reasoning_parser_names(&reasoning_parser_factory);
-        return Err(Error::ReasoningParserUnavailableByName {
+        return Err(Error::ParserUnavailableByName {
+            kind: "reasoning",
             name: name.clone(),
-            available_names,
+            available_names: reasoning_parser_factory.list(),
         });
     }
 
@@ -193,11 +183,11 @@ impl ChatLlm {
         let tool_parsing_enabled =
             matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
         let tool_parser = if tool_parsing_enabled {
-            self.resolve_tool_parser(&request.tools)?
+            Some(self.resolve_tool_parser(&request.tools)?)
         } else {
             None
         };
-        let reasoning_parser = self.resolve_reasoning_parser(request)?;
+        let reasoning_parser = self.resolve_optional_reasoning_parser(request)?;
 
         Ok(output::OutputProcessors {
             reasoning_parser,
@@ -205,44 +195,26 @@ impl ChatLlm {
         })
     }
 
-    fn resolve_tool_parser(&self, tools: &[ChatTool]) -> Result<Option<Box<dyn ToolParser>>> {
+    fn resolve_tool_parser(&self, tools: &[ChatTool]) -> Result<Box<dyn ToolParser>> {
         let parser_name = match &self.tool_call_parser {
             ParserSelection::Auto => self
                 .tool_parser_factory
-                .resolve_name_for_model(self.text.model_id()),
-            ParserSelection::None => return Ok(None),
-            ParserSelection::Explicit(name) => {
-                if !self.tool_parser_factory.contains(name) {
-                    return Err(Error::ToolParserUnavailableByName {
-                        name: name.clone(),
-                        available_names: available_tool_parser_names(&self.tool_parser_factory),
-                    });
-                }
-                Some(name.as_str())
-            }
+                .resolve_name_for_model(self.text.model_id())
+                .ok_or_else(|| Error::ParserUnavailableForModel {
+                    kind: "tool",
+                    model_id: self.text.model_id().to_string(),
+                })?,
+            ParserSelection::None => return Err(Error::ParserDisabled { kind: "tool" }),
+            ParserSelection::Explicit(name) => name.as_str(),
         };
 
-        TOOL_PARSER_LOG_ONCE.call_once(|| match parser_name {
-            Some(name) => info!(name, "using tool-call parser"),
-            None => info!("tool-call parsing disabled"),
-        });
+        let parser = self.tool_parser_factory.create(parser_name, tools)?;
 
-        let Some(parser_name) = parser_name else {
-            return Ok(None);
-        };
-
-        let parser = self
-            .tool_parser_factory
-            .create(parser_name, tools)
-            .map_err(|error| Error::ToolParserInitialization {
-                name: parser_name.to_string(),
-                error,
-            })?;
-
-        Ok(Some(parser))
+        TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
+        Ok(parser)
     }
 
-    fn resolve_reasoning_parser(
+    fn resolve_optional_reasoning_parser(
         &self,
         request: &mut ChatRequest,
     ) -> Result<Option<Box<dyn ReasoningParser>>> {
@@ -251,43 +223,27 @@ impl ChatLlm {
                 .reasoning_parser_factory
                 .resolve_name_for_model(self.text.model_id()),
             ParserSelection::None => None,
-            ParserSelection::Explicit(name) => {
-                if !self.reasoning_parser_factory.contains(name) {
-                    return Err(Error::ReasoningParserUnavailableByName {
-                        name: name.clone(),
-                        available_names: available_reasoning_parser_names(
-                            &self.reasoning_parser_factory,
-                        ),
-                    });
-                }
-                Some(name.as_str())
-            }
+            ParserSelection::Explicit(name) => Some(name.as_str()),
         };
 
-        REASONING_PARSER_LOG_ONCE.call_once(|| match parser_name {
-            Some(name) => info!(name, "using reasoning parser"),
-            None => info!("reasoning parser disabled"),
-        });
-
         let Some(parser_name) = parser_name else {
+            REASONING_PARSER_LOG_ONCE.call_once(|| info!("reasoning parsing disabled"));
             return Ok(None);
         };
 
         let parser = self
             .reasoning_parser_factory
-            .create(parser_name, self.text.tokenizer())
-            .map_err(|error| Error::ReasoningParserInitialization {
-                name: parser_name.to_string(),
-                error,
-            })?;
+            .create(parser_name, self.text.tokenizer())?;
 
         parser
             .adjust_request(request)
-            .map_err(|error| Error::ReasoningParserInitialization {
+            .map_err(|error| Error::ParserInitialization {
+                kind: "reasoning",
                 name: parser_name.to_string(),
-                error,
+                error: error.into(),
             })?;
 
+        REASONING_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using reasoning parser"));
         Ok(Some(parser))
     }
 }
@@ -324,7 +280,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool call parser `definitely_missing_tool_parser` is not registered (choose from: cohere, deepseek_v3, deepseek_v31, glm45, glm47, json, kimi_k2, llama3_json, llama4_json, llama4_pythonic, minimax_m2, mistral, pythonic, qwen3_coder, qwen3_xml, step3)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: cohere, deepseek_v3, deepseek_v31, glm45, glm47, json, kimi_k2, llama3_json, llama4_json, llama4_pythonic, minimax_m2, mistral, pythonic, qwen3_coder, qwen3_xml, step3)"].assert_eq(&error.to_report_string());
     }
 
     #[test]

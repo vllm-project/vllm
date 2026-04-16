@@ -131,5 +131,5 @@ def_external_tool_parser!(MinimaxM2ToolParser, MinimaxM2Parser);
 def_external_tool_parser!(MistralToolParser, MistralParser);
 def_external_tool_parser!(PythonicToolParser, PythonicParser);
 def_external_tool_parser!(Qwen3CoderToolParser, QwenCoderParser);
-def_external_tool_parser!(Qwen3XMLToolParser, QwenParser);
+def_external_tool_parser!(Qwen3XmlToolParser, QwenParser);
 def_external_tool_parser!(Step3ToolParser, Step3Parser);

@@ -245,8 +245,8 @@ mod tests {
         fn push(&mut self, _text: &str) -> Result<ReasoningDelta, ReasoningError> {
             if self.fail_next {
                 self.fail_next = false;
-                return Err(ReasoningError::UnknownModel {
-                    model_id: "boom".to_string(),
+                return Err(ReasoningError::MissingToken {
+                    token: "<think>".to_string(),
                 });
             }
             Ok(ReasoningDelta::default())

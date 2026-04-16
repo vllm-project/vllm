@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 
-use super::{
-    Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserError, ToolParserFactory,
-};
+use super::{Result, ToolCallDelta, ToolParseResult, ToolParser, ToolParserFactory};
+use crate::Error;
 use crate::request::ChatTool;
 use crate::tool::names;
 
@@ -53,7 +52,7 @@ fn factory_rejects_unknown_parser_names() {
         Ok(_) => panic!("expected parser lookup to fail"),
         Err(error) => error,
     };
-    assert!(matches!(error, ToolParserError::UnknownParser { .. }));
+    assert!(matches!(error, Error::ParserUnavailableByName { .. }));
 }
 
 #[test]
@@ -63,7 +62,7 @@ fn factory_rejects_unknown_models() {
         Ok(_) => panic!("expected model lookup to fail"),
         Err(error) => error,
     };
-    assert!(matches!(error, ToolParserError::UnknownModel { .. }));
+    assert!(matches!(error, Error::ParserUnavailableForModel { .. }));
 }
 
 #[test]

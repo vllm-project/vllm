@@ -1557,7 +1557,7 @@ async fn chat_rejects_unknown_tool_parser_before_engine_request() {
 
     assert!(matches!(
         error,
-        vllm_chat::Error::ToolParserUnavailableByName { name, .. }
+        vllm_chat::Error::ParserUnavailableByName { name, .. }
         if name == "definitely_missing_tool_parser"
     ));
 
@@ -1600,8 +1600,51 @@ async fn chat_rejects_unknown_reasoning_parser_before_engine_request() {
 
     assert!(matches!(
         error,
-        vllm_chat::Error::ReasoningParserUnavailableByName { name, .. }
+        vllm_chat::Error::ParserUnavailableByName { name, .. }
         if name == "definitely_missing_reasoning_parser"
+    ));
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    chat.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_rejects_tool_requests_when_tool_parser_is_disabled() {
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-chat-tool-parser-disabled".to_vec();
+    let (shutdown_tx, engine_task) =
+        spawn_mock_engine_task(handshake_address.clone(), engine_id, |dealer, _| {
+            Box::pin(async move {
+                assert!(
+                    timeout(Duration::from_millis(100), recv_engine_message(dealer))
+                        .await
+                        .is_err(),
+                    "chat request should fail before any engine request is sent"
+                );
+            })
+        });
+
+    let backend: Arc<dyn ChatTextBackend> = Arc::new(FakeChatBackend::new());
+    let chat = connect_chat_llm_with_ipc(
+        EngineCoreClientConfig::new_single(handshake_address),
+        &ipc,
+        backend,
+    )
+    .await
+    .with_tool_call_parser(ParserSelection::None);
+    let error = match chat
+        .chat(sample_tool_request("chat-tool-parser-disabled"))
+        .await
+    {
+        Ok(_) => panic!("tool requests should fail when tool parsing is disabled"),
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        vllm_chat::Error::ParserDisabled { kind: "tool" }
     ));
 
     let _ = shutdown_tx.send(());
