@@ -246,6 +246,13 @@ class CpuPlatform(Platform):
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
 
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu" not in compilation_config.custom_ops
+            and "-gelu" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu")
+
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
         assert vllm_config.device_config.device_type == "cpu"
