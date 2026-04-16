@@ -1,0 +1,180 @@
+
+====================================================================================================================================
+HELION VS BASELINE BENCHMARK COMPARISON
+====================================================================================================================================
+
+vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 200 \
+  --max-concurrency 64 \
+  --input-len 127 \
+  --output-len 1
+
+                                       Helion:         Baseline:
+---------------Time to First Token----------------
+Mean TTFT (ms):                          2906.49       1189.72
+Median TTFT (ms):                        2251.92       432.72
+P99 TTFT (ms):                           4592.92       2884.06
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          0.00          0.00
+Median TPOT (ms):                        0.00          0.00
+P99 TPOT (ms):                           0.00          0.00
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           0.00          0.00
+Median ITL (ms):                         0.00          0.00
+P99 ITL (ms):                            0.00          0.00
+--->Key observation :
+ Helions is slower by ~2-5.2-> helion fails on short prefill and high concurrency workloads
+
+
+vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 100 \
+  --max-concurrency 1 \
+  --input-len 8191 \
+  --output-len 1
+
+                                       Helion:         Baseline:
+---------------Time to First Token----------------
+Mean TTFT (ms):                          4089.49       423.26
+Median TTFT (ms):                        3523.31       422.50
+P99 TTFT (ms):                           8584.24       439.23
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          0.00          0.00
+Median TPOT (ms):                        0.00          0.00
+P99 TPOT (ms):                           0.00          0.00
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           0.00          0.00
+Median ITL (ms):                         0.00          0.00
+P99 ITL (ms):                            0.00          0.00
+--->Key observation :
+ Helions is slower by ~8-20-> helion fails on long prefill.
+
+vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 400 \
+  --max-concurrency 128 \
+  --input-len 1023 \
+  --output-len 128
+
+                                       Helion:         Baseline:
+---------------Time to First Token----------------
+Mean TTFT (ms):                          43840.03      1983.24
+Median TTFT (ms):                        32647.25      1540.21.       
+P99 TTFT (ms):                           140731.64     5301.84
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          653.96        48.06
+Median TPOT (ms):                        688.06        48.31
+P99 TPOT (ms):                           1299.35       63.67
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           653.96        48.06
+Median ITL (ms):                         20.44         20.21
+P99 ITL (ms):                            12044.24      386.25
+
+
+vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 100 \
+  --max-concurrency 1 \
+  --input-len 2 \
+  --output-len 1024
+
+                                       Helion:         Baseline:
+---------------Time to First Token----------------
+Mean TTFT (ms):                          16.39         16.33
+Median TTFT (ms):                        16.29         16.24
+P99 TTFT (ms):                           17.53         16.93
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          10.70         10.67
+Median TPOT (ms):                        10.70         10.67
+P99 TPOT (ms):                           10.71         10.67
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           10.70         10.67
+Median ITL (ms):                         10.70         10.66
+P99 ITL (ms):                            11.06         11.01
+
+vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 400 \
+  --max-concurrency 256 \
+  --input-len 1023 \
+  --output-len 128
+
+                                       Helion:         Baseline:
+---------------Time to First Token----------------
+Mean TTFT (ms):                          461.24        465.13
+Median TTFT (ms):                        375.10        387.60
+P99 TTFT (ms):                           904.74        937.67
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          29.65         29.33
+Median TPOT (ms):                        31.02         30.79
+P99 TPOT (ms):                           31.53         31.52
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           29.65         29.33
+Median ITL (ms):                         29.41         29.47
+P99 ITL (ms):                            79.52         83.44
+
+vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 400 \
+  --max-concurrency 512 \
+  --input-len 1023 \
+  --output-len 128
+
+                                       Helion:         Baseline:
+---------------Time to First Token----------------
+Mean TTFT (ms):                          902.12        904.40
+Median TTFT (ms):                        849.20        927.57
+P99 TTFT (ms):                           1527.95       1515.49
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          48.87         48.53
+Median TPOT (ms):                        49.16         48.92
+P99 TPOT (ms):                           50.14         49.89
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           48.87         48.54
+Median ITL (ms):                         50.73         50.43
+P99 ITL (ms):                            85.77         92.71
+
+vllm bench serve \
+  --backend vllm \
+  --model RedHatAI/Meta-Llama-3.1-70B-Instruct-FP8 \
+  --endpoint /v1/completions \
+  --dataset-name random \
+  --num-prompts 400 \
+  --max-concurrency 1024 \
+  --input-len 1023 \
+  --output-len 128
+
+                                       Helion:         Baseline:
+---------------Time to First Token----------------
+Mean TTFT (ms):                          890.15        892.49
+Median TTFT (ms):                        918.47        906.91
+P99 TTFT (ms):                           1504.68       1480.53
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          48.94         48.76
+Median TPOT (ms):                        49.34         49.17
+P99 TPOT (ms):                           50.28         49.96
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           48.95         48.77
+Median ITL (ms):                         50.79         50.44
+P99 ITL (ms):                            85.26         93.49
+
+====================================================================================================================================
