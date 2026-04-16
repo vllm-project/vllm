@@ -41,7 +41,13 @@ class CPUWorker(Worker):
         allowed_memory_nodes = get_visible_memory_node()
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
-        assert cpu_core.numa_node in allowed_memory_nodes
+
+        assert cpu_core.numa_node in allowed_memory_nodes, (
+            "Node "
+            f"{cpu_core.numa_node} is not in available memory nodes "
+            f"{allowed_memory_nodes}"
+        )
+
         torch.ops._C.init_cpu_memory_env([cpu_core.numa_node])
 
         memory_status = get_memory_node_info(cpu_core.numa_node)
