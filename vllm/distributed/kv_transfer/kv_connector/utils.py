@@ -417,6 +417,14 @@ class MambaEngineTransferInfo(EngineTransferInfo):
     remote_physical_heads: int
     """Physical KV heads stored per remote rank."""
 
+    @property
+    def fa_source_set(self) -> frozenset[int]:
+        return frozenset(self.remote_fa_source_ranks)
+
+    @property
+    def fa_source_indices(self) -> dict[int, int]:
+        return {r: i for i, r in enumerate(self.remote_fa_source_ranks)}
+
 
 # ---- Transfer topology ----
 
@@ -439,8 +447,6 @@ class TransferTopology:
         self.local_physical_heads = max(1, self.total_num_kv_heads // self.tp_size)
 
         self._engines: dict[EngineId, EngineTransferInfo] = {}
-        self._fa_source_sets: dict[EngineId, frozenset[int]] = {}
-        self._fa_source_indices: dict[EngineId, dict[int, int]] = {}
 
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks.
@@ -521,13 +527,6 @@ class TransferTopology:
                 remote_physical_blocks_per_logical=(remote_physical_blocks_per_logical),
                 local_block_len=local_block_len,
             )
-            assert isinstance(info, MambaEngineTransferInfo)
-            self._fa_source_sets[remote_engine_id] = frozenset(
-                info.remote_fa_source_ranks
-            )
-            self._fa_source_indices[remote_engine_id] = {
-                r: i for i, r in enumerate(info.remote_fa_source_ranks)
-            }
         else:
             info = EngineTransferInfo(
                 remote_tp_size=remote_tp_size,
@@ -668,7 +667,9 @@ class TransferTopology:
 
     def should_skip_fa(self, remote_engine_id: EngineId, remote_rank: int) -> bool:
         """Whether to skip FA groups for this remote rank (mamba-only)."""
-        return remote_rank not in self._fa_source_sets[remote_engine_id]
+        mamba_info = self._engines[remote_engine_id]
+        assert isinstance(mamba_info, MambaEngineTransferInfo)
+        return remote_rank not in mamba_info.fa_source_set
 
     def fa_head_slot(self, remote_engine_id: EngineId, remote_rank: int) -> int:
         """Index into local FA block for this remote rank's head data.
@@ -677,11 +678,11 @@ class TransferTopology:
         For ranks NOT in ``fa_source_ranks`` (replicated duplicates),
         returns the slot of the matching source rank with the same head.
         """
-        fa_index = self._fa_source_indices[remote_engine_id]
-        if remote_rank in fa_index:
-            return fa_index[remote_rank]
         mamba_info = self._engines[remote_engine_id]
         assert isinstance(mamba_info, MambaEngineTransferInfo)
+        fa_index = mamba_info.fa_source_indices
+        if remote_rank in fa_index:
+            return fa_index[remote_rank]
         K = self.total_num_kv_heads
         remote_tp = mamba_info.remote_tp_size
         r_head = self._physical_head_range(remote_tp, K, remote_rank)
