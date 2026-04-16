@@ -20,6 +20,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_convert_sf_to_mma_layout,
     flashinfer_cute_dsl_fused_moe_nvfp4,
     has_flashinfer_b12x_moe,
     has_flashinfer_cutedsl_moe_nvfp4,
@@ -365,16 +366,37 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         )
 
         self._ensure_wrapper()
-        self._wrapper.run(
+
+        # Convert swizzled 3D scale factors [E, M, K_sf] to 6D MMA layout
+        # expected by the SM12x kernel's _get_weight_views().
+        sf_vec_size = 16
+        E_w1, M_w1, K_sf_w1 = self.w1_scale.shape
+        w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
+            self.w1_scale.reshape(E_w1 * M_w1, K_sf_w1),
+            m=M_w1,
+            k=K_sf_w1 * sf_vec_size,
+            num_groups=E_w1,
+            sf_vec_size=sf_vec_size,
+        )
+        E_w2, M_w2, K_sf_w2 = self.w2_scale.shape
+        w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
+            self.w2_scale.reshape(E_w2 * M_w2, K_sf_w2),
+            m=M_w2,
+            k=K_sf_w2 * sf_vec_size,
+            num_groups=E_w2,
+            sf_vec_size=sf_vec_size,
+        )
+
+        result = self._wrapper.run(
             x=hidden_states,
             w1_weight=w1,
-            w1_weight_sf=self.w1_scale,
+            w1_weight_sf=w1_sf_mma,
             w1_alpha=self.g1_alphas,
             fc2_input_scale=self.a2_gscale,
             w2_weight=w2,
-            w2_weight_sf=self.w2_scale,
+            w2_weight_sf=w2_sf_mma,
             w2_alpha=self.g2_alphas,
             token_selected_experts=topk_ids.to(torch.int32),
             token_final_scales=topk_weights,
-            moe_output=output,
         )
+        output.copy_(result)
