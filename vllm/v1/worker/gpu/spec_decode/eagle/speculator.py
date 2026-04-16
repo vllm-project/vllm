@@ -84,6 +84,9 @@ class EagleSpeculator:
         self.last_token_indices = torch.zeros(
             self.max_num_reqs, dtype=torch.int64, device=device
         )
+        self.arange_cpu = torch.arange(
+            self.max_num_reqs + 1, dtype=torch.int32, device="cpu"
+        )
 
         self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
             self.draft_model_config
@@ -157,10 +160,12 @@ class EagleSpeculator:
         model_state: ModelState,
         kv_cache_config: KVCacheConfig,
         block_tables: BlockTables,
+        target_attn_groups,
     ) -> None:
         self.model_state = model_state
         self.kv_cache_config = kv_cache_config
-        _, self.attn_groups, _ = init_attn_backend(
+        self.prefill_attn_groups = target_attn_groups
+        _, self.decode_attn_groups, _ = init_attn_backend(
             kv_cache_config,
             self.vllm_config,
             self.device,
@@ -310,35 +315,31 @@ class EagleSpeculator:
                         idx_mapping, query_start_loc, pos, num_tokens_padded
                     )
 
-    def _build_draft_attn_metadata(
+    def _build_decode_attn_metadata(
         self,
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
-        max_query_len: int,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
 
-        query_start_loc_cpu = (
-            torch.arange(num_reqs_padded + 1, dtype=torch.int32, device="cpu").clamp_(
-                max=num_reqs
-            )
-            * max_query_len
+        query_start_loc_cpu = torch.clamp(
+            self.arange_cpu[: num_reqs_padded + 1], max=num_reqs
         )
         block_tables = [
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
         slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
         attn_metadata = build_attn_metadata(
-            attn_groups=self.attn_groups,
+            attn_groups=self.decode_attn_groups,
             num_reqs=num_reqs_padded,
             num_tokens=num_tokens_padded,
             query_start_loc_gpu=self.input_buffers.query_start_loc[
                 : num_reqs_padded + 1
             ],
             query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=max_query_len,
+            max_query_len=1,
             seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
@@ -364,7 +365,7 @@ class EagleSpeculator:
             self.model_state,
             self.input_buffers,
             self.block_tables,
-            self.attn_groups,
+            self.prefill_attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing eagle prefill CUDA graphs",
         )
@@ -382,7 +383,7 @@ class EagleSpeculator:
             self.model_state,
             self.input_buffers,
             self.block_tables,
-            self.attn_groups,
+            self.decode_attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing eagle decode CUDA graphs",
         )
@@ -470,22 +471,10 @@ class EagleSpeculator:
         )
 
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
-            # It is necessary to rebuild the attention metadata when
-            # replaying the FULL graph so that any attention metadata
-            # builder state is updated.
-            self._build_draft_attn_metadata(
-                num_reqs=num_reqs,
-                num_reqs_padded=prefill_batch_desc.num_reqs or num_reqs,
-                num_tokens_padded=prefill_batch_desc.num_tokens,
-                max_query_len=self.num_speculative_steps + 1,
-            )
             # Replay the full graph for draft prefill.
             assert self.prefill_cudagraph_manager is not None
             self.prefill_cudagraph_manager.run_fullgraph(prefill_batch_desc)
         else:
-            # The target model's attention metadata and slot mappings
-            # can directly be used for draft prefill, because of the
-            # identical batch shape and KV cache layout.
             self.prefill(
                 num_reqs,
                 prefill_batch_desc.num_tokens,
@@ -538,11 +527,10 @@ class EagleSpeculator:
             slot_mappings_updated = build_slot_mappings_by_layer(
                 slot_mappings, self.kv_cache_config
             )
-            attn_metadata_updated = self._build_draft_attn_metadata(
+            attn_metadata_updated = self._build_decode_attn_metadata(
                 num_reqs=num_reqs,
                 num_reqs_padded=decode_batch_desc.num_reqs or num_reqs,
                 num_tokens_padded=decode_batch_desc.num_tokens,
-                max_query_len=1,
             )
 
         if decode_batch_desc.cg_mode == CUDAGraphMode.FULL:
