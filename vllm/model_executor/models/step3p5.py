@@ -59,6 +59,12 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _get_step3p5_layer_types(config: Any) -> list[str]:
+    return getattr(config, "vllm_layer_types", None) or getattr(
+        config, "layer_types", None
+    ) or []
+
+
 class FP32ReplicatedLinear(ReplicatedLinear):
     """
     Use FP32 for higher precision.
@@ -154,11 +160,16 @@ class Step3p5Attention(nn.Module):
         self.total_num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
         self.layer_idx = extract_layer_index(prefix)
-        if layer_types:
+        if layer_types and self.layer_idx < len(layer_types):
             enable_sliding_window = layer_types[self.layer_idx] == "sliding_attention"
         else:
             enable_sliding_window = self.layer_idx % 2 == 0
-        if yarn_only_types and layer_types[self.layer_idx] not in yarn_only_types:
+        if (
+            yarn_only_types
+            and layer_types
+            and self.layer_idx < len(layer_types)
+            and layer_types[self.layer_idx] not in yarn_only_types
+        ):
             rope_scaling = None
 
         if sliding_window is not None and enable_sliding_window:
@@ -435,6 +446,7 @@ class Step3p5DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         layer_idx = extract_layer_index(prefix)
         self.layer_idx = layer_idx
+        layer_types = _get_step3p5_layer_types(config)
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         if cache_config is not None:
@@ -445,8 +457,9 @@ class Step3p5DecoderLayer(nn.Module):
             head_dim = None
             if (
                 getattr(config, "attention_other_setting", None)
-                and getattr(config, "layer_types", [])
-                and config.layer_types[layer_idx]
+                and layer_types
+                and layer_idx < len(layer_types)
+                and layer_types[layer_idx]
                 == config.attention_other_setting["attention_type"]
             ):
                 num_attention_heads = config.attention_other_setting[
@@ -477,7 +490,7 @@ class Step3p5DecoderLayer(nn.Module):
                 use_head_wise_attn_gate=getattr(
                     config, "use_head_wise_attn_gate", False
                 ),
-                layer_types=getattr(config, "layer_types", []),
+                layer_types=layer_types,
                 use_rope_layers=getattr(config, "use_rope_layers", []),
                 yarn_only_types=getattr(config, "yarn_only_types", []),
                 partial_rotary_factor=partial_rotary_factors[layer_idx]
