@@ -12,6 +12,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     CommonAttentionMetadata,
 )
+from vllm.v1.attention.backends import hpc_attn as hpc_attn_mod
 from vllm.v1.attention.backends.hpc_attn import (
     HpcAttentionBackend,
     HpcAttentionImpl,
@@ -285,14 +286,19 @@ def _make_prefill_meta(query_lens, device):
     num_reqs = len(query_lens)
     total_q = sum(query_lens)
     q_start = [0] + list(torch.tensor(query_lens).cumsum(0).tolist())
+    q_start_t = torch.tensor(q_start, dtype=torch.int32, device=device)
+    # Match HpcAttentionMetadataBuilder: cum. query starts for the prefill segment
+    # (here all requests are prefill, num_decodes == 0).
+    cu_seqlens_q_prefill = q_start_t.clone()
     return HpcAttentionMetadata(
         num_actual_tokens=total_q,
         max_query_len=max(query_lens),
-        query_start_loc=torch.tensor(q_start, dtype=torch.int32, device=device),
+        query_start_loc=q_start_t,
         max_seq_len=max(query_lens),
         seq_lens=torch.tensor(query_lens, dtype=torch.int32, device=device),
         block_table=torch.zeros(num_reqs, 2, dtype=torch.int32, device=device),
         slot_mapping=torch.zeros(total_q, dtype=torch.int64, device=device),
+        cu_seqlens_q_prefill=cu_seqlens_q_prefill,
     )
 
 
@@ -330,7 +336,7 @@ def test_forward_decode_dispatch(device):
 
     fake_hpc = MagicMock()
     fake_hpc.attention_decode_bf16.return_value = torch.zeros_like(query)
-    with patch.dict(sys.modules, {"hpc": fake_hpc}):
+    with patch.object(hpc_attn_mod, "_hpc", fake_hpc):
         impl.forward(layer, query, None, None, kv_cache, meta, output)
 
     fake_hpc.attention_decode_bf16.assert_called_once()
@@ -387,7 +393,7 @@ def test_forward_prefill_dispatch(device):
 
     fake_hpc = MagicMock()
     fake_hpc.attention_with_kvcache_prefill_bf16.return_value = torch.zeros_like(query)
-    with patch.dict(sys.modules, {"hpc": fake_hpc}):
+    with patch.object(hpc_attn_mod, "_hpc", fake_hpc):
         impl.forward(layer, query, None, None, kv_cache, meta, output)
 
     fake_hpc.attention_with_kvcache_prefill_bf16.assert_called_once()
@@ -407,10 +413,13 @@ def test_forward_mixed_batch_output_slices(device):
     block_size = 32
 
     q_start = [0, 1, 2, 3, 4, 4 + pref_q, 4 + 2 * pref_q]
+    q_start_t = torch.tensor(q_start, dtype=torch.int32, device=device)
+    num_decode_tokens = num_decodes
+    cu_seqlens_q_prefill = q_start_t[num_decodes:] - num_decode_tokens
     meta = HpcAttentionMetadata(
         num_actual_tokens=num_actual_tokens,
         max_query_len=pref_q,
-        query_start_loc=torch.tensor(q_start, dtype=torch.int32, device=device),
+        query_start_loc=q_start_t,
         max_seq_len=512,
         seq_lens=torch.tensor(
             [512] * num_decodes + [pref_q] * num_prefills,
@@ -422,8 +431,9 @@ def test_forward_mixed_batch_output_slices(device):
         ),
         slot_mapping=torch.zeros(num_actual_tokens, dtype=torch.int64, device=device),
         num_decodes=num_decodes,
-        num_decode_tokens=num_decodes,
+        num_decode_tokens=num_decode_tokens,
         max_decode_seq_len=512,
+        cu_seqlens_q_prefill=cu_seqlens_q_prefill,
     )
 
     query = torch.randn(
@@ -447,8 +457,17 @@ def test_forward_mixed_batch_output_slices(device):
         device=device,
     )
     mock_hpc = MagicMock()
-    mock_hpc.attention_decode_bf16.return_value = decode_out
-    mock_hpc.attention_with_kvcache_prefill_bf16.return_value = prefill_out
+
+    def _decode_side_effect(**kwargs):
+        kwargs["output"].copy_(decode_out)
+        return kwargs["output"]
+
+    def _prefill_side_effect(**kwargs):
+        kwargs["output"].copy_(prefill_out)
+        return kwargs["output"]
+
+    mock_hpc.attention_decode_bf16.side_effect = _decode_side_effect
+    mock_hpc.attention_with_kvcache_prefill_bf16.side_effect = _prefill_side_effect
 
     impl = make_impl(
         block_size=block_size,
@@ -456,7 +475,7 @@ def test_forward_mixed_batch_output_slices(device):
         head_size=head_size,
         num_kv_heads=num_kv_heads,
     )
-    with patch.dict(sys.modules, {"hpc": mock_hpc}):
+    with patch.object(hpc_attn_mod, "_hpc", mock_hpc):
         result = impl.forward(
             layer=layer,
             query=query,
@@ -467,15 +486,13 @@ def test_forward_mixed_batch_output_slices(device):
             output=output,
         )
 
-    # Verify query slices passed to each kernel
-    dec_q = mock_hpc.attention_decode_bf16.call_args[1].get(
-        "q", mock_hpc.attention_decode_bf16.call_args[0][0]
-    )
+    # Verify query slices passed to each kernel (HPC forward uses kwargs only).
+    dec_kw = mock_hpc.attention_decode_bf16.call_args[1]
+    dec_q = dec_kw["q"]
     assert dec_q.shape == (num_decodes, num_heads, head_size)
 
-    pref_q_arg = mock_hpc.attention_with_kvcache_prefill_bf16.call_args[1].get(
-        "q", mock_hpc.attention_with_kvcache_prefill_bf16.call_args[0][0]
-    )
+    pref_kw = mock_hpc.attention_with_kvcache_prefill_bf16.call_args[1]
+    pref_q_arg = pref_kw["q"]
     assert pref_q_arg.shape == (num_prefill_tokens, num_heads, head_size)
 
     # Verify output slices
@@ -572,6 +589,12 @@ def _build_kvcache_and_meta(
     max_decode_seq_len = (
         int(seq_lens_t[:num_decodes].max().item()) if num_decodes > 0 else 0
     )
+    num_prefill_reqs = batch - num_decodes
+    cu_seqlens_q_prefill = None
+    if num_prefill_reqs > 0 and total_q > num_decode_tokens:
+        cu_seqlens_q_prefill = (q_start[num_decodes:] - num_decode_tokens).to(
+            torch.int32
+        )
     meta = HpcAttentionMetadata(
         num_actual_tokens=total_q,
         max_query_len=max(query_lens),
@@ -583,6 +606,7 @@ def _build_kvcache_and_meta(
         num_decodes=num_decodes,
         num_decode_tokens=num_decode_tokens,
         max_decode_seq_len=max_decode_seq_len,
+        cu_seqlens_q_prefill=cu_seqlens_q_prefill,
     )
     return (
         key_cache,

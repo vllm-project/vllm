@@ -70,17 +70,17 @@ def _hpc_decode_use_splitk(
     if num_heads == 32 and num_kv_heads == 4:
         if num_decode_tokens < 6:
             return True
-        if 6 <= num_decode_tokens < 12 and max_decode_seq_len < 1024:
+        if 6 <= num_decode_tokens < 12 and max_decode_seq_len <= 1024:
             return False
-        if 12 <= num_decode_tokens < 14 and max_decode_seq_len < 3072:
+        if 12 <= num_decode_tokens < 14 and max_decode_seq_len <= 3072:
             return False
-        if 14 <= num_decode_tokens < 16 and max_decode_seq_len < 4096:
+        if 14 <= num_decode_tokens < 16 and max_decode_seq_len <= 4096:
             return False
-        if 16 <= num_decode_tokens < 24 and max_decode_seq_len < 8192:
+        if 16 <= num_decode_tokens < 24 and max_decode_seq_len <= 8192:
             return False
-        if 24 <= num_decode_tokens < 32 and max_decode_seq_len < 24576:
+        if 24 <= num_decode_tokens < 32 and max_decode_seq_len <= 24576:
             return False
-        if num_decode_tokens >= 32 and max_decode_seq_len < 24576:
+        if num_decode_tokens >= 32 and max_decode_seq_len <= 24576:
             return False
         return True
     else:
