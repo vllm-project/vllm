@@ -518,11 +518,6 @@ class TritonAttentionImpl(AttentionImpl):
 
         Creates zero-copy views that existing Triton kernels (store + read)
         can consume via ``.stride()`` without any kernel code changes.
-
-        Rebuilt only when the underlying storage pointer changes (e.g. first
-        call, or if the cache tensor was reallocated). Caching by storage
-        identity avoids stale views across CUDA graph capture/replay while
-        still being cheap.
         """
         cur_ptr = kv_cache.data_ptr()
         if (
