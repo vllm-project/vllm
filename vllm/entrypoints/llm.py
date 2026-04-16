@@ -1575,7 +1575,7 @@ class LLM:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
-        seq_priority = self._priority_to_seq(priority, len(prompts))
+        seq_priority = self._priority_to_seq(priority, len(seq_prompts))
 
         return self._render_and_add_requests(
             prompts=(
