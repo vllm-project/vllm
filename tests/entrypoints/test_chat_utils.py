@@ -1490,6 +1490,38 @@ def test_parse_chat_messages_openai_format_image_url(
     _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
 
 
+def test_parse_chat_messages_openai_format_video_alias(
+    phi3v_model_config,
+    video_url,
+):
+    content = [
+        {"type": "video", "video_url": {"url": video_url}},
+        {"type": "text", "text": "What's in the video?"},
+    ]
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "video"},
+                {"type": "text", "text": "What's in the video?"},
+            ],
+        }
+    ]
+    _assert_mm_data_inputs(mm_data, {"video": 1})
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="video")
+
+
 def test_parse_chat_messages_rejects_too_many_images_in_one_message(
     phi3v_model_config,
     image_url,
@@ -2261,6 +2293,42 @@ def test_parse_chat_messages_video_vision_chunk(
                 {"type": "text", "text": "Analyze this video."},
                 {
                     "type": "video_url",
+                    "video_url": {"url": video_url},
+                },
+            ],
+        }
+    ]
+
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        messages,
+        kimi_k2_5_model_config,
+        content_format="string",
+    )
+
+    placeholder = "<|kimi_k25_video_placeholder|>"
+    expected_conversation = [
+        {
+            "role": "user",
+            "content": f"{placeholder}\nAnalyze this video.",
+        }
+    ]
+
+    assert conversation == expected_conversation
+    _assert_mm_data_is_vision_chunk_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None], modality="vision_chunk")
+
+
+def test_parse_chat_messages_video_alias_vision_chunk(
+    kimi_k2_5_model_config,
+    video_url,
+):
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Analyze this video."},
+                {
+                    "type": "video",
                     "video_url": {"url": video_url},
                 },
             ],

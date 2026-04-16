@@ -156,7 +156,7 @@ class VideoURL(TypedDict, total=False):
 class ChatCompletionContentPartVideoParam(TypedDict, total=False):
     video_url: Required[VideoURL]
 
-    type: Required[Literal["video_url"]]
+    type: Required[Literal["video_url", "video"]]
     """The type of the content part."""
 
 
@@ -1274,6 +1274,7 @@ MM_PARSER_MAP: dict[
     "input_audio": lambda part: _InputAudioParser(part).get("input_audio", None),
     "refusal": lambda part: _RefusalParser(part).get("refusal", None),
     "video_url": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
+    "video": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
 }
 
 
