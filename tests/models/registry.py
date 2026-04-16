@@ -335,7 +335,15 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "internlm/internlm2-chat-7b", trust_remote_code=True
     ),
     "InternLM2VEForCausalLM": _HfExamplesInfo(
-        "OpenGVLab/Mono-InternVL-2B", trust_remote_code=True
+        "OpenGVLab/Mono-InternVL-2B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom config cannot be loaded with Transformers "
+                "v5 because `vision_config` is not always set"
+            )
+        },
     ),
     "InternLM3ForCausalLM": _HfExamplesInfo(
         "internlm/internlm3-8b-instruct", trust_remote_code=True
@@ -475,6 +483,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Plamo2ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-2-1b",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "Custom model code uses `_tied_weight_keys: list[str]` but "
+                "Transformers v5 now expects `_tied_weight_keys: dict[str, str]`"
+            )
+        },
     ),
     "Plamo3ForCausalLM": _HfExamplesInfo(
         "pfnet/plamo-3-nict-2b-base",
@@ -515,6 +530,13 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_model_len=4096,
         is_available_online=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "vllm upgraded transformers above v5.4 where "
+                "validate_rope() no longer accepts ignore_keys param"
+            )
+        },
     ),
     "SeedOssForCausalLM": _HfExamplesInfo(
         "ByteDance-Seed/Seed-OSS-36B-Instruct",
@@ -553,6 +575,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "xverse/XVERSE-7B-Chat",
         tokenizer="meta-llama/Llama-2-7b",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "XVERSE tokenizer is incompatible with transformers v5 "
+            "(add_prefix_space / prepend_scheme mismatch).",
+        },
     ),
     "Zamba2ForCausalLM": _HfExamplesInfo("Zyphra/Zamba2-7B-instruct"),
     "MiMoForCausalLM": _HfExamplesInfo("XiaomiMiMo/MiMo-7B-RL", trust_remote_code=True),
@@ -581,6 +608,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "Alibaba-NLP/gte-base-en-v1.5",
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewModel"]},
+    ),
+    "JinaEmbeddingsV5Model": _HfExamplesInfo(
+        "jinaai/jina-embeddings-v5-text-small",
+        trust_remote_code=True,
     ),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "LlamaBidirectionalModel": _HfExamplesInfo(
@@ -763,10 +794,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
+        "nvidia/audio-flamingo-3-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
+        "nvidia/music-flamingo-2601-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
@@ -821,12 +860,30 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
+        trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "vllm": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FireRedLIDForConditionalGeneration": _HfExamplesInfo(
         "PatchyTisa/FireRedLID-vllm",
+        trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "vllm": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
+        trust_remote_code=True,
+        max_transformers_version="5.1",
+        transformers_version_reason={
+            "vllm": "Incompatible with transformers v5.2+ "
+            "(dict object has no attribute '__name__').",
+        },
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
@@ -868,6 +925,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "Custom config cannot be loaded with Transformers "
+                "v5 because `text_config` is not always set"
+            )
+        },
     ),
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
@@ -887,7 +951,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
-        "internlm/Intern-S1", trust_remote_code=True
+        "internlm/Intern-S1",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom tokenizer code is not compatible with Transformers v5."
+        },
     ),
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
@@ -976,13 +1045,27 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
-    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6", trust_remote_code=True),
+    "MiniCPMO": _HfExamplesInfo(
+        "openbmb/MiniCPM-o-2_6",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
         extras={
             "2.6": "openbmb/MiniCPM-V-2_6",
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
+        },
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "MiniCPMVBatchFeature is incompatible with its base class in "
+                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
+            )
         },
         trust_remote_code=True,
     ),
@@ -1038,14 +1121,70 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         trust_remote_code=True,
     ),
+    # NemotronH_Nano_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2
+    # Use the same registry test as NemotronH_Nano_VL_V2 above
+    "NemotronH_Nano_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
+    ),
+    # NemotronH_Super_Omni_Reasoning_V3 is an alias for NemotronH_Nano_VL_V2 as well
+    # Use the same registry test as NemotronH_Nano_VL_V2 above
+    "NemotronH_Super_Omni_Reasoning_V3": _HfExamplesInfo(
+        "nvidia/NVIDIA-Nemotron-Nano-12B-v2-VL-BF16",
+        max_model_len=4096,
+        use_original_num_layers=True,
+        hf_overrides={
+            "vision_config": PretrainedConfig(
+                args={
+                    "min_num_patches": 1,
+                    "max_num_patches": 12,
+                    "model": "vit_huge_patch16_224",
+                },
+                video_temporal_patch_size=2,
+            ),
+            "text_config": {
+                "num_hidden_layers": 2,
+                "hybrid_override_pattern": "M*",
+            },
+        },
+        trust_remote_code=True,
+    ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
-        "xlangai/OpenCUA-7B", trust_remote_code=True
+        "xlangai/OpenCUA-7B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Tokenizer cannot be initialised in Transformers v5."
+        },
     ),
     "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-VL-7B",
         trust_remote_code=True,
         max_model_len=4096,
         enforce_eager=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": (
+                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
+                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
+            )
+        },
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
@@ -1057,12 +1196,24 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B",
         },
     ),
-    "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "Ovis2_5": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.5-2B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "Ovis2_6ForCausalLM": _HfExamplesInfo(
         "AIDC-AI/Ovis2.6-2B", is_available_online=False, trust_remote_code=True
     ),
     "Ovis2_6_MoeForCausalLM": _HfExamplesInfo(
-        "AIDC-AI/Ovis2.6-30B-A3B", trust_remote_code=True
+        "AIDC-AI/Ovis2.6-30B-A3B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "vllm": "Custom processor code is not compatible with Transformers v5."
+        },
     ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
         "PaddlePaddle/PaddleOCR-VL",
@@ -1082,7 +1233,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"phi3.5": "microsoft/Phi-3.5-vision-instruct"},
     ),
     "Phi4ForCausalLMV": _HfExamplesInfo(
-        "microsoft/Phi-4-reasoning-vision-15B", trust_remote_code=True
+        "microsoft/Phi-4-reasoning-vision-15B",
+        trust_remote_code=True,
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "vllm upgraded transformers above v5.4 where HF model "
+                "custom code uses siglip2 internals "
+                "(filter_out_non_signature_kwargs) removed "
+                "by huggingface/transformers#43514"
+            )
+        },
     ),
     "Phi4MMForCausalLM": _HfExamplesInfo(
         "microsoft/Phi-4-multimodal-instruct", trust_remote_code=True
@@ -1178,6 +1339,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         hf_overrides={
             "architectures": ["Tarsier2ForConditionalGeneration"],
             "model_type": "tarsier2",
+        },
+        max_transformers_version="5.3",
+        transformers_version_reason={
+            "vllm": (
+                "Qwen2VLConfig was split into Qwen2VLConfig + "
+                "Qwen2VLTextConfig in transformers v5, breaking "
+                "attribute access (num_attention_heads, hidden_size, etc.)"
+            )
         },
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
