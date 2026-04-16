@@ -622,6 +622,30 @@ def _rocm_aiter_rms_norm_fake(
     return torch.empty_like(x)
 
 
+def _rocm_aiter_fused_qk_rmsnorm_impl(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    q_eps: float,
+    k: torch.Tensor,
+    k_weight: torch.Tensor,
+    k_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter import fused_qk_rmsnorm
+
+    return fused_qk_rmsnorm(q, q_weight, q_eps, k, k_weight, k_eps)
+
+
+def _rocm_aiter_fused_qk_rmsnorm_fake(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    q_eps: float,
+    k: torch.Tensor,
+    k_weight: torch.Tensor,
+    k_eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return torch.empty_like(q), torch.empty_like(k)
+
+
 def _rocm_aiter_rmsnorm2d_fwd_with_add_impl(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -1396,6 +1420,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_fused_qk_rmsnorm",
+                op_func=_rocm_aiter_fused_qk_rmsnorm_impl,
+                fake_impl=_rocm_aiter_fused_qk_rmsnorm_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_rmsnorm2d_fwd_with_add",
                 op_func=_rocm_aiter_rmsnorm2d_fwd_with_add_impl,
                 fake_impl=_rocm_aiter_rmsnorm2d_fwd_with_add_fake,
@@ -1547,6 +1577,19 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_rmsnorm2d_fwd_with_add(
             x, residual, weight, variance_epsilon
+        )
+
+    @staticmethod
+    def fused_qk_rmsnorm(
+        q: torch.Tensor,
+        q_weight: torch.Tensor,
+        q_eps: float,
+        k: torch.Tensor,
+        k_weight: torch.Tensor,
+        k_eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.rocm_aiter_fused_qk_rmsnorm(
+            q, q_weight, q_eps, k, k_weight, k_eps
         )
 
     @staticmethod
