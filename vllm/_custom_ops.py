@@ -3300,6 +3300,12 @@ def cpu_gemm_wna16(
     return output
 
 
+def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
+    out = torch.empty_like(input)
+    torch.ops._C.activation_lut_bf16(out, input, activation)
+    return out
+
+
 def cpu_prepack_moe_weight(
     weight: torch.Tensor,
     isa: str,
