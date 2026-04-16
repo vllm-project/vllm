@@ -1,14 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Dedicated split-KV attention for per-token-head quantized KV cache.
+"""Attention kernels for per-token-head quantized KV cache.
 
-  - stage1: per-query split-KV tiled attention with inline fp8/int8 dequant
-  - stage2: log-sum-exp reduction (reused ``_fwd_kernel_stage2``)
+Two launch shapes live here:
 
-Covers pure decode (q_len=1) and small continuation prefill (q_len ≤ threshold)
-via precomputed ``q_to_klen`` — each query gets its own causal K length, which
-is the synthetic-seq-lens trick from TurboQuant. Pre-allocated buffers on the
-layer avoid per-forward allocation and keep grid dims constant for CUDA graphs.
+* ``_pth_attn_stage1`` + ``_fwd_kernel_stage2`` — split-KV decode shape:
+  grid ``(total_q, Hq, NUM_KV_SPLITS)`` with per-query causal ``k_len``.
+  Best for q_len=1 (pure decode) and very small continuation prefill.
+
+* ``_pth_prefill_kernel`` — flash-attention prefill shape:
+  grid ``(num_reqs, Hq, cdiv(max_q_len, BLOCK_M))`` with BLOCK_M×BLOCK_N
+  tiles and ``tl.dot`` reuse of K across the query tile. Reads paged KV
+  cache with inline per-token-head dequant (scales applied at tile level
+  after the Q·Kᵀ and before the P·V matmul). Used for long prefill with
+  cached context — replaces the decode-shaped path when q_len is large.
 """
 
 from __future__ import annotations
@@ -320,3 +325,269 @@ def triton_per_token_head_attention(
     )
 
     return out
+
+
+# ------------------------------------------------------------------ #
+#  Prefill kernel: flash-attention shape with per-token-head dequant  #
+# ------------------------------------------------------------------ #
+
+
+@triton.jit
+def _pth_prefill_kernel(
+    Q_ptr,
+    K_cache_ptr,
+    V_cache_ptr,
+    K_scale_ptr,
+    V_scale_ptr,
+    Block_table_ptr,
+    Query_start_loc_ptr,
+    Seq_lens_ptr,
+    Out_ptr,
+    stride_q_tok,
+    stride_q_h,
+    stride_kc_blk,
+    stride_kc_slot,
+    stride_kc_head,
+    stride_vc_blk,
+    stride_vc_slot,
+    stride_vc_head,
+    stride_ks_blk,
+    stride_ks_slot,
+    stride_ks_head,
+    stride_vs_blk,
+    stride_vs_slot,
+    stride_vs_head,
+    stride_bt_r,
+    stride_o_tok,
+    stride_o_h,
+    SM_SCALE: tl.constexpr,
+    KV_GROUP: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+):
+    """Prefill attention over paged KV cache with per-token-head dequant.
+
+    One program computes ``BLOCK_M`` queries of a single request and a single
+    Q-head. It iterates over K/V tiles of width ``BLOCK_N`` (paged lookup via
+    ``Block_table``), applies per-token-head fp32 scales at tile level, and
+    runs the standard flash-attention online-softmax update.
+
+    Causal mask uses absolute positions within the sequence:
+    ``q_pos = cached_len + offs_m`` where ``cached_len = seq_len - q_len``,
+    so queries attend to the cached prefix plus their own prefix within the
+    current chunk.
+    """
+    req_id = tl.program_id(0)
+    head_id = tl.program_id(1)
+    start_m = tl.program_id(2)
+
+    kv_head = head_id // KV_GROUP
+
+    q_start = tl.load(Query_start_loc_ptr + req_id)
+    q_end = tl.load(Query_start_loc_ptr + req_id + 1)
+    q_len = q_end - q_start
+
+    block_start = start_m * BLOCK_M
+    if block_start >= q_len:
+        return
+
+    seq_len = tl.load(Seq_lens_ptr + req_id)
+    cached_len = seq_len - q_len
+
+    offs_m = block_start + tl.arange(0, BLOCK_M)
+    offs_n = tl.arange(0, BLOCK_N)
+    offs_d = tl.arange(0, BLOCK_D)
+
+    d_mask = offs_d < HEAD_DIM
+    m_mask = offs_m < q_len
+
+    q_off = (
+        (q_start + offs_m)[:, None] * stride_q_tok
+        + head_id * stride_q_h
+        + offs_d[None, :]
+    )
+    q = tl.load(
+        Q_ptr + q_off,
+        mask=m_mask[:, None] & d_mask[None, :],
+        other=0.0,
+    )
+    q_dtype = q.dtype
+
+    m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
+
+    q_pos = cached_len + offs_m
+    end_n = tl.minimum(seq_len, cached_len + block_start + BLOCK_M)
+
+    bt_base = req_id * stride_bt_r
+
+    for start_n in range(0, end_n, BLOCK_N):
+        k_pos = start_n + offs_n
+        valid_k = k_pos < seq_len
+
+        page_idx = k_pos // BLOCK_SIZE
+        page_off = k_pos % BLOCK_SIZE
+        block_nums = tl.load(
+            Block_table_ptr + bt_base + page_idx,
+            mask=valid_k,
+            other=0,
+        )
+
+        # K tile laid out as [BLOCK_D, BLOCK_N] so tl.dot(Q, K) works.
+        k_addrs = (
+            block_nums[None, :] * stride_kc_blk
+            + page_off[None, :] * stride_kc_slot
+            + kv_head * stride_kc_head
+            + offs_d[:, None]
+        )
+        k = tl.load(
+            K_cache_ptr + k_addrs,
+            mask=valid_k[None, :] & d_mask[:, None],
+            other=0.0,
+        )
+
+        k_sc_addrs = (
+            block_nums * stride_ks_blk
+            + page_off * stride_ks_slot
+            + kv_head * stride_ks_head
+        )
+        k_scales = tl.load(K_scale_ptr + k_sc_addrs, mask=valid_k, other=0.0)
+
+        qk = tl.dot(q, k.to(q_dtype))
+        qk = qk * k_scales[None, :] * SM_SCALE
+
+        causal = k_pos[None, :] <= q_pos[:, None]
+        full_mask = causal & valid_k[None, :]
+        qk = tl.where(full_mask, qk, -float("inf"))
+
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        qk = qk - m_ij[:, None]
+        p = tl.exp(qk)
+        l_ij = tl.sum(p, 1)
+
+        alpha = tl.exp(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        acc = acc * alpha[:, None]
+
+        v_addrs = (
+            block_nums[:, None] * stride_vc_blk
+            + page_off[:, None] * stride_vc_slot
+            + kv_head * stride_vc_head
+            + offs_d[None, :]
+        )
+        v = tl.load(
+            V_cache_ptr + v_addrs,
+            mask=valid_k[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+
+        v_sc_addrs = (
+            block_nums * stride_vs_blk
+            + page_off * stride_vs_slot
+            + kv_head * stride_vs_head
+        )
+        v_scales = tl.load(V_scale_ptr + v_sc_addrs, mask=valid_k, other=0.0)
+
+        p_casted = (p * v_scales[None, :]).to(q_dtype)
+        v_casted = v.to(q_dtype)
+        acc = tl.dot(p_casted, v_casted, acc)
+
+        m_i = m_ij
+
+    safe_l = tl.where(l_i > 0.0, l_i, 1.0)
+    acc = acc / safe_l[:, None]
+
+    out_off = (
+        (q_start + offs_m)[:, None] * stride_o_tok
+        + head_id * stride_o_h
+        + offs_d[None, :]
+    )
+    tl.store(
+        Out_ptr + out_off,
+        acc.to(q_dtype),
+        mask=m_mask[:, None] & d_mask[None, :],
+    )
+
+
+def triton_per_token_head_prefill(
+    query: torch.Tensor,
+    output: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    k_scale_cache: torch.Tensor,
+    v_scale_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    softmax_scale: float,
+    num_reqs: int,
+    max_query_len: int,
+) -> torch.Tensor:
+    """Flash-attention prefill with paged per-token-head dequant.
+
+    ``query_start_loc`` (shape ``[num_reqs+1]``) and ``seq_lens`` (shape
+    ``[num_reqs]``) describe the prefill portion only; when called on the
+    tail of a mixed batch the caller slices/offsets them accordingly.
+
+    ``seq_lens[i] = cached_len_i + q_len_i``, so causal attention covers
+    both the cached prefix and the queries within the current chunk. The
+    KV cache must already include the new tokens (i.e. the reshape-and-
+    cache step has run before this kernel).
+    """
+    total_q, Hq, D = query.shape
+    Hkv = key_cache.shape[2]
+    kv_group = Hq // Hkv
+    BLOCK_SIZE = key_cache.shape[1]
+
+    if total_q == 0:
+        return output
+
+    BLOCK_M = 64 if D > 128 else 128
+    BLOCK_N = 64 if D > 128 else 128
+    BLOCK_D = triton.next_power_of_2(D)
+
+    grid = (num_reqs, Hq, triton.cdiv(max_query_len, BLOCK_M))
+
+    _pth_prefill_kernel[grid](
+        query,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        block_table,
+        query_start_loc,
+        seq_lens,
+        output,
+        query.stride(0),
+        query.stride(1),
+        key_cache.stride(0),
+        key_cache.stride(1),
+        key_cache.stride(2),
+        value_cache.stride(0),
+        value_cache.stride(1),
+        value_cache.stride(2),
+        k_scale_cache.stride(0),
+        k_scale_cache.stride(1),
+        k_scale_cache.stride(2),
+        v_scale_cache.stride(0),
+        v_scale_cache.stride(1),
+        v_scale_cache.stride(2),
+        block_table.stride(0),
+        output.stride(0),
+        output.stride(1),
+        SM_SCALE=softmax_scale,
+        KV_GROUP=kv_group,
+        BLOCK_SIZE=BLOCK_SIZE,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+        BLOCK_D=BLOCK_D,
+        HEAD_DIM=D,
+        num_warps=4 if D <= 64 else 8,
+        num_stages=2,
+    )
+
+    return output

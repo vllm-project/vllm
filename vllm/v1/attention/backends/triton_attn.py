@@ -32,6 +32,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.attention.ops.triton_per_token_head_attention import (
     triton_per_token_head_attention,
+    triton_per_token_head_prefill,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -852,6 +853,105 @@ class TritonAttentionImpl(AttentionImpl):
                     softmax_scale=self.scale,
                     sliding_window_q=self.sliding_window[0],
                     sliding_window_k=self.sliding_window[1],
+                )
+                return output
+
+            # FP3: pure prefill with at least one continuation chunk.
+            # Reads paged cache with inline per-token-head dequant via a
+            # flash-attention-shaped kernel — avoids falling through to the
+            # decode-shaped unified_attention which wastes K loads across
+            # query tiles.
+            if (
+                num_dec == 0
+                and num_actual_tokens > 0
+                and self.sliding_window == (-1, -1)
+            ):
+                key_cache, value_cache, k_scale_cache, v_scale_cache = (
+                    self._ensure_fused_cache_views(kv_cache)
+                )
+                if key_cache.dtype == torch.uint8:
+                    key_cache = key_cache.view(self.fp8_dtype)
+                    value_cache = value_cache.view(self.fp8_dtype)
+                num_reqs_pref = attn_metadata.query_start_loc.shape[0] - 1
+                triton_per_token_head_prefill(
+                    query=query[:num_actual_tokens],
+                    output=output[:num_actual_tokens],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    k_scale_cache=k_scale_cache,
+                    v_scale_cache=v_scale_cache,
+                    block_table=attn_metadata.block_table,
+                    query_start_loc=attn_metadata.query_start_loc,
+                    seq_lens=attn_metadata.seq_lens,
+                    softmax_scale=self.scale,
+                    num_reqs=num_reqs_pref,
+                    max_query_len=attn_metadata.max_query_len,
+                )
+                return output
+
+            # FP4: mixed decode + prefill where the prefill portion includes
+            # at least one continuation chunk. Decode portion goes through
+            # unified_attention (decode-tuned); prefill portion uses the
+            # flash-attention prefill kernel.
+            if (
+                num_dec > 0
+                and num_dec_tok < num_actual_tokens
+                and self.sliding_window == (-1, -1)
+            ):
+                key_cache, value_cache, k_scale_cache, v_scale_cache = (
+                    self._ensure_fused_cache_views(kv_cache)
+                )
+                if key_cache.dtype == torch.uint8:
+                    key_cache = key_cache.view(self.fp8_dtype)
+                    value_cache = value_cache.view(self.fp8_dtype)
+
+                unified_attention(
+                    q=query[:num_dec_tok],
+                    k=key_cache,
+                    v=value_cache,
+                    out=output[:num_dec_tok],
+                    cu_seqlens_q=attn_metadata.query_start_loc[: num_dec + 1],
+                    max_seqlen_q=1,
+                    seqused_k=attn_metadata.seq_lens[:num_dec],
+                    max_seqlen_k=attn_metadata.max_seq_len,
+                    softmax_scale=self.scale,
+                    causal=True,
+                    alibi_slopes=None,
+                    use_alibi_sqrt=False,
+                    window_size=self.sliding_window,
+                    block_table=attn_metadata.block_table[:num_dec],
+                    softcap=0,
+                    q_descale=None,
+                    k_descale=None,
+                    v_descale=None,
+                    seq_threshold_3D=attn_metadata.seq_threshold_3D,
+                    num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
+                    softmax_segm_output=attn_metadata.softmax_segm_output,
+                    softmax_segm_max=attn_metadata.softmax_segm_max,
+                    softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+                    sinks=None,
+                    output_scale=None,
+                    mm_prefix_range=None,
+                    kv_quant_mode=self._kv_quant_mode,
+                    k_scale_cache=k_scale_cache,
+                    v_scale_cache=v_scale_cache,
+                )
+
+                pref_qsl = attn_metadata.query_start_loc[num_dec:] - num_dec_tok
+                num_reqs_pref = attn_metadata.query_start_loc.shape[0] - 1 - num_dec
+                triton_per_token_head_prefill(
+                    query=query[num_dec_tok:num_actual_tokens],
+                    output=output[num_dec_tok:num_actual_tokens],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    k_scale_cache=k_scale_cache,
+                    v_scale_cache=v_scale_cache,
+                    block_table=attn_metadata.block_table[num_dec:],
+                    query_start_loc=pref_qsl,
+                    seq_lens=attn_metadata.seq_lens[num_dec:],
+                    softmax_scale=self.scale,
+                    num_reqs=num_reqs_pref,
+                    max_query_len=attn_metadata.max_query_len,
                 )
                 return output
 
