@@ -712,21 +712,6 @@ def _resolve_vision_chunk_items(
     return processed_chunks, vision_chunks_uuids
 
 
-def _require_mm_processor(
-    mm_processor: BaseMultiModalProcessor | None,
-    modality: str,
-) -> BaseMultiModalProcessor:
-    """Return `mm_processor`, raising if `None`.
-
-    `mm_processor is None` is only valid on the `prompt_embeds`-only path
-    (with text-only models). Reaching any other modality branch with `None`
-    is invalid.
-    """
-    if mm_processor is None:
-        raise RuntimeError(_REQUIRE_MM_PROCESSOR_ERROR.format(modality=modality))
-    return mm_processor
-
-
 def _resolve_items(
     items_by_modality: dict[str, list[tuple[object, str | None]]],
     mm_processor: BaseMultiModalProcessor | None,
@@ -736,15 +721,23 @@ def _resolve_items(
     Materialize the tracker's per-modality items into `mm_data` / `mm_uuids`.
 
     Note:
-        `mm_processor` is `None` for text-only models (no
-        registered HF processor) with `prompt_embeds` input items.
-        Other modalities route through `_require_mm_processor`, which
-        raises if `None` is reached unexpectedly.
+        `mm_processor` is `None` for text-only models (no registered HF
+        processor) whose only modality is `prompt_embeds`. Every other
+        modality requires a processor, enforced by the guard below.
     """
     if "image" in items_by_modality and "image_embeds" in items_by_modality:
         raise ValueError("Mixing raw image and embedding inputs is not allowed")
     if "audio" in items_by_modality and "audio_embeds" in items_by_modality:
         raise ValueError("Mixing raw audio and embedding inputs is not allowed")
+    # `prompt_embeds` bypasses HF MM processors. Every other modality requires one.
+    processor_modalities = items_by_modality.keys() - {"prompt_embeds"}
+    if processor_modalities and mm_processor is None:
+        raise RuntimeError(
+            _REQUIRE_MM_PROCESSOR_ERROR.format(modality=processor_modalities)
+        )
+    # Narrowing hint for mypy.
+    if processor_modalities:
+        assert mm_processor is not None
 
     mm_data = {}
     mm_uuids = {}
@@ -752,7 +745,7 @@ def _resolve_items(
         mm_data["image"] = _get_embeds_data(
             "image",
             [data for data, uuid in items_by_modality["image_embeds"]],
-            _require_mm_processor(mm_processor, "image_embeds"),
+            mm_processor,
         )
         mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image_embeds"]]
     if "image" in items_by_modality:
@@ -762,7 +755,7 @@ def _resolve_items(
         mm_data["audio"] = _get_embeds_data(
             "audio",
             [data for data, uuid in items_by_modality["audio_embeds"]],
-            _require_mm_processor(mm_processor, "audio_embeds"),
+            mm_processor,
         )
         mm_uuids["audio"] = [uuid for data, uuid in items_by_modality["audio_embeds"]]
     if "audio" in items_by_modality:
@@ -776,7 +769,7 @@ def _resolve_items(
         # and convert to VisionChunk types with proper UUID handling
         processed_chunks, vision_chunk_uuids = _resolve_vision_chunk_items(
             items_by_modality["vision_chunk"],
-            _require_mm_processor(mm_processor, "vision_chunk"),
+            mm_processor,
             modality_order.get("vision_chunk", []),
         )
         mm_data["vision_chunk"] = processed_chunks
