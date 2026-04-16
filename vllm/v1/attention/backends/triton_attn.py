@@ -791,7 +791,10 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
 
-            if (
+            # Dedicated kernel disabled: _build_q_maps does CPU allocations
+            # incompatible with CUDA graph capture. Layout change alone is
+            # the main win — unified_attention below benefits from it.
+            if False and (
                 attn_metadata.max_query_len <= _CONTINUATION_DECODE_THRESHOLD
                 and attn_metadata.seq_lens_cpu is not None
                 and attn_metadata.query_start_loc_cpu is not None
