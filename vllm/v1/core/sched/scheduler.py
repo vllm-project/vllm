@@ -655,6 +655,11 @@ class Scheduler(SchedulerInterface):
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
         # Next, schedule the WAITING requests.
+        # NOTE: Phase 2 is intentionally skipped when Phase 1 caused any
+        # preemption (preempted_reqs is non-empty).  Mixing memory-pressure
+        # preemption with capacity-triggered preemption in a single cycle
+        # would risk cascading evictions; deferring to the next step keeps
+        # the running queue stable.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
@@ -663,6 +668,62 @@ class Scheduler(SchedulerInterface):
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
                 if num_running >= self.max_num_running_reqs:
+                    if self.policy == SchedulingPolicy.PRIORITY and self.running:
+                        # In priority mode, a high-priority waiting request
+                        # may preempt a lower-priority running request when
+                        # max_num_seqs (not memory) is the bottleneck.
+                        # The outer while condition guarantees at least one
+                        # queue is non-empty, so the result is never None.
+                        candidate_queue = (
+                            self._select_waiting_queue_for_scheduling()
+                        )
+                        assert candidate_queue is not None
+                        top_waiting = candidate_queue.peek_request()
+                        # Don't preempt for a request that cannot be
+                        # admitted yet (e.g. waiting for grammar/KV
+                        # transfer). Defer to the next schedule() call.
+                        if self._is_blocked_waiting_status(
+                            top_waiting.status
+                        ) and not self._try_promote_blocked_waiting_request(
+                            top_waiting
+                        ):
+                            break
+                        lowest_running = max(
+                            self.running,
+                            key=lambda r: (
+                                r.priority,
+                                r.arrival_time,
+                                r.request_id,
+                            ),
+                        )
+                        if top_waiting < lowest_running:
+                            self.running.remove(lowest_running)
+                            lp_req_id = lowest_running.request_id
+                            if lowest_running in scheduled_running_reqs:
+                                scheduled_running_reqs.remove(
+                                    lowest_running
+                                )
+                                token_budget += num_scheduled_tokens.pop(
+                                    lp_req_id
+                                )
+                                req_to_new_blocks.pop(lp_req_id)
+                                scheduled_spec_decode_tokens.pop(
+                                    lp_req_id, None
+                                )
+                                evicted_enc = scheduled_encoder_inputs.pop(
+                                    lp_req_id, None
+                                )
+                                if evicted_enc:
+                                    encoder_compute_budget += sum(
+                                        lowest_running
+                                        .get_num_encoder_embeds(i)
+                                        for i in evicted_enc
+                                    )
+                            self._preempt_request(
+                                lowest_running, scheduled_timestamp
+                            )
+                            preempted_reqs.append(lowest_running)
+                            continue
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
