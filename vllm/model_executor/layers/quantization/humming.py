@@ -796,22 +796,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             _w2=w2_quant_desc,
         )
 
-    def apply_activation(
-        self, layer: torch.nn.Module, inputs: torch.Tensor
-    ) -> torch.Tensor:
-        inputs_flat = inputs.view(-1, inputs.size(-1))
-        if layer.activation.is_gated:
-            outputs_flat = torch.empty(
-                (inputs_flat.size(0), inputs_flat.size(1) // 2),
-                dtype=inputs_flat.dtype,
-                device=inputs.device,
-            )
-        else:
-            outputs_flat = torch.empty_like(inputs_flat)
-
-        apply_moe_activation(layer.activation, outputs_flat, inputs_flat)
-        return outputs_flat.view(*inputs.shape[:-1], -1)
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         for sublayer_name, configs in layer.sublayer_configs.items():
             input_schema = self.input_schema
