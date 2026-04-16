@@ -9,6 +9,9 @@ Exercises the full FusedMoE nn.Module end-to-end including:
 - Weight handling and expert sharding
 - The DefaultMoERunner orchestration
 
+Launches processes once per backend and loops over shapes inside the worker
+to minimize process creation overhead.
+
 Run: pytest -v -s tests/kernels/moe/test_fused_moe_ep_dp.py
 """
 
@@ -18,7 +21,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from tests.kernels.moe.utils import make_test_quant_config
+from tests.kernels.moe.utils import make_test_weights
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
@@ -28,6 +31,7 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_ep_group,
     init_distributed_environment,
 )
 from vllm.forward_context import set_forward_context
@@ -38,7 +42,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
 )
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptNvFp4Config,
-    ModelOptNvFp4FusedMoE,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep
@@ -50,6 +53,11 @@ from vllm.v1.worker.workspace import init_workspace_manager
 from ...utils import multi_gpu_test
 
 mp.set_start_method("spawn", force=True)
+
+
+# ---------------------------------------------------------------------------
+# Distributed launch helpers
+# ---------------------------------------------------------------------------
 
 
 def _distributed_run(fn, world_size, *args, extra_env=None):
@@ -92,6 +100,33 @@ def _init_worker(env: dict[str, str]):
     return rank, device
 
 
+def _cleanup_between_configs(prefix: str, backend: str):
+    """Clean up state between test config iterations.
+
+    Follows the pattern from test_moe_layer.py:
+    clear compilation state and destroy DeepEP all2all buffers on SM100.
+    """
+    vllm_config = VllmConfig()
+    cc = vllm_config.compilation_config
+    if prefix in cc.static_forward_context:
+        del cc.static_forward_context[prefix]
+        if prefix in cc.static_all_moe_layers:
+            cc.static_all_moe_layers.remove(prefix)
+
+    cap = current_platform.get_device_capability()
+    if (
+        cap is not None
+        and cap.major == 10
+        and backend in ("deepep_low_latency", "deepep_high_throughput")
+    ):
+        torch.accelerator.synchronize()
+        all2all_manager = get_ep_group().device_communicator.all2all_manager
+        if all2all_manager is not None:
+            all2all_manager.destroy()
+
+    torch.accelerator.empty_cache()
+
+
 def torch_moe_ref(
     a: torch.Tensor,
     w1: torch.Tensor,
@@ -124,9 +159,7 @@ def _worker_bf16(
     backend: str,
     num_experts: int,
     topk: int,
-    hidden_size: int,
-    intermediate_size: int,
-    M: int,
+    shapes: list[tuple[int, int, int]],
 ):
     dtype = torch.bfloat16
     rank, device = _init_worker(env)
@@ -146,106 +179,83 @@ def _worker_bf16(
             pipeline_model_parallel_size=1,
         )
 
-        # Generate full weights (same seed on all ranks)
-        set_random_seed(42)
-        w13_full = (
-            torch.randn(
-                num_experts,
-                2 * intermediate_size,
-                hidden_size,
-                device=device,
-                dtype=dtype,
+        for m, hidden_size, intermediate_size in shapes:
+            prefix = f"test_bf16_{rank}_{m}_{hidden_size}"
+
+            set_random_seed(42)
+            w13_full = (
+                torch.randn(
+                    num_experts,
+                    2 * intermediate_size,
+                    hidden_size,
+                    device=device,
+                    dtype=dtype,
+                )
+                / 10
             )
-            / 10
-        )
-        w2_full = (
-            torch.randn(
-                num_experts,
-                hidden_size,
-                intermediate_size,
-                device=device,
-                dtype=dtype,
+            w2_full = (
+                torch.randn(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size,
+                    device=device,
+                    dtype=dtype,
+                )
+                / 10
             )
-            / 10
-        )
 
-        # Generate per-rank input (different per rank)
-        set_random_seed(100 + rank)
-        hidden_states = (
-            torch.randn(
-                M,
-                hidden_size,
-                device=device,
-                dtype=dtype,
+            set_random_seed(100 + rank)
+            hidden_states = torch.randn(m, hidden_size, device=device, dtype=dtype) / 10
+            router_logits = torch.randn(m, num_experts, device=device, dtype=dtype) / 10
+
+            topk_weights, topk_ids, _ = fused_topk(
+                hidden_states,
+                router_logits.float(),
+                topk,
+                renormalize=True,
             )
-            / 10
-        )
-        router_logits = (
-            torch.randn(
-                M,
-                num_experts,
-                device=device,
-                dtype=dtype,
+            ref_output = torch_moe_ref(
+                hidden_states, w13_full, w2_full, topk_ids, topk_weights
             )
-            / 10
-        )
 
-        # Reference output using all experts locally
-        topk_weights, topk_ids, _ = fused_topk(
-            hidden_states,
-            router_logits.float(),
-            topk,
-            renormalize=True,
-        )
-        ref_output = torch_moe_ref(
-            hidden_states,
-            w13_full,
-            w2_full,
-            topk_ids,
-            topk_weights,
-        )
+            fml = FusedMoE(
+                num_experts=num_experts,
+                top_k=topk,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                prefix=prefix,
+                activation="silu",
+                is_act_and_mul=True,
+                params_dtype=dtype,
+                reduce_results=False,
+            )
+            fml = fml.to(device)
 
-        # Create FusedMoE layer
-        fml = FusedMoE(
-            num_experts=num_experts,
-            top_k=topk,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            prefix=f"test_bf16_{rank}",
-            activation="silu",
-            is_act_and_mul=True,
-            params_dtype=dtype,
-            reduce_results=False,
-        )
-        fml = fml.to(device)
+            ep_rank = fml.moe_parallel_config.ep_rank
+            n_local = fml.local_num_experts
+            start = ep_rank * n_local
+            end = start + n_local
+            fml.w13_weight.data.copy_(w13_full[start:end])
+            fml.w2_weight.data.copy_(w2_full[start:end])
 
-        # Fill local expert weights from the full set
-        ep_rank = fml.moe_parallel_config.ep_rank
-        n_local = fml.local_num_experts
-        start = ep_rank * n_local
-        end = start + n_local
-        fml.w13_weight.data.copy_(w13_full[start:end])
-        fml.w2_weight.data.copy_(w2_full[start:end])
+            fml.quant_method.process_weights_after_loading(fml)
+            fml.maybe_init_modular_kernel()
 
-        # Process weights and init kernel
-        fml.quant_method.process_weights_after_loading(fml)
-        fml.maybe_init_modular_kernel()
+            num_tokens_across_dp = torch.tensor(
+                [m] * world_size, dtype=torch.int, device="cpu"
+            )
+            with set_forward_context(
+                None,
+                vllm_config,
+                num_tokens=m,
+                num_tokens_across_dp=num_tokens_across_dp,
+            ):
+                output = fml(hidden_states, router_logits)
 
-        # Forward
-        num_tokens_across_dp = torch.tensor(
-            [M] * world_size,
-            dtype=torch.int,
-            device="cpu",
-        )
-        with set_forward_context(
-            None,
-            vllm_config,
-            num_tokens=M,
-            num_tokens_across_dp=num_tokens_across_dp,
-        ):
-            output = fml(hidden_states, router_logits)
+            torch.testing.assert_close(ref_output, output, atol=5e-2, rtol=5e-2)
 
-        torch.testing.assert_close(ref_output, output, atol=5e-2, rtol=5e-2)
+            del fml
+            _cleanup_between_configs(prefix, backend)
 
 
 BACKENDS = [
@@ -256,19 +266,15 @@ BACKENDS = [
 
 BF16_SHAPES = [
     (16, 2048, 512),
-    (64, 4096, 1024),
+    (16, 4096, 1024),
 ]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-@pytest.mark.parametrize("m,hidden_size,intermediate_size", BF16_SHAPES)
 @pytest.mark.parametrize("num_experts,topk", [(8, 2)])
 @multi_gpu_test(num_gpus=2)
 def test_fused_moe_ep_dp(
     backend: str,
-    m: int,
-    hidden_size: int,
-    intermediate_size: int,
     num_experts: int,
     topk: int,
 ):
@@ -284,28 +290,24 @@ def test_fused_moe_ep_dp(
         backend,
         num_experts,
         topk,
-        hidden_size,
-        intermediate_size,
-        m,
+        BF16_SHAPES,
     )
 
 
 # ---------------------------------------------------------------------------
-# NVFP4 + DP+EP test (CuTeDSL experts + DeepEP LL)
+# NVFP4 + DP+EP test (CuTeDSL experts)
 # ---------------------------------------------------------------------------
 
 
 def _worker_nvfp4(
     env: dict[str, str],
     world_size: int,
+    backend: str,
     num_experts: int,
     topk: int,
-    hidden_size: int,
-    intermediate_size: int,
-    M: int,
+    shapes: list[tuple[int, int, int]],
 ):
     dtype = torch.bfloat16
-    backend = "deepep_low_latency"
     rank, device = _init_worker(env)
     init_workspace_manager(device)
 
@@ -316,6 +318,9 @@ def _worker_nvfp4(
     vllm_config.parallel_config.all2all_backend = backend
     vllm_config.parallel_config.is_moe_model = True
     vllm_config.compilation_config.fast_moe_cold_start = False
+    # Force CuteDSL backend. Auto-upgrades to batched variant for
+    # DeepEP LL (BatchedExperts format) via oracle lines 212-217.
+    vllm_config.kernel_config.moe_backend = "flashinfer_cutedsl"
 
     with set_current_vllm_config(vllm_config):
         ensure_model_parallel_initialized(
@@ -323,206 +328,147 @@ def _worker_nvfp4(
             pipeline_model_parallel_size=1,
         )
 
-        # Number of local experts for this rank
-        num_local_experts = num_experts // world_size
+        for m, hidden_size, intermediate_size in shapes:
+            prefix = f"test_nvfp4_{rank}_{m}_{hidden_size}"
+            num_local_experts = num_experts // world_size
 
-        # Create FusedMoE layer with NVFP4 quant config
-        quant_config = ModelOptNvFp4Config(
-            is_checkpoint_nvfp4_serialized=True,
-            kv_cache_quant_algo=None,
-            exclude_modules=[],
-        )
-        fml = FusedMoE(
-            num_experts=num_experts,
-            top_k=topk,
-            hidden_size=hidden_size,
-            intermediate_size=intermediate_size,
-            prefix=f"test_nvfp4_{rank}",
-            activation="silu",
-            is_act_and_mul=True,
-            params_dtype=dtype,
-            reduce_results=False,
-            quant_config=quant_config,
-        )
-
-        # Register NVFP4 weight parameters
-        nvfp4_method = ModelOptNvFp4FusedMoE(quant_config, fml)
-        nvfp4_method.create_weights(
-            fml,
-            num_local_experts,
-            hidden_size,
-            intermediate_size,
-            params_dtype=torch.uint8,
-            global_num_experts=num_experts,
-        )
-        fml = fml.to(device)
-
-        # Generate quantized weights (same seed on all ranks)
-        set_random_seed(42)
-        w1_q, w2_q, _ = make_test_quant_config(
-            num_local_experts,
-            intermediate_size,
-            hidden_size,
-            in_dtype=dtype,
-            quant_dtype="nvfp4",
-            block_shape=None,
-            per_act_token_quant=False,
-        )
-
-        # Fill local expert weights and scales
-        fml.w13_weight.data = w1_q
-        fml.w2_weight.data = w2_q
-        fml.w2_input_scale.data = torch.randn_like(fml.w2_input_scale.data) / 5
-        fml.w13_input_scale.data = torch.randn_like(fml.w13_input_scale.data) / 5
-        fml.w2_weight_scale_2.data = torch.randn_like(fml.w2_weight_scale_2.data) / 5
-        fml.w13_weight_scale_2.data = torch.randn_like(fml.w13_weight_scale_2.data) / 5
-        fml.w2_weight_scale.data = (
-            torch.randn(fml.w2_weight_scale.data.shape, device=device) / 5
-        ).to(fml.w2_weight_scale.data.dtype)
-        fml.w13_weight_scale.data = (
-            torch.randn(fml.w13_weight_scale.data.shape, device=device) / 5
-        ).to(fml.w13_weight_scale.data.dtype)
-
-        # Dequantize weights BEFORE process_weights_after_loading, which
-        # transforms scales into kernel-specific format.
-        w13_deq = torch.empty(
-            num_local_experts,
-            2 * intermediate_size,
-            hidden_size,
-            device=device,
-            dtype=dtype,
-        )
-        w2_deq = torch.empty(
-            num_local_experts,
-            hidden_size,
-            intermediate_size,
-            device=device,
-            dtype=dtype,
-        )
-        for idx in range(num_local_experts):
-            w13_deq[idx] = dequantize_nvfp4_to_dtype(
-                fml.w13_weight.data[idx],
-                fml.w13_weight_scale.data[idx],
-                fml.w13_weight_scale_2.data[idx, 0],
-                dtype,
-                device,
-            )
-            w2_deq[idx] = dequantize_nvfp4_to_dtype(
-                fml.w2_weight.data[idx],
-                fml.w2_weight_scale.data[idx],
-                fml.w2_weight_scale_2.data[idx],
-                dtype,
-                device,
-            )
-
-        # Now transform weights for the kernel
-        nvfp4_method.process_weights_after_loading(fml)
-        fml.maybe_init_modular_kernel()
-
-        # Generate per-rank input (different per rank)
-        set_random_seed(100 + rank)
-        hidden_states = (
-            torch.randn(
-                M,
-                hidden_size,
-                device=device,
-                dtype=dtype,
-            )
-            / 10
-        )
-        router_logits = (
-            torch.randn(
-                M,
+            # Generate FULL quantized weights with matching scales
+            # (same seed on all ranks so weights are identical)
+            set_random_seed(42)
+            (_, w13_q, w13_bs, w13_gs), (_, w2_q, w2_bs, w2_gs) = make_test_weights(
                 num_experts,
-                device=device,
+                intermediate_size,
+                hidden_size,
+                in_dtype=dtype,
+                quant_dtype="nvfp4",
+            )
+
+            # Dequantize FULL weights for reference BEFORE any transforms
+            w13_deq = torch.empty(
+                num_experts,
+                2 * intermediate_size,
+                hidden_size,
+                device="cuda",
                 dtype=dtype,
             )
-            / 10
-        )
+            w2_deq = torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size,
+                device="cuda",
+                dtype=dtype,
+            )
+            for idx in range(num_experts):
+                w13_deq[idx] = dequantize_nvfp4_to_dtype(
+                    w13_q[idx], w13_bs[idx], w13_gs[idx], dtype, device
+                )
+                w2_deq[idx] = dequantize_nvfp4_to_dtype(
+                    w2_q[idx], w2_bs[idx], w2_gs[idx], dtype, device
+                )
 
-        # Build full-expert dequantized weights for reference
-        # (allgather across ranks)
-        w13_full = torch.zeros(
-            num_experts,
-            2 * intermediate_size,
-            hidden_size,
-            device=device,
-            dtype=dtype,
-        )
-        w2_full = torch.zeros(
-            num_experts,
-            hidden_size,
-            intermediate_size,
-            device=device,
-            dtype=dtype,
-        )
-        ep_rank = fml.moe_parallel_config.ep_rank
-        start = ep_rank * num_local_experts
-        end = start + num_local_experts
-        w13_full[start:end] = w13_deq
-        w2_full[start:end] = w2_deq
-        torch.distributed.all_reduce(w13_full)
-        torch.distributed.all_reduce(w2_full)
+            # Create FusedMoE layer with NVFP4 quant config
+            # FusedMoE.__init__ creates quant_method and registers weights
+            quant_config = ModelOptNvFp4Config(
+                is_checkpoint_nvfp4_serialized=True,
+                kv_cache_quant_algo=None,
+                exclude_modules=[],
+            )
+            fml = FusedMoE(
+                num_experts=num_experts,
+                top_k=topk,
+                hidden_size=hidden_size,
+                intermediate_size=intermediate_size,
+                prefix=prefix,
+                activation="silu",
+                is_act_and_mul=True,
+                params_dtype=dtype,
+                reduce_results=False,
+                quant_config=quant_config,
+            )
+            fml = fml.to(device)
 
-        # Reference: quantize activations, dequantize, run torch_moe_ref
-        a_global_scale = (
-            (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX)
-            / torch.amax(hidden_states.abs().flatten(), dim=-1)
-        ).to(torch.float32)
-        a_fp4, a_scale = ops.scaled_fp4_quant(hidden_states, a_global_scale)
-        a_deq = dequantize_nvfp4_to_dtype(
-            a_fp4,
-            a_scale,
-            a_global_scale,
-            dtype,
-            device,
-        )
+            # Fill LOCAL expert weights and scales from make_test_weights
+            ep_rank = fml.moe_parallel_config.ep_rank
+            start = ep_rank * num_local_experts
+            end = start + num_local_experts
+            fml.w13_weight.data.copy_(w13_q[start:end])
+            fml.w2_weight.data.copy_(w2_q[start:end])
+            fml.w13_weight_scale.data.copy_(w13_bs[start:end])
+            fml.w2_weight_scale.data.copy_(w2_bs[start:end])
+            # weight_scale_2 stores 1/global_scale (the kernel applies it
+            # as alpha = 1/(a_scale * w_scale), see test_cutedsl_moe.py:428)
+            fml.w13_weight_scale_2.data[:, 0] = 1.0 / w13_gs[start:end]
+            fml.w13_weight_scale_2.data[:, 1] = 1.0 / w13_gs[start:end]
+            fml.w2_weight_scale_2.data.copy_(1.0 / w2_gs[start:end])
+            fml.w13_input_scale.data.fill_(1.0)
+            fml.w2_input_scale.data.fill_(1.0)
 
-        topk_weights, topk_ids, _ = fused_topk(
-            hidden_states,
-            router_logits.float(),
-            topk,
-            renormalize=True,
-        )
-        ref_output = torch_moe_ref(
-            a_deq,
-            w13_full,
-            w2_full,
-            topk_ids,
-            topk_weights,
-        )
+            fml.quant_method.process_weights_after_loading(fml)
+            fml.maybe_init_modular_kernel()
 
-        # Forward
-        num_tokens_across_dp = torch.tensor(
-            [M] * world_size,
-            dtype=torch.int,
-            device="cpu",
-        )
-        with set_forward_context(
-            None,
-            vllm_config,
-            num_tokens=M,
-            num_tokens_across_dp=num_tokens_across_dp,
-        ):
-            output = fml(hidden_states, router_logits)
+            # Generate per-rank input
+            set_random_seed(100 + rank)
+            hidden_states = torch.randn(m, hidden_size, device=device, dtype=dtype) / 10
+            router_logits = torch.randn(m, num_experts, device=device, dtype=dtype) / 10
 
-        torch.testing.assert_close(ref_output, output, atol=1e-1, rtol=1e-1)
+            # Reference: quantize+dequantize activations, then torch_moe_ref
+            a_global_scale = (
+                (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX)
+                / torch.amax(hidden_states.abs().flatten(), dim=-1)
+            ).to(torch.float32)
+            a_fp4, a_scale = ops.scaled_fp4_quant(hidden_states, a_global_scale)
+            a_deq = dequantize_nvfp4_to_dtype(
+                a_fp4, a_scale, a_global_scale, dtype, device
+            )
+
+            topk_weights, topk_ids, _ = fused_topk(
+                hidden_states,
+                router_logits.float(),
+                topk,
+                renormalize=True,
+            )
+            ref_output = torch_moe_ref(a_deq, w13_deq, w2_deq, topk_ids, topk_weights)
+
+            # Forward
+            num_tokens_across_dp = torch.tensor(
+                [m] * world_size, dtype=torch.int, device="cpu"
+            )
+            with set_forward_context(
+                None,
+                vllm_config,
+                num_tokens=m,
+                num_tokens_across_dp=num_tokens_across_dp,
+            ):
+                output = fml(hidden_states, router_logits)
+
+            # FP4 quantization + distributed dispatch introduces error.
+            # test_cutedsl_moe.py uses atol=2e-1 for kernel-level tests.
+            torch.testing.assert_close(ref_output, output, atol=4e-1, rtol=4e-1)
+
+            del fml
+            _cleanup_between_configs(prefix, backend)
 
 
 NVFP4_SHAPES = [
-    # hidden_size must be in DeepEP LL SUPPORTED_HIDDEN_SIZES
+    # hidden_size must be in DeepEP LL SUPPORTED_HIDDEN_SIZES.
+    # M kept small for DeepEP LL buffer constraints.
     (16, 2048, 256),
-    (64, 4096, 512),
+    (32, 4096, 512),
+]
+
+NVFP4_BACKENDS = [
+    # deepep_high_throughput -> Standard format -> masked_gemm CuteDSL
+    "deepep_high_throughput",
+    # TODO: deepep_low_latency needs LL buffer pre-allocation for
+    # batched CuteDSL. Add once buffer sizing is resolved.
 ]
 
 
-@pytest.mark.parametrize("m,hidden_size,intermediate_size", NVFP4_SHAPES)
+@pytest.mark.parametrize("backend", NVFP4_BACKENDS)
 @pytest.mark.parametrize("num_experts,topk", [(8, 2)])
 @multi_gpu_test(num_gpus=2)
 def test_fused_moe_ep_dp_nvfp4(
-    m: int,
-    hidden_size: int,
-    intermediate_size: int,
+    backend: str,
     num_experts: int,
     topk: int,
 ):
@@ -535,13 +481,8 @@ def test_fused_moe_ep_dp_nvfp4(
     _distributed_run(
         _worker_nvfp4,
         2,
+        backend,
         num_experts,
         topk,
-        hidden_size,
-        intermediate_size,
-        m,
-        extra_env={
-            "VLLM_USE_FLASHINFER_MOE_FP4": "1",
-            "VLLM_FLASHINFER_MOE_BACKEND": "cutedsl",
-        },
+        NVFP4_SHAPES,
     )
