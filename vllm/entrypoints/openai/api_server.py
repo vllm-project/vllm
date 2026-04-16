@@ -4,7 +4,6 @@ import asyncio
 import importlib
 import inspect
 import multiprocessing
-import multiprocessing.forkserver as forkserver
 import os
 import signal
 import socket
@@ -41,10 +40,6 @@ from vllm.entrypoints.openai.server_utils import (
     lifespan,
     log_response,
     validation_exception_handler,
-)
-from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.elastic_ep.middleware import (
-    ScalingMiddleware,
 )
 from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
@@ -84,6 +79,8 @@ async def build_async_engine_client(
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
         # The executor is expected to be mp.
         # Pre-import heavy modules in the forkserver process
+        import multiprocessing.forkserver as forkserver
+
         logger.debug("Setup forkserver with pre-imports")
         multiprocessing.set_start_method("forkserver")
         multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
@@ -280,6 +277,8 @@ def build_app(
         app.add_middleware(XRequestIdMiddleware)
 
     # Add scaling middleware to check for scaling state
+    from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
+
     app.add_middleware(ScalingMiddleware)
 
     if "realtime" in supported_tasks:
@@ -309,6 +308,8 @@ def build_app(
             raise ValueError(
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
+
+    from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
 
     app = sagemaker_standards_bootstrap(app)
     return app
