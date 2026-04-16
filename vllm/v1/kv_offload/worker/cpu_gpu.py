@@ -119,6 +119,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         block_size_factor: int,
         kv_cache_groups_data_refs: list[list[CanonicalKVCacheRef]],
         gpu_to_cpu: bool,
+        mmap_region: SharedOffloadRegion | None = None,
     ):
         """
         Initialize a SingleDirectionOffloadingHandler.
@@ -181,6 +182,8 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             self.group_block_size_in_bytes.append(group_block_size_in_bytes)
 
         self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
+        # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
+        self._mmap_region = mmap_region
         # job_id -> event
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
@@ -318,6 +321,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self._event_pool.clear()
         self.src_tensors.clear()
         self.dst_tensors.clear()
+        if self._mmap_region is not None:
+            self._mmap_region.cleanup()
+            self._mmap_region = None
 
 
 class CpuGpuOffloadingHandlers:
@@ -370,6 +376,7 @@ class CpuGpuOffloadingHandlers:
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=True,
+            mmap_region=mmap_region,
         )
 
         self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(

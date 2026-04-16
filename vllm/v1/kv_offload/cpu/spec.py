@@ -40,6 +40,10 @@ class CPUOffloadingSpec(OffloadingSpec):
             if kv_bytes_per_offloaded_block > 0
             else 0
         )
+        world_size = vllm_config.parallel_config.world_size
+        self.cpu_page_size_per_worker: int = (
+            kv_bytes_per_offloaded_block // world_size if world_size > 0 else 0
+        )
 
         # scheduler-side
         self._manager: OffloadingManager | None = None
@@ -48,6 +52,22 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._handlers: CpuGpuOffloadingHandlers | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+
+    def _maybe_apply_store_filter(
+        self, manager: OffloadingManager
+    ) -> OffloadingManager:
+        # store_threshold: how many times a block must appear in lookup()
+        # before it is eligible for CPU offloading.  Values < 2 disable
+        # filtering (a threshold of 1 equals no filter; 0 is the default).
+        store_threshold = int(self.extra_config.get("store_threshold", 0))
+        if store_threshold >= 2:
+            max_tracker_size = int(self.extra_config.get("max_tracker_size", 64_000))
+            return FilterReusedOffloadingManager(
+                backing=manager,
+                store_threshold=store_threshold,
+                max_tracker_size=max_tracker_size,
+            )
+        return manager
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
@@ -61,21 +81,17 @@ class CPUOffloadingSpec(OffloadingSpec):
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=enable_events,
             )
-
-            # store_threshold: how many times a block must appear in lookup()
-            # before it is eligible for CPU offloading.  Values < 2 disable
-            # filtering (a threshold of 1 equals no filter; 0 is the default).
-            store_threshold = int(self.extra_config.get("store_threshold", 0))
-            if store_threshold >= 2:
-                max_tracker_size = int(
-                    self.extra_config.get("max_tracker_size", 64_000)
-                )
-                self._manager = FilterReusedOffloadingManager(
-                    backing=self._manager,
-                    store_threshold=store_threshold,
-                    max_tracker_size=max_tracker_size,
-                )
+            self._manager = self._maybe_apply_store_filter(self._manager)
         return self._manager
+
+    def _create_handlers(
+        self, kv_caches: CanonicalKVCaches
+    ) -> CpuGpuOffloadingHandlers:
+        return CpuGpuOffloadingHandlers(
+            kv_caches=kv_caches,
+            block_size_factor=self.block_size_factor,
+            num_cpu_blocks=self.num_blocks,
+        )
 
     def get_handlers(
         self, kv_caches: CanonicalKVCaches
@@ -85,12 +101,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike GPUs"
                 )
-
-            self._handlers = CpuGpuOffloadingHandlers(
-                kv_caches=kv_caches,
-                block_size_factor=self.block_size_factor,
-                num_cpu_blocks=self.num_blocks,
-            )
+            self._handlers = self._create_handlers(kv_caches)
 
         assert self._handlers is not None
         yield GPULoadStoreSpec, CPULoadStoreSpec, self._handlers.gpu_to_cpu_handler
