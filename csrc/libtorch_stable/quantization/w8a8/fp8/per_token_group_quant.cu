@@ -30,12 +30,23 @@ typedef __hip_fp8_e4m3_fnuz __nv_fp8_e4m3_fnuz;
 #include "libtorch_stable/torch_utils.h"
 
 __device__ __forceinline__ float GroupReduceMax(float val) {
+  constexpr int warp_size = WARP_SIZE;
 #ifdef USE_ROCM
-  const auto mask = threadIdx.x % 32 >= 16 ? 0xffff0000ull : 0x0000ffffull;
+  const int lane = threadIdx.x % warp_size;
+  uint64_t mask;
+  if constexpr (warp_size == 64) {
+    const int group_base = lane & ~15;
+    // 0xffff'0000'0000'0000
+    // 0x0000'ffff'0000'0000
+    // 0x0000'0000'ffff'0000
+    // 0x0000'0000'0000'ffff
+    mask = uint64_t(0xffffull) << group_base;
+  } else {
+    mask = lane >= warp_size / 2 ? 0xffff0000ull : 0x0000ffffull;
+  }
 #else
   const auto mask = threadIdx.x % 32 >= 16 ? 0xffff0000 : 0x0000ffff;
 #endif
-
   val = fmaxf(val, __shfl_xor_sync(mask, val, 8));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 4));
   val = fmaxf(val, __shfl_xor_sync(mask, val, 2));
