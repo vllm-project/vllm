@@ -360,6 +360,7 @@ set(VLLM_EXT_SRC
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
+        "csrc/cpu/activation_lut_bf16.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
