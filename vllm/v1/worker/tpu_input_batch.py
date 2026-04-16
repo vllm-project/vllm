@@ -376,10 +376,14 @@ class InputBatch:
         # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
         #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
         # instead, we need to temporarily copy the data for one of the indices
-        # TODO(lucas): optimize this by only copying valid indices
-        tmp = self.token_ids_cpu[i1, ...].copy()
-        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
-        self.token_ids_cpu[i2, ...] = tmp
+        # Only swap the valid token region, not the full padded row.
+        i1_num_tokens = int(self.num_tokens_no_spec[i1])
+        i2_num_tokens = int(self.num_tokens_no_spec[i2])
+        max_num_tokens = max(i1_num_tokens, i2_num_tokens)
+
+        tmp = self.token_ids_cpu[i1, :max_num_tokens].copy()
+        self.token_ids_cpu[i1, :max_num_tokens] = self.token_ids_cpu[i2, :max_num_tokens]
+        self.token_ids_cpu[i2, :max_num_tokens] = tmp
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.min_tokens, i1, i2)
