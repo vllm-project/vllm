@@ -8,7 +8,7 @@ from vllm.platforms import current_platform
 
 if not current_platform.is_device_capability_family(120):
     pytest.skip(
-        reason="FlashInfer CuteDSL SM12x MoE requires SM120 (Blackwell GeForce).",
+        reason="FlashInfer CuteDSL SM12x MoE requires SM120 (RTX Pro 6000 / DGX Spark).",
         allow_module_level=True,
     )
 

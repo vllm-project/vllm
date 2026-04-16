@@ -346,7 +346,7 @@ def flashinfer_cutedsl_moe_masked(
 
 
 class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
-    """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121, Blackwell GeForce).
+    """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121, RTX Pro 6000 / DGX Spark).
 
     Uses ``cute_dsl_fused_moe_nvfp4`` from FlashInfer PR #3066 which fuses
     token dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction
@@ -374,8 +374,30 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
-        layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+        # The SM12x kernel uses w1_alpha as *both* the activation input_gs and
+        # the weight dequant factor (they are conflated in launch_sm120_moe).
+        # vLLM's NVFP4 convention stores block_scale = max_abs * w_gs / fp4_max
+        # and g1_alphas = 1/w_gs.  We need block_scale = max_abs / fp4_max and
+        # g1_alphas = 1.0 so both conflated roles equal 1.0.
+        #
+        # The FP4-packed values are identical in both conventions — only the
+        # block scale representation changes.  Multiply float8 block scales by
+        # 1/w_gs (= w13_weight_scale_2) to normalise, then set scale_2 = 1.0.
+        #
+        # We intentionally do NOT bake w13_input_scale into w13_weight_scale_2
+        # here (unlike other backends) because that would make g1_alphas ≠ 1.0,
+        # re-introducing the conflation bug for the activation-quantisation role.
+        layer.w13_weight_scale.data = (
+            layer.w13_weight_scale.float()
+            * layer.w13_weight_scale_2.view(-1, 1, 1)
+        ).to(layer.w13_weight_scale.dtype)
+        layer.w13_weight_scale_2.data.fill_(1.0)
+
+        layer.w2_weight_scale.data = (
+            layer.w2_weight_scale.float()
+            * layer.w2_weight_scale_2.view(-1, 1, 1)
+        ).to(layer.w2_weight_scale.dtype)
+        layer.w2_weight_scale_2.data.fill_(1.0)
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
