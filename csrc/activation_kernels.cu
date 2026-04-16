@@ -124,6 +124,61 @@ __global__ void act_and_mul_kernel(
   }
 }
 
+// Instruction-level parallelism optimized kernel.
+// Processes 4 elements per iteration to hide transcendental function latency.
+template <typename scalar_t, typename packed_t,
+          scalar_t (*ACT_FN)(const scalar_t&),
+          packed_t (*PACKED_ACT_FN)(const packed_t&), bool act_first>
+__global__ void act_and_mul_kernel_ilp(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., 2, d]
+    const int d) {
+  const scalar_t* x_ptr = input + blockIdx.x * 2 * d;
+  const scalar_t* y_ptr = x_ptr + d;
+  scalar_t* out_ptr = out + blockIdx.x * d;
+
+  // Optimized for scalar path with instruction-level parallelism.
+  // Process 4 elements per iteration to overlap transcendental function latency.
+  // This allows GPU to hide ~8-12 cycle tanhf/erf latency with other work.
+  
+  constexpr int ELEMS_PER_ITER = 4;
+  const int64_t num_full_iters = (d / ELEMS_PER_ITER) * ELEMS_PER_ITER;
+  
+  for (int64_t base_idx = threadIdx.x * ELEMS_PER_ITER; base_idx < num_full_iters;
+       base_idx += blockDim.x * ELEMS_PER_ITER) {
+    // Load 4 elements with independent memory accesses
+    scalar_t x0 = VLLM_LDG(&x_ptr[base_idx]);
+    scalar_t x1 = VLLM_LDG(&x_ptr[base_idx + 1]);
+    scalar_t x2 = VLLM_LDG(&x_ptr[base_idx + 2]);
+    scalar_t x3 = VLLM_LDG(&x_ptr[base_idx + 3]);
+    
+    scalar_t y0 = VLLM_LDG(&y_ptr[base_idx]);
+    scalar_t y1 = VLLM_LDG(&y_ptr[base_idx + 1]);
+    scalar_t y2 = VLLM_LDG(&y_ptr[base_idx + 2]);
+    scalar_t y3 = VLLM_LDG(&y_ptr[base_idx + 3]);
+    
+    // Apply activation function to all 4 in parallel.
+    // GPU can interleave these operations to hide tanhf/erf latency.
+    scalar_t out0 = compute<scalar_t, ACT_FN, act_first>(x0, y0);
+    scalar_t out1 = compute<scalar_t, ACT_FN, act_first>(x1, y1);
+    scalar_t out2 = compute<scalar_t, ACT_FN, act_first>(x2, y2);
+    scalar_t out3 = compute<scalar_t, ACT_FN, act_first>(x3, y3);
+    
+    // Store 4 results
+    out_ptr[base_idx] = out0;
+    out_ptr[base_idx + 1] = out1;
+    out_ptr[base_idx + 2] = out2;
+    out_ptr[base_idx + 3] = out3;
+  }
+  
+  // Handle remaining elements (d % 4 != 0)
+  for (int64_t idx = threadIdx.x + num_full_iters; idx < d; idx += blockDim.x) {
+    const scalar_t x = VLLM_LDG(&x_ptr[idx]);
+    const scalar_t y = VLLM_LDG(&y_ptr[idx]);
+    out_ptr[idx] = compute<scalar_t, ACT_FN, act_first>(x, y);
+  }
+}
+
 template <typename T>
 __device__ __forceinline__ T silu_kernel(const T& x) {
   // x * sigmoid(x)
@@ -283,6 +338,29 @@ __device__ __forceinline__ packed_t packed_gelu_poly_kernel(const packed_t& val)
     });                                                                        \
   }
 
+// Launch macro for ILP-optimized kernel (scalar path only).
+// Uses loop unrolling and instruction-level parallelism to hide
+// transcendental function latency (erf/tanh).
+#define LAUNCH_ACTIVATION_GATE_KERNEL_ILP(KERNEL, PACKED_KERNEL, ACT_FIRST) \
+  auto dtype = input.scalar_type();                                          \
+  int d = input.size(-1) / 2;                                                \
+  int64_t num_tokens = input.numel() / input.size(-1);                       \
+  if (num_tokens == 0) {                                                     \
+    return;                                                                  \
+  }                                                                          \
+  dim3 grid(num_tokens);                                                     \
+  dim3 block(std::min(d, 1024));                                             \
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));          \
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();              \
+  VLLM_DISPATCH_FLOATING_TYPES(dtype, "act_and_mul_kernel_ilp", [&] {        \
+    vllm::act_and_mul_kernel_ilp<                                            \
+        scalar_t, typename vllm::PackedTypeConverter<scalar_t>::Type,        \
+        KERNEL<scalar_t>,                                                    \
+        PACKED_KERNEL<typename vllm::PackedTypeConverter<scalar_t>::Type>,   \
+        ACT_FIRST><<<grid, block, 0, stream>>>(                              \
+        out.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(), d);            \
+  });
+
 void silu_and_mul(torch::Tensor& out,    // [..., d]
                   torch::Tensor& input)  // [..., 2 * d]
 {
@@ -328,6 +406,37 @@ void gelu_poly_and_mul(torch::Tensor& out,    // [..., d]
   // Provides ~1.5-2x speedup over standard GELU with ~99.5% accuracy.
   LAUNCH_ACTIVATION_GATE_KERNEL(vllm::gelu_poly_kernel,
                                 vllm::packed_gelu_poly_kernel, true);
+}
+
+// ILP-optimized versions for benchmarking and comparison.
+// These use instruction-level parallelism to hide transcendental function
+// latency. Expected speedup: 1.2-1.5x over regular kernel.
+
+void gelu_tanh_and_mul_ilp(torch::Tensor& out,    // [..., d]
+                           torch::Tensor& input)  // [..., 2 * d]
+{
+  // ILP-optimized GELU with tanh approximation.
+  // Uses 4-element loop unrolling to expose instruction parallelism.
+  LAUNCH_ACTIVATION_GATE_KERNEL_ILP(vllm::gelu_tanh_kernel,
+                                    vllm::packed_gelu_tanh_kernel, true);
+}
+
+void gelu_and_mul_ilp(torch::Tensor& out,    // [..., d]
+                      torch::Tensor& input)  // [..., 2 * d]
+{
+  // ILP-optimized GELU with erf approximation.
+  // Uses 4-element loop unrolling to expose instruction parallelism.
+  LAUNCH_ACTIVATION_GATE_KERNEL_ILP(vllm::gelu_kernel,
+                                    vllm::packed_gelu_kernel, true);
+}
+
+void silu_and_mul_ilp(torch::Tensor& out,    // [..., d]
+                      torch::Tensor& input)  // [..., 2 * d]
+{
+  // ILP-optimized SiLU activation.
+  // Uses 4-element loop unrolling to expose instruction parallelism.
+  LAUNCH_ACTIVATION_GATE_KERNEL_ILP(vllm::silu_kernel,
+                                    vllm::packed_silu_kernel, true);
 }
 
 namespace vllm {

@@ -144,6 +144,17 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_poly_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_poly_and_mul", torch::kCUDA, &gelu_poly_and_mul);
 
+  // ILP-optimized activation functions for benchmarking.
+  // Use 4-element loop unrolling to hide transcendental function latency.
+  ops.def("gelu_and_mul_ilp(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_and_mul_ilp", torch::kCUDA, &gelu_and_mul_ilp);
+
+  ops.def("gelu_tanh_and_mul_ilp(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_tanh_and_mul_ilp", torch::kCUDA, &gelu_tanh_and_mul_ilp);
+
+  ops.def("silu_and_mul_ilp(Tensor! out, Tensor input) -> ()");
+  ops.impl("silu_and_mul_ilp", torch::kCUDA, &silu_and_mul_ilp);
+
   // FATReLU implementation.
   ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
   ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
