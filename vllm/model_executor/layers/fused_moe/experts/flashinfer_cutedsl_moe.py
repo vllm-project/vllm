@@ -11,7 +11,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
-    TopKWeightAndReduceDelegate,
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -24,7 +23,6 @@ from vllm.utils.flashinfer import (
     flashinfer_convert_sf_to_mma_layout,
     flashinfer_cute_dsl_fused_moe_nvfp4,
     flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_moe_nvfp4,
     has_flashinfer_cutedsl_sm12x_moe,
     scaled_fp4_grouped_quantize,
@@ -346,7 +344,9 @@ def flashinfer_cutedsl_moe_masked(
 
 
 class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
-    """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121, RTX Pro 6000 / DGX Spark).
+    """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121).
+
+    Targets RTX Pro 6000 / DGX Spark (Blackwell GeForce).
 
     Uses ``cute_dsl_fused_moe_nvfp4`` from FlashInfer PR #3066 which fuses
     token dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction
@@ -388,14 +388,12 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         # here (unlike other backends) because that would make g1_alphas ≠ 1.0,
         # re-introducing the conflation bug for the activation-quantisation role.
         layer.w13_weight_scale.data = (
-            layer.w13_weight_scale.float()
-            * layer.w13_weight_scale_2.view(-1, 1, 1)
+            layer.w13_weight_scale.float() * layer.w13_weight_scale_2.view(-1, 1, 1)
         ).to(layer.w13_weight_scale.dtype)
         layer.w13_weight_scale_2.data.fill_(1.0)
 
         layer.w2_weight_scale.data = (
-            layer.w2_weight_scale.float()
-            * layer.w2_weight_scale_2.view(-1, 1, 1)
+            layer.w2_weight_scale.float() * layer.w2_weight_scale_2.view(-1, 1, 1)
         ).to(layer.w2_weight_scale.dtype)
         layer.w2_weight_scale_2.data.fill_(1.0)
 
@@ -518,9 +516,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         # x_sf is ignored by the SM12x kernel (quantization is fused
         # internally), but the API requires a tensor argument.
         x_sf_placeholder = (
-            a1q_scale
-            if a1q_scale is not None
-            else hidden_states.new_zeros(1)
+            a1q_scale if a1q_scale is not None else hidden_states.new_zeros(1)
         )
 
         # TODO: Use the plan/run() API from FlashInfer PR #3066 instead of
