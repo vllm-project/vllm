@@ -23,7 +23,4 @@ class SharedFusedMoE(FusedMoE):
             hidden_states=hidden_states,
             router_logits=router_logits,
         )
-        if self.shared_experts is None:
-            return None, result
-        else:
-            return result
+        return None, result
