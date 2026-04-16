@@ -557,6 +557,8 @@ _MULTIMODAL_MODELS = {
         "nemotron_parse",
         "NemotronParseForConditionalGeneration",
     ),
+    "VibeVoiceForASRTraining": ("vibevoice_asr", "VibeVoiceForASRTraining"),
+    "VibeVoiceForCausalLM": ("vibevoice_asr", "VibeVoiceForCausalLM"),
     "WhisperForConditionalGeneration": ("whisper", "WhisperForConditionalGeneration"),
 }
 
