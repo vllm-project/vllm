@@ -135,8 +135,8 @@ __device__ __forceinline__
   auto* out_bytes = reinterpret_cast<uint8_t*>(group_output);
   auto scalar_op_quant = [&] __device__(uint8_t& dst, const T& src) {
     float q = fminf(fmaxf(static_cast<float>(src) / y_s, min_8bit), max_8bit);
-    dst = __hip_cvt_float_to_fp8(q, __nv_fp8_e4m3::__default_saturation,
-                                 __nv_fp8_e4m3::__default_interpret);
+    dst = __hip_cvt_float_to_fp8(q, DST_DTYPE::__default_saturation,
+                                 DST_DTYPE::__default_interpret);
   };
 
   vllm::vectorize_with_alignment<vec_size>(
