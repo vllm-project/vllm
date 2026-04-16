@@ -205,9 +205,10 @@ def _get_rht_signs(d: int, round_idx: int, device: torch.device) -> torch.Tensor
     if key not in _RHT_SIGNS_CACHE:
         gen = torch.Generator(device="cpu")
         gen.manual_seed(0x9E3779B9 + round_idx * 0x517CC1B7)
-        signs = 2.0 * torch.bernoulli(
-            torch.full((d,), 0.5, device="cpu"), generator=gen
-        ) - 1.0
+        signs = (
+            2.0 * torch.bernoulli(torch.full((d,), 0.5, device="cpu"), generator=gen)
+            - 1.0
+        )
         _RHT_SIGNS_CACHE[key] = signs.to(device)
     return _RHT_SIGNS_CACHE[key]
 
