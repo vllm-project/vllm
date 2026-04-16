@@ -731,6 +731,7 @@ class CompilationConfig:
         "vllm::mla_attention_prefill_with_output",
         "vllm::mla_write_kv_cache",
         "vllm::mla_split_batch",
+        "vllm::mla_merge_prefill_decode_output",
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
         "vllm::short_conv",

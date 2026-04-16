@@ -70,7 +70,10 @@ def inductor_partition_rule_context(
             torch._inductor.config.cudagraph_unsafe_unbacked_ops  # type: ignore[attr-defined]
         )
         # Only mark known producers of data-dependent SymInts here.
-        known_unsafe_unbacked_ops = {"vllm::mla_split_batch"}
+        known_unsafe_unbacked_ops = {
+            "vllm::mla_split_batch",
+            "vllm::mla_merge_prefill_decode_output",
+        }
         torch._inductor.config.cudagraph_unsafe_unbacked_ops = [  # type: ignore[attr-defined]
             op for op in splitting_ops if op in known_unsafe_unbacked_ops
         ]

@@ -1448,12 +1448,21 @@ direct_register_custom_op(
 )
 
 
-def mla_merge_prefill_decode_output(
+torch.library.define(
+    "vllm::mla_merge_prefill_decode_output",
+    "(Tensor decode_result, Tensor prefill_result, Tensor(a!) output, SymInt num_decode_tokens) -> ()",  # noqa: E501
+    tags=torch.Tag.pt2_compliant_tag,
+)
+
+
+@torch.library.impl("vllm::mla_merge_prefill_decode_output", "cuda")
+def mla_merge_prefill_decode_output_cuda(
     decode_result: torch.Tensor,
     prefill_result: torch.Tensor,
     output: torch.Tensor,
     num_decode_tokens: int,
 ) -> None:
+    """Merge decode and prefill results into output tensor."""
     output[0:num_decode_tokens].copy_(decode_result[0:num_decode_tokens])
     num_prefill = prefill_result.shape[0]
     if num_prefill > 0:
@@ -1462,23 +1471,15 @@ def mla_merge_prefill_decode_output(
         )
 
 
+@torch.library.register_fake("vllm::mla_merge_prefill_decode_output")
 def mla_merge_prefill_decode_output_fake(
     decode_result: torch.Tensor,
     prefill_result: torch.Tensor,
     output: torch.Tensor,
     num_decode_tokens: int,
 ) -> None:
+    """Fake implementation for FakeTensor mode and shape inference."""
     return
-
-
-direct_register_custom_op(
-    op_name="mla_merge_prefill_decode_output",
-    op_func=mla_merge_prefill_decode_output,
-    mutates_args=["output"],
-    fake_impl=mla_merge_prefill_decode_output_fake,
-    dispatch_key=current_platform.dispatch_key,
-    tags=(torch._C.Tag.cudagraph_unsafe,),
-)
 
 
 class QueryLenSupport(Enum):
