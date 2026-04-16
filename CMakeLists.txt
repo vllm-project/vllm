@@ -276,20 +276,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 #
-# spinlock extension
+# spinloop extension
 #
 
-set(VLLM_SPINLOCK_EXT_SRC
-  "csrc/spinlock.cpp")
+set(VLLM_SPINLOOP_EXT_SRC
+  "csrc/spinloop.cpp")
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
-  list(APPEND SPINLOCK_COMPILE_FLAGS "-mmwaitx")
+  list(APPEND SPINLOOP_COMPILE_FLAGS "-mmwaitx")
 endif()
 define_extension_target(
-  spinlock
+  spinloop
   DESTINATION vllm
   LANGUAGE CXX
-  SOURCES ${VLLM_SPINLOCK_EXT_SRC}
-  COMPILE_FLAGS ${SPINLOCK_COMPILE_FLAGS}
+  SOURCES ${VLLM_SPINLOOP_EXT_SRC}
+  COMPILE_FLAGS ${SPINLOOP_COMPILE_FLAGS}
   USE_SABI 3.11
   WITH_SOABI)
 
