@@ -41,6 +41,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.model_executor.parameter import BlockQuantScaleParameter
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
@@ -602,12 +603,99 @@ class MiMoV2Model(nn.Module):
 
             if expert_matched:
                 continue
-            # Support fused qkv_proj checkpoint (Pro format)
+            # Support fused qkv_proj checkpoint (Pro format).
+            # Manually split the fused [Q|K|V] tensor, select the per-TP-rank
+            # portions (with KV head replication when tp_size > num_kv_heads),
+            # and copy directly into the parameter.
+            #
+            # We cannot delegate to QKVParallelLinear._load_fused_module_from_
+            # checkpoint + load_qkv_weight because that chain assumes per-head
+            # block alignment in the scale tensor, which breaks when
+            # head_dim (192) is not a multiple of block_size (128).
             if "qkv_proj" in name:
-                if name in params_dict:
-                    param = params_dict[name]
-                    loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+
+                # Scalars (e.g. input_scale) — fall through to default path.
+                if param.dim() < 2:
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(name)
+                    continue
+
+                output_dim = getattr(param, "output_dim", 0)
+                head_dim = self.config.head_dim
+                v_head_dim = getattr(self.config, "v_head_dim", None) or head_dim
+                total_q = self.config.num_attention_heads * head_dim
+                total_k = self.config.num_key_value_heads * head_dim
+                num_kv_head_replicas = max(
+                    1, tp_size // self.config.num_key_value_heads
+                )
+                kv_head_idx = tp_rank // num_kv_head_replicas
+
+                is_scale = isinstance(param, BlockQuantScaleParameter)
+                if is_scale:
+                    qc = getattr(self.config, "quantization_config", {})
+                    block_n = (qc.get("weight_block_size") or [128])[0]
+                    ceil = lambda x: (x + block_n - 1) // block_n  # noqa: E731
+
+                    q_dim = ceil(total_q)
+                    k_dim = ceil(total_k)
+                    v_dim = (loaded_weight.shape[output_dim]
+                             - q_dim - k_dim)
+
+                    q_per_rank = q_dim // tp_size
+                    q_rank = loaded_weight.narrow(
+                        output_dim, tp_rank * q_per_rank, q_per_rank
+                    )
+
+                    k_start = (kv_head_idx * head_dim) // block_n
+                    k_size = (ceil((kv_head_idx + 1) * head_dim)
+                              - k_start)
+                    k_rank = loaded_weight.narrow(
+                        output_dim, q_dim + k_start, k_size
+                    )
+
+                    v_start = (kv_head_idx * v_head_dim) // block_n
+                    v_size = (ceil((kv_head_idx + 1) * v_head_dim)
+                              - v_start)
+                    v_rank = loaded_weight.narrow(
+                        output_dim, q_dim + k_dim + v_start, v_size
+                    )
+                else:
+                    total_v_dim = loaded_weight.shape[output_dim] - total_q - total_k
+                    # Infer per-head V dim from checkpoint (may differ from config
+                    # v_head_dim if checkpoint pads V to head_dim).
+                    ckpt_v_head_dim = (total_v_dim
+                                       // self.config.num_key_value_heads)
+
+                    q_per_rank = total_q // tp_size
+                    q_rank = loaded_weight.narrow(
+                        output_dim, tp_rank * q_per_rank, q_per_rank
+                    )
+                    k_rank = loaded_weight.narrow(
+                        output_dim,
+                        total_q + kv_head_idx * head_dim,
+                        head_dim,
+                    )
+                    v_rank = loaded_weight.narrow(
+                        output_dim,
+                        total_q + total_k + kv_head_idx * ckpt_v_head_dim,
+                        ckpt_v_head_dim,
+                    )
+
+                rank_weight = torch.cat(
+                    [q_rank, k_rank, v_rank], dim=output_dim
+                )
+                assert param.shape == rank_weight.shape, (
+                    f"fused qkv shape mismatch for {name}: "
+                    f"param {param.shape} vs assembled {rank_weight.shape}"
+                )
+                param.data.copy_(rank_weight)
+                loaded_params.add(name)
                 continue
             stacked_matched = False
             for param_name, weight_name, shard_id in stacked_params_mapping:
