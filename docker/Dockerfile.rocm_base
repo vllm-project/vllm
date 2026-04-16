@@ -175,8 +175,6 @@ RUN git clone ${PYTORCH_REPO} pytorch
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH}
 RUN cd pytorch \
     && pip install -r requirements.txt && git submodule update --init --recursive
-RUN cd pytorch/third_party/kineto \
-    && git remote add rocm https://github.com/ROCm/kineto && git fetch rocm && git checkout 2d73be3 
 RUN cd pytorch && python3 tools/amd_build/build_amd.py \
     && if [ "$USE_SCCACHE" = "1" ]; then \
            export HIP_CLANG_PATH=/opt/sccache-wrappers \
