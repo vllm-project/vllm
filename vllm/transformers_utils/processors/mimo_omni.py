@@ -123,6 +123,7 @@ class MiMoVLInputSample:
     audio_inputs: list[torch.Tensor]
     second_per_grid_ts: list[float] = field(default_factory=list)
     video_start_times: list[float] = field(default_factory=list)
+    audio_token_lens: list[int] = field(default_factory=list)
     position_ids: torch.Tensor | None = None
     rope_deltas: torch.Tensor | None = None
     extra: dict = field(default_factory=dict)
@@ -441,13 +442,13 @@ class MiMoVLProcessor:
 
     def preprocess_audio(self, audio: Any) -> tuple[torch.Tensor, int]:
         """Decode audio bytes/path/tuple → (mel_spec (T, n_mels), token_len)."""
-        if AudioDecoder is None:
-            raise RuntimeError(
-                "torchcodec is required for audio. Install with: pip install torchcodec"
-            )
         if isinstance(audio, tuple):
             waveform, original_sr = audio
         else:
+            if AudioDecoder is None:
+                raise RuntimeError(
+                    "torchcodec is required for audio. Install with: pip install torchcodec"
+                )
             if isinstance(audio, bytes):
                 file_obj: Any = io.BytesIO(audio)
             elif isinstance(audio, str):
@@ -635,6 +636,7 @@ class MiMoVLProcessor:
         vid_grids: list[torch.Tensor] = []
         audio_inputs: list[torch.Tensor] = []
         is_audio_tokenized: list[bool] = []
+        audio_token_lens: list[int] = []
         second_per_grid_ts: list[float] = []
         video_start_times: list[float] = []
 
@@ -720,6 +722,7 @@ class MiMoVLProcessor:
                     is_audio_tokenized.append(True)
                     tok_len = processed.shape[0]
                     audio_inputs.append(processed)
+                audio_token_lens.append(tok_len)
                 _ids = (
                     [self.audio_start_token_id]
                     + [self.audio_token_id] * tok_len
@@ -841,6 +844,7 @@ class MiMoVLProcessor:
             audio_inputs=audio_inputs,
             second_per_grid_ts=second_per_grid_ts,
             video_start_times=video_start_times,
+            audio_token_lens=audio_token_lens,
             position_ids=position_ids,
             rope_deltas=rope_deltas,
             extra=extra,
@@ -1171,9 +1175,20 @@ class MiMoOmniProcessor(ProcessorMixin):
                     sample.video_start_times, dtype=torch.float32
                 )
 
+        # audio_features is a list of variable-length mel-spec tensors; pop it
+        # before BatchFeature conversion to avoid "batched tensors of the same
+        # length" errors, then re-attach it after.
+        audio_features = None
         if sample.audio_inputs:
-            data["audio_features"] = sample.audio_inputs
+            audio_features = sample.audio_inputs
             if "is_audio_tokenized" in sample.extra:
                 data["is_audio_tokenized"] = sample.extra["is_audio_tokenized"]
+            if sample.audio_token_lens:
+                data["audio_token_lens"] = torch.tensor(
+                    sample.audio_token_lens, dtype=torch.long
+                )
 
-        return BatchFeature(data=data, tensor_type=return_tensors)
+        bf = BatchFeature(data=data, tensor_type=return_tensors)
+        if audio_features is not None:
+            bf["audio_features"] = audio_features
+        return bf

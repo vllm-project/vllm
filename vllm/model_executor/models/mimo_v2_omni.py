@@ -43,7 +43,9 @@ from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
     SupportsPP,
+    SupportsQuant,
 )
+from .mimo_audio import MimoAudioEncoder
 from .mimo_v2 import MiMoV2FlashForCausalLM
 from .qwen2_5_vl import (
     Qwen2_5_VisionMLP,
@@ -662,6 +664,9 @@ class MiMoVisionTransformer(nn.Module):
 
 
 class MiMoV2OmniProcessingInfo(Qwen2_5_VLProcessingInfo):
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
+        return {"audio": None, "image": None, "video": None}
+
     def get_hf_config(self):
         config = self.ctx.get_hf_config()
         if isinstance(config.vision_config, dict):
@@ -675,6 +680,10 @@ class MiMoV2OmniProcessingInfo(Qwen2_5_VLProcessingInfo):
 
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
+
+    def get_data_parser(self):
+        from vllm.multimodal.parse import MultiModalDataParser
+        return MultiModalDataParser(target_sr=24000.0)
 
 
 class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
@@ -701,6 +710,8 @@ class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         return dict(
             **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
             video_start_times=MultiModalFieldConfig.batched("video"),
+            audio_features=MultiModalFieldConfig.batched("audio"),
+            audio_token_lens=MultiModalFieldConfig.batched("audio"),
         )
 
     def _call_hf_processor(
@@ -710,7 +721,15 @@ class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo."""
+        """Convert numpy video arrays to (TCHW, timestamps) tuples for MiMo.
+        Also remap 'audios' → 'audio' since MiMoOmniProcessor.__call__ uses
+        the singular form.
+        """
+        # Remap audios → audio (MiMoOmniProcessor uses singular param name)
+        if "audios" in mm_data:
+            mm_data = {**mm_data, "audio": mm_data["audios"]}
+            mm_data = {k: v for k, v in mm_data.items() if k != "audios"}
+
         if "videos" in mm_data:
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
             for video in mm_data["videos"]:
@@ -763,10 +782,13 @@ class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
 
         image_pad_id = vocab[hf_processor.image_token]
         video_pad_id = vocab[hf_processor.video_token]
+        audio_pad_id = vocab.get("<|audio_pad|>")
         vision_start_id = p.vision_start_token_id
         vision_end_id = p.vision_end_token_id
         video_start_id = p.video_start_token_id
         video_end_id = p.video_end_token_id
+        audio_start_id = p.audio_start_token_id
+        audio_end_id = p.audio_end_token_id
 
         def get_image_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["image"][item_idx]
@@ -826,7 +848,22 @@ class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
                 is_embed=lambda _tok, _seq: embed_t,
             )
 
-        return [
+        def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
+            out_item = out_mm_kwargs["audio"][item_idx]
+            tok_len = int(out_item["audio_token_lens"].data)
+            full = (
+                [audio_start_id]
+                + [audio_pad_id] * tok_len
+                + [audio_end_id]
+            )
+            embed_mask = [False] + [True] * tok_len + [False]
+            embed_t = torch.tensor(embed_mask)
+            return PromptUpdateDetails(
+                full=full,
+                is_embed=lambda _tok, _seq: embed_t,
+            )
+
+        updates: list[PromptUpdate] = [
             PromptReplacement(
                 modality="image",
                 target=[image_pad_id],
@@ -838,15 +875,26 @@ class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
                 replacement=get_video_replacement,
             ),
         ]
+        if audio_pad_id is not None and audio_start_id is not None:
+            updates.append(
+                PromptReplacement(
+                    modality="audio",
+                    target=[audio_pad_id],
+                    replacement=get_audio_replacement,
+                )
+            )
+        return updates
 
 
 class MiMoV2OmniDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
+        num_audios = mm_counts.get("audio", 0)
         image_ph = "<|vision_start|><|image_pad|><|vision_end|>"
         video_ph = "<|vision_start|><|video_pad|><|vision_end|>"
-        return image_ph * num_images + video_ph * num_videos
+        audio_ph = "<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>"
+        return image_ph * num_images + video_ph * num_videos + audio_ph * num_audios
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -854,7 +902,7 @@ class MiMoV2OmniDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
     info=MiMoV2OmniProcessingInfo,
     dummy_inputs=MiMoV2OmniDummyInputsBuilder,
 )
-class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant):
     # To ensure correct weight loading and mapping.
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
@@ -873,8 +921,10 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return "<|vision_start|><|image_pad|><|vision_end|>"
         if modality.startswith("video"):
             return "<|vision_start|><|video_pad|><|vision_end|>"
+        if modality.startswith("audio"):
+            return "<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>"
 
-        raise ValueError("Only image or video modality is supported")
+        raise ValueError(f"Unsupported modality: {modality}")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -891,8 +941,12 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             quant_config=None,
             prefix=maybe_prefix("visual", prefix),
         )
-        # self.audio_config = config.audio_config
-        # self.audio_encoder = MimoAudioEncoder(self.audio_config)
+        audio_config = getattr(config, "audio_config", None)
+        model_path = vllm_config.model_config.model
+        if audio_config is not None:
+            self.audio_encoder = MimoAudioEncoder(audio_config, model_path=model_path)
+        else:
+            self.audio_encoder = None
         self.language_model = MiMoV2FlashForCausalLM(
             vllm_config=vllm_config,
             prefix=maybe_prefix("language_model", prefix),
@@ -1006,6 +1060,17 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
         return video_embeds.split(sizes)
 
+    def _parse_and_validate_audio_input(self, **kwargs: object) -> dict | None:
+        audio_features = kwargs.pop("audio_features", None)
+        audio_token_lens = kwargs.pop("audio_token_lens", None)
+        if audio_features is None:
+            return None
+        return {
+            "type": "audio",
+            "audio_features": audio_features,
+            "audio_token_lens": audio_token_lens,
+        }
+
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         mm_input_by_modality = {}
 
@@ -1026,7 +1091,31 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 mm_input_by_modality["video"] = self._parse_and_validate_video_input(
                     **kwargs
                 )
+            if (
+                input_key == "audio_features"
+                and "audio" not in mm_input_by_modality
+            ):
+                mm_input_by_modality["audio"] = self._parse_and_validate_audio_input(
+                    **kwargs
+                )
         return mm_input_by_modality
+
+    def _process_audio_input(
+        self, audio_input: dict
+    ) -> tuple[torch.Tensor, ...]:
+        mel_specs = audio_input["audio_features"]
+        if self.audio_encoder is None:
+            return ()
+        # Normalize to List[2D-Tensor].
+        # MultiModalBatchedField._reduce_data either wraps a single [T, 128]
+        # into [1, T, 128] via unsqueeze(0) or stacks N same-T items into
+        # [N, T, 128]. Indexing along dim-0 extracts the per-item [T, 128].
+        if isinstance(mel_specs, torch.Tensor):
+            mel_specs = list(mel_specs)   # [1,T,128] or [N,T,128] → [[T,128],...]
+        if not mel_specs:
+            return ()
+        audio_embeds, item_token_lens = self.audio_encoder.get_audio_feature(mel_specs)
+        return tuple(audio_embeds.split(item_token_lens))
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -1034,7 +1123,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
-        # tensor correspoending to a multimodal data item (image or video).
+        # tensor corresponding to a multimodal data item (image, video, or audio).
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         # NOTE: It is important to iterate over the keys in this dictionary
@@ -1047,6 +1136,9 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             if modality == "video":
                 video_embeddings = self._process_video_input(multimodal_input)
                 multimodal_embeddings += tuple(video_embeddings)
+            if modality == "audio":
+                audio_embeddings = self._process_audio_input(multimodal_input)
+                multimodal_embeddings += audio_embeddings
         return multimodal_embeddings
 
     def forward(
@@ -1086,8 +1178,63 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["audio_encoder.", "speech_embeddings."],
+        params_dict = dict(self.named_parameters())
+        audio_loaded: set[str] = set()
+
+        def _preprocess(weights_iter: Iterable[tuple[str, torch.Tensor]]):
+            for name, loaded_weight in weights_iter:
+                # Skip audio tokenizer weights (loaded independently in __init__)
+                if "audio_tokenizer" in name:
+                    continue
+
+                # Remap old audio projection naming
+                if "audio" in name and "projection" in name:
+                    if "audio_encoder.audio_projection" in name:
+                        name = name.replace(
+                            "audio_encoder.audio_projection",
+                            "audio_encoder.projection",
+                        )
+                    elif (
+                        "audio_projection" in name
+                        and "audio_encoder.projection" not in name
+                    ):
+                        name = name.replace(
+                            "audio_projection", "audio_encoder.projection"
+                        )
+
+                # Remap old input_local_transformer naming
+                if (
+                    "audio_input_local_transformer" in name
+                    and "audio_encoder.input_local_transformer" not in name
+                ):
+                    name = name.replace(
+                        "audio_input_local_transformer",
+                        "audio_encoder.input_local_transformer",
+                    )
+
+                # Remap speech_embeddings to audio_encoder.speech_embeddings
+                if (
+                    "speech_embeddings" in name
+                    and "audio_encoder.speech_embeddings" not in name
+                ):
+                    name = name.replace(
+                        "speech_embeddings", "audio_encoder.speech_embeddings"
+                    )
+
+                # Load speech_embeddings with vocab-size truncation
+                if "audio_encoder.speech_embeddings" in name and name in params_dict:
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight[: param.shape[0]])
+                    audio_loaded.add(name)
+                    continue
+
+                yield name, loaded_weight
+
+        loader = AutoWeightsLoader(self)
+        auto_loaded = loader.load_weights(
+            _preprocess(weights), mapper=self.hf_to_vllm_mapper
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        return audio_loaded | auto_loaded
