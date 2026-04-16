@@ -342,6 +342,8 @@ def _worker_nvfp4(
                 in_dtype=dtype,
                 quant_dtype="nvfp4",
             )
+            assert w13_bs is not None and w13_gs is not None
+            assert w2_bs is not None and w2_gs is not None
 
             # Dequantize FULL weights for reference BEFORE any transforms
             w13_deq = torch.empty(
