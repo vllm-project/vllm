@@ -196,15 +196,21 @@ void runGemm(torch::stable::Tensor& D, torch::stable::Tensor const& A,
   CUTLASS_CHECK(gemm.run(arguments, workspace.data_ptr(), stream));
 }
 
-void cutlass_fp4_bf16_gemm_dispatch(torch::stable::Tensor& D,
-                                    torch::stable::Tensor const& A,
-                                    torch::stable::Tensor const& B,
-                                    torch::stable::Tensor const& A_sf,
-                                    torch::stable::Tensor const& B_sf,
-                                    torch::stable::Tensor const& alpha, int m,
-                                    int n, int k, cudaStream_t stream) {
+namespace {
+
+// Dispatch function to select appropriate config based on M (file-local;
+// internal linkage avoids clashing with SM100's cutlass_fp4_gemm_dispatch in
+// nvfp4_scaled_mm_kernels.cu).
+template <typename OutType>
+void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
+                               torch::stable::Tensor const& A,
+                               torch::stable::Tensor const& B,
+                               torch::stable::Tensor const& A_sf,
+                               torch::stable::Tensor const& B_sf,
+                               torch::stable::Tensor const& alpha, int m, int n,
+                               int k, cudaStream_t stream) {
   if (vllm::vllm_is_batch_invariant()) {
-    using BiGemm = Fp4GemmSm120<sm120_fp4_config_default, cutlass::bfloat16_t>;
+    using BiGemm = Fp4GemmSm120<sm120_fp4_config_default, OutType>;
     static_assert(
         cute::is_same_v<typename BiGemm::TileScheduler,
                         cutlass::gemm::PersistentScheduler>,
@@ -216,41 +222,15 @@ void cutlass_fp4_bf16_gemm_dispatch(torch::stable::Tensor& D,
 
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
   if (mp2 <= 256) {
-    runGemm<Fp4GemmSm120<sm120_fp4_config_M256, cutlass::bfloat16_t>::Gemm>(
+    runGemm<Fp4GemmSm120<sm120_fp4_config_M256, OutType>::Gemm>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else {
-    runGemm<Fp4GemmSm120<sm120_fp4_config_default, cutlass::bfloat16_t>::Gemm>(
+    runGemm<Fp4GemmSm120<sm120_fp4_config_default, OutType>::Gemm>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   }
 }
 
-void cutlass_fp4_f16_gemm_dispatch(torch::stable::Tensor& D,
-                                   torch::stable::Tensor const& A,
-                                   torch::stable::Tensor const& B,
-                                   torch::stable::Tensor const& A_sf,
-                                   torch::stable::Tensor const& B_sf,
-                                   torch::stable::Tensor const& alpha, int m,
-                                   int n, int k, cudaStream_t stream) {
-  if (vllm::vllm_is_batch_invariant()) {
-    using BiGemm = Fp4GemmSm120<sm120_fp4_config_default, cutlass::half_t>;
-    static_assert(
-        cute::is_same_v<typename BiGemm::TileScheduler,
-                        cutlass::gemm::PersistentScheduler>,
-        "batch_invariant requires a persistent tile scheduler; stream-K or "
-        "split-K would break numerical invariance");
-    runGemm<typename BiGemm::Gemm>(D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
-    return;
-  }
-
-  uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
-  if (mp2 <= 256) {
-    runGemm<Fp4GemmSm120<sm120_fp4_config_M256, cutlass::half_t>::Gemm>(
-        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
-  } else {
-    runGemm<Fp4GemmSm120<sm120_fp4_config_default, cutlass::half_t>::Gemm>(
-        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
-  }
-}
+}  // namespace
 
 void cutlass_scaled_fp4_mm_sm120a(torch::stable::Tensor& D,
                                   torch::stable::Tensor const& A,
@@ -313,11 +293,11 @@ void cutlass_scaled_fp4_mm_sm120a(torch::stable::Tensor& D,
   const cudaStream_t stream = get_current_cuda_stream(A.get_device_index());
 
   if (out_dtype == torch::headeronly::ScalarType::BFloat16) {
-    return cutlass_fp4_bf16_gemm_dispatch(D, A, B, A_sf, B_sf, alpha, m, n, k,
-                                          stream);
+    return cutlass_fp4_gemm_dispatch<cutlass::bfloat16_t>(
+        D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else if (out_dtype == torch::headeronly::ScalarType::Half) {
-    return cutlass_fp4_f16_gemm_dispatch(D, A, B, A_sf, B_sf, alpha, m, n, k,
-                                         stream);
+    return cutlass_fp4_gemm_dispatch<cutlass::half_t>(D, A, B, A_sf, B_sf,
+                                                      alpha, m, n, k, stream);
   } else {
     STD_TORCH_CHECK(false, "Unsupported output data type of nvfp4 mm sm120 (",
                     out_dtype, ")");
