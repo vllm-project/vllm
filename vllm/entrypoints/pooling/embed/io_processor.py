@@ -66,11 +66,62 @@ class EmbedIOProcessor(PoolingIOProcessor):
     def pre_process_online(self, ctx: PoolingServeContext):
         if isinstance(ctx.request, CohereEmbedRequest):
             self._pre_process_cohere_online(ctx)
+        elif isinstance(ctx.request, EmbeddingChatRequest):
+            self._pre_process_chat_online(ctx)
         else:
             super().pre_process_online(ctx)
 
         if self.enable_chunked_processing:
             self._pre_process_chunked(ctx)
+
+    def _pre_process_chat_online(self, ctx: PoolingServeContext) -> None:
+        """Render each message as a separate embedding.
+
+        Unlike the base-class chat path which treats all messages as a
+        single conversation, this splits ``request.messages`` so that
+        each message produces its own ``EngineInput``.
+        """
+        request = ctx.request
+        assert isinstance(request, EmbeddingChatRequest)
+
+        self._validate_chat_template(
+            request_chat_template=request.chat_template,
+            chat_template_kwargs=request.chat_template_kwargs,
+            trust_request_chat_template=self.trust_request_chat_template,
+        )
+
+        renderer = self.renderer
+        mm_config = self.model_config.multimodal_config
+
+        tok_params = request.build_tok_params(self.model_config)
+        chat_params = request.build_chat_params(
+            self.chat_template,
+            self.chat_template_content_format,
+        ).with_defaults(
+            merge_kwargs(
+                None,
+                dict(
+                    tools=None,
+                    tokenize=is_mistral_tokenizer(renderer.tokenizer),
+                ),
+            ),
+            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+        )
+
+        # Each message becomes its own single-message conversation
+        all_messages = [[msg] for msg in request.messages]
+
+        _, engine_inputs = renderer.render_chat(
+            all_messages,
+            chat_params,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
+        ctx.engine_inputs = engine_inputs
 
     def post_process_online(
         self,

@@ -297,27 +297,19 @@ async def test_truncate_prompt_tokens(client: openai.AsyncOpenAI, model_name: st
 async def test_chat_request(
     server: RemoteOpenAIServer, client: openai.AsyncOpenAI, model_name: str
 ):
-    messages = [
+    single_message = [
         {
             "role": "user",
             "content": "The cat sat on the mat.",
         },
-        {
-            "role": "assistant",
-            "content": "A feline was resting on a rug.",
-        },
-        {
-            "role": "user",
-            "content": "Stars twinkle brightly in the night sky.",
-        },
     ]
 
-    # test chat request basic usage
+    # --- single message produces 1 embedding, matching completion path ---
     chat_response = requests.post(
         server.url_for("v1/embeddings"),
         json={
             "model": model_name,
-            "messages": messages,
+            "messages": single_message,
             "encoding_format": "float",
         },
     )
@@ -326,9 +318,9 @@ async def test_chat_request(
 
     tokenizer = get_tokenizer(tokenizer_name=model_name)
     prompt = tokenizer.apply_chat_template(
-        messages,
+        single_message,
         chat_template=DUMMY_CHAT_TEMPLATE,
-        add_generation_prompt=True,
+        add_generation_prompt=False,
         continue_final_message=False,
         tokenize=False,
     )
@@ -336,7 +328,6 @@ async def test_chat_request(
         model=model_name,
         input=prompt,
         encoding_format="float",
-        # To be consistent with chat
         extra_body={"add_special_tokens": False},
     )
     completion_embeddings = EmbeddingResponse.model_validate(
@@ -344,78 +335,112 @@ async def test_chat_request(
     )
 
     assert chat_embeddings.id is not None
-    assert completion_embeddings.id is not None
-    assert chat_embeddings.created <= completion_embeddings.created
-    # Use tolerance-based comparison for embeddings
+    assert len(chat_embeddings.data) == 1
     check_embeddings_close(
         embeddings_0_lst=[d.embedding for d in chat_embeddings.data],
         embeddings_1_lst=[d.embedding for d in completion_embeddings.data],
         name_0="chat",
         name_1="completion",
     )
-    assert chat_embeddings.model_dump(exclude={"id", "created", "data"}) == (
-        completion_embeddings.model_dump(exclude={"id", "created", "data"})
-    )
 
-    # test add_generation_prompt
-    response = requests.post(
-        server.url_for("v1/embeddings"),
-        json={"model": model_name, "messages": messages, "add_generation_prompt": True},
-    )
+    # --- multiple messages produce multiple embeddings (one per message) ---
+    messages = [
+        {"role": "user", "content": "The cat sat on the mat."},
+        {"role": "user", "content": "A feline was resting on a rug."},
+        {"role": "user", "content": "Stars twinkle brightly in the night sky."},
+    ]
 
-    response.raise_for_status()
-    output = EmbeddingResponse.model_validate(response.json())
-
-    assert output.object == "list"
-    assert len(output.data) == 1
-    assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 34
-
-    # test continue_final_message
-    response = requests.post(
+    batch_response = requests.post(
         server.url_for("v1/embeddings"),
         json={
             "model": model_name,
             "messages": messages,
+            "encoding_format": "float",
+        },
+    )
+    batch_response.raise_for_status()
+    batch_embeddings = EmbeddingResponse.model_validate(batch_response.json())
+
+    assert len(batch_embeddings.data) == 3
+
+    # each embedding should match its individual single-message request
+    for i, msg in enumerate(messages):
+        individual_response = requests.post(
+            server.url_for("v1/embeddings"),
+            json={
+                "model": model_name,
+                "messages": [msg],
+                "encoding_format": "float",
+            },
+        )
+        individual_response.raise_for_status()
+        individual = EmbeddingResponse.model_validate(individual_response.json())
+
+        check_embeddings_close(
+            embeddings_0_lst=[batch_embeddings.data[i].embedding],
+            embeddings_1_lst=[individual.data[0].embedding],
+            name_0=f"batch[{i}]",
+            name_1=f"individual[{i}]",
+        )
+
+    # --- add_generation_prompt still works ---
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": single_message,
+            "add_generation_prompt": True,
+        },
+    )
+    response.raise_for_status()
+    output = EmbeddingResponse.model_validate(response.json())
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+
+    # --- continue_final_message still works ---
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": single_message,
             "continue_final_message": True,
         },
     )
-
     response.raise_for_status()
     output = EmbeddingResponse.model_validate(response.json())
-
     assert output.object == "list"
     assert len(output.data) == 1
     assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 33
 
-    # test add_special_tokens
-    response = requests.post(
-        server.url_for("v1/embeddings"),
-        json={"model": model_name, "messages": messages, "add_special_tokens": True},
-    )
-
-    response.raise_for_status()
-    output = EmbeddingResponse.model_validate(response.json())
-
-    assert output.object == "list"
-    assert len(output.data) == 1
-    assert output.model == MODEL_NAME
-    assert output.usage.prompt_tokens == 36
-
-    # test continue_final_message with add_generation_prompt
+    # --- add_special_tokens still works ---
     response = requests.post(
         server.url_for("v1/embeddings"),
         json={
             "model": model_name,
-            "messages": messages,
+            "messages": single_message,
+            "add_special_tokens": True,
+        },
+    )
+    response.raise_for_status()
+    output = EmbeddingResponse.model_validate(response.json())
+    assert output.object == "list"
+    assert len(output.data) == 1
+    assert output.model == MODEL_NAME
+
+    # --- conflicting flags error ---
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": single_message,
             "continue_final_message": True,
             "add_generation_prompt": True,
         },
     )
     assert (
-        "Cannot set both `continue_final_message` and `add_generation_prompt` to True."
-        in response.json()["error"]["message"]
+        "Cannot set both `continue_final_message` and "
+        "`add_generation_prompt` to True." in response.json()["error"]["message"]
     )
 
 

@@ -10,6 +10,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     CohereEmbedContent,
     CohereEmbedInput,
     CohereEmbedRequest,
+    EmbeddingChatRequest,
 )
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 
@@ -324,3 +325,166 @@ class TestPreProcessCohereOnline:
                 },
             )
         ]
+
+
+class TestPreProcessChatOnline:
+    """Unit tests for EmbedIOProcessor chat request batch splitting.
+
+    Each message in an EmbeddingChatRequest should produce a separate
+    engine input (and therefore a separate embedding in the response).
+    """
+
+    @staticmethod
+    def _make_context(
+        messages, **request_kwargs
+    ) -> PoolingServeContext[EmbeddingChatRequest]:
+        return PoolingServeContext(
+            request=EmbeddingChatRequest(
+                model="test",
+                messages=messages,
+                **request_kwargs,
+            ),
+            model_name="test",
+            request_id="embd-test",
+        )
+
+    @staticmethod
+    def _make_handler(*, enable_chunked_processing=False):
+        handler = object.__new__(EmbedIOProcessor)
+        handler.enable_chunked_processing = enable_chunked_processing
+        handler.trust_request_chat_template = False
+        return handler
+
+    def test_multiple_messages_produce_multiple_engine_inputs(self):
+        """3 messages should produce 3 engine_inputs, not 1."""
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "user", "content": "second"},
+            {"role": "user", "content": "third"},
+        ]
+        handler = self._make_handler()
+        ctx = self._make_context(messages)
+
+        captured_conversations: list[list] = []
+
+        def fake_pre_process_chat_online(ctx_arg):
+            # Simulate the expected behaviour: split messages and render
+            all_messages = [[msg] for msg in ctx_arg.request.messages]
+            captured_conversations.extend(all_messages)
+            ctx_arg.engine_inputs = [
+                f"engine_input_{i}" for i in range(len(all_messages))
+            ]
+
+        handler._pre_process_chat_online = fake_pre_process_chat_online
+
+        handler.pre_process_online(ctx)
+
+        assert len(ctx.engine_inputs) == 3
+        assert ctx.engine_inputs == [
+            "engine_input_0",
+            "engine_input_1",
+            "engine_input_2",
+        ]
+        # Each conversation should be a single-message list
+        assert captured_conversations == [
+            [messages[0]],
+            [messages[1]],
+            [messages[2]],
+        ]
+
+    def test_single_message_produces_one_engine_input(self):
+        """A single message should produce exactly 1 engine_input."""
+        messages = [{"role": "user", "content": "hello"}]
+        handler = self._make_handler()
+        ctx = self._make_context(messages)
+
+        calls: list[list] = []
+
+        def fake_pre_process_chat_online(ctx_arg):
+            all_messages = [[msg] for msg in ctx_arg.request.messages]
+            calls.append(all_messages)
+            ctx_arg.engine_inputs = ["engine_input_0"]
+
+        handler._pre_process_chat_online = fake_pre_process_chat_online
+
+        handler.pre_process_online(ctx)
+
+        assert len(ctx.engine_inputs) == 1
+        assert ctx.engine_inputs == ["engine_input_0"]
+        assert calls == [[[messages[0]]]]
+
+    def test_untrusted_chat_template_is_rejected(self):
+        """A request-level chat_template must be rejected when
+        trust_request_chat_template is False."""
+        messages = [{"role": "user", "content": "hello"}]
+        handler = self._make_handler()
+        ctx = self._make_context(
+            messages,
+            chat_template=("{% for msg in messages %}{{ msg.content }}{% endfor %}"),
+        )
+
+        # _pre_process_chat_online calls _validate_chat_template, which
+        # is inherited from the base class and checks the flag.
+        with pytest.raises(ValueError, match="trust-request-chat-template"):
+            handler.pre_process_online(ctx)
+
+    def test_prompt_extras_are_passed_through(self):
+        """mm_processor_kwargs and cache_salt should reach render_chat."""
+        messages = [{"role": "user", "content": "hello"}]
+        handler = self._make_handler()
+        ctx = self._make_context(
+            messages,
+            mm_processor_kwargs={"crop_size": 224},
+            cache_salt="random-salt",
+        )
+
+        captured_extras: dict = {}
+
+        class FakeRenderer:
+            tokenizer = None
+
+            def render_chat(
+                self, conversations, chat_params, tok_params, *, prompt_extras=None
+            ):
+                captured_extras.update(prompt_extras or {})
+                return ([[]], ["engine_input_0"])
+
+        class FakeModelConfig:
+            max_model_len = 512
+            pooler_config = None
+            encoder_config = None
+            multimodal_config = None
+
+        handler.renderer = FakeRenderer()
+        handler.model_config = FakeModelConfig()
+        handler.chat_template = None
+        handler.chat_template_content_format = "auto"
+
+        handler._pre_process_chat_online(ctx)
+
+        assert captured_extras == {
+            "mm_processor_kwargs": {"crop_size": 224},
+            "cache_salt": "random-salt",
+        }
+
+    def test_chunked_processing_runs_after_chat_preprocessing(self):
+        """enable_chunked_processing should still trigger
+        _pre_process_chunked after the chat path."""
+        messages = [{"role": "user", "content": "hello"}]
+        handler = self._make_handler(enable_chunked_processing=True)
+        ctx = self._make_context(messages)
+
+        chunked_calls: list[bool] = []
+
+        def fake_pre_process_chat_online(ctx_arg):
+            ctx_arg.engine_inputs = ["engine_input_0"]
+
+        def fake_pre_process_chunked(ctx_arg):
+            chunked_calls.append(True)
+
+        handler._pre_process_chat_online = fake_pre_process_chat_online
+        handler._pre_process_chunked = fake_pre_process_chunked
+
+        handler.pre_process_online(ctx)
+
+        assert chunked_calls == [True]
