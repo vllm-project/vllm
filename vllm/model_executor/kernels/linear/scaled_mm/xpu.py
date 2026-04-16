@@ -101,14 +101,12 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         As: torch.Tensor,
         Bs: torch.Tensor,
     ) -> torch.Tensor:
-        block_n, block_k = self.weight_group_shape
-        return torch.ops._xpu_C.fp8_block_scaled_gemm(
+        # Weight is [N, K]. Use .t() to create a [K, N] view without copying.
+        return torch.ops._xpu_C.fp8_gemm(
             A,
-            B,
+            B.t(),
+            self.config.out_dtype,
             As,
             Bs,
-            int(block_n),
-            int(block_k),
-            self.config.out_dtype,
             None,
         )
