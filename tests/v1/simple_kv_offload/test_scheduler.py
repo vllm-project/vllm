@@ -1135,3 +1135,267 @@ def test_partial_gpu_prefix_plus_cpu_load() -> None:
         assert bid in ext_block_ids, (
             f"Load GPU block {bid} should be an ext_comp block, not a comp or new block"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 11: BlockPool.access() refreshes LRU without changing ref_cnt
+# ---------------------------------------------------------------------------
+def test_block_pool_access_refreshes_lru() -> None:
+    """BlockPool.access() moves free (ref_cnt=0) blocks to the MRU end of
+    the free queue without incrementing their reference count.
+
+    Verifies:
+    - ref_cnt stays 0 after access (unlike touch which increments)
+    - accessed block moves to MRU end and survives eviction
+    - blocks with ref_cnt > 0 are skipped (no-op)
+    - null block is skipped
+    """
+    pool = BlockPool(
+        num_gpu_blocks=8,
+        enable_caching=True,
+        hash_block_size=BLOCK_SIZE,
+    )
+
+    # --- Part 1: access() does not change ref_cnt ---
+    blocks = pool.get_new_blocks(4)
+    pool.free_blocks(blocks)
+    b0, b1, b2, b3 = blocks
+
+    for b in blocks:
+        assert b.ref_cnt == 0
+
+    pool.access([b0])
+    assert b0.ref_cnt == 0, "access() must not change ref_cnt"
+
+    # --- Part 2: accessed block moves to MRU end ---
+    # After access(b0), free queue LRU order among these 4 is:
+    #   [b1, b2, b3, b0]  (b0 moved to MRU)
+    # Allocate all free blocks — they come from LRU end first.
+    n_free = pool.get_num_free_blocks()
+    all_alloc = pool.get_new_blocks(n_free)
+    # b0 should be the last of the 4 original blocks to be allocated.
+    # Find positions of b0..b3 in the allocation order.
+    alloc_ids = [b.block_id for b in all_alloc]
+    pos_b0 = alloc_ids.index(b0.block_id)
+    pos_b1 = alloc_ids.index(b1.block_id)
+    pos_b2 = alloc_ids.index(b2.block_id)
+    pos_b3 = alloc_ids.index(b3.block_id)
+    # b1, b2, b3 should be allocated before b0 (they're more LRU)
+    assert pos_b1 < pos_b0, "b1 should be allocated before b0 (more LRU)"
+    assert pos_b2 < pos_b0, "b2 should be allocated before b0 (more LRU)"
+    assert pos_b3 < pos_b0, "b3 should be allocated before b0 (more LRU)"
+
+    # --- Part 3: access() is a no-op for pinned blocks (ref_cnt > 0) ---
+    # all_alloc blocks now have ref_cnt == 1 (just allocated)
+    pinned = all_alloc[0]
+    assert pinned.ref_cnt == 1
+    pool.access([pinned])  # should not crash or change anything
+    assert pinned.ref_cnt == 1, "access() must skip pinned blocks"
+
+    # --- Part 4: access() skips null block ---
+    pool.access([pool.null_block])  # should not crash
+
+
+# ---------------------------------------------------------------------------
+# Test 12: Eager store refreshes CPU LRU for shared prefix blocks
+# ---------------------------------------------------------------------------
+def test_eager_store_refreshes_cpu_lru_for_shared_prefix() -> None:
+    """When many requests share a common prefix (same block hashes),
+    the eager store path should refresh the LRU position of already-cached
+    CPU blocks each time a new request re-encounters them.
+
+    Without this fix, shared prefix blocks inserted early would be evicted
+    after enough new unique blocks cycle through the CPU cache.
+
+    Setup: CPU pool has 5 blocks (4 usable after null_block).
+    1. req_0 stores 2 prefix + 2 unique blocks → fills CPU (4 blocks).
+    2. 10 subsequent requests each share the same 2 prefix blocks + bring
+       2 new unique blocks. Each round evicts the *previous* request's
+       unique blocks (now LRU), NOT the shared prefix — because access()
+       refreshes the prefix LRU position every round.
+    3. After all 10 rounds, verify the shared prefix is still cached.
+    """
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=64, lazy=False)
+    sched = fix.scheduler
+    cpu_pool = sched.cpu_block_pool
+
+    # req_0: 4 blocks (first 2 are "prefix", last 2 are "unique to req_0")
+    req_0 = make_request(num_blocks=4)
+    kv_0 = _alloc_and_register(fix, req_0, 4)
+    sched.update_state_after_alloc(req_0, kv_0, num_external_tokens=0)
+    ids_0 = kv_0.get_block_ids()
+    sched_out_0 = make_scheduler_output(
+        {req_0.request_id: 4 * BLOCK_SIZE},
+        new_reqs={req_0.request_id: ids_0},
+    )
+    meta_0 = sched.build_connector_meta(sched_out_0)
+    assert meta_0.store_event >= 0
+    assert len(meta_0.store_gpu_blocks) == 4, (
+        "All 4 blocks from req_0 should be stored (none cached yet)"
+    )
+    simulate_store_completion(sched, meta_0.store_event)
+
+    # Record shared prefix hashes
+    prefix_hashes = []
+    for bhash in req_0.block_hashes[:2]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        prefix_hashes.append(bhash_with_group)
+    shared_prefix_tokens = req_0.prompt_token_ids[: 2 * BLOCK_SIZE]
+
+    # Run 10 requests, each sharing the prefix + bringing 2 new unique blocks.
+    # Each round evicts the previous round's unique blocks (LRU), but the
+    # shared prefix survives because access() keeps refreshing it to MRU.
+    global _req_counter
+    num_rounds = 10
+    prev_unique_hashes: list = []
+
+    for round_idx in range(num_rounds):
+        _req_counter += 1
+        start = _req_counter * 10000
+        unique_tokens = list(range(start, start + 2 * BLOCK_SIZE))
+        req = Request(
+            request_id=f"req-shared-prefix-{round_idx}-{_req_counter}",
+            prompt_token_ids=shared_prefix_tokens + unique_tokens,
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            mm_features=None,
+            block_hasher=get_request_block_hasher(BLOCK_SIZE, sha256),
+        )
+
+        kv = _alloc_and_register(fix, req, 4)
+        sched.update_state_after_alloc(req, kv, num_external_tokens=0)
+        ids = kv.get_block_ids()
+        sched_out = make_scheduler_output(
+            {req.request_id: 4 * BLOCK_SIZE},
+            new_reqs={req.request_id: ids},
+        )
+        meta = sched.build_connector_meta(sched_out)
+
+        # Only the 2 unique blocks should be stored (prefix skipped)
+        assert meta.store_event >= 0
+        assert len(meta.store_gpu_blocks) == 2, (
+            f"Round {round_idx}: only 2 new unique blocks should be stored, "
+            f"got {len(meta.store_gpu_blocks)}"
+        )
+        simulate_store_completion(sched, meta.store_event)
+
+        # Previous round's unique blocks should have been evicted
+        if prev_unique_hashes:
+            for i, bhash_wg in enumerate(prev_unique_hashes):
+                cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+                assert cached is None, (
+                    f"Round {round_idx}: previous unique block {i} "
+                    f"should have been evicted (LRU)"
+                )
+
+        # Shared prefix must still be cached after every round
+        for i, bhash_wg in enumerate(prefix_hashes):
+            cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+            assert cached is not None, (
+                f"Round {round_idx}: shared prefix block {i} should survive "
+                f"(LRU was refreshed by access())"
+            )
+
+        # This round's unique blocks should be present
+        prev_unique_hashes = []
+        for bhash in req.block_hashes[2:4]:
+            bhash_wg = make_block_hash_with_group_id(bhash, 0)
+            prev_unique_hashes.append(bhash_wg)
+            cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+            assert cached is not None, (
+                f"Round {round_idx}: current unique block should be cached"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 13: access() changes eviction order (direct CPU pool manipulation)
+# ---------------------------------------------------------------------------
+def test_access_vs_no_access_eviction_difference() -> None:
+    """Demonstrates that access() is load-bearing: without it, the LRU order
+    would cause older blocks to be evicted before newer ones.
+
+    This test directly manipulates the CPU block pool to show that access()
+    changes eviction order, independent of the eager store path.
+
+    Setup: 5 CPU blocks (4 usable after null_block), fill all 4.
+    - After storing: LRU order [old_0, old_1, mid_0, mid_1].
+    - access(old_0, old_1) → LRU order [mid_0, mid_1, old_0, old_1].
+    - Store 2 new blocks → evicts mid_0, mid_1 (now LRU).
+    - Result: old survives (was accessed), mid evicted.
+    """
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+    cpu_pool = sched.cpu_block_pool
+
+    # Store 4 blocks (fills CPU) via 2 requests
+    req_old = make_request(num_blocks=2)
+    req_mid = make_request(num_blocks=2)
+
+    kv_old = _alloc_and_register(fix, req_old, 2)
+    kv_mid = _alloc_and_register(fix, req_mid, 2)
+    sched.update_state_after_alloc(req_old, kv_old, num_external_tokens=0)
+    sched.update_state_after_alloc(req_mid, kv_mid, num_external_tokens=0)
+
+    ids_old = kv_old.get_block_ids()
+    ids_mid = kv_mid.get_block_ids()
+    sched_out = make_scheduler_output(
+        {
+            req_old.request_id: 2 * BLOCK_SIZE,
+            req_mid.request_id: 2 * BLOCK_SIZE,
+        },
+        new_reqs={
+            req_old.request_id: ids_old,
+            req_mid.request_id: ids_mid,
+        },
+    )
+    meta = sched.build_connector_meta(sched_out)
+    simulate_store_completion(sched, meta.store_event)
+
+    # Verify all 4 blocks are cached
+    for bhash in req_old.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        assert cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg) is not None
+    for bhash in req_mid.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        assert cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg) is not None
+
+    # Now access req_old's CPU blocks — refresh their LRU to MRU end
+    for bhash in req_old.block_hashes[:2]:
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+        assert cached is not None
+        cpu_pool.access([cached])
+
+    # Store 2 new blocks → must evict 2 LRU blocks (req_mid)
+    req_new = make_request(num_blocks=2)
+    kv_new = _alloc_and_register(fix, req_new, 2)
+    sched.update_state_after_alloc(req_new, kv_new, num_external_tokens=0)
+    ids_new = kv_new.get_block_ids()
+    sched_out2 = make_scheduler_output(
+        {req_new.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_new.request_id: ids_new},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    simulate_store_completion(sched, meta2.store_event)
+
+    # req_mid should be evicted (it's now LRU since req_old was accessed)
+    for i, bhash in enumerate(req_mid.block_hashes[:2]):
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+        assert cached is None, (
+            f"req_mid block {i} should be evicted (LRU, not refreshed)"
+        )
+
+    # req_old should survive (access moved it to MRU)
+    for i, bhash in enumerate(req_old.block_hashes[:2]):
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+        assert cached is not None, (
+            f"req_old block {i} should survive (was refreshed via access)"
+        )
+
+    # req_new should be present
+    for i, bhash in enumerate(req_new.block_hashes[:2]):
+        bhash_wg = make_block_hash_with_group_id(bhash, 0)
+        cached = cpu_pool.cached_block_hash_to_block.get_one_block(bhash_wg)
+        assert cached is not None, f"req_new block {i} should be cached (just stored)"
