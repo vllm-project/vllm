@@ -693,6 +693,12 @@ class precompiled_wheel_utils:
                 flash_attn_regex = re.compile(
                     r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # __init__.py and flash_attn_interface.py are source-controlled
+                # in vllm and should not be overwritten (matches cmake exclusions)
+                flash_attn_files_to_skip = {
+                    "vllm/vllm_flash_attn/__init__.py",
+                    "vllm/vllm_flash_attn/flash_attn_interface.py",
+                }
                 triton_kernels_regex = re.compile(
                     r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
@@ -705,7 +711,11 @@ class precompiled_wheel_utils:
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
                 file_members += list(
-                    filter(lambda x: flash_attn_regex.match(x.filename), wheel.filelist)
+                    filter(
+                        lambda x: flash_attn_regex.match(x.filename)
+                        and x.filename not in flash_attn_files_to_skip,
+                        wheel.filelist,
+                    )
                 )
                 file_members += list(
                     filter(
@@ -1082,10 +1092,7 @@ setup(
         "instanttensor": ["instanttensor >= 0.1.5"],
         "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
-            "av",
-            "resampy",
             "scipy",
-            "soundfile",
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
@@ -1094,7 +1101,7 @@ setup(
         # NOTE: When updating helion version, also update CI files:
         #   - .buildkite/test_areas/kernels.yaml
         #   - .buildkite/test-amd.yaml
-        "helion": ["helion==0.3.3"],
+        "helion": ["helion==1.0.0"],
         # Optional deps for gRPC server (vllm serve --grpc)
         "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
         # Optional deps for OpenTelemetry tracing

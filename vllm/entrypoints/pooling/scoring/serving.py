@@ -6,8 +6,6 @@ from fastapi.responses import JSONResponse, Response
 from vllm import PoolingParams
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.base.serving import PoolingServing
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.v1.pool.late_interaction import (
@@ -15,6 +13,8 @@ from vllm.v1.pool.late_interaction import (
     build_late_interaction_query_params,
 )
 
+from ..base.io_processor import PoolingIOProcessor
+from ..base.serving import PoolingServing
 from .io_processor import ScoringIOProcessors, ScoringServeContext
 from .protocol import (
     RerankDocument,
@@ -90,7 +90,7 @@ class ServingScores(PoolingServing):
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
             )
         else:
-            raise NotImplementedError("")
+            raise ValueError(f"Invalid {self.request_id_prefix} request type")
 
     def _request_output_to_score_response(
         self,
