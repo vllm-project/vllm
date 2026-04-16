@@ -234,6 +234,7 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DBO_COMM_SMS: int = 20
+    VLLM_DP_PADDING_NAN_MASK: bool = False
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -1623,6 +1624,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # The number of SMs to allocate for communication kernels when running DBO
     # the rest of the SMs on the device will be allocated to compute
     "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
+    # Zero out DP padding tokens before MoE to prevent NaN propagation
+    # from attention into expert routing / EP dispatch.
+    "VLLM_DP_PADDING_NAN_MASK": lambda: bool(
+        int(os.getenv("VLLM_DP_PADDING_NAN_MASK", "0"))
+    ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
     # If set to 1, enable max_autotune; By default, this is enabled (1)

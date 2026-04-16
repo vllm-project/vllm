@@ -4952,7 +4952,10 @@ class GPUModelRunner(
                 )
 
         # Allocate DP padding mask for MoE layers when using data parallelism.
-        if self.parallel_config.data_parallel_size > 1:
+        if (
+            self.parallel_config.data_parallel_size > 1
+            and envs.VLLM_DP_PADDING_NAN_MASK
+        ):
             self._setup_dp_padding_mask()
 
         get_offloader().post_init()
@@ -4964,8 +4967,8 @@ class GPUModelRunner(
         from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
 
         self._dp_padding_mask = torch.ones(
-            self.max_num_tokens, 1,
-            dtype=self.dtype, device=self.device)
+            self.max_num_tokens, 1, dtype=self.dtype, device=self.device
+        )
 
         assigned = 0
         for module in self.model.modules():
@@ -4974,8 +4977,7 @@ class GPUModelRunner(
                 assigned += 1
 
         if assigned > 0:
-            logger.info(
-                "DP padding mask assigned to %d MoE layers", assigned)
+            logger.info("DP padding mask assigned to %d MoE layers", assigned)
         else:
             # No DeepseekV2MoE modules found — not a DeepSeek model.
             self._dp_padding_mask = None
