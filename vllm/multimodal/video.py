@@ -19,6 +19,11 @@ except ImportError:
     cv2 = PlaceholderModule("cv2")
     vr = PlaceholderModule("cv2").placeholder_attr("videoio_registry")
 
+try:
+    import av
+except ImportError:
+    av = PlaceholderModule("av")  # type: ignore[assignment]
+
 
 logger = init_logger(__name__)
 
@@ -959,3 +964,219 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             valid_frame_indices=valid_frame_indices,
         )
         return frames, metadata
+
+
+# Threshold for switching from sequential scan to per-frame seeking
+# in PyAV backends.  At 30 fps, 5000 frames ≈ 3 minutes.  Scan holds
+# the GIL continuously; seek releases it between frames, which is
+# critical for concurrent serving with long videos.
+_PYAV_SEEK_FRAME_THRESHOLD = 5000
+
+
+class PyAVVideoBackendMixin:
+    """Shared utilities for PyAV-based video backends.
+
+    Decodes video using the PyAV library (Python bindings for FFmpeg).
+    Short videos are decoded via sequential scan; long videos use
+    per-frame seeking to release the GIL between frames and allow
+    concurrent request processing.
+    """
+
+    _video_backend_name: str
+
+    @staticmethod
+    def _get_metadata(
+        container: "av.container.InputContainer",
+    ) -> VideoSourceMetadata:
+        """Extract metadata from an open PyAV container."""
+        if not container.streams.video:
+            raise ValueError("No video streams found in container")
+        stream = container.streams.video[0]
+        total_frames = stream.frames or 0
+        fps = float(stream.average_rate) if stream.average_rate else 0.0
+        duration = float(stream.duration * stream.time_base) if stream.duration else 0.0
+
+        if total_frames == 0 and duration > 0 and fps > 0:
+            total_frames = int(duration * fps)
+
+        return VideoSourceMetadata(total_frames, fps, duration)
+
+    @staticmethod
+    def _decode_frames_scan(
+        container: "av.container.InputContainer",
+        frame_indices: list[int],
+    ) -> tuple[npt.NDArray, list[int]]:
+        """Decode frames by sequential scan (best for short videos)."""
+        target_set = set(frame_indices)
+        max_idx = max(frame_indices)
+        frames_list: list[npt.NDArray] = []
+        valid_indices: list[int] = []
+
+        container.streams.video[0].thread_type = "AUTO"
+        for idx, frame in enumerate(container.decode(video=0)):
+            if idx > max_idx:
+                break
+            if idx in target_set:
+                frames_list.append(frame.to_ndarray(format="rgb24"))
+                valid_indices.append(idx)
+
+        return np.stack(frames_list), valid_indices
+
+    @staticmethod
+    def _decode_frames_seek(
+        container: "av.container.InputContainer",
+        frame_indices: list[int],
+        fps: float,
+        duration: float,
+    ) -> tuple[npt.NDArray, list[int]]:
+        """Decode frames by seeking to timestamps (best for long videos).
+
+        Releases the GIL between frames (via seek + decode boundaries),
+        allowing other requests to make progress under concurrency.
+        """
+        stream = container.streams.video[0]
+        # SLICE parallelizes within a single frame without the
+        # one-frame-per-thread latency penalty of FRAME threading.
+        stream.thread_type = "SLICE"
+        time_base = stream.time_base
+        frames_list: list[npt.NDArray] = []
+        valid_indices: list[int] = []
+
+        frame_interval = 1.0 / fps if fps > 0 else 0.1
+        max_ts = max(0.0, duration - frame_interval) if duration > 0 else float("inf")
+
+        for idx in frame_indices:
+            ts = min(idx / fps, max_ts) if fps > 0 else 0.0
+            pts = int(ts / time_base)
+            container.seek(pts, stream=stream)
+            frame = next(container.decode(video=0), None)
+            if frame is not None:
+                frames_list.append(frame.to_ndarray(format="rgb24"))
+                valid_indices.append(idx)
+
+        return np.stack(frames_list), valid_indices
+
+    @classmethod
+    def _decode_frames(
+        cls,
+        container: "av.container.InputContainer",
+        frame_indices: list[int],
+        source: VideoSourceMetadata,
+        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
+    ) -> tuple[npt.NDArray, list[int]]:
+        """Decode frames, choosing scan or seek based on video length.
+
+        Scan holds the GIL continuously — fine for short videos.
+        Seek releases the GIL between frames, critical for concurrency
+        with long videos.
+        """
+        if source.total_frames_num >= seek_threshold and source.original_fps > 0:
+            return cls._decode_frames_seek(
+                container, frame_indices, source.original_fps, source.duration
+            )
+        return cls._decode_frames_scan(container, frame_indices)
+
+    @classmethod
+    def _prepare_source(
+        cls,
+        source: VideoSourceMetadata,
+    ) -> VideoSourceMetadata:
+        return source
+
+    @classmethod
+    def _load_bytes_impl(
+        cls,
+        data: bytes,
+        num_frames: int,
+        fps: int,
+        max_duration: int,
+        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        """Shared implementation for all PyAV-based load_bytes methods."""
+        with av.open(BytesIO(data)) as container:
+            raw_source = cls._get_metadata(container)
+            source = cls._prepare_source(raw_source)
+
+            frame_idx = cls.compute_frames_index_to_sample(  # type: ignore[attr-defined]
+                source=source,
+                target=VideoTargetMetadata(num_frames, fps, max_duration),
+            )
+            frames, valid_frame_indices = cls._decode_frames(
+                container, frame_idx, source, seek_threshold
+            )
+
+        if len(valid_frame_indices) < len(frame_idx):
+            logger.warning(
+                "pyav video loading: expected %d frames but got %d.",
+                len(frame_idx),
+                len(valid_frame_indices),
+            )
+        metadata = cls.create_hf_metadata(  # type: ignore[attr-defined]
+            source=source,
+            video_backend=cls._video_backend_name,
+            valid_frame_indices=valid_frame_indices,
+        )
+        return frames, metadata
+
+
+@VIDEO_LOADER_REGISTRY.register("pyav")
+class PyAVVideoBackend(VideoLoader, PyAVVideoBackendMixin):
+    """Video backend using PyAV (in-process FFmpeg bindings)."""
+
+    _video_backend_name = "pyav"
+
+    compute_frames_index_to_sample = OpenCVVideoBackend.compute_frames_index_to_sample
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return cls._load_bytes_impl(data, num_frames, fps, max_duration, seek_threshold)
+
+
+@VIDEO_LOADER_REGISTRY.register("pyav_dynamic")
+class PyAVDynamicVideoBackend(VideoLoader, PyAVVideoBackendMixin):
+    """Dynamic-sampling PyAV backend (mirrors OpenCVDynamicVideoBackend)."""
+
+    _video_backend_name = "pyav_dynamic"
+
+    @classmethod
+    def _prepare_source(
+        cls,
+        source: VideoSourceMetadata,
+    ) -> VideoSourceMetadata:
+        """Estimate duration from frame count and fps when not available."""
+        if source.duration:
+            return source
+        if source.original_fps > 0:
+            max_frame_idx = source.total_frames_num - 1
+            estimated_duration = round(max_frame_idx / source.original_fps) + 1
+        else:
+            estimated_duration = 0
+        return VideoSourceMetadata(
+            source.total_frames_num,
+            source.original_fps,
+            estimated_duration,
+        )
+
+    compute_frames_index_to_sample = (
+        OpenCVDynamicVideoBackend.compute_frames_index_to_sample
+    )
+
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = 2,
+        max_duration: int = 300,
+        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        return cls._load_bytes_impl(data, num_frames, fps, max_duration, seek_threshold)

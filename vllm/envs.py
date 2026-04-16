@@ -831,6 +831,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Backend for Video IO
     # - "opencv": Default backend that uses OpenCV stream buffered backend.
+    # - "pyav": PyAV backend using in-process FFmpeg bindings.
+    #   Uses adaptive scan/seek: sequential scan for short videos,
+    #   per-frame seeking for long videos to reduce GIL hold time.
+    # - "pyav_dynamic": Dynamic-sampling variant of the PyAV backend
+    #   (mirrors "opencv_dynamic" sampling logic).
     # - "identity": Returns raw video bytes for model processor to handle.
     #
     # Custom backend implementations can be registered
