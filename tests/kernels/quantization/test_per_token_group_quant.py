@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.utils import fp8_utils, int8_utils
+from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(
@@ -80,7 +81,9 @@ def test_per_token_group_quant_fp8(
     ],
 )
 @pytest.mark.parametrize("poisoned_scales", [False, True])
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="DeepGEMM not available on this platform"
+)
 def test_per_token_group_quant_fp8_packed(
     num_tokens, hidden_dim, group_size, poisoned_scales
 ):
