@@ -13,6 +13,11 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     selective_state_update,
 )
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheGroupSpec,
+    MambaSpec,
+)
 
 try:
     import flashinfer.mamba  # noqa: F401
@@ -22,22 +27,40 @@ except ImportError:
     HAS_FLASHINFER = False
 
 
+def _kv_cache_config_with_ssu(mamba_type: str = "mamba2") -> KVCacheConfig:
+    spec = MambaSpec(
+        block_size=16,
+        shapes=((16, 64),),
+        dtypes=(torch.float16,),
+        mamba_type=mamba_type,
+    )
+    return KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(layer_names=["l0"], kv_cache_spec=spec)],
+    )
+
+
 def test_default_backend_is_triton():
-    initialize_mamba_ssu_backend(MambaConfig())
+    initialize_mamba_ssu_backend(MambaConfig(), _kv_cache_config_with_ssu())
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, TritonSSUBackend)
     assert backend.name == "triton"
 
 
 def test_explicit_triton_backend():
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum.TRITON))
+    initialize_mamba_ssu_backend(
+        MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
+    )
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, TritonSSUBackend)
 
 
 @pytest.mark.skipif(not HAS_FLASHINFER, reason="flashinfer not installed")
 def test_flashinfer_backend_init():
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum.FLASHINFER))
+    initialize_mamba_ssu_backend(
+        MambaConfig(backend=MambaBackendEnum.FLASHINFER), _kv_cache_config_with_ssu()
+    )
     backend = get_mamba_ssu_backend()
     assert isinstance(backend, FlashInferSSUBackend)
     assert backend.name == "flashinfer"
@@ -61,7 +84,9 @@ def test_flashinfer_import_error():
 
 def test_triton_basic_call():
     set_random_seed(0)
-    initialize_mamba_ssu_backend(MambaConfig(backend=MambaBackendEnum.TRITON))
+    initialize_mamba_ssu_backend(
+        MambaConfig(backend=MambaBackendEnum.TRITON), _kv_cache_config_with_ssu()
+    )
     device = "cuda"
     batch_size = 2
     dim = 64
