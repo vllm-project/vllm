@@ -98,6 +98,9 @@ class TritonAttentionMetadata:
     num_decode_tokens: int = 0
     prefill_is_first_chunk: bool = False
 
+    seq_lens_cpu: torch.Tensor | None = None
+    query_start_loc_cpu: torch.Tensor | None = None
+
     @staticmethod
     def compute_mm_prefix_range_tensor(
         mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
@@ -246,6 +249,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         # materialized the CPU copy of seq_lens — otherwise we skip the
         # fast-path gate to avoid triggering a D2H sync here.
         seq_lens_cpu = common_attn_metadata._seq_lens_cpu
+        qsl_cpu = None
         num_decodes = 0
         num_decode_tokens = 0
         prefill_is_first_chunk = False
@@ -309,6 +313,8 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             prefill_is_first_chunk=prefill_is_first_chunk,
+            seq_lens_cpu=seq_lens_cpu,
+            query_start_loc_cpu=qsl_cpu,
         )
         return attn_metadata
 
