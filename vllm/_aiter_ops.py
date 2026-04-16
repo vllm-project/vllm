@@ -3,7 +3,6 @@
 import functools
 from collections.abc import Callable
 
-import pandas as pd
 import torch
 from torch._ops import OpOverload
 
@@ -62,6 +61,7 @@ def _load_gemm_tuned_configs(
     q_dtype_w: torch.dtype, csv_path: str
 ) -> set[tuple[int, int, int]]:
     try:
+        import pandas as pd
         df = pd.read_csv(csv_path).drop_duplicates()
         df = df[df["q_dtype_w"] == str(q_dtype_w)]
         return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
