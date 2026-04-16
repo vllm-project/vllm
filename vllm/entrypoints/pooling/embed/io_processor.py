@@ -16,21 +16,6 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     CustomChatCompletionMessageParam,
 )
-from vllm.entrypoints.pooling.base.io_processor import PoolingIOProcessor
-from vllm.entrypoints.pooling.embed.protocol import (
-    CohereEmbedContent,
-    CohereEmbedInput,
-    CohereEmbedRequest,
-    EmbeddingChatRequest,
-    EmbeddingCompletionRequest,
-)
-from vllm.entrypoints.pooling.scoring.io_processor import JinaRankingIOProcessorMixin
-from vllm.entrypoints.pooling.typing import (
-    OfflineInputsContext,
-    PoolingChatLikeRequest,
-    PoolingCompletionLikeRequest,
-    PoolingServeContext,
-)
 from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
@@ -38,6 +23,22 @@ from vllm.renderers import merge_kwargs
 from vllm.renderers.hf import resolve_chat_template
 from vllm.utils.collection_utils import chunk_list
 from vllm.utils.mistral import is_mistral_tokenizer
+
+from ..base.io_processor import PoolingIOProcessor
+from ..scoring.io_processor import JinaRankingIOProcessorMixin
+from ..typing import (
+    OfflineInputsContext,
+    PoolingChatLikeRequest,
+    PoolingCompletionLikeRequest,
+    PoolingServeContext,
+)
+from .protocol import (
+    CohereEmbedContent,
+    CohereEmbedInput,
+    CohereEmbedRequest,
+    EmbeddingChatRequest,
+    EmbeddingCompletionRequest,
+)
 
 logger = init_logger(__name__)
 
@@ -94,7 +95,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
-        ctx.intermediates = ctx.engine_inputs
+        ctx.original_engine_inputs = ctx.engine_inputs
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len
         chunked_engine_inputs: list[EngineInput] = []
@@ -189,10 +190,10 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 aggregator["total_weight"] += weight
                 aggregator["chunk_count"] += 1
 
-        if ctx.intermediates is None:
-            raise ValueError("Original prompts inputs not available")
+        if ctx.original_engine_inputs is None:
+            raise ValueError("Original engine inputs not available")
 
-        original_engine_inputs = cast(list[EngineInput], ctx.intermediates)
+        original_engine_inputs = ctx.original_engine_inputs
         num_prompts = len(original_engine_inputs)
 
         # Finalize aggregated results
