@@ -618,7 +618,7 @@ def _get_auto_round_ark_instance() -> Any:
 
     import auto_round_kernel
 
-    ark_loader = getattr(auto_round_kernel, "_ark_instance")
+    ark_loader = auto_round_kernel._ark_instance
     _ark_instance = ark_loader()
     return _ark_instance
 
@@ -718,6 +718,11 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
         # Wrap as a Parameter and disable gradients.
         layer.packed_weight = Parameter(packw, requires_grad=False)
 
+        if hasattr(layer, "bias") and layer.bias is not None:
+            layer.safe_bias = layer.bias.data.detach().contiguous()
+        else:
+            layer.safe_bias = torch.empty(0, dtype=layer.params_dtype, device=device)
+
         layer.compute_type = compute_type
         layer.scale_type = scale_type
 
@@ -739,18 +744,11 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
         out_shape = x.shape[:-1] + (layer.out_features,)
         reshaped_x = x.reshape(-1, x.shape[-1]).contiguous()
 
-        # Ensure bias has no grad requirement and is contiguous to avoid C++
-        # pointer handling issues.
-        if bias is not None:
-            safe_bias = bias.detach().contiguous()
-        else:
-            safe_bias = torch.empty(0, dtype=x.dtype, device=x.device)
-
         assert self.ark is not None
         out = self.ark.woqgemm(
             reshaped_x,  # Input activations [M, K]
             layer.packed_weight,  # Repacked low-level weight buffer
-            safe_bias,  # Bias [1, N] or empty
+            layer.safe_bias,  # Bias [1, N] or empty
             layer.out_features,  # N
             layer.in_features,  # K
             self.group_size,  # Block size
