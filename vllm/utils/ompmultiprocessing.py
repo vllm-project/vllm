@@ -255,8 +255,16 @@ class OMPProcessManager:
             total_cpu_num += len(selected_logical_cpu_list)
 
         # Reserve CPUs for other processes
-        assert total_cpu_num > self.reserve_cpu_num, "Selected CPU core "
-        "number should be greater than reserved CPU core number."
+        if total_cpu_num <= self.reserve_cpu_num:
+            logger.warning(
+                "Selected CPU core number (%s) "
+                "should be greater than reserved CPU core "
+                "number (%s).",
+                total_cpu_num,
+                self.reserve_cpu_num,
+            )
+            return cpu_lists_of_ranks, []
+
         reserve_num_per_rank = [
             self.reserve_cpu_num // self.local_world_size
         ] * self.local_world_size

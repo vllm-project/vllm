@@ -42,10 +42,14 @@ class CPUWorker(Worker):
         allowed_cpu_list = get_allowed_cpu_list()
         cpu_core = allowed_cpu_list[0]
 
-        assert cpu_core.numa_node in allowed_memory_nodes, (
-            f"Node {cpu_core.numa_node} is not in available memory nodes "
-            f"{allowed_memory_nodes}"
-        )
+        # TODO: some CI hosts are not correctly set, change to assertion
+        # after fix
+        if cpu_core.numa_node not in allowed_memory_nodes:
+            logger.warning(
+                "Node %s is not in available memory nodes %s.",
+                cpu_core.numa_node,
+                allowed_memory_nodes,
+            )
 
         torch.ops._C.init_cpu_memory_env([cpu_core.numa_node])
 
