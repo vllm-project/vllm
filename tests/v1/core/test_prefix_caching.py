@@ -551,25 +551,29 @@ def test_prefill_hybrid_model_eagle():
 
     # Cache hit in the common prefix
     # Incomplete 1 block (5 tokens)
+    # With coordinator-level EAGLE drop: converge at 96 (6 blocks), then
+    # drop one block to 80 (5 blocks). Full attention: blocks 0-4.
+    # Sliding window: [null, null, block2, block3, block4] (3 real blocks
+    # at the end, covering the sliding window).
     unique_token_ids = [6] * 5
     all_token_ids = common_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids, block_size, hash_fn)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == num_full_blocks
     assert computed_blocks.get_block_ids() == (
-        [1, 2, 3, 4],
-        [0, 9, 10, 11],
-        [0, 16, 17, 18],
+        [1, 2, 3, 4, 5],
+        [0, 0, 10, 11, 12],
+        [0, 0, 17, 18, 19],
     )
-    assert num_computed_tokens == 4 * block_size
+    assert num_computed_tokens == 5 * block_size
     num_new_tokens = len(all_token_ids) - num_computed_tokens
     blocks = manager.allocate_slots(
         req1, num_new_tokens, num_computed_tokens, computed_blocks
     )
     assert blocks is not None and blocks.get_block_ids() == (
-        [22, 23, 24],
-        [25, 26, 27],
-        [28, 29, 30],
+        [22, 23],
+        [24, 25],
+        [26, 27],
     )
     for block_per_group in computed_blocks.blocks:
         for block in block_per_group:
@@ -591,7 +595,7 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[0], 1),
             make_block_hash_with_group_id(block_hashes[0], 2),
         ],
-        4,
+        5,
     )
 
     # Evict the first block of full attention, makes total cache miss.
@@ -605,7 +609,8 @@ def test_prefill_hybrid_model_eagle():
         0,
     )
 
-    # Evict the last block of all layers, reduces the hit length to 3.
+    # Evict the last block of all layers, reduces the hit length to 4.
+    # (Converge at 5 blocks since block 5 is evicted, EAGLE drop to 4.)
     _test_partial_request_hit(
         manager,
         block_size,
@@ -617,10 +622,12 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[-1], 1),
             make_block_hash_with_group_id(block_hashes[-1], 2),
         ],
-        3,
+        4,
     )
 
-    # Evict the last block of full attention, reduces the hit length to 3.
+    # Evict the last block of full attention, reduces the hit length to 4.
+    # (Full attn finds 5 blocks since block 5 is evicted, SW finds all 6.
+    # Converge at 5. EAGLE drop to 4.)
     _test_partial_request_hit(
         manager,
         block_size,
@@ -628,11 +635,14 @@ def test_prefill_hybrid_model_eagle():
         "5",
         all_token_ids,
         [make_block_hash_with_group_id(block_hashes[-1], 0)],
-        3,
+        4,
     )
 
-    # Since the last block of full attention is dropped for eagle, evict
-    # the second last block of sliding window, reduces the hit length to 3.
+    # Evict the second last block of sliding window group 1.
+    # SW search from right finds block 5 (contiguous=1), then block 4 is
+    # evicted for group 1 → miss. Continue: block 3 (contiguous=1),
+    # block 2 (contiguous=2), block 1 (contiguous=3 >= 3). Hit at 4 blocks.
+    # Converge with full at 4 blocks (64 tokens). EAGLE drop to 3.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -643,8 +653,7 @@ def test_prefill_hybrid_model_eagle():
         3,
     )
 
-    # Since the last block of full attention is dropped for eagle, evict
-    # the second last block of sliding window, reduces the hit length to 3.
+    # Same as above but for sliding window group 2.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -655,12 +664,11 @@ def test_prefill_hybrid_model_eagle():
         3,
     )
 
-    # Evict different set of blocks for full attention and sliding window makes
-    # total cache miss.
-    # The cache hit length of full attention is 4 * block_size.
-    # The cache hit length of sliding window is 3 * block_size.
-    # Then it is cache miss as the two type of layers
-    # have different hit length.
+    # Evict last block of full attention and first block of sliding window.
+    # Full attn: finds 5 blocks (0-4). SW: block 0 evicted but it's outside
+    # the sliding window anyway. SW finds [null,null,block2,block3,block4]
+    # at max_length=80. Converge at 80. EAGLE drop to 64.
+    # SW re-query at 64: finds [null,block1,block2,block3]. Hit = 4.
     _test_partial_request_hit(
         manager,
         block_size,
@@ -672,7 +680,7 @@ def test_prefill_hybrid_model_eagle():
             make_block_hash_with_group_id(block_hashes[0], 1),
             make_block_hash_with_group_id(block_hashes[0], 2),
         ],
-        0,
+        4,
     )
 
 
@@ -893,7 +901,9 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 # - 2 groups: 1 full + 1 other
 _EAGLE_HYBRID_MODEL_TEST_CASES = [
     # 2 groups: 1 full + 1 other
-    pytest.param(["full", "sliding_window"], 2, id="2g-full+sw"),
+    # With coordinator-level EAGLE drop: converge at 4 blocks (64 tokens),
+    # then EAGLE drop to 3 blocks (48 tokens).
+    pytest.param(["full", "sliding_window"], 3, id="2g-full+sw"),
 ]
 
 
@@ -903,7 +913,7 @@ def test_prefill_hybrid_model_combinations_eagle(
 ):
     """
     Test prefix caching with hybrid models (1 full attn + 1 other) with EAGLE.
-    More complex hybrid models with EAGLE are not yet supported (see issue #32802).
+    EAGLE drop is applied once at the coordinator level after convergence.
     """
     block_size = 16
     num_groups = len(spec_types)
@@ -2237,8 +2247,7 @@ def test_block_removed_event_group_idx(group_id: int):
 
 
 def test_eagle_enabled_removes_last_block():
-    """Verify Eagle does NOT remove blocks when request
-    length is divisible by block size."""
+    """Verify Eagle drops one block via coordinator-level EAGLE drop."""
     block_size = 16
     manager = KVCacheManager(
         make_kv_cache_config(block_size, num_blocks=10),
@@ -2263,9 +2272,8 @@ def test_eagle_enabled_removes_last_block():
     req_eagle = make_request("eagle_divisible", token_ids, block_size, sha256)
     computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
 
-    # Should retain 1 block:
-    # 1. Original 3 blocks → pop last hash → 2 matched blocks
-    # 2. drop last matched block → 1 remaining block
+    # max_cache_hit_length = 47, so max_num_blocks = 2.
+    # Manager finds 2 blocks. Coordinator EAGLE drop reduces to 1 block.
     assert len(computed_blocks.blocks[0]) == 1
     assert num_tokens == 1 * block_size  # 16 tokens
 
@@ -2294,7 +2302,7 @@ def test_eagle_with_partial_blocks():
     # New request with Eagle enabled
     req_eagle = make_request("partial_eagle", token_ids, block_size, sha256)
     computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
-    # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
+    # Manager finds 2 blocks. Coordinator EAGLE drop reduces to 1 block.
     assert len(computed_blocks.blocks[0]) == 1
     assert num_tokens == 1 * block_size
 
@@ -2338,7 +2346,8 @@ def test_eagle_with_sliding_window():
     # New request with Eagle enabled
     req_eagle = make_request("partial_eagle", token_ids, block_size, sha256)
     computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
-    # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
+    # Manager finds 2 blocks. Coordinator EAGLE drop: reduce to 1 block,
+    # re-query at max_length=16 finds 1 block.
     assert len(computed_blocks.blocks[0]) == 1
     assert num_tokens == 1 * block_size
 
@@ -2358,9 +2367,9 @@ def test_eagle_with_sliding_window():
         "partial_eagle_after_evict", token_ids, block_size, sha256
     )
     computed_blocks, num_tokens = manager.get_computed_blocks(req_after_evict)
-    # Cache miss. The only hit prefix is [NULL_BLOCK, BLOCK_2] if eagle is
-    # not considered. But after dropping the last matched block due to eagle,
-    # there will be no matched prefix.
+    # Manager finds [NULL_BLOCK, BLOCK_2] at max_length=32. Coordinator
+    # EAGLE drop reduces to max_length=16, re-queries: only block_hashes[0]
+    # at position 0 which was evicted → no match.
     assert len(computed_blocks.blocks[0]) == 0
     assert num_tokens == 0
 

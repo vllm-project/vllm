@@ -543,48 +543,47 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 break
             hit_length = curr_hit_length
 
-        # Phase 2: Truncate full attention blocks to final hit_length.
-        spec, group_ids, _ = self.attention_groups[0]
-        if isinstance(spec, FullAttentionSpec):
-            num_blocks = hit_length // spec.block_size
-            for group_id in group_ids:
-                if (blks := hit_blocks_by_group[group_id]) is not None:
-                    del blks[num_blocks:]
+        # Phase 2: Truncate all full attention groups to the final hit_length.
+        # A hybrid model can have multiple FullAttentionSpec groups with
+        # different configs (e.g. different num_kv_heads or head_size), so
+        # we must iterate over all of them, not just attention_groups[0].
+        for spec, group_ids, _ in self.attention_groups:
+            if isinstance(spec, FullAttentionSpec):
+                num_blocks = hit_length // spec.block_size
+                for group_id in group_ids:
+                    if (blks := hit_blocks_by_group[group_id]) is not None:
+                        del blks[num_blocks:]
 
         # Phase 3: EAGLE drop — applied once after convergence.
-        # Drop one lcm_block_size worth of tokens, then verify that
-        # non-full-attention groups still have valid hits at the new length.
+        # Drop one lcm_block_size worth of tokens, then iteratively re-query
+        # non-full-attention groups until they converge. The EAGLE drop is
+        # NOT inside this loop, so the spiral block-dropping problem cannot
+        # recur. Iteration is required because in models with multiple
+        # non-full-attention types (e.g. SlidingWindow + Mamba), one group
+        # may further reduce hit_length and invalidate earlier groups' hits.
         if self.use_eagle and hit_length > 0:
             hit_length = max(0, hit_length - self.lcm_block_size)
 
-            # Truncate full attention (downward-closed, always safe).
-            for spec, group_ids, _ in self.attention_groups:
-                if isinstance(spec, FullAttentionSpec):
-                    num_blocks = hit_length // spec.block_size
-                    for group_id in group_ids:
-                        if (blks := hit_blocks_by_group[group_id]) is not None:
-                            del blks[num_blocks:]
+            while True:
+                prev_hit_length = hit_length
+                for spec, group_ids, manager_cls in self.attention_groups:
+                    if not isinstance(spec, FullAttentionSpec):
+                        hit_blocks = manager_cls.find_longest_cache_hit(
+                            block_hashes=_get_block_hashes(spec),
+                            max_length=hit_length,
+                            kv_cache_group_ids=group_ids,
+                            block_pool=self.block_pool,
+                            kv_cache_spec=spec,
+                            alignment_tokens=self.lcm_block_size,
+                        )
+                        hit_length = len(hit_blocks[0]) * spec.block_size
+                        for group_id, blocks in zip(group_ids, hit_blocks):
+                            hit_blocks_by_group[group_id] = blocks
+                if hit_length >= prev_hit_length:
+                    break
 
-            # Re-query non-full-attention groups at the new length to ensure
-            # their hits are still valid (e.g. sliding window contiguity).
-            for spec, group_ids, manager_cls in self.attention_groups:
-                if not isinstance(spec, FullAttentionSpec):
-                    hit_blocks = manager_cls.find_longest_cache_hit(
-                        block_hashes=_get_block_hashes(spec),
-                        max_length=hit_length,
-                        kv_cache_group_ids=group_ids,
-                        block_pool=self.block_pool,
-                        kv_cache_spec=spec,
-                        alignment_tokens=self.lcm_block_size,
-                    )
-                    new_len = len(hit_blocks[0]) * spec.block_size
-                    if new_len < hit_length:
-                        hit_length = new_len
-                    for group_id, blocks in zip(group_ids, hit_blocks):
-                        hit_blocks_by_group[group_id] = blocks
-
-            # If non-full-attn groups further reduced hit_length, also
-            # truncate full attention blocks accordingly.
+            # Truncate all full attention groups to the final hit_length
+            # (downward-closed, always safe).
             for spec, group_ids, _ in self.attention_groups:
                 if isinstance(spec, FullAttentionSpec):
                     num_blocks = hit_length // spec.block_size
