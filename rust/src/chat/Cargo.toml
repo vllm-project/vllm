@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 easy-ext.workspace = true
 futures.workspace = true
 futures-async-stream.workspace = true
@@ -27,7 +28,6 @@ vllm-text.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true

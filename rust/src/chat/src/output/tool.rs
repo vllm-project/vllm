@@ -9,15 +9,14 @@ use std::collections::{BTreeMap, btree_map};
 
 use futures::{StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
-use openai_protocol::common::Tool as OpenAiTool;
 use thiserror_ext::AsReport;
-use tool_parser::ToolParser;
 use tracing::warn;
 use uuid::Uuid;
 
 use super::{AssistantEvent, ContentEvent, ContentEventStream};
 use crate::error::Error;
 use crate::event::{AssistantBlockKind, AssistantToolCall};
+use crate::tool::{ToolCallDelta, ToolParseResult, ToolParser};
 
 /// One currently open tool call being assembled from streaming parser output.
 struct OpenToolCallState {
@@ -35,19 +34,16 @@ struct ToolState {
     parser: Box<dyn ToolParser>,
     /// Whether tool parsing has already failed for this stream.
     parser_failed: bool,
-    /// Northbound tool definitions made available to the parser.
-    tools: Vec<OpenAiTool>,
     /// Open tool calls keyed by the parser's tool index.
     open_calls: BTreeMap<usize, OpenToolCallState>,
 }
 
 impl ToolState {
     /// Create one fresh tool-parsing state for a new streamed response.
-    fn new(tools: Vec<OpenAiTool>, parser: Box<dyn ToolParser>) -> Self {
+    fn new(parser: Box<dyn ToolParser>) -> Self {
         Self {
             parser,
             parser_failed: false,
-            tools,
             open_calls: BTreeMap::new(),
         }
     }
@@ -69,7 +65,7 @@ impl ToolState {
             return events;
         }
 
-        let parse_result = self.parser.parse_incremental(&delta, &self.tools).await;
+        let parse_result = self.parser.parse_incremental(&delta).await;
 
         match parse_result {
             Ok(result) => {
@@ -105,12 +101,8 @@ impl ToolState {
         events
     }
 
-    /// Apply one batch of incremental tool-call items emitted by the parser.
-    fn process_tool_items(
-        &mut self,
-        items: Vec<tool_parser::types::ToolCallItem>,
-        events: &mut Vec<AssistantEvent>,
-    ) {
+    /// Apply one batch of parsed tool-call deltas emitted by the parser.
+    fn process_tool_items(&mut self, items: Vec<ToolCallDelta>, events: &mut Vec<AssistantEvent>) {
         for item in items {
             if let Some(name) = item.name {
                 // The parser is now advancing a specific tool index, so any
@@ -128,18 +120,18 @@ impl ToolState {
                 }
             }
 
-            if item.parameters.is_empty() {
+            if item.arguments.is_empty() {
                 // No arguments delta to apply.
                 continue;
             }
             let Some(open_call) = self.open_calls.get_mut(&item.tool_index) else {
                 continue;
             };
-            open_call.arguments.push_str(&item.parameters);
+            open_call.arguments.push_str(&item.arguments);
 
             events.push(AssistantEvent::ToolCallArgumentsDelta {
                 id: open_call.id.clone(),
-                delta: item.parameters,
+                delta: item.arguments,
             });
         }
     }
@@ -244,22 +236,27 @@ async fn final_only_tool_event_stream(
                 kv_transfer_params,
             } => {
                 match parser.parse_complete(&final_text).await {
-                    Ok((normal_text, tool_calls)) => {
+                    Ok(ToolParseResult { normal_text, calls }) => {
                         if !normal_text.is_empty() {
                             yield AssistantEvent::TextDelta {
                                 kind: AssistantBlockKind::Text,
                                 delta: normal_text,
                             };
                         }
-                        for tool_call in tool_calls {
-                            let function = tool_call.function;
+                        // `parse_complete` currently returns one complete delta
+                        // per tool call, so we can finalize each call directly
+                        // without reusing the streaming state machine here.
+                        for tool_call in calls {
+                            let Some(name) = tool_call.name else {
+                                continue;
+                            };
                             // It's okay to only emit `ToolCallEnd` without a preceding
                             // `ToolCallStart` or `ToolCallArgumentsDelta`.
                             yield AssistantEvent::ToolCallEnd {
                                 call: AssistantToolCall {
                                     id: generate_tool_call_id(),
-                                    name: function.name,
-                                    arguments: function.arguments,
+                                    name,
+                                    arguments: tool_call.arguments,
                                 },
                             };
                         }
@@ -294,7 +291,6 @@ async fn final_only_tool_event_stream(
 pub(crate) async fn tool_event_stream(
     stream: impl ContentEventStream,
     intermediate: bool,
-    parser_tools: Vec<OpenAiTool>,
     parser: Option<Box<dyn ToolParser>>,
 ) {
     // Without a parser, pass through the input stream unchanged.
@@ -317,7 +313,7 @@ pub(crate) async fn tool_event_stream(
     }
 
     pin_mut!(stream);
-    let mut state = ToolState::new(parser_tools, parser);
+    let mut state = ToolState::new(parser);
 
     while let Some(event) = stream.next().await.transpose()? {
         match event {
@@ -377,12 +373,7 @@ pub(crate) async fn tool_event_stream(
 #[cfg(test)]
 mod tests {
 
-    use async_trait::async_trait;
     use futures::{StreamExt as _, stream};
-    use openai_protocol::common::Tool;
-    use tool_parser::ToolParser;
-    use tool_parser::errors::{ParserError, ParserResult};
-    use tool_parser::types::{StreamingParseResult, ToolCall, ToolCallItem};
     use vllm_llm::FinishReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
@@ -390,53 +381,41 @@ mod tests {
     use super::super::{AssistantEvent, ContentEvent};
     use super::tool_event_stream;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
+    use crate::request::ChatTool;
     use crate::stream::ChatEventStream;
+    use crate::tool::{Result, ToolCallDelta, ToolParseResult, ToolParser};
 
     struct FailingParser {
         fail_next: bool,
     }
 
-    #[async_trait]
+    #[async_trait::async_trait]
     impl ToolParser for FailingParser {
-        async fn parse_complete(&self, _output: &str) -> ParserResult<(String, Vec<ToolCall>)> {
-            Ok((String::new(), Vec::new()))
+        fn create(_tools: &[ChatTool]) -> crate::tool::Result<Box<dyn ToolParser>>
+        where
+            Self: Sized + 'static,
+        {
+            Ok(Box::new(Self { fail_next: false }))
         }
 
-        async fn parse_incremental(
-            &mut self,
-            _chunk: &str,
-            _tools: &[Tool],
-        ) -> ParserResult<StreamingParseResult> {
+        async fn parse_complete(&self, _output: &str) -> Result<ToolParseResult> {
+            Ok(ToolParseResult::default())
+        }
+
+        async fn parse_incremental(&mut self, _chunk: &str) -> Result<ToolParseResult> {
             if self.fail_next {
                 self.fail_next = false;
-                return Err(ParserError::ParsingFailed("boom".to_string()));
+                return Err(
+                    tool_parser::errors::ParserError::ParsingFailed("boom".to_string()).into(),
+                );
             }
 
-            Ok(StreamingParseResult::default())
+            Ok(ToolParseResult::default())
         }
 
-        fn has_tool_markers(&self, _text: &str) -> bool {
-            false
-        }
-
-        fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallItem>> {
+        fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallDelta>> {
             None
         }
-    }
-
-    fn tool_parser_tools() -> Vec<openai_protocol::common::Tool> {
-        vec![openai_protocol::common::Tool {
-            tool_type: "function".to_string(),
-            function: openai_protocol::common::Function {
-                name: "get_weather".to_string(),
-                description: Some("Get weather".to_string()),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                }),
-                strict: None,
-            },
-        }]
     }
 
     #[tokio::test]
@@ -465,7 +444,6 @@ mod tests {
         let collected = tool_event_stream(
             events,
             true,
-            tool_parser_tools(),
             Some(Box::new(FailingParser { fail_next: true })),
         )
         .collect::<Vec<_>>()
@@ -543,7 +521,6 @@ mod tests {
         let events = tool_event_stream(
             events,
             false,
-            tool_parser_tools(),
             Some(Box::new(FailingParser { fail_next: false })),
         )
         .collect::<Vec<_>>()

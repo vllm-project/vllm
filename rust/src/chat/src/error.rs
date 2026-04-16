@@ -1,7 +1,7 @@
 use thiserror::Error;
 
-use crate::ReasoningError;
 use crate::parser::available_parser_hint;
+use crate::{ReasoningError, ToolParserError};
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -32,6 +32,12 @@ pub enum Error {
     ReasoningParserUnavailableByName {
         name: String,
         available_names: Vec<String>,
+    },
+    #[error("failed to initialize tool parser `{name}`")]
+    ToolParserInitialization {
+        name: String,
+        #[source]
+        error: ToolParserError,
     },
     #[error("failed to initialize reasoning parser `{name}`")]
     ReasoningParserInitialization {

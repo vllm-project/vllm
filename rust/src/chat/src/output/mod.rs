@@ -7,9 +7,7 @@ mod tool;
 use std::sync::Arc;
 
 use futures::Stream;
-use openai_protocol::common::Tool as OpenAiTool;
 use subenum::subenum;
-use tool_parser::ToolParser;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
 use self::reasoning::reasoning_event_stream;
@@ -19,6 +17,7 @@ use crate::error::Result;
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
 use crate::output::structured::structured_chat_event_stream;
 use crate::reasoning::ReasoningParser;
+use crate::tool::ToolParser;
 
 /// Internal assistant event before final assembly.
 ///
@@ -117,7 +116,6 @@ pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'st
 /// Request-scoped processors that adapt decoded text into structured chat events.
 pub(crate) struct OutputProcessors {
     pub(crate) reasoning_parser: Option<Box<dyn ReasoningParser>>,
-    pub(crate) parser_tools: Vec<OpenAiTool>,
     pub(crate) tool_parser: Option<Box<dyn ToolParser>>,
 }
 
@@ -132,12 +130,11 @@ pub(crate) fn output_stream(
     decoded: impl DecodedTextEventStream,
     OutputProcessors {
         reasoning_parser,
-        parser_tools,
         tool_parser,
     }: OutputProcessors,
 ) -> Result<impl ChatEventStream> {
     let reasoning = reasoning_event_stream(decoded, reasoning_parser);
-    let tool = tool_event_stream(reasoning, intermediate, parser_tools, tool_parser);
+    let tool = tool_event_stream(reasoning, intermediate, tool_parser);
     let structured = structured_chat_event_stream(tool);
     Ok(structured)
 }
