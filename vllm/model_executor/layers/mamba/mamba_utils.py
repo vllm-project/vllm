@@ -388,14 +388,6 @@ QUANTIZED_SSM_STATE_DTYPES: tuple[torch.dtype, ...] = (
     torch.float8_e4m3fn,
 )
 
-# Maximum absolute value representable by each quantized dtype.
-_QUANT_MAX: dict[torch.dtype, float] = {
-    torch.int8: 127.0,
-    torch.int16: 32767.0,
-    torch.float8_e4m3fn: 448.0,
-}
-
-
 def quantize_scaled(
     state: torch.Tensor, dtype: torch.dtype
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -411,9 +403,9 @@ def quantize_scaled(
           decode_scale is fp32, shape (..., nheads, head_dim) — the factor to
                        multiply by when dequantizing (i.e. 1 / encode_scale).
     """
-    quant_max = _QUANT_MAX[dtype]
+    quant_max = torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
     amax = torch.amax(torch.abs(state), dim=-1, keepdim=True)
     encode_scale = torch.where(amax == 0.0, torch.ones_like(amax), quant_max / amax)
     state_q = (state * encode_scale).to(dtype)
-    decode_scale = torch.reciprocal(encode_scale).squeeze(-1)
+    decode_scale = torch.squeeze(torch.reciprocal(encode_scale), dim=-1)
     return state_q, decode_scale

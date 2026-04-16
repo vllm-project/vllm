@@ -8,6 +8,7 @@ import torch
 from packaging import version
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.mamba.mamba_utils import QUANTIZED_SSM_STATE_DTYPES
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
@@ -364,11 +365,11 @@ def _selective_scan_update_kernel(
         tl.store(dst_state_ptrs, state, mask=mask)
 
 
-_QUANT_MAX: dict = {
-    torch.int8: 127.0,
-    torch.int16: 32767.0,
-    torch.float8_e4m3fn: 448.0,
-}
+def _quant_max(dtype: torch.dtype) -> float:
+    """Return the max representable value for a quantized dtype, or 0.0 if not quantized."""
+    if dtype not in QUANTIZED_SSM_STATE_DTYPES:
+        return 0.0
+    return torch.finfo(dtype).max if dtype.is_floating_point else torch.iinfo(dtype).max
 
 
 def selective_state_update(
@@ -521,7 +522,7 @@ def selective_state_update(
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
-    quant_max = _QUANT_MAX.get(state.dtype, 0.0)
+    quant_max = _quant_max(state.dtype)
     if quant_max > 0.0 and state_scale is None:
         raise ValueError(
             f"state_scale is required for quantized state dtype {state.dtype}"
