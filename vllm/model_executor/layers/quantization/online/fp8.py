@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
 from vllm.model_executor.layers.linear import (
     LinearMethodBase,
 )
-from vllm.model_executor.layers.quantization.online.common.moe_base import (
+from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

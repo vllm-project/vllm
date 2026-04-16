@@ -18,7 +18,7 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     make_int8_moe_quant_config,
     select_int8_moe_backend,
 )
-from vllm.model_executor.layers.quantization.online.common.moe_base import (
+from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.utils import replace_parameter
