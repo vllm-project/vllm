@@ -372,34 +372,6 @@ def get_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
     return copy.deepcopy(_compute_kwargs(cls))
 
 
-def _get_full_attention_layer_indices(model_config: ModelConfig) -> list[int]:
-    """Global indices of full-attention layers in a hybrid model.
-
-    Covers the conventions used across vLLM: ``layer_types`` (Qwen3.5/Next),
-    ``layers_block_type`` (Jamba/Zamba2), ``attn_type_list`` (Minimax).
-    """
-    text_cfg = model_config.hf_text_config
-    hf_cfg = model_config.hf_config
-
-    layer_types = getattr(text_cfg, "layer_types", None)
-    if layer_types is not None:
-        return [
-            i for i, t in enumerate(layer_types) if t in ("full_attention", "attention")
-        ]
-
-    layers_block_type = getattr(text_cfg, "layers_block_type", None)
-    if layers_block_type is not None:
-        return [
-            i for i, t in enumerate(layers_block_type) if t in ("attention", "hybrid")
-        ]
-
-    attn_type_list = getattr(hf_cfg, "attn_type_list", None)
-    if attn_type_list is not None:
-        return [i for i, t in enumerate(attn_type_list) if t == 1]
-
-    return []
-
-
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
@@ -1675,25 +1647,7 @@ class EngineArgs:
                 TurboQuantConfig,
             )
 
-            num_layers = model_config.hf_text_config.num_hidden_layers
-            if model_config.is_hybrid:
-                # Hybrid models often have only 8-12 full-attention layers
-                # total; a hard n=2 on each side can cover ~40% of them.
-                # Leave boundary protection off by default here — the dense
-                # GSM8K baselines that motivate n=2 don't cover hybrids.
-                attn_indices = _get_full_attention_layer_indices(model_config)
-                if not attn_indices:
-                    raise NotImplementedError(
-                        "TurboQuant KV cache requires identifiable full-attention "
-                        "layers, but none were found in the hybrid model config."
-                    )
-                logger.info("TQ hybrid: full-attention layers %s", attn_indices)
-                boundary: list[str] = []
-            else:
-                # Dense stacks: skip first/last 2 attention layers. Empirically
-                # required for aggressive presets (k3v4_nc, 3bit_nc) — without
-                # it GSM8K drops ~30 points on Qwen3-4B.
-                boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            boundary = TurboQuantConfig.get_boundary_skip_layers(model_config)
             existing = set(cache_config.kv_cache_dtype_skip_layers)
             cache_config.kv_cache_dtype_skip_layers = sorted(
                 existing | set(boundary), key=int

@@ -184,19 +184,32 @@ class TestTurboQuantConfig:
 
     # ---- Boundary skip layers ----
 
+    @staticmethod
+    def _dense_model_config(num_layers):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            is_hybrid=False,
+            hf_text_config=SimpleNamespace(num_hidden_layers=num_layers),
+        )
+
     def test_boundary_skip_layers_basic(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(32)
+        mc = self._dense_model_config(32)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc)
         assert layers == ["0", "1", "30", "31"]
 
     def test_boundary_skip_layers_zero(self):
-        assert TurboQuantConfig.get_boundary_skip_layers(32, 0) == []
+        mc = self._dense_model_config(32)
+        assert TurboQuantConfig.get_boundary_skip_layers(mc, 0) == []
 
     def test_boundary_skip_layers_small_model(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(4)
+        mc = self._dense_model_config(4)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc)
         assert layers == ["0", "1", "2", "3"]
 
     def test_boundary_skip_layers_cap_at_half(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(8, 10)
+        mc = self._dense_model_config(8)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc, 10)
         assert len(layers) == 8
 
 
@@ -220,7 +233,9 @@ class TestHybridAttentionIndices:
         )
 
     def test_layer_types_full_attention(self):
-        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
 
         cfg = type("C", (), {})()
         cfg.layer_types = [
@@ -235,7 +250,9 @@ class TestHybridAttentionIndices:
         assert _get_full_attention_layer_indices(mc) == [2, 4, 5]
 
     def test_layers_block_type_jamba(self):
-        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
 
         cfg = type("C", (), {})()
         cfg.layers_block_type = ["mamba", "attention", "mamba", "attention"]
@@ -243,7 +260,9 @@ class TestHybridAttentionIndices:
         assert _get_full_attention_layer_indices(mc) == [1, 3]
 
     def test_attn_type_list_minimax(self):
-        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
 
         hf = type("C", (), {})()
         hf.attn_type_list = [0, 1, 0, 1, 1]
@@ -251,7 +270,9 @@ class TestHybridAttentionIndices:
         assert _get_full_attention_layer_indices(mc) == [1, 3, 4]
 
     def test_no_hybrid_hints_returns_empty(self):
-        from vllm.engine.arg_utils import _get_full_attention_layer_indices
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
 
         mc = self._fake_model_config()
         assert _get_full_attention_layer_indices(mc) == []
