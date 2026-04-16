@@ -76,6 +76,25 @@ def test_uninitialized_backend_raises():
     mod._mamba_ssu_backend = old
 
 
+@pytest.mark.parametrize(
+    "mamba_type", ["linear_attention", "gdn_attention", "short_conv"]
+)
+def test_init_is_noop_for_non_ssu_mamba_type(mamba_type):
+    import vllm.model_executor.layers.mamba.ops.ssu_dispatch as mod
+
+    old = mod._mamba_ssu_backend
+    mod._mamba_ssu_backend = None
+    try:
+        initialize_mamba_ssu_backend(
+            MambaConfig(), _kv_cache_config_with_ssu(mamba_type)
+        )
+        assert mod._mamba_ssu_backend is None
+        with pytest.raises(RuntimeError, match="not been initialized"):
+            get_mamba_ssu_backend()
+    finally:
+        mod._mamba_ssu_backend = old
+
+
 @pytest.mark.skipif(HAS_FLASHINFER, reason="flashinfer is installed")
 def test_flashinfer_import_error():
     with pytest.raises(ImportError, match="FlashInfer is required"):
