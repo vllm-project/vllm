@@ -106,7 +106,7 @@ ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 # torch profiler hotfix for 7.2.2: rebuild CLR with https://github.com/ROCm/rocm-systems/pull/5062
 # will be removed once we move to ROCm 7.2.3
-RUN apt-get install rocm-llvm-dev
+RUN apt-get install -y rocm-llvm-dev
 RUN pip install CppHeaderParser
 RUN git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-systems /tmp/rocm-systems \
     && cd /tmp/rocm-systems \
