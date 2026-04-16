@@ -332,7 +332,6 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             use_cuda_graph=True,
             max_num_tokens=self.max_num_tokens,
             num_local_experts=self.num_local_experts,
-            local_expert_offset=self.local_expert_offset,
             activation=self._activation_str,
         )
 
