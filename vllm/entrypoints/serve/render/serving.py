@@ -53,6 +53,7 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.tool_parsers import ToolParser
+from vllm.tool_parsers.mistral_tool_parser import MistralToolParser
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
@@ -555,9 +556,19 @@ class OpenAIServingRender:
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
         # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        #
+        # Exception: Mistral grammar-capable tokenizers always call
+        # adjust_request — even for tool_choice="none" — so that the grammar
+        # factory can prevent special-token leakage.
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
-            if tool_choice != "none":
+            tokenizer = renderer.get_tokenizer()
+            is_mistral_grammar_eligible = (
+                issubclass(tool_parser, MistralToolParser)
+                and is_mistral_tokenizer(tokenizer)
+                and tokenizer.supports_grammar
+            )
+            if tool_choice != "none" or is_mistral_grammar_eligible:
                 if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
                     msg = (
                         "Tool usage is only supported "
@@ -565,7 +576,6 @@ class OpenAIServingRender:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                tokenizer = renderer.get_tokenizer()
                 request = tool_parser(tokenizer, request.tools).adjust_request(
                     request=request
                 )

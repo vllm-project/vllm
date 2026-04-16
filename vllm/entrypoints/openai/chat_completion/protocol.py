@@ -11,7 +11,7 @@ from openai.types.chat.chat_completion_audio import (
     ChatCompletionAudio as OpenAIChatCompletionAudio,
 )
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
-from pydantic import Field, model_validator
+from pydantic import Field, PrivateAttr, model_validator
 
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
@@ -397,6 +397,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if tool_calls is not None and not isinstance(tool_calls, list):
                 msg["tool_calls"] = list(tool_calls)
         return self
+
+    _grammar_from_tool_parser: bool = PrivateAttr(default=False)
+    """CAUTION: Should only be set by ``ToolParser.adjust_request``."""
 
     def build_chat_params(
         self,
@@ -820,13 +823,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                                     part_type,
                                 )
 
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def set_include_reasoning_for_none_effort(cls, data: Any) -> Any:
-        if data.get("reasoning_effort") == "none":
-            data["include_reasoning"] = False
         return data
 
 
