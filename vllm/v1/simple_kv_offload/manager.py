@@ -522,13 +522,18 @@ class SimpleCPUOffloadScheduler:
 
                     # Check if this group's data is already scheduled for store
                     # in this step or already cached in CPU.
-                    if (
-                        gpu_block_id in gpu_blocks_this_step
-                        or cpu_block_pool.cached_block_hash_to_block.get_one_block(
+                    if gpu_block_id in gpu_blocks_this_step:
+                        advanced_per_group[g] += 1
+                        continue
+                    cached_cpu_blk = (
+                        cpu_block_pool.cached_block_hash_to_block.get_one_block(
                             bhash_with_group
                         )
-                        is not None
-                    ):
+                    )
+                    if cached_cpu_blk is not None:
+                        # Refresh LRU position so shared prefix blocks
+                        # are not evicted while still actively used on GPU.
+                        cpu_block_pool.access([cached_cpu_blk])
                         advanced_per_group[g] += 1
                         continue
 

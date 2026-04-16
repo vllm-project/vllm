@@ -388,6 +388,21 @@ class BlockPool:
             )
         return True
 
+    def access(self, blocks: Sequence[KVCacheBlock]) -> None:
+        """Refresh the LRU position of cached blocks without changing their
+        reference count.  For blocks with ref_cnt == 0 (eviction candidates in
+        the free queue), this moves them to the back of their tier so they are
+        evicted last. Blocks with ref_cnt > 0 are already pinned and not in
+        the free queue, so they are skipped.
+
+        Args:
+            blocks: A list of blocks whose LRU position should be refreshed.
+        """
+        for block in blocks:
+            if block.ref_cnt == 0 and not block.is_null:
+                self.free_block_queue.remove(block)
+                self.free_block_queue.append(block)
+
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
