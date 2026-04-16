@@ -505,7 +505,9 @@ class TritonAttentionImpl(AttentionImpl):
     _k_scale_cache: torch.Tensor | None = None
     _v_scale_cache: torch.Tensor | None = None
 
-    def _ensure_fused_cache_views(self, kv_cache: torch.Tensor) -> None:
+    def _ensure_fused_cache_views(
+        self, kv_cache: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Create K, V, K_scale, V_scale strided views from fused cache.
 
         Fused layout (5-dim with dummy size-1 dim for rank compat):
@@ -524,9 +526,17 @@ class TritonAttentionImpl(AttentionImpl):
         cur_ptr = kv_cache.data_ptr()
         if (
             self._k_scale_cache is not None
+            and self._key_cache_view is not None
+            and self._value_cache_view is not None
+            and self._v_scale_cache is not None
             and getattr(self, "_pth_cache_ptr", None) == cur_ptr
         ):
-            return
+            return (
+                self._key_cache_view,
+                self._value_cache_view,
+                self._k_scale_cache,
+                self._v_scale_cache,
+            )
         self._pth_cache_ptr = cur_ptr
         from vllm.utils.torch_utils import get_dtype_size
 
@@ -584,11 +594,17 @@ class TritonAttentionImpl(AttentionImpl):
             storage_offset=v_scale_off_f32,
         )
         self._v_scale_cache.fill_(1.0)
+        return (
+            self._key_cache_view,
+            self._value_cache_view,
+            self._k_scale_cache,
+            self._v_scale_cache,
+        )
 
     # Legacy 5-dim scale extraction for non-per_token_head paths.
     def _ensure_scale_caches(self, kv_cache: torch.Tensor) -> None:
         if self._is_per_token_head_quant:
-            self._ensure_fused_cache_views(kv_cache)
+            self._ensure_fused_cache_views(kv_cache)  # populates self._* views
             return
         if self._k_scale_cache is not None:
             return
@@ -785,9 +801,7 @@ class TritonAttentionImpl(AttentionImpl):
                 return output
 
             if num_dec > 0 and num_dec_tok < num_actual_tokens and pref_first_chunk:
-                self._ensure_fused_cache_views(kv_cache)
-                key_cache = self._key_cache_view
-                value_cache = self._value_cache_view
+                key_cache, value_cache, _, _ = self._ensure_fused_cache_views(kv_cache)
                 if key_cache.dtype == torch.uint8:
                     key_cache = key_cache.view(self.fp8_dtype)
                     value_cache = value_cache.view(self.fp8_dtype)
@@ -846,16 +860,14 @@ class TritonAttentionImpl(AttentionImpl):
         # query gets its own causal K length via q_to_klen. For large
         # continuation (q_len > threshold), fall through to unified_attention.
         if self._is_per_token_head_quant:
-            self._ensure_fused_cache_views(kv_cache)
-            key_cache = self._key_cache_view
-            value_cache = self._value_cache_view
+            key_cache, value_cache, k_scale_cache, v_scale_cache = (
+                self._ensure_fused_cache_views(kv_cache)
+            )
             if key_cache.dtype == torch.uint8:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             k_descale = None
             v_descale = None
-            k_scale_cache = self._k_scale_cache
-            v_scale_cache = self._v_scale_cache
 
             # Dedicated split-KV kernel for decode + small continuation
             # prefill. Gated on max_query_len ≤ threshold; larger shapes
@@ -1020,9 +1032,9 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # Reshape the input keys and values and store them in the cache.
         if self._is_per_token_head_quant:
-            self._ensure_fused_cache_views(kv_cache)
-            key_cache = self._key_cache_view
-            value_cache = self._value_cache_view
+            key_cache, value_cache, k_scale_cache, v_scale_cache = (
+                self._ensure_fused_cache_views(kv_cache)
+            )
             if key_cache.dtype == torch.uint8:
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
@@ -1031,8 +1043,8 @@ class TritonAttentionImpl(AttentionImpl):
                 value,
                 key_cache,
                 value_cache,
-                self._k_scale_cache,
-                self._v_scale_cache,
+                k_scale_cache,
+                v_scale_cache,
                 slot_mapping,
             )
             return

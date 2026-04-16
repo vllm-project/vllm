@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dedicated split-KV attention for per-token-head quantized KV cache.
 
-Modelled on TurboQuant's decode kernel:
   - stage1: per-query split-KV tiled attention with inline fp8/int8 dequant
   - stage2: log-sum-exp reduction (reused ``_fwd_kernel_stage2``)
 
