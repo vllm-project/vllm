@@ -431,19 +431,19 @@ class INCConfig(QuantizationConfig):
             )
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            try:
+            if _is_auto_round_ark_available():
                 return INCXPULinearARKMethod(
                     weight_bits=weight_bits,
                     group_size=group_size,
                     sym=sym,
                 )
-            except ImportError as error:
-                logger.warning(
-                    "Failed to initialize ARK backend for layer %s; "
-                    "falling back to the default XPU INC path. Error: %s",
-                    prefix,
-                    error,
-                )
+
+            logger.warning(
+                "ARK backend is unavailable for layer %s; "
+                "falling back to the default XPU INC path. Error: %s",
+                prefix,
+                _ark_availability_error or "unknown error",
+            )
 
             return INCXPULinearMethod(
                 weight_bits=weight_bits,
@@ -578,6 +578,51 @@ class _INCXPULinearBase(LinearMethodBase):
         )
 
 
+_ark_instance: Any | None = None
+_ark_available: bool | None = None
+_ark_availability_error: str | None = None
+
+
+def _is_auto_round_ark_available() -> bool:
+    global _ark_available, _ark_availability_error
+
+    if _ark_available is not None:
+        return _ark_available
+
+    try:
+        import auto_round_kernel
+    except ImportError as error:
+        _ark_available = False
+        _ark_availability_error = str(error)
+        return False
+
+    if not callable(getattr(auto_round_kernel, "_ark_instance", None)):
+        _ark_available = False
+        _ark_availability_error = "auto_round_kernel does not expose _ark_instance()."
+        return False
+
+    _ark_available = True
+    _ark_availability_error = None
+    return True
+
+
+def _get_auto_round_ark_instance() -> Any:
+    global _ark_instance
+
+    if _ark_instance is not None:
+        return _ark_instance
+
+    if not _is_auto_round_ark_available():
+        reason = _ark_availability_error or "unknown error"
+        raise ImportError(f"Failed to import auto_round_kernel. {reason}")
+
+    import auto_round_kernel
+
+    ark_loader = getattr(auto_round_kernel, "_ark_instance")
+    _ark_instance = ark_loader()
+    return _ark_instance
+
+
 def _get_ark_type_str(dtype: torch.dtype) -> str:
     """Helper: Convert PyTorch's dtype to a string format recognized by ARK"""
     if dtype == torch.float16:
@@ -597,7 +642,6 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
     """
 
     _set_layer_attrs_on_create = True
-    _ark_instance: Any | None = None
 
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
         super().__init__(weight_bits=weight_bits, group_size=group_size, sym=sym)
@@ -605,21 +649,7 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
         self.weight_type = f"int{weight_bits}"
         self.asym = not sym
 
-        self.ark = self._get_ark_instance()
-
-    @classmethod
-    def _get_ark_instance(cls):
-        if cls._ark_instance is None:
-            try:
-                import auto_round_kernel
-
-                ark_inst = auto_round_kernel._ark_instance()
-                cls._ark_instance = ark_inst
-            except ImportError as e:
-                raise ImportError("Failed to import auto_round_kernel.") from e
-
-        assert cls._ark_instance is not None
-        return cls._ark_instance
+        self.ark = _get_auto_round_ark_instance()
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
