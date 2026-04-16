@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVFP4 CUTLASS GEMM tests that require ``VLLM_BATCH_INVARIANT=1``.
 
-Must run in a **fresh** pytest process with the env var set before Python starts::
+Must run in a **fresh** pytest process:
 
-    VLLM_BATCH_INVARIANT=1 pytest \
-        tests/v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py -v
+    pytest tests/v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py -v
 
-Do not share a session with ``tests/kernels/quantization/test_nvfp4_scaled_mm.py``
-(no env var) — the cached flag would reflect the default-off path.
+Do not share a session with ``tests/kernels/quantization/test_nvfp4_scaled_mm.py``:
+the native code caches whether batch invariance is enabled on the first GEMM, and
+if ``VLLM_BATCH_INVARIANT`` was not set at that moment, it stays disabled for the
+rest of the process.
 
 The reference correctness test is included here (not only in the default-path
 module) because ``VLLM_BATCH_INVARIANT=1`` potentially activates a different kernel.
@@ -20,7 +21,6 @@ full-batch and single-row runs equally.
 import pytest
 import torch
 
-import vllm.envs as envs
 from tests.kernels.quantization.nvfp4_utils import (
     FLOAT4_E2M1_MAX,
     FLOAT8_E4M3_MAX,
@@ -36,20 +36,13 @@ if not current_platform.has_device_capability(100):
         allow_module_level=True,
     )
 
-
-if not envs.VLLM_BATCH_INVARIANT:
-    pytest.skip(
-        reason="Set VLLM_BATCH_INVARIANT=1 before starting pytest for this file.",
-        allow_module_level=True,
-    )
-
 DTYPES = [torch.float16, torch.bfloat16]
 SHAPES = [(128, 128, 64), (128, 128, 128), (256, 128, 64), (128, 256, 128)]
 PAD_SHAPES = [(150, 128, 64), (128, 128, 96)]
 SHAPES.extend(PAD_SHAPES)
 
-SEEDS = [42]
-CUDA_DEVICES = ["cuda:0"]
+SEED = 42
+CUDA_DEVICE = "cuda:0"
 
 
 def get_ref_results(
@@ -77,14 +70,10 @@ def get_ref_results(
 
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", SHAPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_nvfp4_gemm_correctness_vs_reference_batch_invariant_path(
     dtype: torch.dtype,
     shape: tuple[int, int, int],
-    seed: int,
-    device: str,
 ) -> None:
     """Correctness: ``cutlass_scaled_fp4_mm`` vs dequantize-then-matmul reference.
 
@@ -93,12 +82,12 @@ def test_nvfp4_gemm_correctness_vs_reference_batch_invariant_path(
     produces correct results. Covers ``(M, N, packed_K)`` shapes including
     non-aligned dims in ``PAD_SHAPES``, both fp16 and bf16 output.
     """
-    set_random_seed(seed)
+    set_random_seed(SEED)
     m, n, packed_k = shape
     k = packed_k * 2
     block_size = 16
-    a_dtype = torch.randn((m, k), dtype=dtype, device=device)
-    b_dtype = torch.randn((n, k), dtype=dtype, device=device)
+    a_dtype = torch.randn((m, k), dtype=dtype, device=CUDA_DEVICE)
+    b_dtype = torch.randn((n, k), dtype=dtype, device=CUDA_DEVICE)
 
     a_global_scale = (
         (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a_dtype.flatten(), dim=-1)
@@ -119,7 +108,7 @@ def test_nvfp4_gemm_correctness_vs_reference_batch_invariant_path(
         b_global_scale,
         dtype,
         block_size,
-        device,
+        CUDA_DEVICE,
     )
     out = ops.cutlass_scaled_fp4_mm(
         a_fp4,
@@ -142,14 +131,10 @@ CONSISTENCY_SHAPES = [
 
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("shape", CONSISTENCY_SHAPES)
-@pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_nvfp4_gemm_batch_invariance(
     dtype: torch.dtype,
     shape: tuple[int, int, int],
-    seed: int,
-    device: str,
 ) -> None:
     """Batch invariance: each row of a full-``M`` GEMM matches its ``M=1`` counterpart.
 
@@ -158,12 +143,12 @@ def test_nvfp4_gemm_batch_invariance(
     Catches kernels whose reduction or scheduling depends on ``M`` or adjacent
     rows. Uses larger ``CONSISTENCY_SHAPES`` than the reference test.
     """
-    set_random_seed(seed)
+    set_random_seed(SEED)
     m, n, packed_k = shape
     k = packed_k * 2  # real K (FP4 elements)
 
-    a_dtype = torch.randn((m, k), dtype=dtype, device=device)
-    b_dtype = torch.randn((n, k), dtype=dtype, device=device)
+    a_dtype = torch.randn((m, k), dtype=dtype, device=CUDA_DEVICE)
+    b_dtype = torch.randn((n, k), dtype=dtype, device=CUDA_DEVICE)
 
     a_global_scale = (
         (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a_dtype.flatten(), dim=-1)
