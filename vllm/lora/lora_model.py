@@ -174,14 +174,12 @@ class LoRAModel:
                 ):
                     continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
-                # Case for expert lora weights
+                candidate_module_names = {module_name.rsplit(".", 1)[-1]}
                 if ".experts" in module_name:
-                    expert_idx = module_name.find(".experts")
-                    expert_suffix = module_name[expert_idx + 1 :]
-                    if expert_suffix not in expected_lora_modules:
-                        unexpected_modules.append(module_name)
-
-                elif module_name.rsplit(".", 1)[-1] not in expected_lora_modules:
+                    candidate_module_names.add(
+                        module_name[module_name.find(".experts") + 1 :]
+                    )
+                if not candidate_module_names.intersection(expected_lora_modules):
                     unexpected_modules.append(module_name)
 
             if unexpected_modules:
