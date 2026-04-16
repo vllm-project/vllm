@@ -101,6 +101,9 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                 from .compressed_tensors_moe_wna16 import (
                     CompressedTensorsWNA16MoEMethod,
                 )
+                from .compressed_tensors_moe_w4a16_flydsl import (
+                    CompressedTensorsW4A16FlydslMoEMethod,
+                )
 
                 if (
                     weight_quant.strategy == QuantizationStrategy.GROUP
@@ -110,6 +113,16 @@ class CompressedTensorsMoEMethod(FusedMoEMethodBase):
                     raise ValueError(
                         "WNA16MoE is not supported with actorder=group/dynamic."
                     )
+
+                if (
+                    weight_quant.strategy == QuantizationStrategy.GROUP
+                    and group_size in (-1, 32) and weight_quant.num_bits == 4
+                ):
+                    logger.info_once("Using CompressedTensorsW4A16FlydslMoEMethod")
+                    return CompressedTensorsW4A16FlydslMoEMethod(
+                        weight_quant, input_quant, layer.moe_config
+                    )
+
                 logger.info_once("Using CompressedTensorsWNA16MoEMethod")
                 return CompressedTensorsWNA16MoEMethod(
                     weight_quant, input_quant, layer.moe_config
