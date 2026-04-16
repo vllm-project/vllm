@@ -100,6 +100,11 @@ struct BF16Vec16 : public Vec<BF16Vec16> {
     reg.val[1] = (__vector signed short)vec_xl(16, (signed short*)ptr);
   }
 
+  // Non-temporal load constructor (stub - VSX doesn't have direct NT load support)
+  explicit BF16Vec16(bool, const void* ptr) : BF16Vec16(ptr) {
+    // Falls back to regular load (same as ARM ASIMD approach)
+  }
+
   explicit BF16Vec16(const FP32Vec16&);
 
   void save(void* ptr) const {
@@ -377,6 +382,11 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[1] = vec_xl(16, ptr);
     reg.val[2] = vec_xl(32, ptr);
     reg.val[3] = vec_xl(48, ptr);
+  }
+
+  // Non-temporal load constructor (stub - VSX doesn't have direct NT load support)
+  explicit FP32Vec16(bool, const float* ptr) : FP32Vec16(ptr) {
+    // Falls back to regular load (same as ARM ASIMD approach)
   }
 
   explicit FP32Vec16(f32x4x4_t data) : reg(data) {}
@@ -793,6 +803,58 @@ inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
 inline void prefetch(const void* addr) {
   __asm__ __volatile__("dcbt 0, %0" : : "r"(addr) : "memory");
 }
+
+// INT8Vec64 - 64 bytes = 4 VSX vectors (4 × 16 bytes)
+struct INT8Vec64 {
+  __vector signed char data[4];
+
+  // Default constructor
+  INT8Vec64() = default;
+
+  // Regular load constructor
+  explicit INT8Vec64(const int8_t* ptr) {
+    data[0] = vec_xl(0, ptr);
+    data[1] = vec_xl(16, ptr);
+    data[2] = vec_xl(32, ptr);
+    data[3] = vec_xl(48, ptr);
+  }
+
+  // Non-temporal load constructor (stub → regular load)
+  explicit INT8Vec64(bool, const int8_t* ptr) : INT8Vec64(ptr) {
+    // Non-temporal load stub - falls back to regular load
+  }
+
+  // Full save
+  void save(int8_t* ptr) const {
+    vec_xst(data[0], 0, ptr);
+    vec_xst(data[1], 16, ptr);
+    vec_xst(data[2], 32, ptr);
+    vec_xst(data[3], 48, ptr);
+  }
+
+  // Masked save (save only elem_num elements)
+  void save(int8_t* ptr, int elem_num) const {
+    if (elem_num <= 0) return;
+    
+    // Save full vectors
+    int full_vecs = elem_num / 16;
+    for (int i = 0; i < full_vecs && i < 4; i++) {
+      vec_xst(data[i], i * 16, ptr);
+    }
+    
+    // Save remaining elements
+    int remaining = elem_num % 16;
+    if (remaining > 0 && full_vecs < 4) {
+      // Use vec_xst_len for partial vector store
+      vec_xst_len(data[full_vecs], ptr + full_vecs * 16, remaining);
+    }
+  }
+
+  // Non-temporal save (stub → regular save)
+  void nt_save(int8_t* ptr) const {
+    save(ptr);
+  }
+
 
 };  // namespace vec_op
 
