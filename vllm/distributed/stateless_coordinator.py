@@ -79,6 +79,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
         host: str = "127.0.0.1",
         global_rank: int = 0,
         global_world_size: int = 1,
+        gloo_timeout_seconds: int | None = None,
     ):
         group_name = group_name or "anonymous"
         self.unique_name = _get_unique_name(group_name)
@@ -130,6 +131,7 @@ class StatelessGroupCoordinator(GroupCoordinator):
                     backend="gloo",
                     group_name=f"{self.unique_name}_cpu",
                     listen_socket=socks[1] if socks else None,
+                    gloo_timeout_seconds=gloo_timeout_seconds,
                 )
                 tcp_store_group = StatelessProcessGroup.create(
                     host=host,

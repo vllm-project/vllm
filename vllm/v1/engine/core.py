@@ -62,6 +62,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.exceptions import EngineLoopPausedError
 from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
@@ -70,13 +71,18 @@ from vllm.v1.engine.utils import (
     get_device_indices,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.fault_tolerance.engine_core_sentinel import (
+    EngineCoreSentinel,
+    fault_tolerant_wrapper,
+)
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import compute_iteration_details
+from vllm.v1.utils import compute_iteration_details, get_engine_client_zmq_addr
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -868,7 +874,6 @@ class EngineCoreProc(EngineCore):
                     vllm_config=vllm_config,
                 )
             self._init_data_parallel(vllm_config)
-
             super().__init__(
                 vllm_config,
                 executor_class,
@@ -876,6 +881,30 @@ class EngineCoreProc(EngineCore):
                 executor_fail_callback,
                 internal_dp_balancing,
             )
+
+            # Initialize fault tolerance settings.
+            self.enable_fault_tolerance = (
+                vllm_config.parallel_config.enable_fault_tolerance
+            )
+            if self.enable_fault_tolerance:
+                assert addresses.fault_tolerance_addresses is not None
+                ft_addresses = addresses.fault_tolerance_addresses
+                engine_core_sentinel_ids = ft_addresses.engine_core_sentinel_identities
+                # The ZMQ address between engine_core_sentinel and worker_sentinel.
+                worker_cmd_addr = get_engine_client_zmq_addr(True, "0.0.0.0")
+                self.engine_core_sentinel = EngineCoreSentinel(
+                    parallel_config=vllm_config.parallel_config,
+                    engine_index=self.engine_index,
+                    engine_input_q=self.input_queue,
+                    engine_fault_socket_addr=ft_addresses.engine_fault_socket_addr,
+                    sentinel_identity=engine_core_sentinel_ids[self.engine_index],
+                    worker_cmd_addr=worker_cmd_addr,
+                )
+                self.model_executor.collective_rpc(
+                    method="create_worker_sentinel",
+                    args=(worker_cmd_addr,),
+                    non_block=False,
+                )
 
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
@@ -974,6 +1003,9 @@ class EngineCoreProc(EngineCore):
                 #    (client_addresses).
                 addresses.inputs = client_addresses.inputs
                 addresses.outputs = client_addresses.outputs
+                addresses.fault_tolerance_addresses = (
+                    client_addresses.fault_tolerance_addresses
+                )
                 yield addresses
 
         # Update config which may have changed from the handshake
@@ -1157,6 +1189,7 @@ class EngineCoreProc(EngineCore):
         """Returns true if shutdown has not been requested."""
         return self.shutdown_state == EngineShutdownState.RUNNING
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
         while self._handle_shutdown():
@@ -1166,6 +1199,14 @@ class EngineCoreProc(EngineCore):
             self._process_engine_step()
 
         raise SystemExit
+
+    def _ensure_busy_loop_running(self):
+        if (
+            self.enable_fault_tolerance
+            and self.engine_core_sentinel.stop_busy_loop.is_set()
+        ):
+            raise EngineLoopPausedError("Engine busy loop is paused.")
+        return True
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1200,9 +1241,10 @@ class EngineCoreProc(EngineCore):
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
-
+        self._ensure_busy_loop_running()
         # Step the engine core.
         outputs, model_executed = self.step_fn()
+        self._ensure_busy_loop_running()
         # Put EngineCoreOutputs into the output queue.
         for output in outputs.items() if outputs else ():
             self.output_queue.put_nowait(output)
@@ -1265,6 +1307,7 @@ class EngineCoreProc(EngineCore):
         """Dispatch request from client."""
 
         if request_type == EngineCoreRequestType.WAKEUP:
+            self._ensure_busy_loop_running()
             return
         elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
@@ -1446,6 +1489,12 @@ class EngineCoreProc(EngineCore):
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
+                    elif request_type == EngineCoreRequestType.UTILITY:
+                        request = generic_decoder.decode(data_frames)
+                        client_index, call_id, method, args = request
+                        if method == "handle_fault":
+                            self.handle_fault(call_id, client_index, args[0])
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
 
@@ -1525,6 +1574,20 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    def handle_fault(self, call_id: int, client_index: int, args: dict):
+        """Call engine_core_sentinel to perform fault tolerance."""
+        uo = UtilityOutput(call_id=call_id)
+        try:
+            ft_result = self.engine_core_sentinel.handle_fault(
+                FaultToleranceRequest(**args)
+            )
+            uo.result = UtilityResult(ft_result)
+        except Exception as e:
+            logger.exception("Call to handle_fault method failed")
+            uo.failure_message = f"Call to handle_fault method failed: {e}"
+        outputs = EngineCoreOutputs(utility_output=uo)
+        self.output_queue.put_nowait((client_index, outputs))
 
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
@@ -1606,6 +1669,11 @@ class EngineCoreProc(EngineCore):
             for client_index, req_ids in by_client.items():
                 self._send_abort_outputs_to_client(list(req_ids), client_index)
 
+    def shutdown(self):
+        super().shutdown()
+        if self.enable_fault_tolerance:
+            self.engine_core_sentinel.shutdown()
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -1660,7 +1728,9 @@ class DPEngineCoreProc(EngineCoreProc):
         assert 0 <= local_dp_rank <= dp_rank < dp_size
 
         self.dp_rank = dp_rank
-        dp_group, dp_store = parallel_config.stateless_init_dp_group(return_store=True)
+        dp_group, dp_store = parallel_config.stateless_init_dp_group(
+            return_store=True,
+        )
         self.dp_group, self.dp_store = dp_group, dp_store
 
     def shutdown(self):
@@ -1724,6 +1794,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
+    @fault_tolerant_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 
@@ -1751,7 +1822,9 @@ class DPEngineCoreProc(EngineCoreProc):
 
                 # We are in a running state and so must execute a dummy pass
                 # if the model didn't execute any ready requests.
+                self._ensure_busy_loop_running()
                 self.execute_dummy_batch()
+                self._ensure_busy_loop_running()
 
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(

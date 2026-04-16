@@ -40,6 +40,7 @@ from vllm.config import (
     DeviceConfig,
     ECTransferConfig,
     EPLBConfig,
+    FaultToleranceConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -418,6 +419,7 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    gloo_timeout_seconds: int | None = ParallelConfig.gloo_timeout_seconds
     numa_bind: bool = ParallelConfig.numa_bind
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
@@ -638,6 +640,12 @@ class EngineArgs:
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
+    # fault tolerance fields (`None` means not explicitly provided).
+    fault_tolerance_config: FaultToleranceConfig | None = get_field(
+        ParallelConfig, "fault_tolerance_config"
+    )
+    enable_fault_tolerance: bool = ParallelConfig.enable_fault_tolerance
+
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
@@ -669,6 +677,10 @@ class EngineArgs:
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
+            )
+        if isinstance(self.fault_tolerance_config, dict):
+            self.fault_tolerance_config = FaultToleranceConfig(
+                **self.fault_tolerance_config
             )
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
@@ -887,6 +899,10 @@ class EngineArgs:
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
         )
+        parallel_group.add_argument(
+            "--gloo-timeout-seconds",
+            **parallel_kwargs["gloo_timeout_seconds"],
+        )
         parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
         parallel_group.add_argument(
             "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
@@ -1023,6 +1039,16 @@ class EngineArgs:
         parallel_group.add_argument("--worker-cls", **parallel_kwargs["worker_cls"])
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
+        )
+        parallel_group.add_argument(
+            "--enable-fault-tolerance", **parallel_kwargs["enable_fault_tolerance"]
+        )
+        parallel_group.add_argument(
+            "--fault-tolerance-config",
+            **{
+                **parallel_kwargs["fault_tolerance_config"],
+                "default": None,
+            },
         )
 
         # KV cache arguments
@@ -1425,6 +1451,13 @@ class EngineArgs:
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
+
+        # If --fault-tolerance-config is provided, enable fault tolerance by default.
+        if args.fault_tolerance_config is not None:
+            args.enable_fault_tolerance = True
+        if args.enable_fault_tolerance and args.fault_tolerance_config is None:
+            args.fault_tolerance_config = FaultToleranceConfig()
+
         # Set the attributes from the parsed arguments.
         engine_args = cls(
             **{attr: getattr(args, attr) for attr in attrs if hasattr(args, attr)}
@@ -1841,6 +1874,7 @@ class EngineArgs:
             nnodes=self.nnodes,
             node_rank=self.node_rank,
             distributed_timeout_seconds=self.distributed_timeout_seconds,
+            gloo_timeout_seconds=self.gloo_timeout_seconds,
             data_parallel_master_ip=data_parallel_address,
             data_parallel_rpc_port=data_parallel_rpc_port,
             data_parallel_backend=self.data_parallel_backend,
@@ -1872,6 +1906,10 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            enable_fault_tolerance=self.enable_fault_tolerance,
+            fault_tolerance_config=(
+                self.fault_tolerance_config or FaultToleranceConfig()
+            ),
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,

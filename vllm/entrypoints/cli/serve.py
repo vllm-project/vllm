@@ -294,6 +294,7 @@ def run_multi_api_server(args: argparse.Namespace):
             output_addresses=addresses.outputs,
             stats_update_address=stats_update_address,
             tensor_queue=tensor_queue,
+            fault_tolerance_addresses=addresses.fault_tolerance_addresses,
         )
 
     # Wait for API servers.

@@ -13,6 +13,7 @@ from torch.distributed import ProcessGroup, ReduceOp, Store
 from typing_extensions import Self
 
 import vllm.envs as envs
+from vllm.config.fault_tolerance import FaultToleranceConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from ray.runtime_env import RuntimeEnv
     from ray.util.placement_group import PlacementGroup
 
+    from vllm.config.fault_tolerance import FaultToleranceConfig
     from vllm.v1.executor import Executor
 else:
     RuntimeEnv = Any
@@ -289,6 +291,9 @@ class ParallelConfig:
     timeout parameter. If None, PyTorch's default timeout is used (600s for NCCL).
     Increase this for multi-node setups where model downloads may be slow."""
 
+    gloo_timeout_seconds: int | None = None
+    """Timeout (in seconds) for gloo communication groups."""
+
     world_size: int = Field(init=False)
     """world_size is TPxPP, it affects the number of workers we create."""
 
@@ -361,6 +366,16 @@ class ParallelConfig:
         This is an internal config that is only valid for and
         should only be set by API server scale-out.
     """
+
+    enable_fault_tolerance: bool = False
+    """Enable fault tolerance for detailed error recovery,
+    such as scaling down fault DPEngineCore.
+    """
+
+    fault_tolerance_config: FaultToleranceConfig = Field(
+        default_factory=FaultToleranceConfig
+    )
+    """The configurations for fault tolerance."""
 
     @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
     @classmethod
@@ -549,14 +564,17 @@ class ParallelConfig:
 
     @overload
     def stateless_init_dp_group(
-        self, return_store: Literal[False] = ...
+        self,
+        return_store: Literal[False] = False,
     ) -> ProcessGroup: ...
     @overload
     def stateless_init_dp_group(
-        self, return_store: Literal[True] = ...
+        self,
+        return_store: Literal[True] = True,
     ) -> tuple[ProcessGroup, Store]: ...
     def stateless_init_dp_group(
-        self, return_store: bool = False
+        self,
+        return_store: bool = False,
     ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race
@@ -585,6 +603,7 @@ class ParallelConfig:
                     backend="gloo",
                     return_store=return_store,
                     listen_socket=listen_socket,
+                    gloo_timeout_seconds=self.gloo_timeout_seconds,
                 )
             except DistNetworkError as e:
                 # We only want to retry when the root cause is EADDRINUSE.
