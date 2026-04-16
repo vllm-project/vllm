@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -49,6 +51,12 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
             "Only nvfp4 quantization are currently supported."
         )
         self.out_dtype = moe_config.in_dtype
+
+        # combine_v2 / overlap attributes, wired up by
+        # DeepEPLLPrepareAndFinalize during post_init_setup.
+        self.down_sm_count: int | None = None
+        self.down_signals: torch.Tensor | None = None
+        self.down_start_event: torch.cuda.Event | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -184,6 +192,9 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
             masked_m=expert_num_tokens,
             workspace=workspace2,
             out=output,
+            down_sm_count=self.down_sm_count,
+            down_signals=self.down_signals,
+            down_start_event=self.down_start_event,
         )
 
 
@@ -211,6 +222,9 @@ def flashinfer_cutedsl_moe_masked(
     masked_m: torch.Tensor,
     workspace: torch.Tensor,
     out: torch.Tensor,
+    down_sm_count: int | None = None,
+    down_signals: torch.Tensor | None = None,
+    down_start_event: torch.cuda.Event | None = None,
 ):
     """
     Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
@@ -336,8 +350,18 @@ def flashinfer_cutedsl_moe_masked(
         a2_global_scale,
     )
 
+    if down_signals is not None:
+        down_signals.zero_()
+        if down_start_event is not None:
+            down_start_event.record()
+
     # Gemm2
     out = out.permute(1, 2, 0)  # requirement of kernel
+    gemm2_kwargs: dict[str, Any] = {}
+    if down_signals is not None:
+        gemm2_kwargs["dst_signals"] = down_signals
+    if down_sm_count is not None:
+        gemm2_kwargs["sm_count"] = down_sm_count
     flashinfer_cutedsl_grouped_gemm_nt_masked(
         (diq, diq_sf),
         (w2.permute(1, 2, 0), w2_blockscale),
@@ -349,5 +373,6 @@ def flashinfer_cutedsl_moe_masked(
         sf_vec_size=sf_vec_size,
         alpha=w2_alpha.view(1, 1, num_experts),
         alpha_dtype=get_cute_dtype(w2_alpha),
+        **gemm2_kwargs,
     )  # in logical [m, k, l]
     out = out.permute(2, 0, 1)

@@ -17,6 +17,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     normalize_batched_scales_shape,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import aux_stream, current_stream
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
     dbo_enabled,
@@ -120,12 +121,24 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         # time. This setting is handled by post_init_setup.
         self.use_ue8m0_dispatch = False
 
+        # combine_v2 uses per-expert completion signals from GEMM2.
+        # GEMM2 overlap additionally runs combine_v2 on aux_stream
+        # concurrently with GEMM2 using SM partitioning.
+        self.use_combine_v2 = (
+            envs.VLLM_DEEPEP_COMBINE_V2 or envs.VLLM_DEEPEP_COMBINE_GEMM2_OVERLAP
+        )
+        self.overlap_enabled = envs.VLLM_DEEPEP_COMBINE_GEMM2_OVERLAP
+        self.overlap_comm_sms = envs.VLLM_DEEPEP_COMBINE_GEMM2_OVERLAP_COMM_SMS
+        self._combine_stream: torch.cuda.Stream | None = None
+        self._combine_signal: torch.Tensor | None = None
+        self._combine_event: torch.cuda.Event | None = None
+        self._signal_expect_value: int = 0
+
     def post_init_setup(self, fused_experts: mk.FusedMoEExperts):
         if not fused_experts.supports_packed_ue8m0_act_scales():
             # Early exit.
-            return
-
-        if self.use_fp8_dispatch:
+            pass
+        elif self.use_fp8_dispatch:
             logger.debug_once(
                 "Update DeepEPLLPrepareFinalize to do packed ue8m0 scales dispatch."
             )
@@ -137,6 +150,83 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
                 "to support quantized activations.",
                 scope="local",
             )
+
+        # Setup combine_v2 signal tensor and (optionally) GEMM2 overlap.
+        if self.use_combine_v2:
+            from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa
+                FlashInferCuteDSLBatchedExperts,
+            )
+
+            if not isinstance(fused_experts, FlashInferCuteDSLBatchedExperts):
+                logger.warning_once(
+                    "combine_v2 requires FlashInferCuteDSLBatchedExperts. "
+                    "Falling back to combine.",
+                    scope="local",
+                )
+                self.use_combine_v2 = False
+                self.overlap_enabled = False
+                return
+
+            num_local_experts = fused_experts.moe_config.num_local_experts
+            device = fused_experts.moe_config.device
+
+            if num_local_experts > 8:
+                logger.warning_once(
+                    "combine_v2 disabled: FlashInfer overlap kernel supports "
+                    f"max 8 local experts, got {num_local_experts}.",
+                    scope="local",
+                )
+                self.use_combine_v2 = False
+                self.overlap_enabled = False
+                return
+
+            total_sms = torch.cuda.get_device_properties(device).multi_processor_count
+
+            # Signal tensor: GEMM2 writes per-expert completion,
+            # combine_v2 polls before sending each expert's output.
+            self._combine_signal = torch.zeros(
+                num_local_experts, dtype=torch.uint32, device=device
+            )
+            fused_experts.down_signals = self._combine_signal
+
+            if self.overlap_enabled:
+                # SM partitioning: restrict GEMM2, run combine_v2
+                # on aux_stream concurrently.
+                compute_sms = total_sms - self.overlap_comm_sms
+
+                self._combine_stream = aux_stream()
+                if self._combine_stream is None:
+                    logger.warning_once(
+                        "GEMM2 overlap disabled: aux_stream not available.",
+                        scope="local",
+                    )
+                    self.overlap_enabled = False
+                    # Fall through — combine_v2 still works without overlap.
+
+            if self.overlap_enabled:
+                self._combine_event = torch.cuda.Event()
+                self._signal_expect_value = compute_sms
+
+                fused_experts.down_sm_count = compute_sms
+                fused_experts.down_start_event = self._combine_event
+
+                logger.info(
+                    "combine_v2 with GEMM2 overlap: %d compute SMs, "
+                    "%d comm SMs, %d local experts",
+                    compute_sms,
+                    self.overlap_comm_sms,
+                    num_local_experts,
+                )
+            else:
+                # No overlap: GEMM2 uses all SMs, combine_v2 runs
+                # sequentially on main stream after GEMM2 completes.
+                self._signal_expect_value = total_sms
+
+                logger.info(
+                    "combine_v2 enabled (no GEMM2 overlap): %d SMs, %d local experts",
+                    total_sms,
+                    num_local_experts,
+                )
 
     def num_dispatchers(self) -> int:
         return self.num_dispatchers_
@@ -415,18 +505,67 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         combine_topk_ids = self._map_global_to_physical_ids(topk_ids)
         # TODO (varun) : Enable zero copy mode
         dbo_maybe_run_recv_hook()
-        _, _, recv_hook = self.buffer.low_latency_combine(
-            fused_expert_output,
-            combine_topk_ids,
-            combine_topk_weights,
-            handle,
-            async_finish=False,
-            zero_copy=False,
-            return_recv_hook=do_recv_hook,
-            out=output,
-        )
 
-        return recv_hook, lambda: None
+        if self.overlap_enabled and self._combine_stream is not None:
+            # GEMM2-combine overlap: combine_v2 on aux_stream,
+            # concurrent with GEMM2 on main stream.
+            assert self._combine_event is not None
+            self._combine_stream.wait_event(self._combine_event)
+            with torch.cuda.stream(self._combine_stream):
+                _, _, recv_hook = self.buffer.low_latency_combine(
+                    fused_expert_output,
+                    combine_topk_ids,
+                    combine_topk_weights,
+                    handle,
+                    async_finish=False,
+                    zero_copy=False,
+                    return_recv_hook=do_recv_hook,
+                    out=output,
+                    overlap=True,
+                    src_signals=self._combine_signal,
+                    src_signal_expect_value=self._signal_expect_value,
+                )
+
+            combine_stream = self._combine_stream
+
+            def _overlap_receiver():
+                current_stream().wait_stream(combine_stream)
+
+            return recv_hook, _overlap_receiver
+
+        elif self.use_combine_v2 and self._combine_signal is not None:
+            # combine_v2 on main stream (no overlap).
+            # GEMM2 already ran to completion and wrote all signals.
+            _, _, recv_hook = self.buffer.low_latency_combine(
+                fused_expert_output,
+                combine_topk_ids,
+                combine_topk_weights,
+                handle,
+                async_finish=False,
+                zero_copy=False,
+                return_recv_hook=do_recv_hook,
+                out=output,
+                overlap=True,
+                src_signals=self._combine_signal,
+                src_signal_expect_value=self._signal_expect_value,
+            )
+
+            return recv_hook, lambda: None
+
+        else:
+            # Original combine path.
+            _, _, recv_hook = self.buffer.low_latency_combine(
+                fused_expert_output,
+                combine_topk_ids,
+                combine_topk_weights,
+                handle,
+                async_finish=False,
+                zero_copy=False,
+                return_recv_hook=do_recv_hook,
+                out=output,
+            )
+
+            return recv_hook, lambda: None
 
     def finalize_async(
         self,
