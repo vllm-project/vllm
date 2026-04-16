@@ -114,7 +114,7 @@ def derive_mamba_conv_split(
     assert len(conv_shape) == 2, f"Expected 2D conv state shape, got {conv_shape}"
 
     # NOTE (ZhanqiuHu): 3-read requires DS layout, which is already asserted
-    # in nixl_connector __init__.  Use it directly instead of heuristic detection.
+    # in nixl worker __init__.  Use it directly instead of heuristic detection.
     assert is_conv_state_dim_first(), "3-read requires DS conv state layout"
     local_conv_dim = conv_shape[0]  # DS: (conv_dim_local, conv_rows)
     conv_rows = conv_shape[1]
