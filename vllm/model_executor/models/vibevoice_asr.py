@@ -685,12 +685,13 @@ class VibeVoiceAudioEncoder(nn.Module):
         # Tokenizers expect (B, C, T)
         audio_input = audio.unsqueeze(1)
 
+        # VAE tokenizers are frozen inference components; connectors are trainable.
         with torch.no_grad():
             acoustic_out = self.acoustic_tokenizer.encode(audio_input)
-            acoustic_embeds = self.acoustic_connector(acoustic_out.mean)
-
             semantic_out = self.semantic_tokenizer.encode(audio_input)
-            semantic_embeds = self.semantic_connector(semantic_out.mean)
+
+        acoustic_embeds = self.acoustic_connector(acoustic_out.mean)
+        semantic_embeds = self.semantic_connector(semantic_out.mean)
 
         return acoustic_embeds + semantic_embeds
 
