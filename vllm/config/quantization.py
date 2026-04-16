@@ -19,6 +19,10 @@ class OnlineQuantScheme(Enum):
     # blocks of 128x128 elements (popularized by DeepSeek)
     FP8_PER_BLOCK = "fp8_per_block"
 
+    # int8, weight-only per-channel quantization for MoE expert weights.
+    # Linear layers remain unquantized.
+    INT8_PER_CHANNEL_WEIGHT_ONLY = "int8_per_channel_weight_only"
+
     # TODO(future PRs): add more online quant schemes here: mxfp8, etc
 
 

@@ -40,6 +40,7 @@ QuantizationMethods = Literal[
     # shorthand for creating a more complicated online quant config object
     "fp8_per_tensor",
     "fp8_per_block",
+    "int8_per_channel_weight_only",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
@@ -47,7 +48,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
     "fbgemm_fp8",
     "fp_quant",
-    "experts_int8",
 ]
 
 # The customized quantization methods which will be added to this dict.
