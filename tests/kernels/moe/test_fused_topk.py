@@ -188,9 +188,7 @@ def test_fused_topk_nan_inf_clamp(
     torch.testing.assert_close(
         ref_weights.to(torch.float32), topk_weights[:1], atol=1e-2, rtol=1e-2
     )
-    torch.testing.assert_close(
-        ref_ids.to(torch.int32), topk_ids[:1], atol=0, rtol=0
-    )
+    torch.testing.assert_close(ref_ids.to(torch.int32), topk_ids[:1], atol=0, rtol=0)
 
     # Poisoned rows: IDs must be unique (no duplicates) and weights must be
     # finite (no NaN/Inf propagation into downstream MoE kernels).
