@@ -14,7 +14,7 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.utils.ompmultiprocessing import OMPProcessManager
+from vllm.utils.ompmultiprocessing import OMPProcessManager, OMPStrategy
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -80,7 +80,7 @@ class CpuPlatform(Platform):
     # 4 on PowerPC, 1 on non-PowerPC architectures
     smt = 1
     global_cpu_mask = None
-    simulate_numa = int(os.environ.get("_SIM_MULTI_NUMA", 0))
+    simulate_numa = int(os.environ.get("_SIM_MULTI_NUMA", 1))
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -339,6 +339,29 @@ class CpuPlatform(Platform):
                 * vllm_config.parallel_config._api_process_count
             )
 
+        if os.environ.get("VLLM_CPU_NUM_OF_RESERVED_CPU", None) is None:
+            om = cls.get_omp_manager()
+            # On large systems reserve at least 1 CPU for the control plane
+            if len(om.omp_places) > 0 and om.total_cpus() > 0:
+                # omp_places are sorted in order of size, the first one is
+                # the biggest
+                # More than 16 cores per node needs at least one core
+                # of control plane reservation
+
+                reservation = 1 if len(om.omp_places[0]) > 16 else 0
+
+                ratio = om.compute_cpus() / om.total_cpus()
+                # add more control plane cores for very large systems
+                if ratio > 0.984:
+                    reservation += int(0.016 * om.total_cpus() / len(om.omp_places))
+                if reservation > 0:
+                    logger.info(
+                        "Not enough resource available for vllm"
+                        "control plane, reserving %d",
+                        reservation,
+                    )
+                    os.environ["VLLM_CPU_NUM_OF_RESERVED_CPU"] = f"{reservation}"
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         # TODO: CPU still sets block_size in check_and_update_config.
@@ -348,128 +371,47 @@ class CpuPlatform(Platform):
     @classmethod
     def get_omp_manager(cls) -> OMPProcessManager:
         # initialise the OMP resource management if need be and return the manager
+
         if cls.omp_process_manager is None:
-            if cls.get_cpu_architecture() == CpuArchEnum.POWERPC:
-                cls.smt = 4
-            cls.omp_process_manager = OMPProcessManager(
-                affinity=cls.get_global_cpu_mask(), smt=cls.smt
+            omp_strategy = OMPStrategy(
+                split=cls.simulate_numa,
+                reserve=int(os.environ.get("VLLM_CPU_NUM_OF_RESERVED_CPU", 0)),
+                merge=int(os.environ.get("VLLM_CPU_MERGE_NUMA_NODES", 1)),
             )
-            # we need to fix up the topology returned by the OMP Manager for
-            # simulated NUMA environments in CI
-            if cls.simulate_numa > 0:
+
+            if (
+                cls.get_cpu_architecture() == CpuArchEnum.POWERPC
+                or cls.get_cpu_architecture() == CpuArchEnum.S390X
+            ):
+                omp_strategy.smt = 4
+
+            cls.omp_process_manager = OMPProcessManager(
+                strategy=omp_strategy,
+                global_mask=os.environ.get("VLLM_CPU_OMP_THREADS_BIND", None),
+            )
+            if len(cls.omp_process_manager.omp_places) > 0:
                 logger.info(
-                    "Adjusting numa topology to resemble at least %d nodes",
-                    int(cls.simulate_numa),
+                    "%d out of %d CPUs available for compute",
+                    cls.omp_process_manager.compute_cpus(),
+                    cls.omp_process_manager.total_cpus(),
                 )
-                om = cls.omp_process_manager
-                while len(om.omp_places) < cls.simulate_numa:
-                    new_omp_places = []
-                    touched = False
-                    for omp_place in om.omp_places:
-                        if len(omp_place["mask"]) > 1:
-                            touched = True
-                            cpu_list = sorted(list(omp_place["mask"]))
-                            new_omp_places.append(
-                                {
-                                    "mask": set(cpu_list[0 : int(len(cpu_list) / 2)]),
-                                    "available": True,
-                                }
-                            )
-                            new_omp_places.append(
-                                {
-                                    "mask": set(cpu_list[int(len(cpu_list) / 2) :]),
-                                    "available": True,
-                                }
-                            )
-                    if touched:
-                        om.omp_places = new_omp_places
-                    else:
-                        raise ValueError(
-                            "Cannot split the existing NUMA topology to match "
-                            "simulation requirements"
-                        )
 
         return cls.omp_process_manager
 
     @classmethod
-    def get_global_cpu_mask(cls) -> set[int]:
-        # get global cpu mask
-        if cls.global_cpu_mask is None:
-            if hasattr(os, "sched_getaffinity"):
-                cls.global_cpu_mask = os.sched_getaffinity(0)
-            else:
-                # macOS does not support sched_getaffinity
-                cpu_count = os.cpu_count() or 1
-                cls.global_cpu_mask = set(range(cpu_count))
-        return cls.global_cpu_mask
-
-    @classmethod
-    def reserve_cpus(cls, reserve: set[int]) -> bool:
-        # remove CPUs from global mask, for now there is no "release" mechanism
-        if cls.omp_process_manager is not None:
-            for place in cls.omp_process_manager.omp_places:
-                if not place["available"]:
-                    return False
-        cls.global_cpu_mask = cls.get_global_cpu_mask() - reserve
-        # reinitialize OMP resource management
-        cls.omp_process_manager = OMPProcessManager(
-            affinity=cls.global_cpu_mask, smt=cls.smt
-        )
-        return True
-
-    @classmethod
-    def discover_numa_topology(cls) -> list[list[int]]:
+    def reserved_cpus(cls) -> set[int]:
         """
         Discover NUMA topology and keep the last physical core of each numa
         into one core group list for nixl start_kv_load()
         """
-        SYS_NODE = "/sys/devices/system/node"
-        SYS_CPU = "/sys/devices/system/cpu"
 
-        if not (os.path.exists(SYS_NODE) and os.path.exists(SYS_CPU)):
-            return []
-
+        om = cls.get_omp_manager()
         core_rsv_for_kv = []
-        for node in os.listdir(SYS_NODE):
-            if not node.startswith("node") or not node[4:].isdigit():
-                continue
-            node_path = f"{SYS_NODE}/{node}"
 
-            seen_phys = set()
-            for cpu in os.listdir(node_path):
-                if not cpu.startswith("cpu") or not cpu[3:].isdigit():
-                    continue
+        for reserved in om.reserved.values():
+            core_rsv_for_kv.extend(reserved)
 
-                cpu_id = int(cpu[3:])
-                # thread_siblings based on cpu_id
-                path = f"{SYS_CPU}/cpu{cpu_id}/topology/thread_siblings_list"
-
-                if os.path.exists(path):
-                    try:
-                        with open(path) as f:
-                            s = f.read()
-                        cpus: list[int] = []
-                        for part in s.strip().split(","):
-                            if "-" in part:
-                                a, b = map(int, part.split("-"))
-                                cpus.extend(range(a, b + 1))
-                            else:
-                                cpus.append(int(part))
-                        siblings = cpus if cpus else [cpu_id]
-                    except (OSError, ValueError):
-                        siblings = [cpu_id]
-                else:
-                    siblings = [cpu_id]
-
-                phys = min(siblings)
-
-                if phys not in seen_phys:
-                    seen_phys.add(phys)
-
-            if len(seen_phys) > 0:
-                core_rsv_for_kv.append(list(seen_phys))
-
-        return core_rsv_for_kv
+        return set(core_rsv_for_kv)
 
     @classmethod
     def is_pin_memory_available(cls) -> bool:

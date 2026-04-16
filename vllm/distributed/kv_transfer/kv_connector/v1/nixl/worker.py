@@ -215,13 +215,9 @@ class NixlConnectorWorker:
 
         # reserve different cores for start_load_kv() from model_forward()
         if self.device_type == "cpu":
-            numa_core_list = current_platform.discover_numa_topology()
-            # setup one last core in each numa for kv transfer.
-            rsv_cores_for_kv = [
-                max(each_numa_core_list) for each_numa_core_list in numa_core_list
-            ]
+            rsv_cores_for_kv = current_platform.reserved_cpus()
 
-            if rsv_cores_for_kv:
+            if len(rsv_cores_for_kv) > 0:
                 if not hasattr(os, "sched_setaffinity"):
                     raise NotImplementedError(
                         "os.sched_setaffinity is not available on this platform"

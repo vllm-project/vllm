@@ -78,6 +78,17 @@ class CPUWorker(Worker):
 
         # Note: unique identifier for creating allreduce shared memory
         os.environ["VLLM_DIST_IDENT"] = self.distributed_init_method.split(":")[-1]
+
+        # nice down the CPU compute threads if there is no spare resource to run
+        # the control plane (Arm, PPC in HPC mode, etc)
+
+        om = current_platform.get_omp_manager()
+        if len(om.omp_places) > 0 and om.compute_cpus() == om.total_cpus():
+            logger.info(
+                "No resource to run control plane. Decreasing compute threads priority"
+            )
+            os.nice(10)
+
         # Initialize the distributed environment.
         init_worker_distributed_environment(
             self.vllm_config,

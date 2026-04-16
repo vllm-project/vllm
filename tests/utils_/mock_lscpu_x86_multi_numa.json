@@ -1,0 +1,12 @@
+{
+  "cpus": [
+    {"cpu": "0", "core": "0", "socket": "0", "node": "0"},
+    {"cpu": "1", "core": "1", "socket": "0", "node": "0"},
+    {"cpu": "2", "core": "2", "socket": "0", "node": "0"},
+    {"cpu": "3", "core": "3", "socket": "0", "node": "0"},
+    {"cpu": "4", "core": "4", "socket": "1", "node": "1"},
+    {"cpu": "5", "core": "5", "socket": "1", "node": "1"},
+    {"cpu": "6", "core": "6", "socket": "1", "node": "1"},
+    {"cpu": "7", "core": "7", "socket": "1", "node": "1"}
+  ]
+}

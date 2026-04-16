@@ -1,0 +1,29 @@
+{
+  "cpus": [
+    {"cpu": "0", "core": "0", "socket": "0", "node": "0", "book": "0"},
+    {"cpu": "2", "core": "2", "socket": "0", "node": "0", "book": "0"},
+    {"cpu": "4", "core": "4", "socket": "0", "node": "0", "book": "0"},
+    {"cpu": "6", "core": "6", "socket": "0", "node": "0", "book": "0"},
+    {"cpu": "8", "core": "8", "socket": "0", "node": "0", "book": "0"},
+    {"cpu": "10", "core": "10", "socket": "0", "node": "0", "book": "0"},
+    {"cpu": "12", "core": "12", "socket": "0", "node": "0", "book": "0"},
+    {"cpu": "14", "core": "14", "socket": "0", "node": "0", "book": "1"},
+    {"cpu": "16", "core": "16", "socket": "0", "node": "0", "book": "1"},
+    {"cpu": "18", "core": "18", "socket": "0", "node": "0", "book": "1"},
+    {"cpu": "20", "core": "20", "socket": "0", "node": "0", "book": "1"},
+    {"cpu": "22", "core": "22", "socket": "0", "node": "0", "book": "1"},
+    {"cpu": "24", "core": "24", "socket": "0", "node": "0", "book": "1"},
+    {"cpu": "26", "core": "26", "socket": "0", "node": "0", "book": "1"},
+    {"cpu": "28", "core": "28", "socket": "0", "node": "0", "book": "2"},
+    {"cpu": "30", "core": "30", "socket": "0", "node": "0", "book": "2"},
+    {"cpu": "32", "core": "32", "socket": "0", "node": "0", "book": "2"},
+    {"cpu": "34", "core": "34", "socket": "0", "node": "0", "book": "2"},
+    {"cpu": "36", "core": "36", "socket": "0", "node": "0", "book": "2"},
+    {"cpu": "38", "core": "38", "socket": "0", "node": "0", "book": "2"},
+    {"cpu": "40", "core": "40", "socket": "0", "node": "0", "book": "2"},
+    {"cpu": "42", "core": "42", "socket": "0", "node": "0", "book": "3"},
+    {"cpu": "44", "core": "44", "socket": "0", "node": "0", "book": "3"},
+    {"cpu": "46", "core": "46", "socket": "0", "node": "0", "book": "3"},
+    {"cpu": "48", "core": "48", "socket": "0", "node": "0", "book": "3"}
+  ]
+}
