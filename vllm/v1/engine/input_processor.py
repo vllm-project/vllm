@@ -188,14 +188,8 @@ class InputProcessor:
         Uses ``get_and_update_item()`` with an empty prompt_updates list,
         since token expansion has already been handled externally.
         """
-        cache = getattr(self.renderer, "mm_processor_cache", None)
+        cache = self.renderer.mm_processor_cache
         if cache is None:
-            # No cache configured — record queries (not hits) for
-            # observability so the metric reflects items were seen.
-            mm_cache_stats = getattr(self.renderer, "_mm_cache_stats", None)
-            if mm_cache_stats is not None:
-                total = sum(len(h) for h in mm_hashes.values())
-                mm_cache_stats.record(total, 0)
             return
         try:
             for modality, hashes in mm_hashes.items():
@@ -212,7 +206,7 @@ class InputProcessor:
             # Update cache stats to reflect the externally processed items
             self.renderer.update_mm_cache_stats()
         except Exception:
-            logger.debug(
+            logger.warning(
                 "Failed to inject mm_kwargs into processor cache",
                 exc_info=True,
             )
