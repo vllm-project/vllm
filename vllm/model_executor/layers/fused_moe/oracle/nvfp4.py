@@ -100,7 +100,6 @@ def backend_to_kernel_cls(
 
         return [FlashInferCuteDSLExperts]
 
-<<<<<<< HEAD
     elif backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED:
         from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutedsl_batched_moe import (  # noqa: E501
             FlashInferCuteDSLBatchedExperts,
