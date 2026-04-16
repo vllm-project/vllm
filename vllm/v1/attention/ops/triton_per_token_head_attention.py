@@ -168,6 +168,219 @@ def _pth_attn_stage1(
 
 
 # ------------------------------------------------------------------ #
+#  Stage 1 — GQA/MQA grouped Q-heads with int8 WMMA/MFMA              #
+# ------------------------------------------------------------------ #
+
+
+@triton.jit
+def _pth_attn_stage1_gqa_wmma(
+    Q_ptr,
+    K_ptr,
+    V_ptr,
+    K_scale_ptr,
+    V_scale_ptr,
+    Block_table_ptr,
+    Q_to_req_ptr,
+    Q_to_klen_ptr,
+    Mid_o_ptr,
+    stride_q_tok,
+    stride_q_h,
+    stride_kc_blk,
+    stride_kc_slot,
+    stride_kc_head,
+    stride_vc_blk,
+    stride_vc_slot,
+    stride_vc_head,
+    stride_ks_blk,
+    stride_ks_slot,
+    stride_ks_head,
+    stride_vs_blk,
+    stride_vs_slot,
+    stride_vs_head,
+    stride_bt_r,
+    stride_mid_q,
+    stride_mid_h,
+    stride_mid_s,
+    HQ: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_KV_SPLITS: tl.constexpr,
+    KV_GROUP_SIZE: tl.constexpr,
+    ATTN_SCALE: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    QK_INT8_WMMA: tl.constexpr = False,
+):
+    """Split-KV stage1 that groups the ``KV_GROUP_SIZE`` Q-heads sharing a
+    KV head into a single ``BLOCK_M × HEAD_DIM`` tile.
+
+    Grouping amortizes the K/V loads across the group (each K tile feeds
+    all ``KV_GROUP_SIZE`` Q-heads instead of being reloaded per head) and
+    — more importantly — lets the Q·Kᵀ dot be issued as a real ``tl.dot``
+    of shape ``[BLOCK_M, HEAD_DIM] × [HEAD_DIM, BLOCK_KV]``, which lowers
+    to RDNA3/4 WMMA or CDNA2/3 MFMA. The non-grouped ``_pth_attn_stage1``
+    kernel uses an elementwise multiply-reduce that bypasses the matrix
+    units entirely.
+
+    ``BLOCK_M`` is padded to ≥16 (the smallest WMMA/MFMA M dimension).
+    Rows beyond ``KV_GROUP_SIZE`` are masked to -inf before the softmax
+    and zeroed in the store. Stage 2 (``_fwd_kernel_stage2``) consumes
+    the same ``mid_o`` layout as the non-grouped kernel.
+
+    P·V stays bf16/fp16: the gfx1100 measurement in the unified-attention
+    PR showed per-tile P quantization regresses PV throughput.
+    """
+    q_id = tl.program_id(0)
+    kv_head = tl.program_id(1)
+    sid = tl.program_id(2)
+
+    k_len = tl.load(Q_to_klen_ptr + q_id)
+    if k_len <= 0:
+        return
+
+    split_len = tl.cdiv(k_len, NUM_KV_SPLITS)
+    split_start = split_len * sid
+    split_end = tl.minimum(split_start + split_len, k_len)
+    if split_start >= split_end:
+        return
+
+    req_id = tl.load(Q_to_req_ptr + q_id)
+
+    m_offs = tl.arange(0, BLOCK_M)
+    h_offs = kv_head * KV_GROUP_SIZE + m_offs
+    h_mask = (m_offs < KV_GROUP_SIZE) & (h_offs < HQ)
+
+    d_offs = tl.arange(0, BLOCK_D)
+    d_mask = d_offs < HEAD_DIM
+    kv_range = tl.arange(0, BLOCK_KV)
+
+    q_off = q_id * stride_q_tok + h_offs[:, None] * stride_q_h + d_offs[None, :]
+    Q = tl.load(
+        Q_ptr + q_off,
+        mask=h_mask[:, None] & d_mask[None, :],
+        other=0.0,
+    )
+    q_dtype = Q.dtype
+
+    if QK_INT8_WMMA:
+        Q_f32 = Q.to(tl.float32)
+        q_absmax = tl.max(tl.abs(Q_f32), axis=1)
+        q_scale = tl.maximum(q_absmax * (1.0 / 127.0), 1e-6)
+        Q_q = tl.clamp(Q_f32 * (1.0 / q_scale)[:, None], -128.0, 127.0).to(tl.int8)
+
+    m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
+
+    bt_base = req_id * stride_bt_r
+
+    for start_n in range(split_start, split_end, BLOCK_KV):
+        kv_offs = start_n + kv_range
+        kv_mask = kv_offs < split_end
+
+        page_idx = kv_offs // BLOCK_SIZE
+        page_off = kv_offs % BLOCK_SIZE
+        block_nums = tl.load(
+            Block_table_ptr + bt_base + page_idx, mask=kv_mask, other=0
+        )
+
+        # K : (BLOCK_D, BLOCK_KV) — transposed so tl.dot(Q, K) works.
+        k_addrs = (
+            block_nums[None, :] * stride_kc_blk
+            + page_off[None, :] * stride_kc_slot
+            + kv_head * stride_kc_head
+            + d_offs[:, None]
+        )
+        if QK_INT8_WMMA:
+            K = tl.load(
+                K_ptr + k_addrs,
+                mask=kv_mask[None, :] & d_mask[:, None],
+                other=0,
+            )
+        else:
+            K = tl.load(
+                K_ptr + k_addrs,
+                mask=kv_mask[None, :] & d_mask[:, None],
+                other=0.0,
+            )
+
+        k_sc_addrs = (
+            block_nums * stride_ks_blk
+            + page_off * stride_ks_slot
+            + kv_head * stride_ks_head
+        )
+        k_scales = tl.load(K_scale_ptr + k_sc_addrs, mask=kv_mask, other=0.0)
+
+        if QK_INT8_WMMA:
+            qk_i32 = tl.dot(Q_q, K, out_dtype=tl.int32)
+            qk = qk_i32.to(tl.float32) * (
+                ATTN_SCALE * q_scale[:, None] * k_scales[None, :]
+            )
+        else:
+            qk = tl.dot(Q, K.to(q_dtype))
+            qk = qk * k_scales[None, :] * ATTN_SCALE
+
+        # Mask padded K columns and padded Q-head rows to -inf.
+        qk = tl.where(kv_mask[None, :] & h_mask[:, None], qk, -float("inf"))
+
+        m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
+        qk = qk - m_ij[:, None]
+        p = tl.exp(qk)
+        l_ij = tl.sum(p, axis=1)
+
+        alpha = tl.exp(m_i - m_ij)
+        l_i = l_i * alpha + l_ij
+        acc = acc * alpha[:, None]
+
+        # V : (BLOCK_KV, BLOCK_D)
+        v_addrs = (
+            block_nums[:, None] * stride_vc_blk
+            + page_off[:, None] * stride_vc_slot
+            + kv_head * stride_vc_head
+            + d_offs[None, :]
+        )
+        v = tl.load(
+            V_ptr + v_addrs,
+            mask=kv_mask[:, None] & d_mask[None, :],
+            other=0.0,
+        )
+
+        v_sc_addrs = (
+            block_nums * stride_vs_blk
+            + page_off * stride_vs_slot
+            + kv_head * stride_vs_head
+        )
+        v_scales = tl.load(V_scale_ptr + v_sc_addrs, mask=kv_mask, other=0.0)
+
+        p_casted = (p * v_scales[None, :]).to(q_dtype)
+        v_casted = v.to(q_dtype)
+        acc = tl.dot(p_casted, v_casted, acc)
+
+        m_i = m_ij
+
+    # Store per-row output and LSE for BLOCK_M Q-heads sharing this KV head.
+    safe_l = tl.where(l_i > 0.0, l_i, 1.0)
+    out_addrs = (
+        q_id * stride_mid_q
+        + h_offs[:, None] * stride_mid_h
+        + sid * stride_mid_s
+        + d_offs[None, :]
+    )
+    tl.store(
+        Mid_o_ptr + out_addrs,
+        acc / safe_l[:, None],
+        mask=h_mask[:, None] & d_mask[None, :],
+    )
+
+    lse_addrs = (
+        q_id * stride_mid_q + h_offs * stride_mid_h + sid * stride_mid_s + HEAD_DIM
+    )
+    lse = m_i + tl.log(safe_l)
+    tl.store(Mid_o_ptr + lse_addrs, lse, mask=h_mask)
+
+
+# ------------------------------------------------------------------ #
 #  CPU-side query maps (vectorized, no per-request Python loop)       #
 # ------------------------------------------------------------------ #
 
@@ -222,6 +435,7 @@ def triton_per_token_head_attention(
     output_buf: torch.Tensor | None = None,
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
+    use_qk_int8_wmma: bool = False,
 ) -> torch.Tensor:
     """Per-token-head split-KV attention.
 
@@ -229,6 +443,13 @@ def triton_per_token_head_attention(
     shape ``(total_q,)`` — typically slices of persistent buffers owned by
     the metadata builder so their pointers stay stable under CUDA graph
     capture/replay.
+
+    When ``use_qk_int8_wmma`` is true and the model has GQA/MQA
+    (``kv_group >= 2``), the grouped-Q-heads kernel
+    (``_pth_attn_stage1_gqa_wmma``) is used: K/V are amortized across
+    the group and the Q·Kᵀ dot is routed through int8 tensor cores.
+    Otherwise (MHA models or bf16 cache) the original per-query
+    elementwise kernel is used.
     """
     total_q, Hq, D = query.shape
     Hk = key_cache.shape[2]
@@ -238,6 +459,12 @@ def triton_per_token_head_attention(
     block_size = key_cache.shape[1]
     BLOCK_D = triton.next_power_of_2(D)
     NUM_KV_SPLITS = max_num_kv_splits
+
+    # WMMA/MFMA path needs at least 16 rows in the M dimension; for
+    # kv_group < 2 the waste dominates and the original per-query kernel
+    # is preferred. kv_group > 32 not handled (unusual; would need an
+    # inner loop over groups).
+    use_grouped_wmma = use_qk_int8_wmma and 2 <= kv_group <= 32
 
     # Pre-allocated buffer reuse (TQ pattern: allocate once, slice by batch)
     if mid_o_buf is not None and mid_o_buf.shape[0] >= total_q:
@@ -267,45 +494,91 @@ def triton_per_token_head_attention(
         if buf_holder is not None:
             buf_holder._pth_lse_buf = lse
 
-    # Stage 1
-    _pth_attn_stage1[(total_q, Hq, NUM_KV_SPLITS)](
-        query,
-        key_cache,
-        value_cache,
-        k_scale_cache,
-        v_scale_cache,
-        block_table,
-        q_to_req,
-        q_to_klen,
-        mid_o,
-        query.stride(0),
-        query.stride(1),
-        key_cache.stride(0),
-        key_cache.stride(1),
-        key_cache.stride(2),
-        value_cache.stride(0),
-        value_cache.stride(1),
-        value_cache.stride(2),
-        k_scale_cache.stride(0),
-        k_scale_cache.stride(1),
-        k_scale_cache.stride(2),
-        v_scale_cache.stride(0),
-        v_scale_cache.stride(1),
-        v_scale_cache.stride(2),
-        block_table.stride(0),
-        mid_o.stride(0),
-        mid_o.stride(1),
-        mid_o.stride(2),
-        HEAD_DIM=D,
-        BLOCK_SIZE=block_size,
-        NUM_KV_SPLITS=NUM_KV_SPLITS,
-        KV_GROUP_SIZE=kv_group,
-        ATTN_SCALE=scale,
-        BLOCK_D=BLOCK_D,
-        BLOCK_KV=block_kv,
-        num_warps=4,
-        num_stages=2,
-    )
+    # Stage 1 — dispatch to grouped-WMMA kernel when profitable, else the
+    # original per-query elementwise kernel. Both write the same mid_o
+    # layout consumed by _fwd_kernel_stage2 below.
+    if use_grouped_wmma:
+        BLOCK_M = max(16, triton.next_power_of_2(kv_group))
+        _pth_attn_stage1_gqa_wmma[(total_q, Hk, NUM_KV_SPLITS)](
+            query,
+            key_cache,
+            value_cache,
+            k_scale_cache,
+            v_scale_cache,
+            block_table,
+            q_to_req,
+            q_to_klen,
+            mid_o,
+            query.stride(0),
+            query.stride(1),
+            key_cache.stride(0),
+            key_cache.stride(1),
+            key_cache.stride(2),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            value_cache.stride(2),
+            k_scale_cache.stride(0),
+            k_scale_cache.stride(1),
+            k_scale_cache.stride(2),
+            v_scale_cache.stride(0),
+            v_scale_cache.stride(1),
+            v_scale_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            HQ=Hq,
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group,
+            ATTN_SCALE=scale,
+            BLOCK_D=BLOCK_D,
+            BLOCK_M=BLOCK_M,
+            BLOCK_KV=block_kv,
+            QK_INT8_WMMA=True,
+            num_warps=4,
+            num_stages=2,
+        )
+    else:
+        _pth_attn_stage1[(total_q, Hq, NUM_KV_SPLITS)](
+            query,
+            key_cache,
+            value_cache,
+            k_scale_cache,
+            v_scale_cache,
+            block_table,
+            q_to_req,
+            q_to_klen,
+            mid_o,
+            query.stride(0),
+            query.stride(1),
+            key_cache.stride(0),
+            key_cache.stride(1),
+            key_cache.stride(2),
+            value_cache.stride(0),
+            value_cache.stride(1),
+            value_cache.stride(2),
+            k_scale_cache.stride(0),
+            k_scale_cache.stride(1),
+            k_scale_cache.stride(2),
+            v_scale_cache.stride(0),
+            v_scale_cache.stride(1),
+            v_scale_cache.stride(2),
+            block_table.stride(0),
+            mid_o.stride(0),
+            mid_o.stride(1),
+            mid_o.stride(2),
+            HEAD_DIM=D,
+            BLOCK_SIZE=block_size,
+            NUM_KV_SPLITS=NUM_KV_SPLITS,
+            KV_GROUP_SIZE=kv_group,
+            ATTN_SCALE=scale,
+            BLOCK_D=BLOCK_D,
+            BLOCK_KV=block_kv,
+            num_warps=4,
+            num_stages=2,
+        )
 
     # Stage 2
     _fwd_kernel_stage2[(total_q, Hq)](

@@ -998,6 +998,9 @@ class TritonAttentionImpl(AttentionImpl):
                 mid_o_buf = getattr(layer, "_pth_mid_o_buf", None)
                 output_buf = getattr(layer, "_pth_output_buf", None)
                 lse_buf = getattr(layer, "_pth_lse_buf", None)
+                use_qk_int8_wmma = (
+                    key_cache.dtype == torch.int8 and current_platform.is_rocm()
+                )
                 triton_per_token_head_attention(
                     query=query[:num_actual_tokens],
                     key_cache=key_cache,
@@ -1014,6 +1017,7 @@ class TritonAttentionImpl(AttentionImpl):
                     output_buf=output_buf,
                     lse_buf=lse_buf,
                     buf_holder=layer,
+                    use_qk_int8_wmma=use_qk_int8_wmma,
                 )
                 return output
         # FP8 per-tensor / auto path (original flow).
