@@ -550,20 +550,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     output=output,
                 )
 
+            encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
-                self.layer_name,
+                encoded,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
             output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
+
             torch.ops.vllm.unified_mla_attention_with_output(
                 q,
                 kv_c_normed,
                 k_pe,
                 output,
-                self.layer_name,
+                encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             return output
@@ -1166,6 +1168,11 @@ def unified_mla_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
+    # that ensures torch.compile preserves ordering between KV cache update and
+    # attention forward.
+    del kv_cache_dummy_dep
+    layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache = _get_mla_context(layer_name)
     layer.forward_impl(
         q,

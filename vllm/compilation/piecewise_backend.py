@@ -378,6 +378,9 @@ class PiecewiseBackend:
             return self.graph(*args)
 
         range_entry = self._find_range_for_shape(runtime_shape)
+        assert range_entry is not None, (
+            f"Shape: {runtime_shape} out of considered ranges: {self.compile_ranges}"
+        )
 
         assert range_entry.compiled, (
             "All ranges should be compiled or loaded up front in "

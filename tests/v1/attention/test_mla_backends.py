@@ -8,6 +8,9 @@ Known Issues:
   test_backend_correctness[small_prefill], but passes when run alone.
 """
 
+import os
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -17,7 +20,13 @@ from tests.v1.attention.utils import (
     create_vllm_config,
     try_get_attention_backend,
 )
+from vllm import LLM, SamplingParams
 from vllm import _custom_ops as ops
+from vllm.config.compilation import (
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+)
 from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
@@ -1138,34 +1147,24 @@ def test_mla_numerical_accuracy_compile_cuda_graphs(model):
     result was generated with same parameters, but with VLLM_MLA_EXPOSED_SPLIT
     = 0.
     """
-    import os
+    with patch.dict(os.environ, {"VLLM_MLA_EXPOSED_SPLIT": "1"}):
+        prompts = ["The capital of France is"]
+        sampling_params = SamplingParams(max_tokens=20, temperature=0, seed=42)
 
-    from vllm import LLM, SamplingParams
-    from vllm.config.compilation import (
-        CompilationConfig,
-        CompilationMode,
-        CUDAGraphMode,
-    )
+        llm_exposed = LLM(
+            model=model,
+            max_model_len=256,
+            trust_remote_code=True,
+            disable_log_stats=True,
+            gpu_memory_utilization=0.5,  # Reduced to allow sequential runs
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+                use_inductor_graph_partition=True,
+            ),
+        )
 
-    os.environ["VLLM_MLA_EXPOSED_SPLIT"] = "1"
-    prompts = ["The capital of France is"]
-
-    sampling_params = SamplingParams(max_tokens=20, temperature=0, seed=42)
-
-    llm_exposed = LLM(
-        model=model,
-        max_model_len=256,
-        trust_remote_code=True,
-        disable_log_stats=True,
-        gpu_memory_utilization=0.5,  # Reduced to allow sequential runs
-        compilation_config=CompilationConfig(
-            mode=CompilationMode.VLLM_COMPILE,
-            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
-            use_inductor_graph_partition=True,
-        ),
-    )
-
-    actual_result = llm_exposed.generate(prompts, sampling_params)
+        actual_result = llm_exposed.generate(prompts, sampling_params)
     expected_result = (
         " Paris, which is also the largest city in the country."
         " The city is located on the Seine River"
