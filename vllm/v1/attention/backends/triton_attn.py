@@ -34,8 +34,6 @@ from vllm.v1.attention.ops.triton_per_token_head_attention import (
     triton_per_token_head_attention,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
-
-_CONTINUATION_DECODE_THRESHOLD = 128
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
@@ -48,6 +46,8 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+_CONTINUATION_DECODE_THRESHOLD = 128
 
 
 # constants
@@ -485,9 +485,9 @@ class TritonAttentionImpl(AttentionImpl):
 
         # Scale views (fp32) — same underlying storage, different dtype
         raw = kv_cache.untyped_storage()
-        base_f32 = torch.tensor(
-            [], dtype=torch.float32, device=kv_cache.device
-        ).set_(raw)
+        base_f32 = torch.tensor([], dtype=torch.float32, device=kv_cache.device).set_(
+            raw
+        )
 
         s_blk_f32 = s_blk * dtype_sz // 4
         s_slot_f32 = s_slot * dtype_sz // 4
@@ -528,9 +528,9 @@ class TritonAttentionImpl(AttentionImpl):
         hs = padded_hs - scale_pad
 
         raw = kv_cache.untyped_storage()
-        base_f32 = torch.tensor(
-            [], dtype=torch.float32, device=kv_cache.device
-        ).set_(raw)
+        base_f32 = torch.tensor([], dtype=torch.float32, device=kv_cache.device).set_(
+            raw
+        )
 
         kv_half_bytes = block_size * nkv * padded_hs * dtype_sz
         full_block_f32 = 2 * kv_half_bytes // 4

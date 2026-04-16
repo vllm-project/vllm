@@ -167,14 +167,13 @@ def _pth_attn_stage1(
 #  CPU-side query maps (vectorized, no per-request Python loop)       #
 # ------------------------------------------------------------------ #
 
+
 def _build_q_maps(
     query_start_loc_cpu: torch.Tensor,
     seq_lens_cpu: torch.Tensor,
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    q_lens_i32 = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).to(
-        torch.int32
-    )
+    q_lens_i32 = (query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]).to(torch.int32)
     num_reqs = q_lens_i32.shape[0]
     total_q = int(query_start_loc_cpu[-1].item())
 
@@ -188,9 +187,7 @@ def _build_q_maps(
             torch.arange(num_reqs, dtype=torch.int32), q_lens_i32
         )
         cached_len_per_req = seq_lens_i32 - q_lens_i32
-        pos_in_req = (
-            torch.arange(total_q, dtype=torch.int32) - qsl_i32[q_to_req.long()]
-        )
+        pos_in_req = torch.arange(total_q, dtype=torch.int32) - qsl_i32[q_to_req.long()]
         q_to_klen = cached_len_per_req[q_to_req.long()] + pos_in_req + 1
 
     return (
@@ -202,6 +199,7 @@ def _build_q_maps(
 # ------------------------------------------------------------------ #
 #  Launcher (TQ-style pre-allocated buffers + constant splits)        #
 # ------------------------------------------------------------------ #
+
 
 def triton_per_token_head_attention(
     query: torch.Tensor,
