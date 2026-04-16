@@ -658,6 +658,7 @@ async def benchmark(
         connector=connector,
         trust_env=True,
         timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+        read_bufsize=4 * 1024 * 1024,
     )
 
     print("Starting initial single prompt test run...")
