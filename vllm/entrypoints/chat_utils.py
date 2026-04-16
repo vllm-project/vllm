@@ -1080,7 +1080,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         model_config = self.model_config
         data_bytes = data.encode()
 
-        async def _decode() -> tuple[torch.Tensor, str | None]:
+        async def _decode() -> tuple[torch.Tensor, None]:
             loop = asyncio.get_running_loop()
             tensor = await loop.run_in_executor(
                 None, safe_load_prompt_embeds, model_config, data_bytes
