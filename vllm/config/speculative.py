@@ -59,7 +59,7 @@ SpeculativeMethod = Literal[
     "mlp_speculator",
     "draft_model",
     "suffix",
-    "custom_callable",
+    "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
 ]
@@ -197,12 +197,22 @@ class SpeculativeConfig:
     is 'synthetic'. Must be in [0, 1]."""
 
     custom_proposer_backend: str | None = None
-    """Module path to a custom proposer function (e.g., 'my_module.my_draft_func').
-    If provided, this custom function will be used to generate draft tokens instead
-    of built-in proposers. The function must have the signature:
-        def generate_drafts(batch_input_ids: List[List[int]],
-                            draft_len: int, **kwargs) -> torch.Tensor
-    and return a tensor of shape [batch_size, draft_len]."""
+    """Module path to a custom proposer class (e.g., 'my_module.MyCustomProposer').
+    If provided, this custom class will be used to generate draft tokens instead
+    of built-in proposers. The class must implement the interface:
+        class MyCustomProposer:
+            def __init__(self, vllm_config: VllmConfig):
+                ...
+
+            def propose(
+                self,
+                sampled_token_ids: list[list[int]],
+                num_tokens_no_spec: int,
+                token_ids_cpu: torch.Tensor,
+                slot_mappings: torch.Tensor | None = None,
+            ) -> list[list[int]]:
+                ...
+    The propose method must return a list of draft token sequences for each request."""
 
     def compute_hash(self) -> str:
         """
@@ -382,7 +392,7 @@ class SpeculativeConfig:
 
         # infer method from user args
         if self.custom_proposer_backend is not None:
-            self.method = "custom_callable"
+            self.method = "custom_class"
         elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
                 self.method = "ngram"
@@ -417,8 +427,8 @@ class SpeculativeConfig:
                 self.model = "suffix"
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
-            elif self.method == "custom_callable":
-                self.model = "custom_callable"
+            elif self.method == "custom_class":
+                self.model = "custom_class"
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -462,9 +472,9 @@ class SpeculativeConfig:
             self.draft_parallel_config = self.target_parallel_config
         elif self.method == "suffix":
             self._validate_suffix_decoding()
-        elif self.method == "custom_callable":
-            # Custom callable proposer does not need a draft model.
-            # It will dynamically load the user-provided function at runtime.
+        elif self.method == "custom_class":
+            # Custom class proposer does not need a draft model.
+            # It will dynamically load the user-provided class at runtime.
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
             self.draft_model_config = self.target_model_config
@@ -919,7 +929,7 @@ class SpeculativeConfig:
                 "ngram",
                 "suffix",
                 "extract_hidden_states",
-                "custom_callable",
+                "custom_class",
             )
             else self.draft_model_config.model
         )

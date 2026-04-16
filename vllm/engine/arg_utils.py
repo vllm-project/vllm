@@ -1333,10 +1333,11 @@ class EngineArgs:
             "--custom-proposer-backend",
             type=str,
             default=None,
-            help="Module path to a custom proposer function for speculative "
-            "decoding (e.g., 'my_module.my_draft_func'). The function must "
-            "accept batch_input_ids (List[List[int]]) and draft_len (int) "
-            "and return a torch.Tensor of shape [batch_size, draft_len]. "
+            help="Module path to a custom proposer class for speculative "
+            "decoding (e.g., 'my_module.MyCustomProposer'). The class must "
+            "implement a propose() method that accepts sampled_token_ids, "
+            "num_tokens_no_spec, token_ids_cpu, and slot_mappings parameters "
+            "and returns a list of draft token sequences. "
             "This option takes highest priority over --speculative-config.",
         )
         vllm_group.add_argument(

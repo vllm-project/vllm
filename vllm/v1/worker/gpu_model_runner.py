@@ -162,7 +162,7 @@ from vllm.v1.sample.logits_processor.interface import LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
-from vllm.v1.spec_decode.custom_callable_proposer import CustomCallableProposer
+from vllm.v1.spec_decode.custom_class_proposer import CustomClassProposer
 from vllm.v1.spec_decode.dflash import DFlashProposer
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
 from vllm.v1.spec_decode.eagle import EagleProposer
@@ -522,10 +522,10 @@ class GPUModelRunner(
                 | DraftModelProposer
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
-                | CustomCallableProposer
+                | CustomClassProposer
             )
-            if self.speculative_config.method == "custom_callable":
-                custom_proposer = CustomCallableProposer(self.vllm_config)
+            if self.speculative_config.method == "custom_class":
+                custom_proposer = CustomClassProposer(self.vllm_config)
                 self.drafter = custom_proposer
             elif self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -4517,13 +4517,13 @@ class GPUModelRunner(
                 self.input_batch.token_ids_cpu,
                 slot_mappings=slot_mappings,
             )
-        elif spec_config.method == "custom_callable":
-            from vllm.v1.spec_decode.custom_callable_proposer import (
-                CustomCallableProposer,
+        elif spec_config.method == "custom_class":
+            from vllm.v1.spec_decode.custom_class_proposer import (
+                CustomClassProposer,
             )
 
             assert isinstance(sampled_token_ids, list)
-            assert isinstance(self.drafter, CustomCallableProposer)
+            assert isinstance(self.drafter, CustomClassProposer)
             draft_token_ids = self.drafter.propose(
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
