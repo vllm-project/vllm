@@ -9,7 +9,6 @@ import regex as re
 import torch
 
 from vllm import envs
-from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
