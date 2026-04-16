@@ -916,11 +916,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             returned by the engine.
         """
 
-        params: dict[str, Any] | None = (
-            request.kv_transfer_params
-            if hasattr(request, "kv_transfer_params")
-            else None
-        )
+        params: dict[str, Any] | None = getattr(request, "kv_transfer_params", None)
         return_params: dict[str, Any] | None = {} if params is not None else None
 
         if (
@@ -929,9 +925,10 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             and "num_lmcache_extra_cached_token" in params
         ):
             request_tracker = self._get_request_tracker(request.request_id)
-            num_extra_cached_tokens = (
+            num_extra_cached_tokens = max(
+                0,
                 request_tracker.num_lmcache_hit_blocks
-                - request_tracker.num_vllm_hit_blocks
+                - request_tracker.num_vllm_hit_blocks,
             )
             return_params["num_lmcache_extra_cached_token"] = (
                 num_extra_cached_tokens * self.vllm_block_size
