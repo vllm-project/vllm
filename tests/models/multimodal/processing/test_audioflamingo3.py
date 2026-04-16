@@ -142,7 +142,7 @@ def test_audio_token_count_matches_hf_processor_math():
     assert _count_audio_tokens_from_mask(feature_attention_mask, chunk_counts, 1) == 375
 
 
-def test_audio_feature_pipeline_matches_hf_small_config():
+def test_audio_feature_pipeline_matches_hf_small_config(default_vllm_config):
     from transformers.models.audioflamingo3 import (
         modeling_audioflamingo3 as hf_audioflamingo3_modeling,
     )
