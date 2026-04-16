@@ -67,7 +67,7 @@ are a subset of classification models that accept two prompts as input and outpu
 | `LAST` pooling | Sequence-wise | For GPT‑like (causal self‑attention) models, LAST pooling is used by default. This means the last_hidden_states corresponding to the last token is taken as the output.                           |
 | `MEAN` pooling | Sequence-wise | Many studies have shown that averaging the last_hidden_states over all input tokens performs better on certain downstream tasks. Therefore, more and more models are using MEAN pooling.          |
 | `ALL` pooling  | Token-wise    | Outputs the last_hidden_states for all input tokens.                                                                                                                                              |
-| `ALL` pooling  | Token-wise    | Filters and outputs the last_hidden_states corresponding to the token IDs returned by returned_token_ids.                                                                                         |
+| `STEP` pooling | Token-wise    | Filters and outputs the last_hidden_states corresponding to the token IDs returned by returned_token_ids.                                                                                         |
 
 ### Score Types
 

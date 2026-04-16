@@ -17,6 +17,8 @@ logger = init_logger(__name__)
 
 
 class PluginWithoutIOProcessorPlugins(PoolingIOProcessor):
+    # Some models, such as Terratorch (tests/models/test_terratorch.py),
+    # use plugin tasks in the pooler but do not use IO Processor plugins.
     name = "plugin"
 
 

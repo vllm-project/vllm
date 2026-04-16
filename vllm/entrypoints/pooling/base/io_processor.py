@@ -30,6 +30,12 @@ from ..typing import (
 
 
 class PoolingIOProcessor:
+    """Processor for handling preprocessing & postprocessing ops for pooling requests.
+
+    This class manages both online (serving) and offline (batch) processing of pooling
+    requests, handling chat and completion formats.
+    """
+
     name: str
 
     def __init__(
@@ -59,7 +65,7 @@ class PoolingIOProcessor:
     def pre_process_online(self, ctx: PoolingServeContext):
         request = ctx.request
 
-        if isinstance(ctx.request, PoolingChatLikeRequest):
+        if isinstance(request, PoolingChatLikeRequest):
             self._validate_chat_template(
                 request_chat_template=request.chat_template,
                 chat_template_kwargs=request.chat_template_kwargs,

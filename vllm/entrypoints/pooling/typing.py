@@ -66,6 +66,8 @@ PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 
 @dataclass(kw_only=True)
 class PoolingServeContext(Generic[PoolingRequestT]):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request: PoolingRequestT
     raw_request: Request | None = None
     model_name: str
@@ -75,14 +77,14 @@ class PoolingServeContext(Generic[PoolingRequestT]):
     lora_request: LoRARequest | None = None
     engine_inputs: Sequence[EngineInput] | None = None
     prompt_request_ids: list[str] | None = None
-    intermediates: Any | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
     )
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    ## for Long Text Embedding with Chunked Processing
+    original_engine_inputs: Sequence[EngineInput] | None = None
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None

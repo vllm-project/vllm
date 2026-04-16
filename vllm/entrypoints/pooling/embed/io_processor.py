@@ -95,7 +95,7 @@ class EmbedIOProcessor(PoolingIOProcessor):
         if ctx.engine_inputs is None:
             raise ValueError("Engine prompts not available")
 
-        ctx.intermediates = ctx.engine_inputs
+        ctx.original_engine_inputs = ctx.engine_inputs
         request_id = ctx.request_id
         max_model_len = self.model_config.max_model_len
         chunked_engine_inputs: list[EngineInput] = []
@@ -190,10 +190,10 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 aggregator["total_weight"] += weight
                 aggregator["chunk_count"] += 1
 
-        if ctx.intermediates is None:
-            raise ValueError("Original prompts inputs not available")
+        if ctx.original_engine_inputs is None:
+            raise ValueError("Original engine inputs not available")
 
-        original_engine_inputs = cast(list[EngineInput], ctx.intermediates)
+        original_engine_inputs = ctx.original_engine_inputs
         num_prompts = len(original_engine_inputs)
 
         # Finalize aggregated results
