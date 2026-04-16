@@ -10,11 +10,11 @@ The score models is designed to compute similarity scores between two input prom
 - Model Usage: Scoring
 - Pooling Task:
 
-| Score Types        | Pooling Tasks | scoring function         |
-|--------------------|---------------|--------------------------|
-| `cross-encoder`    | `score`       | linear classifier        |
-| `late-interaction` | `token_embed` | late interaction(MaxSim) |
-| `bi-encoder`       | `embed`       | cosine similarity        |
+| Score Types        | Pooling Tasks         | scoring function         |
+|--------------------|-----------------------|--------------------------|
+| `cross-encoder`    | `classify` (see note) | linear classifier        |
+| `late-interaction` | `token_embed`         | late interaction(MaxSim) |
+| `bi-encoder`       | `embed`               | cosine similarity        |
 
 - Offline APIs:
     - `LLM.score`
@@ -22,13 +22,16 @@ The score models is designed to compute similarity scores between two input prom
     - [Score API](scoring.md#score-api) (`/score`)
     - [Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 
+!!! note
+    Only when a classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+
 ## Supported Models
 
 ### Cross-encoder models
 
 [Cross-encoder](https://www.sbert.net/examples/applications/cross-encoder/README.html) (aka reranker) models are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
---8<-- [start:supported-score-models]
+--8<-- [start:supported-cross-encoder-models]
 
 #### Text-only Models
 
@@ -99,7 +102,7 @@ The score models is designed to compute similarity scores between two input prom
     vllm serve Qwen/Qwen3-VL-Reranker-2B --hf_overrides '{"architectures": ["Qwen3VLForSequenceClassification"],"classifier_from_token": ["no", "yes"],"is_original_qwen3_reranker": true}'
     ```
 
---8<-- [end:supported-score-models]
+--8<-- [end:supported-cross-encoder-models]
 
 ### Late-interaction models
 
@@ -157,6 +160,8 @@ The following Score API parameters are supported:
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+--8<-- "vllm/entrypoints/pooling/scoring/protocol.py:scoring-common-params"
+--8<-- "vllm/entrypoints/pooling/scoring/protocol.py:score-request-params"
 ```
 
 #### Examples
@@ -367,6 +372,8 @@ The following rerank api parameters are supported:
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:pooling-common-extra-params"
 --8<-- "vllm/entrypoints/pooling/base/protocol.py:classify-extra-params"
+--8<-- "vllm/entrypoints/pooling/scoring/protocol.py:scoring-common-params"
+--8<-- "vllm/entrypoints/pooling/scoring/protocol.py:rerank-request-params"
 ```
 
 #### Examples

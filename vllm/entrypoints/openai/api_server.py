@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
@@ -155,7 +155,9 @@ async def build_async_engine_client_from_engine_args(
 
 
 def build_app(
-    args: Namespace, supported_tasks: tuple["SupportedTask", ...] | None = None
+    args: Namespace,
+    supported_tasks: tuple["SupportedTask", ...] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -191,7 +193,7 @@ def build_app(
         attach_router as register_sagemaker_api_router,
     )
 
-    register_sagemaker_api_router(app, supported_tasks)
+    register_sagemaker_api_router(app, supported_tasks, model_config)
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.openai.generate.api_router import (
@@ -218,6 +220,12 @@ def build_app(
 
         elastic_ep_attach_router(app)
 
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            register_generative_scoring_api_router,
+        )
+
+        register_generative_scoring_api_router(app)
+
     if "generate" in supported_tasks or "render" in supported_tasks:
         from vllm.entrypoints.serve.render.api_router import (
             attach_router as attach_render_router,
@@ -240,9 +248,9 @@ def build_app(
         register_realtime_api_router(app)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling import register_pooling_api_routers
+        from vllm.entrypoints.pooling.factories import register_pooling_api_routers
 
-        register_pooling_api_routers(app, supported_tasks)
+        register_pooling_api_routers(app, supported_tasks, model_config)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -361,7 +369,6 @@ async def init_app_state(
     state.openai_serving_render = OpenAIServingRender(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        io_processor=engine_client.io_processor,
         model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -370,6 +377,7 @@ async def init_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
@@ -392,6 +400,12 @@ async def init_app_state(
             engine_client, state, args, request_logger, supported_tasks
         )
 
+        from vllm.entrypoints.openai.generative_scoring.api_router import (
+            init_generative_scoring_state,
+        )
+
+        await init_generative_scoring_state(engine_client, state, args, request_logger)
+
     if "transcription" in supported_tasks:
         from vllm.entrypoints.openai.speech_to_text.api_router import (
             init_transcription_state,
@@ -407,7 +421,7 @@ async def init_app_state(
         init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
 
     if any(task in POOLING_TASKS for task in supported_tasks):
-        from vllm.entrypoints.pooling import init_pooling_state
+        from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
@@ -424,13 +438,12 @@ async def init_render_app_state(
 
     Unlike :func:`init_app_state` this function does not require an
     :class:`~vllm.engine.protocol.EngineClient`; it bootstraps the
-    preprocessing pipeline (renderer, io_processor, input_processor)
+    preprocessing pipeline (renderer, input_processor)
     directly from the :class:`~vllm.config.VllmConfig`.
     """
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-    from vllm.plugins.io_processors import get_io_processor
     from vllm.renderers import renderer_from_config
 
     served_model_names = args.served_model_name or [args.model]
@@ -448,15 +461,11 @@ async def init_render_app_state(
         request_logger = None
 
     renderer = renderer_from_config(vllm_config)
-    io_processor = get_io_processor(
-        vllm_config, renderer, vllm_config.model_config.io_processor_plugin
-    )
     resolved_chat_template = load_chat_template(args.chat_template)
 
     state.openai_serving_render = OpenAIServingRender(
         model_config=vllm_config.model_config,
         renderer=renderer,
-        io_processor=io_processor,
         model_registry=model_registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -465,6 +474,7 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
@@ -583,8 +593,10 @@ async def build_and_serve(
         uvicorn_kwargs["log_config"] = log_config
 
     supported_tasks = await engine_client.get_supported_tasks()
+    model_config = engine_client.model_config
+
     logger.info("Supported tasks: %s", supported_tasks)
-    app = build_app(args, supported_tasks)
+    app = build_app(args, supported_tasks, model_config)
     await init_app_state(engine_client, app.state, args, supported_tasks)
 
     logger.info("Starting vLLM server on %s", listen_address)

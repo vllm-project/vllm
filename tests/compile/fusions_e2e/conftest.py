@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
+from collections import defaultdict
 
 import pytest
 import regex as re
@@ -52,6 +53,16 @@ def run_model(compile_config: int | CompilationConfig, model: str, **model_kwarg
         llm.llm_engine.vllm_config.compilation_config.compile_ranges_endpoints
     )
 
+    # Fetch match table from each worker via RPC and sum across workers.
+    worker_tables = llm.llm_engine.engine_core.collective_rpc(
+        "get_compilation_match_table"
+    )
+    combined: defaultdict[str, int] = defaultdict(int)
+    for table in worker_tables:
+        for k, v in table.items():
+            combined[k] += v
+    return dict(combined)
+
 
 @pytest.fixture
 def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
@@ -73,10 +84,14 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         rocm_aiter_ops.refresh_env_variables()
 
         # Filter here to reduce code duplication
+        backend_name = attn_backend.backend.name.lower()
         requires_mla = "deepseek" in model_name.lower()
-        is_mla = "mla" in attn_backend.backend.name.lower()
+        is_mla = "mla" in backend_name
+        # DeepSeek V3.2 uses sparse MLA
+        requires_sparse = "v3.2" in model_name.lower()
+        is_sparse = "sparse" in backend_name
 
-        if requires_mla != is_mla:
+        if requires_mla != is_mla or requires_sparse != is_sparse:
             pytest.skip(
                 f"Incompatible model '{model_name}' and "
                 f"attention backend '{attn_backend.backend.name}'"
@@ -84,7 +99,10 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
 
         # TODO: remove this after finishing migration from envs to model kwargs
         if model_name == "openai/gpt-oss-20b":
-            monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
+            from .common import is_blackwell
+
+            if is_blackwell():
+                monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "1")
 
         # Disable, compile cache to make sure custom passes run.
         # Otherwise, we can't verify fusion happened through the logs.
@@ -110,7 +128,7 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
         )
 
         with caplog_mp_spawn(logging.DEBUG) as log_holder:
-            run_model(full_compilation_config, model_name, **model_kwargs)
+            match_table = run_model(full_compilation_config, model_name, **model_kwargs)
 
         num_compile_ranges = len(full_compilation_config.get_compile_ranges())
         assert num_compile_ranges in [1, 2, 3]
@@ -152,11 +170,14 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
             else:
                 num_ranges_activated = num_compile_ranges
 
+            # TODO: Remove log counting in unit tests
+            # once all matchers implement VllmFusionPatternMatcherPass
             n_expected = tp_size * num_ranges_activated
-            assert len(log_matches) == n_expected, (
-                f"Could not find {n_expected} {match_name} "
-                f"(found {len(log_matches)}) in:\n {log_holder.text}"
-            )
+            if match_name != "attn_quant_fusion":
+                assert len(log_matches) == n_expected, (
+                    f"Could not find {n_expected} {match_name} "
+                    f"(found {len(log_matches)}) in:\n {log_holder.text}"
+                )
 
             expected_matches = getattr(matches, match_name)
 
@@ -211,6 +232,15 @@ def run_e2e_fusion_test(monkeypatch, caplog_mp_spawn):
                     f"Expecting 0 ar_rms on "
                     f"{tp_size * (num_ranges_activated - 1)} large-range "
                     f"entries (SP took precedence), found: {log_matches}"
+                )
+
+            elif match_name == "attn_quant_fusion":
+                actual_match = match_table.get(
+                    "attn_quant_fusion", 0
+                ) + match_table.get("mla_attn_quant_fusion", 0)
+                assert actual_match == expected_matches * n_expected, (
+                    f"Could not find {expected_matches * n_expected} "
+                    f"{match_name} (found {actual_match})."
                 )
             else:
                 expected_matches_list = [expected_matches] * n_expected

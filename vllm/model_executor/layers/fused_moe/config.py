@@ -6,8 +6,7 @@ from typing import Union
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -346,7 +345,7 @@ class FusedMoEQuantConfig:
 
     @property
     def use_fp8_w8a8(self) -> bool:
-        return self.quant_dtype == torch.float8_e4m3fn
+        return self.quant_dtype == current_platform.fp8_dtype()
 
     @property
     def use_int8_w8a8(self) -> bool:
@@ -566,7 +565,7 @@ def fp8_w8a8_moe_quant_config(
     Construct a quant config for fp8 activations and fp8 weights.
     """
     return FusedMoEQuantConfig.make(
-        torch.float8_e4m3fn,
+        current_platform.fp8_dtype(),
         w1_scale=w1_scale,
         g1_alphas=g1_alphas,
         w2_scale=w2_scale,
@@ -1169,8 +1168,13 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
+    # Defaults to hidden_dim if not specified.
+    hidden_dim_unpadded: int | None = None
+    # Defaults to intermediate_size_per_partition if not specified.
+    intermediate_size_per_partition_unpadded: int | None = None
+
     moe_backend: str = "auto"
-    max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+    max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
@@ -1191,6 +1195,13 @@ class FusedMoEConfig:
 
         if self.router_logits_dtype is None:
             self.router_logits_dtype = self.in_dtype
+
+        if self.hidden_dim_unpadded is None:
+            self.hidden_dim_unpadded = self.hidden_dim
+        if self.intermediate_size_per_partition_unpadded is None:
+            self.intermediate_size_per_partition_unpadded = (
+                self.intermediate_size_per_partition
+            )
 
     @property
     def tp_size(self):
