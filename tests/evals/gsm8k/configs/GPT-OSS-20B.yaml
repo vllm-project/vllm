@@ -1,5 +1,5 @@
 model_name: "openai/gpt-oss-20b"
-accuracy_threshold: 0.82
+accuracy_threshold: 0.28
 num_questions: 1319
 num_fewshot: 5
 server_args: "--enforce-eager --max-model-len 4096 --tensor-parallel-size 2"

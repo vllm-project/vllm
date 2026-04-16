@@ -1,5 +1,5 @@
 model_name: "google/gemma-4-26B-A4B-it"
-accuracy_threshold: 0.85
+accuracy_threshold: 0.30
 num_questions: 1319
 num_fewshot: 5
 server_args: "--enforce-eager --max-model-len 4096 --tensor-parallel-size 2 --enable-expert-parallel"

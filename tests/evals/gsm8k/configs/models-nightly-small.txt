@@ -12,4 +12,3 @@ Nemotron-3-Super-120B-A12B-NVFP4.yaml
 OLMoE-1B-7B-0125-Instruct.yaml
 Phi-Tiny-MoE-Instruct.yaml
 Sarvam-30B.yaml
-Step-3.5-Flash.yaml

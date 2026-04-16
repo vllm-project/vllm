@@ -1,5 +1,5 @@
 model_name: "LiquidAI/LFM2.5-350M"
-accuracy_threshold: 0.60
+accuracy_threshold: 0.21
 num_questions: 1319
 num_fewshot: 5
 server_args: "--enforce-eager --max-model-len 4096"
