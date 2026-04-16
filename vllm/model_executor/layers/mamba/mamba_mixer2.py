@@ -22,9 +22,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    QUANTIZED_SSM_STATE_DTYPES,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
+    quantize_scaled,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -488,8 +490,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-        # The tuple is (conv_state, ssm_state)
-        self.kv_cache = (torch.tensor([]), torch.tensor([]))
+        # The tuple is (conv_state, ssm_state, ssm_state_scales)
+        self.kv_cache = (torch.tensor([]), torch.tensor([]), torch.tensor([]))
 
         self.model_config = model_config
         self.cache_config = cache_config
@@ -592,6 +594,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 else self.kv_cache[0].transpose(-1, -2)
             )
             ssm_state = self.kv_cache[1]
+            ssm_state_scales = self.kv_cache[2]
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -721,6 +724,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     ssm_state[kernel_ssm_indices],
                     0,
                 )
+                if ssm_state.dtype in QUANTIZED_SSM_STATE_DTYPES:
+                    decode_scale = ssm_state_scales[kernel_ssm_indices]
+                    initial_states = initial_states.to(torch.float32) * decode_scale
 
             # NOTE: final output is an in-place update of out tensor
             assert preallocated_ssm_out_p is not None
@@ -745,7 +751,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_softplus=True,
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
-                state_dtype=ssm_state.dtype,
+                state_dtype=(
+                    torch.float32
+                    if ssm_state.dtype in QUANTIZED_SSM_STATE_DTYPES
+                    else ssm_state.dtype
+                ),
             )
 
             if is_mamba_cache_all:
@@ -816,22 +826,38 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         + n_blocks_to_fill * chunk_stride : chunk_stride
                     ]
 
-                    # Write the states
+                    # Write the states (quantize if cache dtype requires it)
+                    if ssm_state.dtype in QUANTIZED_SSM_STATE_DTYPES:
+                        from_where, decode_scale = quantize_scaled(
+                            from_where, ssm_state.dtype
+                        )
+                        ssm_state_scales[cache_blocks_to_fill] = decode_scale.unsqueeze(
+                            -1
+                        )
                     ssm_state[cache_blocks_to_fill] = from_where
 
                 # For all seqs, store the last state (note: might be partial):
-                assert state_indices_tensor_p is not None
-                ssm_state[
-                    state_indices_tensor_p.gather(
-                        1, block_idx_last_scheduled_token_p.unsqueeze(1)
-                    ).squeeze(1)
-                ] = varlen_states[last_chunk_indices_p]
+                last_varlen_states = varlen_states[last_chunk_indices_p]
+                last_state_indices = state_indices_tensor_p.gather(
+                    1, block_idx_last_scheduled_token_p.unsqueeze(1)
+                ).squeeze(1)
+                if ssm_state.dtype in QUANTIZED_SSM_STATE_DTYPES:
+                    last_varlen_states, decode_scale = quantize_scaled(
+                        last_varlen_states, ssm_state.dtype
+                    )
+                    ssm_state_scales[last_state_indices] = decode_scale.unsqueeze(-1)
+                ssm_state[last_state_indices] = last_varlen_states
 
             else:
                 # update ssm states
                 # - varlen state is a (num_prefills, nheads, headdim, dstate)
                 #   tensor
                 assert state_indices_tensor_p is not None
+                if ssm_state.dtype in QUANTIZED_SSM_STATE_DTYPES:
+                    varlen_states, decode_scale = quantize_scaled(
+                        varlen_states, ssm_state.dtype
+                    )
+                    ssm_state_scales[state_indices_tensor_p] = decode_scale.unsqueeze(-1)
                 ssm_state[state_indices_tensor_p] = varlen_states
 
         # Process decode requests
@@ -911,9 +937,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 num_accepted_tokens=num_accepted_tokens,
                 cu_seqlens=query_start_loc_d,
                 is_blackwell=self.is_blackwell,
+                state_scale=ssm_state_scales,
             )
 
-    def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
         assert self.model_config is not None
         assert self.cache_config is not None
         return MambaStateDtypeCalculator.mamba2_state_dtype(
@@ -922,7 +949,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             self.cache_config.mamba_ssm_cache_dtype,
         )
 
-    def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=self.intermediate_size,
             tp_world_size=get_tensor_model_parallel_world_size(),

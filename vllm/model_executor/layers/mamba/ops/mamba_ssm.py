@@ -63,6 +63,7 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
 def _selective_scan_update_kernel(
     # Pointers to matrices
     state_ptr,
+    state_scales_ptr,
     rand_seed_ptr,
     x_ptr,
     dt_ptr,
@@ -89,6 +90,9 @@ def _selective_scan_update_kernel(
     stride_state_head,
     stride_state_dim,
     stride_state_dstate,
+    stride_state_scales_batch,
+    stride_state_scales_head,
+    stride_state_scales_dim,
     stride_x_batch,
     stride_x_head,
     stride_x_dim,
@@ -131,6 +135,7 @@ def _selective_scan_update_kernel(
     BLOCK_SIZE_DSTATE: tl.constexpr,
     USE_RS_ROUNDING: tl.constexpr,
     PHILOX_ROUNDS: tl.constexpr,
+    QUANT_MAX: tl.constexpr,
 ):
     pid_m = tl.program_id(axis=0)
     pid_b = tl.program_id(axis=1)
@@ -168,17 +173,30 @@ def _selective_scan_update_kernel(
             dst_state_ptr = state_ptr + (
                 dst_state_batch_idx * stride_state_batch + pid_h * stride_state_head
             )
+            dst_state_scales_ptr = state_scales_ptr + (
+                dst_state_batch_idx * stride_state_scales_batch
+                + pid_h * stride_state_scales_head
+            )
 
         state_batch_indices_ptr += (
             pid_b * stride_state_indices_batch + init_token_idx * stride_state_indices_T
         )
         state_batch_idx = tl.load(state_batch_indices_ptr).to(tl.int64)
         state_ptr += state_batch_idx * stride_state_batch + pid_h * stride_state_head
+        state_scales_ptr += (
+            state_batch_idx * stride_state_scales_batch + pid_h * stride_state_scales_head
+        )
     else:
         dst_state_ptr = (
             state_ptr + pid_b * stride_state_batch + pid_h * stride_state_head
         )
+        dst_state_scales_ptr = state_scales_ptr + (
+            pid_b * stride_state_scales_batch + pid_h * stride_state_scales_head
+        )
         state_ptr += pid_b * stride_state_batch + pid_h * stride_state_head
+        state_scales_ptr += (
+            pid_b * stride_state_scales_batch + pid_h * stride_state_scales_head
+        )
 
     x_ptr += bos * stride_x_batch + pid_h * stride_x_head
     dt_ptr += bos * stride_dt_batch + pid_h * stride_dt_head
@@ -196,15 +214,30 @@ def _selective_scan_update_kernel(
     state_ptrs = state_ptr + (
         offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
     )
+    # Scale pointers: shape (BLOCK_SIZE_M, 1) — one scale per dim channel.
+    state_scales_ptrs = state_scales_ptr + offs_m[:, None] * stride_state_scales_dim
     if not IS_SPEC_DECODING:
         dst_state_ptrs = dst_state_ptr + (
             offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
+        )
+        dst_state_scales_ptrs = (
+            dst_state_scales_ptr + offs_m[:, None] * stride_state_scales_dim
         )
 
     mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
     if HAS_STATE_BATCH_INDICES:
         mask &= state_batch_idx != null_block_id
     state = tl.load(state_ptrs, mask=mask, other=0.0).to(tl.float32)
+
+    # Dequantize block-scaled state (int8 / int16 / fp8).
+    if QUANT_MAX > 0.0:
+        scales_mask = offs_m[:, None] < dim
+        if HAS_STATE_BATCH_INDICES:
+            scales_mask = scales_mask & (state_batch_idx != null_block_id)
+        decode_scale = tl.load(state_scales_ptrs, mask=scales_mask, other=1.0).to(
+            tl.float32
+        )
+        state = state * decode_scale
 
     if HAS_DT_BIAS:
         dt_bias_ptrs = dt_bias_ptr + offs_m * stride_dt_bias_dim
@@ -285,7 +318,22 @@ def _selective_scan_update_kernel(
             z_ptr += stride_z_batch
 
     if not IS_SPEC_DECODING:
-        if USE_RS_ROUNDING:
+        if QUANT_MAX > 0.0:
+            # Block-scale quantize: compute per-dim amax over dstate, encode and
+            # store the decode scale, then clip and cast to the quantized dtype.
+            amax = tl.max(tl.abs(state), axis=1, keep_dims=True)
+            encode_scale = tl.where(amax == 0.0, 1.0, QUANT_MAX / amax)
+            new_decode_scale = 1.0 / encode_scale
+            # Guard scale store: padded CUDA-graph slots have out-of-bounds ptrs.
+            dst_scales_mask = offs_m[:, None] < dim
+            if HAS_STATE_BATCH_INDICES:
+                dst_scales_mask = dst_scales_mask & (state_batch_idx != null_block_id)
+            tl.store(dst_state_scales_ptrs, new_decode_scale, mask=dst_scales_mask)
+            state = state * encode_scale
+            state = tl.extra.cuda.libdevice.round(state)
+            state = tl.minimum(tl.maximum(state, -QUANT_MAX), QUANT_MAX)
+            tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
+        elif USE_RS_ROUNDING:
             # Load random seed
             rand_seed = tl.load(rand_seed_ptr)
             # Generate random offsets for each element in state
@@ -316,6 +364,13 @@ def _selective_scan_update_kernel(
         tl.store(dst_state_ptrs, state, mask=mask)
 
 
+_QUANT_MAX: dict = {
+    torch.int8: 127.0,
+    torch.int16: 32767.0,
+    torch.float8_e4m3fn: 448.0,
+}
+
+
 def selective_state_update(
     state,
     x,
@@ -336,6 +391,7 @@ def selective_state_update(
     is_blackwell=False,
     enable_stochastic_rounding=False,
     cache_philox_rounds=0,
+    state_scale=None,
 ):
     """
     Argument:
@@ -465,6 +521,15 @@ def selective_state_update(
         and dt.stride(-1) == 0
         and dt_bias.stride(-1) == 0
     )
+    quant_max = _QUANT_MAX.get(state.dtype, 0.0)
+    if quant_max > 0.0 and state_scale is None:
+        raise ValueError(
+            f"state_scale is required for quantized state dtype {state.dtype}"
+        )
+    # Provide a unit-stride dummy tensor when no scale is used so the kernel
+    # receives valid (but never accessed) stride values.
+    _dummy_scales = state_scale if state_scale is not None else state[:1, :1, :1, :1]
+
     rand_seed = (
         torch.randint(0, 2**32, (1,), device=state.device)
         if enable_stochastic_rounding
@@ -474,6 +539,7 @@ def selective_state_update(
     with torch.accelerator.device_index(x.device.index):
         _selective_scan_update_kernel[grid](
             state,
+            _dummy_scales,
             rand_seed,
             x,
             dt,
@@ -498,6 +564,9 @@ def selective_state_update(
             state.stride(1),
             state.stride(2),
             state.stride(3),
+            _dummy_scales.stride(0),
+            _dummy_scales.stride(1),
+            _dummy_scales.stride(2),
             x.stride(0),
             x.stride(1),
             x.stride(2),
@@ -533,6 +602,7 @@ def selective_state_update(
             num_warps=num_warps,
             USE_RS_ROUNDING=enable_stochastic_rounding,
             PHILOX_ROUNDS=cache_philox_rounds,
+            QUANT_MAX=quant_max,
         )
 
 

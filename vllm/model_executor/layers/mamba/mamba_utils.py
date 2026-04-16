@@ -96,7 +96,7 @@ class MambaStateDtypeCalculator:
         else:
             temporal_state_dtype = STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype]
 
-        return (conv_state_dtype, temporal_state_dtype)
+        return (conv_state_dtype, temporal_state_dtype, torch.float32)
 
     @classmethod
     def short_conv_state_dtype(
@@ -172,7 +172,7 @@ class MambaStateShapeCalculator:
         state_size: int,
         conv_kernel: int,
         num_spec: int = 0,
-    ) -> tuple[tuple[int, int], tuple[int, int, int]]:
+    ) -> tuple[tuple[int, int], tuple[int, int, int], tuple[int, int, int]]:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
         n_groups = n_groups + cls.extra_groups_for_head_shards(n_groups, tp_world_size)
@@ -187,7 +187,11 @@ class MambaStateShapeCalculator:
         # - they are typically small
         #   e.g., (h_heads, head_dim, state_size) = (128, 64, 128)
         temporal_state_shape = (divide(num_heads, tp_world_size), head_dim, state_size)
-        return conv_state_shape, temporal_state_shape
+        # Block-scale factors for quantized SSM state: one fp32 value per
+        # (head, dim) channel, covering the dstate axis.  Trailing 1 lets the
+        # scale broadcast over dstate in Python without an explicit expand.
+        temporal_state_scales_shape = (divide(num_heads, tp_world_size), head_dim, 1)
+        return conv_state_shape, temporal_state_shape, temporal_state_scales_shape
 
     @classmethod
     def short_conv_state_shape(
@@ -356,7 +360,8 @@ class MambaStateCopyFuncCalculator:
 
     @classmethod
     def mamba2_state_copy_func(cls):
-        return get_conv_copy_spec, get_temporal_copy_spec
+        # Third entry copies ssm_state_scales alongside the temporal state.
+        return get_conv_copy_spec, get_temporal_copy_spec, get_temporal_copy_spec
 
     @classmethod
     def short_conv_state_copy_func(cls):
@@ -374,3 +379,41 @@ class MambaStateCopyFuncCalculator:
             get_conv_copy_spec,
             get_temporal_copy_spec,
         )
+
+
+# Dtypes that require block-scale quantization in the SSM state cache.
+QUANTIZED_SSM_STATE_DTYPES: tuple[torch.dtype, ...] = (
+    torch.int8,
+    torch.int16,
+    torch.float8_e4m3fn,
+)
+
+# Maximum absolute value representable by each quantized dtype.
+_QUANT_MAX: dict[torch.dtype, float] = {
+    torch.int8: 127.0,
+    torch.int16: 32767.0,
+    torch.float8_e4m3fn: 448.0,
+}
+
+
+def quantize_scaled(
+    state: torch.Tensor, dtype: torch.dtype
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize state tensor with dynamic per-head-dim block scales.
+
+    Args:
+        state: fp32 tensor of shape (..., nheads, head_dim, dstate).
+        dtype: target quantized dtype (int8, int16, or float8_e4m3fn).
+
+    Returns:
+        (state_q, decode_scale) where:
+          state_q      has the requested dtype, same shape as state.
+          decode_scale is fp32, shape (..., nheads, head_dim) — the factor to
+                       multiply by when dequantizing (i.e. 1 / encode_scale).
+    """
+    quant_max = _QUANT_MAX[dtype]
+    amax = torch.amax(torch.abs(state), dim=-1, keepdim=True)
+    encode_scale = torch.where(amax == 0.0, torch.ones_like(amax), quant_max / amax)
+    state_q = (state * encode_scale).to(dtype)
+    decode_scale = torch.reciprocal(encode_scale).squeeze(-1)
+    return state_q, decode_scale

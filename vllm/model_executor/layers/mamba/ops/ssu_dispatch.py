@@ -50,6 +50,7 @@ class MambaSSUBackend(ABC):
         num_accepted_tokens: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
+        state_scale: torch.Tensor | None = None,
     ) -> None: ...
 
 
@@ -87,6 +88,7 @@ class TritonSSUBackend(MambaSSUBackend):
         num_accepted_tokens: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
+        state_scale: torch.Tensor | None = None,
     ) -> None:
         self._kernel(
             state,
@@ -108,6 +110,7 @@ class TritonSSUBackend(MambaSSUBackend):
             is_blackwell=is_blackwell,
             enable_stochastic_rounding=self._mamba_config.enable_stochastic_rounding,
             cache_philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds,
+            state_scale=state_scale,
         )
 
 
@@ -149,6 +152,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
         num_accepted_tokens: torch.Tensor | None = None,
         cu_seqlens: torch.Tensor | None = None,
         is_blackwell: bool = False,
+        state_scale: torch.Tensor | None = None,
     ) -> None:
         rand_seed = (
             torch.randint(0, 2**32, (1,), device=state.device)
@@ -178,6 +182,7 @@ class FlashInferSSUBackend(MambaSSUBackend):
             out=out,
             rand_seed=rand_seed,
             philox_rounds=self._mamba_config.stochastic_rounding_philox_rounds or 10,
+            state_scale=state_scale,
         )
 
 
@@ -250,6 +255,7 @@ def selective_state_update(
     num_accepted_tokens: torch.Tensor | None = None,
     cu_seqlens: torch.Tensor | None = None,
     is_blackwell: bool = False,
+    state_scale: torch.Tensor | None = None,
 ) -> None:
     """Unified dispatch for Mamba selective state update.
 
@@ -273,4 +279,5 @@ def selective_state_update(
         num_accepted_tokens=num_accepted_tokens,
         cu_seqlens=cu_seqlens,
         is_blackwell=is_blackwell,
+        state_scale=state_scale,
     )
