@@ -21,8 +21,6 @@ mod gemma4;
 mod kimi;
 mod qwen3;
 
-use std::collections::HashMap;
-
 use thiserror::Error;
 use vllm_text::tokenizers::DynTokenizer;
 
@@ -32,6 +30,7 @@ pub(crate) use self::delimited::DelimitedReasoningParser;
 pub use self::gemma4::Gemma4ReasoningParser;
 pub use self::kimi::KimiReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
+use crate::parser::{ParserFactory, available_parser_hint};
 use crate::request::ChatRequest;
 
 /// Canonical public names for registered reasoning parsers.
@@ -149,24 +148,11 @@ pub enum ReasoningError {
     MissingToken { token: String },
 }
 
-/// Format the available-parser suffix used in user-facing error messages.
-fn available_parser_hint(available_names: &[String]) -> String {
-    if available_names.is_empty() {
-        String::new()
-    } else {
-        format!(" (choose from: {})", available_names.join(", "))
-    }
-}
-
 /// Constructor signature for one registered reasoning parser implementation.
-type ParserCreator = fn(DynTokenizer) -> Result<Box<dyn ReasoningParser>>;
+type ReasoningParserCreator = fn(DynTokenizer) -> Result<Box<dyn ReasoningParser>>;
 
-/// Registry and model matcher for reasoning stream parsers.
-#[derive(Clone, Default)]
-pub struct ReasoningParserFactory {
-    creators: HashMap<String, ParserCreator>,
-    patterns: Vec<(String, String)>,
-}
+/// Registry and model matcher for reasoning parsers.
+pub type ReasoningParserFactory = ParserFactory<ReasoningParserCreator>;
 
 impl ReasoningParserFactory {
     /// Create the default registry with built-in parser names and model mappings.
@@ -212,43 +198,13 @@ impl ReasoningParserFactory {
     where
         T: ReasoningParser + 'static,
     {
-        self.creators.insert(name.to_string(), T::create);
-        self
-    }
-
-    /// Add a case-insensitive substring match from model ID to parser name.
-    pub fn register_pattern(&mut self, pattern: &str, parser_name: &str) -> &mut Self {
-        self.patterns
-            .push((pattern.to_lowercase(), parser_name.to_string()));
-        self
-    }
-
-    /// Return the first registered parser name matching the given model ID.
-    pub fn find_parser_for_model(&self, model_id: &str) -> Option<String> {
-        let model_lower = model_id.to_lowercase();
-        self.patterns
-            .iter()
-            .find(|(pattern, _)| model_lower.contains(pattern))
-            .map(|(_, parser_name)| parser_name.clone())
-    }
-
-    /// Return true if the exact parser name is registered.
-    pub fn contains(&self, name: &str) -> bool {
-        self.creators.contains_key(name)
-    }
-
-    /// Return all registered parser names sorted for stable display.
-    pub fn list(&self) -> Vec<String> {
-        let mut names: Vec<_> = self.creators.keys().cloned().collect();
-        names.sort_unstable();
-        names
+        self.register_creator(name, T::create)
     }
 
     /// Construct a parser from an exact name.
     pub fn create(&self, name: &str, tokenizer: DynTokenizer) -> Result<Box<dyn ReasoningParser>> {
         let creator = self
-            .creators
-            .get(name)
+            .creator(name)
             .ok_or_else(|| ReasoningError::UnknownParser {
                 name: name.to_string(),
                 available_names: self.list(),
@@ -262,12 +218,12 @@ impl ReasoningParserFactory {
         model_id: &str,
         tokenizer: DynTokenizer,
     ) -> Result<Box<dyn ReasoningParser>> {
-        let parser_name =
-            self.find_parser_for_model(model_id)
+        let name =
+            self.resolve_name_for_model(model_id)
                 .ok_or_else(|| ReasoningError::UnknownModel {
                     model_id: model_id.to_string(),
                 })?;
-        self.create(&parser_name, tokenizer)
+        self.create(name, tokenizer)
     }
 }
 

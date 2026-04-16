@@ -19,7 +19,7 @@ pub use event::{
     AssistantToolCall, ChatEvent,
 };
 use futures::{StreamExt, TryStreamExt as _};
-pub use parser_selection::ParserSelection;
+pub use parser::ParserSelection;
 pub use reasoning::{ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory};
 pub use renderers::{ChatRenderer, DynChatRenderer, RenderedPrompt};
 pub use request::{
@@ -27,7 +27,6 @@ pub use request::{
     ChatToolChoice, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
-use thiserror_ext::AsReport;
 use tracing::info;
 pub use vllm_llm::FinishReason;
 
@@ -36,7 +35,7 @@ pub mod backends;
 mod error;
 mod event;
 mod output;
-mod parser_selection;
+mod parser;
 mod reasoning;
 mod renderers;
 mod request;
@@ -246,7 +245,7 @@ impl ChatLlm {
         let parser_name = match &self.reasoning_parser {
             ParserSelection::Auto => self
                 .reasoning_parser_factory
-                .find_parser_for_model(self.text.model_id()),
+                .resolve_name_for_model(self.text.model_id()),
             ParserSelection::None => None,
             ParserSelection::Explicit(name) => {
                 if !self.reasoning_parser_factory.contains(name) {
@@ -257,7 +256,7 @@ impl ChatLlm {
                         ),
                     });
                 }
-                Some(name.clone())
+                Some(name.as_str())
             }
         };
 
@@ -270,17 +269,17 @@ impl ChatLlm {
 
         let parser = self
             .reasoning_parser_factory
-            .create(&parser_name, self.text.tokenizer())
+            .create(parser_name, self.text.tokenizer())
             .map_err(|error| Error::ReasoningParserInitialization {
-                name: parser_name.clone(),
-                message: error.to_report_string(),
+                name: parser_name.to_string(),
+                error,
             })?;
 
         parser
             .adjust_request(request)
             .map_err(|error| Error::ReasoningParserInitialization {
-                name: parser_name,
-                message: error.to_report_string(),
+                name: parser_name.to_string(),
+                error,
             })?;
 
         Ok(Some(parser))

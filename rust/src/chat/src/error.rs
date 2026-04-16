@@ -1,5 +1,8 @@
 use thiserror::Error;
 
+use crate::ReasoningError;
+use crate::parser::available_parser_hint;
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("chat request must contain at least one message")]
@@ -30,8 +33,12 @@ pub enum Error {
         name: String,
         available_names: Vec<String>,
     },
-    #[error("failed to initialize reasoning parser `{name}`: {message}")]
-    ReasoningParserInitialization { name: String, message: String },
+    #[error("failed to initialize reasoning parser `{name}`")]
+    ReasoningParserInitialization {
+        name: String,
+        #[source]
+        error: ReasoningError,
+    },
     #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
@@ -44,11 +51,3 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
-
-fn available_parser_hint(available_names: &[String]) -> String {
-    if available_names.is_empty() {
-        String::new()
-    } else {
-        format!(" (choose from: {})", available_names.join(", "))
-    }
-}
