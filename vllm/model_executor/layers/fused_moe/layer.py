@@ -273,7 +273,7 @@ class FusedMoE(PluggableLayer):
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
         routed_output_transform: torch.nn.Module | None = None,
-        apply_scale_to_output: bool = False,
+        apply_routed_scale_to_fused_output: bool = False,
         zero_expert_type: str | None = None,
     ):
         super().__init__()
@@ -454,7 +454,7 @@ class FusedMoE(PluggableLayer):
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
             routed_scaling_factor=routed_scaling_factor
-            if not apply_scale_to_output
+            if not apply_routed_scale_to_fused_output
             else 1.0,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
@@ -583,7 +583,7 @@ class FusedMoE(PluggableLayer):
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
-            apply_scale_to_output=apply_scale_to_output,
+            apply_routed_scale_to_fused_output=apply_routed_scale_to_fused_output,
             routed_scaling_factor=routed_scaling_factor,
         )
 

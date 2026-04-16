@@ -199,7 +199,7 @@ class MoERunnerBase(MoERunner):
         quant_method: FusedMoEMethodBase,
         enable_dbo: bool,
         routed_output_transform: torch.nn.Module | None = None,
-        apply_scale_to_output: bool = False,
+        apply_routed_scale_to_fused_output: bool = False,  # Flip sense and change name?
         routed_scaling_factor: float = 1.0,
     ):
         super().__init__()
@@ -207,13 +207,17 @@ class MoERunnerBase(MoERunner):
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
-        self.apply_scale_to_output = (
-            apply_scale_to_output and routed_scaling_factor != 1.0
+        self.apply_routed_scale_to_fused_output = (
+            apply_routed_scale_to_fused_output and routed_scaling_factor != 1.0
         )
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
         self.quant_method = quant_method
         self.enable_dbo = enable_dbo
+        self._fused_output_is_reduced = (
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
+        )
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -300,7 +304,7 @@ class MoERunnerBase(MoERunner):
             fused_output = r[0] if isinstance(r, tuple) else r
         return fused_output
 
-    def _maybe_apply_output_scale(
+    def _maybe_apply_routed_scale_to_fused_output(
         self,
         shared_output: torch.Tensor | None,
         fused_output: torch.Tensor,
@@ -308,36 +312,17 @@ class MoERunnerBase(MoERunner):
         """Apply routed_scaling_factor to the output with FP16 overflow
         protection.
 
-        When apply_scale_to_output is True, scales the fused expert output
+        When apply_routed_scale_to_fused_output is True, scales the fused expert output
         by routed_scaling_factor. For FP16, avoid overflow by dividing
         shared_output by the scale instead (the decoder layer compensates
         with matching divisions).
         """
-        if self.apply_scale_to_output:
+        if self.apply_routed_scale_to_fused_output:
             if fused_output.dtype != torch.float16:
                 fused_output *= self.routed_scaling_factor
             elif shared_output is not None:
                 shared_output *= 1.0 / self.routed_scaling_factor
         return shared_output, fused_output
-
-    def _must_reduce_shared_expert_output(self) -> bool:
-        """
-        The shared_experts are typically computed using the RowParallelLinear
-        layer. The result of this function is typically used as
-        the reduce_results argument to the module.
-        When just tensor-parallel is used, it is not required to reduce
-        the shared_experts results immediately. Instead we reduce at the
-        once at the end of the MoE op. (Refer to DeepSeekV2MoE module)
-        With EP and all2all kernels - this is no longer viable as all
-        GPU ranks in DP, produce the complete set of hidden_states.
-        Therefore it is required that we reduce the shared_experts output
-        early.
-        """
-        return (
-            self.shared_experts is not None
-            and self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
-        )
 
     def _maybe_reduce_shared_expert_output(
         self,
@@ -348,14 +333,14 @@ class MoERunnerBase(MoERunner):
 
         This is the "early" all-reduce path. When the combine kernel produces
         already-reduced fused output, shared output must be reduced separately
-        to match. See _must_reduce_shared_expert_output for details.
+        to match.
         """
-        if self._must_reduce_shared_expert_output():
+        if self._fused_output_is_reduced:
             assert shared_output is not None
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
-    def _maybe_reduce_output(
+    def _maybe_reduce_final_output(
         self,
         states: torch.Tensor,
         trunc_size: int,
@@ -369,10 +354,13 @@ class MoERunnerBase(MoERunner):
         """
         result = states[..., :trunc_size]
 
+        # We don't need to reduce the final output if:
+        # - We are not running with TP or DP
+        # - The MK already reduced the fused output itself.
         if (
             not self.moe_config.is_sequence_parallel
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
-            and not self._must_reduce_shared_expert_output()
+            and not self._fused_output_is_reduced
         ):
             result = tensor_model_parallel_all_reduce(result)
 
@@ -400,7 +388,7 @@ class MoERunnerBase(MoERunner):
         For latent MoE, the routed hidden_states may be smaller than
         hidden_dim. Padding ensures uniform tensor sizes through the
         fused MoE kernel. The returned trunc_size is used by
-        _maybe_reduce_output to strip the padding from the result.
+        _maybe_reduce_final_output to strip the padding from the result.
         """
         shared_experts_hidden_dim = (
             shared_experts_input.shape[-1] if shared_experts_input is not None else 0
@@ -579,12 +567,12 @@ class MoERunnerBase(MoERunner):
 
         #
         # Note: there are two all-reduce points below. They are mutually
-        # exclusive, controlled by _must_reduce_shared_expert_output():
+        # exclusive, controlled by _fused_output_is_reduced
         #  - When True: the combine kernel already reduced fused_output,
         #    so we reduce shared_output here to match, then skip the
-        #    all-reduce in _maybe_reduce_output.
+        #    all-reduce in _maybe_reduce_final_output.
         #  - When False: neither output is reduced yet, so we combine
-        #    them first and all-reduce the sum in _maybe_reduce_output.
+        #    them first and all-reduce the sum in _maybe_reduce_final_output.
 
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
@@ -596,7 +584,7 @@ class MoERunnerBase(MoERunner):
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output)
 
-        shared_output, fused_output = self._maybe_apply_output_scale(
+        shared_output, fused_output = self._maybe_apply_routed_scale_to_fused_output(
             shared_output, fused_output
         )
 
@@ -605,7 +593,7 @@ class MoERunnerBase(MoERunner):
         else:
             result = fused_output
 
-        result = self._maybe_reduce_output(result, og_hidden_dim)
+        result = self._maybe_reduce_final_output(result, og_hidden_dim)
 
         return self._maybe_add_zero_expert_output(result)
 

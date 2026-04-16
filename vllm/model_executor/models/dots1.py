@@ -170,7 +170,7 @@ class Dots1MoE(nn.Module):
             scoring_func=config.scoring_func,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_scale_to_output=True,
+            apply_routed_scale_to_fused_output=True,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
