@@ -494,6 +494,29 @@ class RayDistributedExecutor(Executor):
             "get_execute_model_output", step_id=expected_step_id
         )
 
+    @staticmethod
+    def _get_async_pp_refs_pipelined(
+        dag_ref,
+        output_ref,
+        expected_step_id: int,
+        timeout=None,
+    ):
+        """Pipelined variant: the output-fetch RPC was pre-fired at DAG
+        submission time.  We only need to consume the DAG marker (to avoid
+        back-pressure on the compiled-DAG output channel) and return the
+        already-in-flight output ref."""
+        marker = ray.get(dag_ref, timeout=timeout)
+        if not isinstance(marker, tuple) or len(marker) != 2:
+            raise RuntimeError(
+                f"Unexpected PP async marker from compiled DAG: {marker!r}"
+            )
+        _, step_id = marker
+        if step_id != expected_step_id:
+            raise RuntimeError(
+                "PP async marker step mismatch: "
+                f"expected {expected_step_id}, got {step_id}"
+            )
+        return output_ref
 
     def _execute_dag(
         self,
@@ -525,22 +548,37 @@ class RayDistributedExecutor(Executor):
                 assert non_block
 
                 if use_async_pp:
-                    # PP async: first wait for marker, then fetch this step's
-                    # materialized output by step_id.
+                    # PP async: pre-fire the output-fetch RPC immediately
+                    # so it overlaps with DAG execution on the GPU.  The
+                    # worker's get_execute_model_output() will block
+                    # internally (via threading.Event) until
+                    # execute_model_ray() populates the output dict.
                     output_workers = self.pp_tp_workers[-1]
                     assert len(refs) == len(output_workers), (
                         "Ray compiled DAG outputs must match the last PP output "
                         "worker group."
                     )
+                    with self.tracer.log_event(
+                        "ray_executor.prefire_output_fetch"
+                    ):
+                        prefired_output_refs = [
+                            worker.execute_method.remote(
+                                "get_execute_model_output",
+                                step_id=submitted_step_id,
+                            )
+                            for worker in output_workers
+                        ]
                     with self.tracer.log_event("ray_executor.wrap_async_pp_refs"):
                         refs = [
                             partial(
-                                RayDistributedExecutor._get_async_pp_refs,
-                                ref,
-                                worker,
+                                RayDistributedExecutor._get_async_pp_refs_pipelined,
+                                dag_ref,
+                                output_ref,
                                 submitted_step_id,
                             )
-                            for ref, worker in zip(refs, output_workers)
+                            for dag_ref, output_ref in zip(
+                                refs, prefired_output_refs
+                            )
                         ]
                 else:
                     # Non-PP async: delay output retrieval so the driver can

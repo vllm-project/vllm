@@ -3,6 +3,7 @@
 
 import atexit
 import os
+import threading
 import time
 from collections import defaultdict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -67,6 +68,13 @@ try:
             self._pp_execute_model_outputs: dict[int, Any] = {}
             self._pp_async_output_futures: dict[int, Future[Any]] = {}
             self._pp_async_output_materializer = ThreadPoolExecutor(max_workers=1)
+            # Synchronization for pre-fired output-fetch RPCs.  The driver
+            # pre-fires get_execute_model_output(step_id) right after DAG
+            # submission, but the DAG bg thread may not have populated the
+            # output dict yet.  Each step_id gets an Event that the DAG
+            # thread sets after storing the output.
+            self._pp_output_ready: dict[int, threading.Event] = {}
+            self._pp_output_ready_lock = threading.Lock()
             # State for the early sampled-token irecv. The actual P2P traffic
             # runs on GPUModelRunner.pp_sampled_token_group so it does not
             # interfere with Ray compiled-DAG PP communication.
@@ -277,22 +285,18 @@ try:
                             "PP async path requires a step_id."
                         )
                         if isinstance(output, AsyncModelRunnerOutput):
-                            # Keep at most one outstanding deferred async
-                            # output to preserve decode-step ordering.
-                            while self._pp_async_output_futures:
-                                oldest_step = min(self._pp_async_output_futures)
-                                oldest_fut = self._pp_async_output_futures.pop(
-                                    oldest_step
-                                )
-                                self._pp_execute_model_outputs[oldest_step] = (
-                                    oldest_fut.result()
-                                )
                             fut = self._pp_async_output_materializer.submit(
                                 output.get_output
                             )
                             self._pp_async_output_futures[step_id] = fut
                         else:
                             self._pp_execute_model_outputs[step_id] = output
+                        # Signal any pre-fired get_execute_model_output RPC
+                        # that is already waiting for this step's output.
+                        with self._pp_output_ready_lock:
+                            event = self._pp_output_ready.pop(step_id, None)
+                        if event is not None:
+                            event.set()
                         return self.rpc_rank, step_id
                     # Non-PP async: buffer so the driver can schedule the next
                     # batch without blocking on this step's output transfer.
@@ -317,6 +321,20 @@ try:
                     assert self._execute_model_outputs, "No execute_model output available"
                     output = self._execute_model_outputs.popleft()
                 else:
+                    # The driver may pre-fire this RPC right after DAG
+                    # submission.  The DAG bg thread may not have finished
+                    # execute_model_ray yet, so wait for the output to
+                    # become available.
+                    if (
+                        step_id not in self._pp_execute_model_outputs
+                        and step_id not in self._pp_async_output_futures
+                    ):
+                        with self._pp_output_ready_lock:
+                            event = self._pp_output_ready.setdefault(
+                                step_id, threading.Event()
+                            )
+                        event.wait()
+
                     if step_id in self._pp_async_output_futures:
                         fut = self._pp_async_output_futures.pop(step_id)
                         output = fut.result()
