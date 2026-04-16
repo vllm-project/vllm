@@ -274,6 +274,7 @@ class FusedMoE(PluggableLayer):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
+        zero_expert_type: str | None = None,
     ):
         super().__init__()
 
@@ -462,6 +463,8 @@ class FusedMoE(PluggableLayer):
             # TODO(bnell): once we can construct the MK at init time, we
             # can make this a value.
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            zero_expert_type=zero_expert_type,
+            num_logical_experts=self.logical_num_experts,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
