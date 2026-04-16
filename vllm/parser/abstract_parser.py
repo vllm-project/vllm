@@ -87,7 +87,7 @@ class Parser:
         """Specialize the parser for the tokenizer.
         The output of this function may be used to update the class-level attributes.
         """
-        res = {
+        res: dict[str, Any] = {
             "vocab": tokenizer.get_vocab(),
         }
         if cls.tool_parser_cls is not None:
