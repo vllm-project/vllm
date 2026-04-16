@@ -169,8 +169,6 @@ FROM fetch_vllm AS build_vllm
 ARG MAX_JOBS=32
 ENV MAX_JOBS=${MAX_JOBS}
 # Ensure Ray Compiled Graph matches vLLM (base images may ship an older ray; avoids resolver warnings)
-# HIP: gfx1250 FP8 dot builtins need dot11-insts (see cmake/utils.cmake; append helps hipcc in some setups)
-ENV HIPCC_COMPILE_FLAGS_APPEND="-mllvm -mattr=+dot11-insts"
 # Build vLLM (setup.py auto-detects sccache in PATH)
 RUN cd vllm \
     && uv pip install --upgrade 'ray[cgraph]>=2.48.0' \
