@@ -359,7 +359,7 @@ class Scheduler(SchedulerInterface):
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
-        scheduled_running_reqs: list[Request] = []
+        scheduled_running_reqs: set[Request] = set()
         preempted_reqs: list[Request] = []
 
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
@@ -480,7 +480,7 @@ class Scheduler(SchedulerInterface):
                         self.running.remove(preempted_req)
                         if preempted_req in scheduled_running_reqs:
                             preempted_req_id = preempted_req.request_id
-                            scheduled_running_reqs.remove(preempted_req)
+                            scheduled_running_reqs.discard(preempted_req)
                             token_budget += num_scheduled_tokens.pop(preempted_req_id)
                             req_to_new_blocks.pop(preempted_req_id)
                             scheduled_spec_decode_tokens.pop(preempted_req_id, None)
@@ -510,7 +510,7 @@ class Scheduler(SchedulerInterface):
                 break
 
             # Schedule the request.
-            scheduled_running_reqs.append(request)
+            scheduled_running_reqs.add(request)
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -1051,7 +1051,7 @@ class Scheduler(SchedulerInterface):
 
     def _make_cached_request_data(
         self,
-        running_reqs: list[Request],
+        running_reqs: set[Request],
         resumed_reqs: list[Request],
         num_scheduled_tokens: dict[str, int],
         spec_decode_tokens: dict[str, list[int]],
