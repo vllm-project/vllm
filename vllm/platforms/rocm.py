@@ -965,12 +965,14 @@ class RocmPlatform(Platform):
             numa_nodes = []
             for device_id in range(cls.device_count()):
                 physical_device_id = cls.device_id_to_physical_device_id(device_id)
-                numa_node = amdsmi_topo_get_numa_node_number(handles[physical_device_id])
-                if numa_node is None:
+                try:
+                    numa_node = amdsmi_topo_get_numa_node_number(handles[physical_device_id])
+                except AmdSmiException as e:
                     logger.warning(
                         "Could not detect NUMA node for GPU %d, "
-                        "disabling automatic NUMA binding",
+                        "disabling automatic NUMA binding: %s",
                         device_id,
+                        e,
                     )
                     return None
                 numa_nodes.append(numa_node)
