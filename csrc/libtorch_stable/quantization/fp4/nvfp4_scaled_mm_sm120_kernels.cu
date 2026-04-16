@@ -222,10 +222,10 @@ void cutlass_fp4_gemm_dispatch(torch::stable::Tensor& D,
 
   uint32_t const mp2 = std::max(static_cast<uint32_t>(16), next_pow_2(m));
   if (mp2 <= 256) {
-    runGemm<Fp4GemmSm120<sm120_fp4_config_M256, OutType>::Gemm>(
+    runGemm<typename Fp4GemmSm120<sm120_fp4_config_M256, OutType>::Gemm>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   } else {
-    runGemm<Fp4GemmSm120<sm120_fp4_config_default, OutType>::Gemm>(
+    runGemm<typename Fp4GemmSm120<sm120_fp4_config_default, OutType>::Gemm>(
         D, A, B, A_sf, B_sf, alpha, m, n, k, stream);
   }
 }
