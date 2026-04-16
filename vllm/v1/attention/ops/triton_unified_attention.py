@@ -1174,11 +1174,6 @@ def unified_attention(
         is_prefill=False,
     )
 
-    # Route the QK dot through AMD int8 WMMA/MFMA (~2× bf16 throughput on
-    # RDNA3/4 and CDNA2/3) when the KV cache is int8 per-token-head on
-    # ROCm. Also drops the per-tile int8→bf16 cast on K. Only gated for
-    # the 2D kernel — 3D accepts the constexpr for code-reuse but the
-    # launcher leaves it False.
     use_rocm_int8_wmma_qk = (
         kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD and current_platform.is_rocm()
     )
