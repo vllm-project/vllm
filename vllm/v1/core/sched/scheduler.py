@@ -671,6 +671,13 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+                    # Clamp to max_model_len (mirrors the RUNNING path
+                    # guard). This is needed for streaming/resumable
+                    # requests whose prompt can grow across updates.
+                    num_new_tokens = min(
+                        num_new_tokens,
+                        self.max_model_len - 1 - num_computed_tokens,
+                    )
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -686,7 +693,10 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
-                    assert num_new_tokens > 0
+                    if num_new_tokens <= 0:
+                        # Request has reached max_model_len; skip it so
+                        # check_stop can finish it on the next output step.
+                        break
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -1596,6 +1606,20 @@ class Scheduler(SchedulerInterface):
                 # Streaming request finished.
                 return True
             self._update_request_as_session(request, update)
+            # After extending the session with new streaming input, check
+            # if accumulated tokens exceed max_model_len. This prevents a
+            # fatal assertion in the model runner when encoder tokens (e.g.
+            # from continuous audio streaming) grow unboundedly.
+            if request.num_tokens >= self.max_model_len:
+                logger.warning(
+                    "Streaming session %s exceeded max_model_len "
+                    "(%d >= %d) after session update. Finishing request.",
+                    request.request_id,
+                    request.num_tokens,
+                    self.max_model_len,
+                )
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                return True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -1745,6 +1769,23 @@ class Scheduler(SchedulerInterface):
             elif update is not None:
                 # Commence next input chunk.
                 self._update_request_as_session(existing, update)
+                # Check if the session exceeded max_model_len after the
+                # update (e.g. continuous audio streaming accumulating
+                # encoder tokens). Finish the request gracefully instead
+                # of letting it crash in the model runner.
+                if existing.num_tokens >= self.max_model_len:
+                    logger.warning(
+                        "Streaming session %s exceeded max_model_len "
+                        "(%d >= %d) after session update. Finishing "
+                        "request.",
+                        existing.request_id,
+                        existing.num_tokens,
+                        self.max_model_len,
+                    )
+                    self.finish_requests(
+                        existing.request_id,
+                        RequestStatus.FINISHED_LENGTH_CAPPED,
+                    )
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
