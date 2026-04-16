@@ -265,8 +265,10 @@ class UBatchWrapper:
                 ubatch_metadata[0].context.cpu_wait_event.set()
                 for thread in ubatch_threads:
                     thread.join()
-                sorted_results = [value for position, value in sorted(results)]
-                result = torch.cat(sorted_results, dim=0)
+                sorted_results: list[torch.Tensor | None] = [None] * len(results)
+                for position, value in results:
+                    sorted_results[position] = value
+                result = torch.cat(sorted_results, dim=0)  # type: ignore[arg-type]
                 cudagraph_metadata.outputs = result
                 # Join offloader's copy stream after forward to avoid unjoined
                 # stream error. The last layer's start_prefetch forks copy_stream,
@@ -309,8 +311,10 @@ class UBatchWrapper:
             ubatch_metadata[0].context.cpu_wait_event.set()
             for thread in ubatch_threads:
                 thread.join()
-        sorted_results = [value for position, value in sorted(results)]
-        result = torch.cat(sorted_results, dim=0)
+        sorted_results: list[torch.Tensor | None] = [None] * len(results)
+        for position, value in results:
+            sorted_results[position] = value
+        result = torch.cat(sorted_results, dim=0)  # type: ignore[arg-type]
         return result
 
     def _make_ubatch_metadata(
