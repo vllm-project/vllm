@@ -166,6 +166,16 @@ class ToolParser:
                         strict=True,
                     )
                 )
+        elif isinstance(request, ChatCompletionRequest) and request.tool_choice in (
+            "auto",
+            None,
+        ):
+            # tool_choice="auto" (or unset, which defaults to auto when tools
+            # are provided): clear response_format so constrained JSON decoding
+            # doesn't box the model into the schema and block tool-call tokens.
+            # tool_choice="none" is intentionally left alone — the caller asked
+            # for response_format and no tools.
+            request.response_format = None
 
         return request
 
