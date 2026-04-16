@@ -45,6 +45,7 @@ from vllm.config import (
     KVTransferConfig,
     LoadConfig,
     LoRAConfig,
+    MambaConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -72,6 +73,7 @@ from vllm.config.cache import (
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -578,6 +580,7 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
@@ -610,10 +613,12 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+
+    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
-        CacheConfig.enable_mamba_cache_stochastic_rounding
+        MambaConfig.enable_stochastic_rounding
     )
-    mamba_cache_philox_rounds: int = CacheConfig.mamba_cache_philox_rounds
+    mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -655,6 +660,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.mamba_config, dict):
+            self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
@@ -823,6 +830,22 @@ class EngineArgs:
         )
         attention_group.add_argument(
             "--attention-backend", **attention_kwargs["backend"]
+        )
+
+        # Mamba arguments
+        mamba_kwargs = get_kwargs(MambaConfig)
+        mamba_group = parser.add_argument_group(
+            title="MambaConfig",
+            description=MambaConfig.__doc__,
+        )
+        mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_group.add_argument(
+            "--enable-mamba-cache-stochastic-rounding",
+            **mamba_kwargs["enable_stochastic_rounding"],
+        )
+        mamba_group.add_argument(
+            "--mamba-cache-philox-rounds",
+            **mamba_kwargs["stochastic_rounding_philox_rounds"],
         )
 
         # Structured outputs arguments
@@ -1049,13 +1072,6 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
-        )
-        cache_group.add_argument(
-            "--enable-mamba-cache-stochastic-rounding",
-            **cache_kwargs["enable_mamba_cache_stochastic_rounding"],
-        )
-        cache_group.add_argument(
-            "--mamba-cache-philox-rounds", **cache_kwargs["mamba_cache_philox_rounds"]
         )
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
@@ -1622,11 +1638,34 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
-            enable_mamba_cache_stochastic_rounding=self.enable_mamba_cache_stochastic_rounding,
-            mamba_cache_philox_rounds=self.mamba_cache_philox_rounds,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
+
+        # TurboQuant: auto-skip first/last 2 layers (boundary protection).
+        # These layers are most sensitive to quantization error.
+        # Users can add extra layers via --kv-cache-dtype-skip-layers.
+        if resolved_cache_dtype.startswith("turboquant_"):
+            if model_config.is_hybrid:
+                raise NotImplementedError(
+                    "TurboQuant KV cache is not supported for hybrid "
+                    "(attention + Mamba) models. Boundary layer protection "
+                    "requires uniform attention layers."
+                )
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            num_layers = model_config.hf_text_config.num_hidden_layers
+            boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            merged = sorted(existing | set(boundary), key=lambda x: int(x))
+            cache_config.kv_cache_dtype_skip_layers = merged
+            logger.info(
+                "TQ: skipping layers %s for boundary protection (num_layers=%d)",
+                merged,
+                num_layers,
+            )
 
         ray_runtime_env = None
         if is_ray_initialized():
@@ -1934,6 +1973,35 @@ class EngineArgs:
                 self.attention_backend
             )
 
+        # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
+        # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
+        if resolved_cache_dtype.startswith("turboquant_") and (
+            attention_config.flash_attn_version is None
+            or attention_config.flash_attn_version >= 3
+        ):
+            logger.warning(
+                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "Overriding flash_attn_version to 2. To silence this "
+                "warning, pass --attention-config.flash_attn_version=2"
+            )
+            attention_config.flash_attn_version = 2
+
+        # Mamba config overrides
+        mamba_config = copy.deepcopy(self.mamba_config)
+        # Convert string to enum if needed (CLI parsing returns a string)
+        if isinstance(self.mamba_backend, str):
+            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
+        else:
+            mamba_config.backend = self.mamba_backend
+        if self.enable_mamba_cache_stochastic_rounding:
+            mamba_config.enable_stochastic_rounding = (
+                self.enable_mamba_cache_stochastic_rounding
+            )
+        if self.mamba_cache_philox_rounds:
+            mamba_config.stochastic_rounding_philox_rounds = (
+                self.mamba_cache_philox_rounds
+            )
+
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
         if self.enable_flashinfer_autotune is not None:
@@ -2032,6 +2100,7 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
