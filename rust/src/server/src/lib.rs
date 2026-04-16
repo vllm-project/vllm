@@ -21,8 +21,8 @@ pub use config::{Config, CoordinatorMode, HttpListenerMode};
 use socket2::Socket;
 use tokio::net::TcpListener;
 use tracing::{info, trace};
-pub use vllm_chat::ParserSelection;
-use vllm_chat::{ChatLlm, load_model_backends};
+use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
+pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
@@ -33,9 +33,19 @@ use crate::state::AppState;
 /// Build the shared application state for one configured model and one engine client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     // Load both backends from the same model metadata so they stay in sync.
-    let loaded = load_model_backends(&config.model)
-        .await
-        .context("failed to create chat/text backends")?;
+    let loaded = load_model_backends(
+        &config.model,
+        LoadModelBackendsOptions {
+            chat_template: config.chat_template.clone(),
+            chat_template_content_format: config.chat_template_content_format,
+            default_chat_template_kwargs: config
+                .default_chat_template_kwargs
+                .clone()
+                .unwrap_or_default(),
+        },
+    )
+    .await
+    .context("failed to create chat/text backends")?;
     let text_backend = loaded.text_backend;
     let chat_backend = loaded.chat_backend;
 

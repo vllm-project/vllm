@@ -12,7 +12,7 @@
 pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, SamplingHints,
 };
-pub use backends::{LoadedModelBackends, load_model_backends};
+pub use backends::{LoadModelBackendsOptions, LoadedModelBackends, load_model_backends};
 pub use error::{Error, Result};
 pub use event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantMessageExt,
@@ -21,6 +21,7 @@ pub use event::{
 use futures::{StreamExt, TryStreamExt as _};
 pub use parser::ParserSelection;
 pub use reasoning::{ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory};
+pub use renderers::hf::ChatTemplateContentFormatOption;
 pub use renderers::{ChatRenderer, DynChatRenderer, RenderedPrompt};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,

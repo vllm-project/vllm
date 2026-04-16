@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use openai_protocol::common::Tool as OpenAiTool;
 use serde::Serialize;
 use serde_json::Value;
@@ -5,7 +7,9 @@ use thiserror_ext::AsReport as _;
 use tracing::trace;
 use vllm_text::backends::hf::HfSpecialTokens;
 
-use self::format::ChatTemplateContentFormat;
+use self::format::{
+    ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
+};
 use self::template::{CompiledChatTemplate, TemplateContext};
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
@@ -17,24 +21,35 @@ mod format;
 mod template;
 mod tojson;
 
-pub use template::load_chat_template;
+pub use template::{load_chat_template, resolve_chat_template};
+
+pub use self::format::ChatTemplateContentFormatOption;
 
 /// Hugging Face chat-template renderer backed by the local Jinja chat-template state.
 pub struct HfChatRenderer {
     default_template: Option<CompiledChatTemplate>,
+    default_template_kwargs: HashMap<String, Value>,
+    content_format: ContentFormatOption,
     special_tokens: Option<HfSpecialTokens>,
 }
 
 impl HfChatRenderer {
     /// Create a renderer from the given template string.
-    pub fn new(template: Option<String>, special_tokens: Option<HfSpecialTokens>) -> Result<Self> {
+    pub fn new(
+        template: Option<String>,
+        default_template_kwargs: HashMap<String, Value>,
+        content_format: ContentFormatOption,
+        special_tokens: Option<HfSpecialTokens>,
+    ) -> Result<Self> {
         Ok(Self {
             default_template: template
                 .map(|template| {
-                    CompiledChatTemplate::new(template)
+                    CompiledChatTemplate::new(template, content_format)
                         .map_err(|error| Error::ChatTemplate(error.to_report_string()))
                 })
                 .transpose()?,
+            default_template_kwargs,
+            content_format,
             special_tokens,
         })
     }
@@ -50,7 +65,7 @@ impl HfChatRenderer {
             .chat_template
             .as_ref()
             .map(|template| {
-                CompiledChatTemplate::new(template.clone())
+                CompiledChatTemplate::new(template.clone(), self.content_format)
                     .map_err(|error| Error::ChatTemplate(error.to_report_string()))
             })
             .transpose()?;
@@ -81,7 +96,8 @@ impl HfChatRenderer {
         );
 
         let merged_template_kwargs = {
-            let mut kwargs = request.chat_options.template_kwargs.clone();
+            let mut kwargs = self.default_template_kwargs.clone();
+            kwargs.extend(request.chat_options.template_kwargs.clone());
             kwargs.insert(
                 "continue_final_message".to_string(),
                 Value::Bool(request.chat_options.continue_final_message),
@@ -265,11 +281,13 @@ fn to_template_tools(tools: &[ChatTool]) -> Vec<TemplateTool> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use expect_test::expect;
     use serde_json::Value;
     use vllm_text::backends::hf::{HfSpecialTokens, NamedSpecialToken};
 
-    use super::HfChatRenderer;
+    use super::{ChatTemplateContentFormatOption, HfChatRenderer};
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
     };
@@ -287,9 +305,14 @@ mod tests {
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
-        Ok(HfChatRenderer::new(template.map(str::to_owned), None)?
-            .render(request)?
-            .prompt)
+        Ok(HfChatRenderer::new(
+            template.map(str::to_owned),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::Auto,
+            None,
+        )?
+        .render(request)?
+        .prompt)
     }
 
     #[test]
@@ -423,6 +446,8 @@ mod tests {
 
         let rendered = HfChatRenderer::new(
             Some("{{ bos_token }}|{{ bos_token is defined }}".to_string()),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::Auto,
             Some(special_tokens),
         )
         .unwrap()
@@ -450,6 +475,74 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered, "inner|outer");
+    }
+
+    #[test]
+    fn chat_template_forces_string_content_format_when_configured() {
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text(" world"),
+        ])]);
+
+        let rendered = HfChatRenderer::new(
+            Some(
+                "{%- if messages[0].content is string -%}{{ messages[0].content }}{%- else -%}{%- for item in messages[0].content %}{{ item.text }}|{%- endfor -%}{%- endif -%}".to_string(),
+            ),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::String,
+            None,
+        )
+        .unwrap()
+        .render(&request)
+        .unwrap()
+        .prompt;
+
+        assert_eq!(rendered, "hello world");
+    }
+
+    #[test]
+    fn chat_template_forces_openai_content_format_when_configured() {
+        let request = sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("hello"),
+            ChatContentPart::text(" world"),
+        ])]);
+
+        let rendered = HfChatRenderer::new(
+            Some("{{ messages[0].content[0].text }}{{ messages[0].content[1].text }}".to_string()),
+            HashMap::new(),
+            ChatTemplateContentFormatOption::OpenAi,
+            None,
+        )
+        .unwrap()
+        .render(&request)
+        .unwrap()
+        .prompt;
+
+        assert_eq!(rendered, "hello world");
+    }
+
+    #[test]
+    fn chat_template_merges_default_template_kwargs_before_request_kwargs() {
+        let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
+        request
+            .chat_options
+            .template_kwargs
+            .insert("enable_thinking".to_string(), Value::Bool(true));
+
+        let renderer = HfChatRenderer::new(
+            Some("{{ enable_thinking }}|{{ default_only }}".to_string()),
+            HashMap::from([
+                ("enable_thinking".to_string(), Value::Bool(false)),
+                ("default_only".to_string(), Value::String("x".to_string())),
+            ]),
+            ChatTemplateContentFormatOption::Auto,
+            None,
+        )
+        .unwrap();
+
+        let rendered = renderer.render(&request).unwrap().prompt;
+
+        assert_eq!(rendered, "true|x");
     }
 
     #[test]

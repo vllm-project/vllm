@@ -1,8 +1,11 @@
 use std::collections::{HashSet, VecDeque};
+use std::fmt;
+use std::str::FromStr;
 
 use minijinja::machinery::ast::{Expr, ForLoop, Set, Stmt};
 use minijinja::machinery::{WhitespaceConfig, parse};
 use minijinja::syntax::SyntaxConfig;
+use serde_with::DeserializeFromStr;
 
 /// Chat template content format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -12,6 +15,55 @@ pub enum ChatTemplateContentFormat {
     String,
     /// Content is a list of structured parts (OpenAI format).
     OpenAi,
+}
+
+/// Configurable chat-template content format selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, DeserializeFromStr)]
+pub enum ChatTemplateContentFormatOption {
+    /// Detect the format from the template source.
+    #[default]
+    Auto,
+    /// Always flatten content into plain strings before rendering.
+    String,
+    /// Always pass content through in OpenAI-compatible structured form.
+    OpenAi,
+}
+
+impl ChatTemplateContentFormatOption {
+    pub const AUTO_LITERAL: &str = "auto";
+    pub const OPENAI_LITERAL: &str = "openai";
+    pub const STRING_LITERAL: &str = "string";
+}
+
+impl FromStr for ChatTemplateContentFormatOption {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
+            Ok(Self::Auto)
+        } else if value.eq_ignore_ascii_case(Self::STRING_LITERAL) {
+            Ok(Self::String)
+        } else if value.eq_ignore_ascii_case(Self::OPENAI_LITERAL) {
+            Ok(Self::OpenAi)
+        } else {
+            Err(format!(
+                "invalid content format `{value}`; expected one of: {}, {}, {}",
+                Self::AUTO_LITERAL,
+                Self::STRING_LITERAL,
+                Self::OPENAI_LITERAL
+            ))
+        }
+    }
+}
+
+impl fmt::Display for ChatTemplateContentFormatOption {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Auto => f.write_str(Self::AUTO_LITERAL),
+            Self::String => f.write_str(Self::STRING_LITERAL),
+            Self::OpenAi => f.write_str(Self::OPENAI_LITERAL),
+        }
+    }
 }
 
 fn is_var_access(expr: &Expr, varname: &str) -> bool {

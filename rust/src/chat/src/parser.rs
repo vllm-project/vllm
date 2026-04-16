@@ -1,10 +1,12 @@
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt;
+use std::str::FromStr;
 
-use serde::Deserialize;
+use serde_with::DeserializeFromStr;
 
 /// Specify which reasoning or tool-call parser implementation to use.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, DeserializeFromStr)]
 pub enum ParserSelection {
     /// Use model-based auto-detection.
     #[default]
@@ -20,15 +22,17 @@ impl ParserSelection {
     pub const NONE_LITERAL: &str = "none";
 }
 
-impl From<String> for ParserSelection {
-    fn from(value: String) -> Self {
-        if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
+impl FromStr for ParserSelection {
+    type Err = Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(if value.eq_ignore_ascii_case(Self::AUTO_LITERAL) {
             Self::Auto
         } else if value.eq_ignore_ascii_case(Self::NONE_LITERAL) {
             Self::None
         } else {
-            Self::Explicit(value)
-        }
+            Self::Explicit(value.to_owned())
+        })
     }
 }
 
@@ -39,16 +43,6 @@ impl fmt::Display for ParserSelection {
             Self::None => f.write_str(Self::NONE_LITERAL),
             Self::Explicit(name) => f.write_str(name),
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for ParserSelection {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Option::<String>::deserialize(deserializer)?;
-        Ok(value.map_or(Self::Auto, Self::from))
     }
 }
 

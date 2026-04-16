@@ -14,7 +14,9 @@ use serde_json::{self};
 use vllm_text::backends::hf::HfSpecialTokens;
 
 use super::error::TemplateError;
-use super::format::{ChatTemplateContentFormat, detect_chat_template_content_format};
+use super::format::{
+    ChatTemplateContentFormat, ChatTemplateContentFormatOption, detect_chat_template_content_format,
+};
 use super::tojson::hf_tojson_filter;
 use crate::renderers::hf::{TemplateMessage, TemplateTool};
 
@@ -75,6 +77,21 @@ pub fn load_chat_template(template_path: &Path) -> Result<Option<String>> {
     Ok(Some(template))
 }
 
+/// Resolve a configured chat template value into a template string.
+pub fn resolve_chat_template(chat_template: &str) -> Result<String> {
+    let path = Path::new(chat_template);
+    if path.exists() {
+        return load_chat_template(path).map(|template| template.unwrap_or_default());
+    }
+
+    const JINJA_CHARS: [char; 3] = ['{', '}', '\n'];
+    if chat_template.chars().any(|c| JINJA_CHARS.contains(&c)) {
+        return Ok(chat_template.to_string());
+    }
+
+    Err(TemplateError::MissingTemplatePath)
+}
+
 /// One compiled chat template with its Jinja environment and detected content format.
 pub(super) struct CompiledChatTemplate {
     /// Cached, fully-configured environment for one compiled template.
@@ -84,8 +101,12 @@ pub(super) struct CompiledChatTemplate {
 
 impl CompiledChatTemplate {
     /// Compile the given chat template string into a [`CompiledChatTemplate`].
-    pub fn new(template: String) -> Result<Self> {
-        let content_format = detect_chat_template_content_format(&template);
+    pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
+        let content_format = match content_format {
+            ChatTemplateContentFormatOption::Auto => detect_chat_template_content_format(&template),
+            ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
+            ChatTemplateContentFormatOption::OpenAi => ChatTemplateContentFormat::OpenAi,
+        };
         let env = build_environment(template)?;
         Ok(Self {
             env,
@@ -115,7 +136,11 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_valid_template() {
-        let template = CompiledChatTemplate::new("{{ messages }}".to_string()).unwrap();
+        let template = CompiledChatTemplate::new(
+            "{{ messages }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
         assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "[]");
@@ -123,7 +148,10 @@ mod tests {
 
     #[test]
     fn test_chat_template_state_invalid_template() {
-        let result = CompiledChatTemplate::new("{% invalid".to_string());
+        let result = CompiledChatTemplate::new(
+            "{% invalid".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        );
         assert!(result.is_err());
         let err = result.err().unwrap().to_string();
         assert!(
@@ -135,7 +163,9 @@ mod tests {
     #[test]
     fn test_special_tokens_injected_into_context() {
         let template = "{{ bos_token }}hello{{ eos_token }}";
-        let template = CompiledChatTemplate::new(template.to_string()).unwrap();
+        let template =
+            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
+                .unwrap();
 
         let special_tokens = HfSpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
@@ -156,7 +186,9 @@ mod tests {
     #[test]
     fn test_special_tokens_undefined_when_not_provided() {
         let template = "{% if bos_token is defined %}{{ bos_token }}{% endif %}hello";
-        let template = CompiledChatTemplate::new(template.to_string()).unwrap();
+        let template =
+            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
+                .unwrap();
 
         let result = template.apply(TemplateContext::default()).unwrap();
         assert_eq!(result, "hello");
@@ -166,7 +198,9 @@ mod tests {
     fn test_special_tokens_partial() {
         let template =
             "{{ bos_token }}hello{% if eos_token is defined %}{{ eos_token }}{% endif %}";
-        let template = CompiledChatTemplate::new(template.to_string()).unwrap();
+        let template =
+            CompiledChatTemplate::new(template.to_string(), ChatTemplateContentFormatOption::Auto)
+                .unwrap();
 
         let special_tokens = HfSpecialTokens {
             bos_token: Some(NamedSpecialToken::Text("<s>".to_string())),
@@ -188,6 +222,7 @@ mod tests {
     fn test_tojson_filter_supports_indent_and_sort_keys() {
         let template = CompiledChatTemplate::new(
             "{{ payload | tojson(indent=2, sort_keys=true) }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
         )
         .unwrap();
         let mut kwargs = HashMap::new();
@@ -212,6 +247,42 @@ mod tests {
         let template = load_chat_template(&path).unwrap();
 
         assert_eq!(template.as_deref(), Some("{{ messages }}"));
+    }
+
+    #[test]
+    fn test_resolve_chat_template_from_inline_literal() {
+        let template = resolve_chat_template("{{ messages }}").unwrap();
+
+        assert_eq!(template, "{{ messages }}");
+    }
+
+    #[test]
+    fn test_resolve_chat_template_from_existing_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("chat_template.jinja");
+        fs::write(&path, "{{ messages }}").unwrap();
+
+        let template = resolve_chat_template(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(template, "{{ messages }}");
+    }
+
+    #[test]
+    fn test_resolve_chat_template_rejects_missing_path_like_value() {
+        let error = resolve_chat_template("missing_template.jinja").unwrap_err();
+
+        assert!(matches!(error, TemplateError::MissingTemplatePath));
+    }
+
+    #[test]
+    fn test_chat_template_state_respects_explicit_content_format_override() {
+        let template = CompiledChatTemplate::new(
+            "{% for item in messages[0].content %}{{ item.text }}{% endfor %}".to_string(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(template.content_format(), ChatTemplateContentFormat::String);
     }
 
     #[test]

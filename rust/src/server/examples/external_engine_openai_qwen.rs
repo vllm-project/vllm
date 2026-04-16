@@ -13,7 +13,10 @@ use futures::StreamExt as _;
 use tokio::sync::oneshot;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, CoordinatorMode, HttpListenerMode, ParserSelection, serve};
+use vllm_server::{
+    ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
+    serve,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -59,6 +62,9 @@ async fn main() -> Result<()> {
         },
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
+        chat_template: None,
+        default_chat_template_kwargs: None,
+        chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         enable_log_requests: false,
         disable_log_stats: false,
     };

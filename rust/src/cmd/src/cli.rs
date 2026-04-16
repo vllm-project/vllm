@@ -7,6 +7,7 @@
 mod serve_validate;
 mod unsupported;
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -14,10 +15,14 @@ use std::time::Duration;
 use clap::{Args, Parser, Subcommand};
 use educe::Educe;
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, CoordinatorMode, HttpListenerMode, ParserSelection};
+use vllm_server::{
+    ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
+};
 
 use crate::cli::unsupported::UnsupportedArgs;
 use crate::managed_engine::ManagedEngineConfig;
@@ -105,6 +110,33 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     pub max_model_len: Option<u32>,
 
+    /// The file path to the chat template, or the template in single-line form for the specified
+    /// model.
+    #[arg(long)]
+    #[serde(default)]
+    pub chat_template: Option<String>,
+
+    /// Default keyword arguments to pass to the chat template renderer.
+    ///
+    /// These will be merged with request-level chat_template_kwargs, with request values taking
+    /// precedence. Useful for setting default behavior for reasoning models.
+    ///
+    /// Example: `{"enable_thinking": false}` to disable thinking mode by default for
+    /// Qwen3/DeepSeek models.
+    #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
+    #[serde(default)]
+    pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
+
+    /// The format to render message content within a chat template.
+    ///
+    /// * "auto" detects the format from the template
+    /// * "string" renders content as a string. Example: `"Hello World"`
+    /// * "openai" renders content as a list of dictionaries, similar to OpenAI schema. Example:
+    ///   `[{"type": "text", "text": "Hello world!"}]`
+    #[arg(long, default_value_t)]
+    #[serde(default)]
+    pub chat_template_content_format: ChatTemplateContentFormatOption,
+
     /// Log a summary line for each completed request, including prompt/output token counts
     /// and finish reason.
     #[arg(long)]
@@ -156,6 +188,9 @@ impl SharedRuntimeArgs {
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            chat_template: self.chat_template,
+            default_chat_template_kwargs: self.default_chat_template_kwargs,
+            chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
         }
@@ -187,6 +222,9 @@ impl SharedRuntimeArgs {
             listener_mode: HttpListenerMode::Bind { host, port },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            chat_template: self.chat_template,
+            default_chat_template_kwargs: self.default_chat_template_kwargs,
+            chat_template_content_format: self.chat_template_content_format,
             enable_log_requests: self.enable_log_requests,
             disable_log_stats: self.disable_log_stats,
         }
@@ -195,6 +233,10 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     300
+}
+
+fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
+    serde_json::from_str(value).map_err(|e| format!("invalid JSON object: {}", e.as_report()))
 }
 
 fn parse_runtime_args_json(value: &str) -> Result<SharedRuntimeArgs, String> {

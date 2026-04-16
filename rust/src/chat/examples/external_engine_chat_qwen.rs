@@ -46,7 +46,7 @@ fn init_tracing() {
 async fn main() -> Result<()> {
     init_tracing();
     let args = Args::parse();
-    let loaded = load_model_backends(&args.model)
+    let loaded = load_model_backends(&args.model, Default::default())
         .await
         .with_context(|| format!("failed to load backends for {}", args.model))?;
     let text_backend = loaded.text_backend;
