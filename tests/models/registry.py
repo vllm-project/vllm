@@ -609,6 +609,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
         trust_remote_code=True,
         hf_overrides={"architectures": ["GteNewModel"]},
     ),
+    "JinaEmbeddingsV5Model": _HfExamplesInfo(
+        "jinaai/jina-embeddings-v5-text-small",
+        trust_remote_code=True,
+    ),
     "LlamaModel": _HfExamplesInfo("llama", is_available_online=False),
     "LlamaBidirectionalModel": _HfExamplesInfo(
         "nvidia/llama-nemotron-embed-1b-v2", trust_remote_code=True
