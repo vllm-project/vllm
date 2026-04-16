@@ -5,7 +5,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    xpu_mxfp4_quant as quant_mxfp4,
+    xpu_mxfp4_quantize as quant_mxfp4,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -27,14 +27,6 @@ class XPUMxfp4LinearKernel(Mxfp4LinearKernel):
     @classmethod
     def can_implement(cls, c: Mxfp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
-
-    def __init__(
-        self,
-        c: Mxfp4LinearLayerConfig,
-        w_q_param_name: str,
-        w_s_param_name: str,
-    ) -> None:
-        super().__init__(c, w_q_param_name, w_s_param_name)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight_packed.view(torch.float4_e2m1fn_x2)

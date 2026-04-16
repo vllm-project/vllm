@@ -431,6 +431,7 @@ class CompressedTensorsConfig(QuantizationConfig):
     def _is_w4a4_mxfp4(
         weight_quant: QuantizationArgs, input_quant: QuantizationArgs
     ) -> bool:
+        return True
         return CompressedTensorsConfig._is_mxfp4(
             weight_quant
         ) and CompressedTensorsConfig._is_mxfp4(input_quant)
