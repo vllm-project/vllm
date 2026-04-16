@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .MXFP4LinearKernel import MXFP4LinearKernel, MXFP4LinearLayerConfig
-from .xpu import XPUMXFP4LinearKernel
+from .Mxfp4LinearKernel import Mxfp4LinearKernel, Mxfp4LinearLayerConfig
 
 __all__ = [
-    "MXFP4LinearKernel",
-    "MXFP4LinearLayerConfig",
-    "XPUMXFP4LinearKernel",
+    "Mxfp4LinearKernel",
+    "Mxfp4LinearLayerConfig",
 ]

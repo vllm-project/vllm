@@ -58,6 +58,13 @@ from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4 import (
+    Mxfp4LinearKernel,
+    Mxfp4LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.mxfp4.xpu import (
+    XPUMxfp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp8 import (
     Mxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
@@ -94,13 +101,6 @@ from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
 )
 from vllm.model_executor.kernels.linear.nvfp4.marlin import (
     MarlinNvFp4LinearKernel,
-)
-from vllm.model_executor.kernels.linear.mxfp4 import (
-    MXFP4LinearKernel,
-    MXFP4LinearLayerConfig,
-)
-from vllm.model_executor.kernels.linear.mxfp4.xpu import (
-    XPUMXFP4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm import (
     Fp8BlockScaledMMLinearKernel,
@@ -247,7 +247,6 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     ],
 }
 
-<<<<<<< HEAD
 # in priority/performance order (when available)
 _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
@@ -279,20 +278,16 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     ],
 }
 
+_POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[Mxfp4LinearKernel]]] = {
+    PlatformEnum.XPU: [
+        XPUMxfp4LinearKernel,
+    ],
+}
+
 # TODO make all kernels inherit from MMLinearKernel
 # then bound _KernelT only to MMLinearKernel
 _KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
-=======
-_POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MXFP4LinearKernel]]] = {
-    PlatformEnum.XPU: [
-        XPUMXFP4LinearKernel,
-    ],
-}
-
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
-_KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
->>>>>>> 1d20cbb7a (add ct mxfp4 and xpu mxfp4 kernel)
 
 
 def is_supported_and_can_implement_kernel(
@@ -535,7 +530,6 @@ def choose_mp_linear_kernel(
     )
 
 
-<<<<<<< HEAD
 def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform."""
@@ -691,47 +685,6 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
     raise ValueError(
         "Failed to find a kernel that can implement the "
         "NVFP4 linear layer. Reasons: \n" + "\n".join(failure_reasons)
-=======
-def choose_mxfp4_linear_kernel(
-    config: MXFP4LinearLayerConfig, compute_capability: int | None = None
-) -> type[MXFP4LinearKernel]:
-    if compute_capability is None:
-        if current_platform is None:
-            raise ValueError("Cannot determine compute capability")
-        _cc = current_platform.get_device_capability()
-        if _cc is not None:
-            compute_capability = _cc[0] * 10 + _cc[1]
-
-    failure_reasons = []
-    for kernel in _POSSIBLE_MXFP4_KERNELS[current_platform._enum]:
-        if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
-            failure_reasons.append(
-                f" {kernel.__name__} disabled by environment variable"
-            )
-            continue
-        if (
-            compute_capability is not None
-            and kernel.get_min_capability() > compute_capability
-        ):
-            failure_reasons.append(
-                f"{kernel.__name__} requires capability "
-                f"{kernel.get_min_capability()}, current compute "
-                f" capability is {compute_capability}"
-            )
-            continue
-
-        can_implement, failure_reason = kernel.can_implement(config)
-        if can_implement:
-            return kernel
-        else:
-            failure_reasons.append(
-                f" {kernel.__name__} cannot implement due to: {failure_reason}"
-            )
-
-    raise ValueError(
-        "Failed to find a kernel that can implement the "
-        "WNA16 linear layer. Reasons: \n" + "\n".join(failure_reasons)
->>>>>>> 1d20cbb7a (add ct mxfp4 and xpu mxfp4 kernel)
     )
 
 
@@ -764,7 +717,6 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
-<<<<<<< HEAD
     elif kernel_type == "mxfp8":
         if platform not in _POSSIBLE_MXFP8_KERNELS:
             _POSSIBLE_MXFP8_KERNELS[platform] = []
@@ -773,22 +725,55 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_NVFP4_KERNELS:
             _POSSIBLE_NVFP4_KERNELS[platform] = []
         _POSSIBLE_NVFP4_KERNELS[platform].append(kernel_class)
-=======
     elif kernel_type == "mxfp4":
         if platform not in _POSSIBLE_MXFP4_KERNELS:
             _POSSIBLE_MXFP4_KERNELS[platform] = []
         _POSSIBLE_MXFP4_KERNELS[platform].append(kernel_class)
->>>>>>> 1d20cbb7a (add ct mxfp4 and xpu mxfp4 kernel)
     else:
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
+
+
+def init_mxfp4_linear_kernel() -> Mxfp4LinearKernel:
+    """Select and instantiate the best MXFP4 linear kernel for the
+    current platform."""
+    config = Mxfp4LinearLayerConfig()
+
+    platform = current_platform._enum
+    possible = _POSSIBLE_MXFP4_KERNELS.get(platform, [])
+
+    failure_reasons = []
+    for kernel_cls in possible:
+        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel_cls.__name__} disabled by environment variable"
+            )
+            continue
+
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        can_implement, reason = kernel_cls.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
+        return kernel_cls(config)
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "MXFP4 linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
 
 
 __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
     "init_nvfp4_linear_kernel",
+    "init_mxfp4_linear_kernel",
     "choose_mp_linear_kernel",
-    "choose_mxfp4_linear_kernel",
     "register_linear_kernel",
     "init_wfp8_a16_linear_kernel",
     "FP8ScaledMMLinearKernel",
@@ -813,8 +798,8 @@ __all__ = [
     "TritonInt8ScaledMMLinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
-    "MXFP4LinearKernel",
-    "MXFP4LinearLayerConfig",
+    "Mxfp4LinearKernel",
+    "Mxfp4LinearLayerConfig",
     "AllSparkLinearKernel",
     "ConchLinearKernel",
     "CPUWNA16LinearKernel",

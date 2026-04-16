@@ -5,41 +5,32 @@ import torch
 from torch.nn.parameter import Parameter
 
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
-    MXFP4_BLOCK_SIZE,
-)
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     xpu_mxfp4_quant as quant_mxfp4,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-from .MXFP4LinearKernel import MXFP4LinearKernel, MXFP4LinearLayerConfig
+from .Mxfp4LinearKernel import Mxfp4LinearKernel, Mxfp4LinearLayerConfig
 
 
-class XPUMXFP4LinearKernel(MXFP4LinearKernel):
-    @classmethod
-    def get_min_capability(cls) -> int:
-        return -1
+class XPUMxfp4LinearKernel(Mxfp4LinearKernel):
+    """MXFP4 W4A4 GEMM on XPU."""
 
     @classmethod
-    def can_implement(cls, c: MXFP4LinearLayerConfig) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
-            return False, "XPU MXFP4 Linear only supported on XPU"
+            return False, "XPUMxFp4 only support on XPU"
+        return True, None
 
-        in_features, out_features = c.partition_weight_shape
-        if in_features % MXFP4_BLOCK_SIZE or out_features % MXFP4_BLOCK_SIZE:
-            return (
-                False,
-                f"XPU MXFP4 Linear requires in/out features to be multiples of "
-                f"{MXFP4_BLOCK_SIZE}, got in_features={in_features}, "
-                f"out_features={out_features}",
-            )
-
+    @classmethod
+    def can_implement(cls, c: Mxfp4LinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def __init__(
         self,
-        c: MXFP4LinearLayerConfig,
+        c: Mxfp4LinearLayerConfig,
         w_q_param_name: str,
         w_s_param_name: str,
     ) -> None:
@@ -62,13 +53,13 @@ class XPUMXFP4LinearKernel(MXFP4LinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        orig_dtype = x.dtype
+        out_dtype = x.dtype
         x_fp4, x_blockscale = quant_mxfp4(x)
         return torch.ops._xpu_C.fp4_gemm(
             x_fp4,
             layer.weight,
             x_blockscale,
             layer.weight_scale,
-            orig_dtype,
+            out_dtype,
             bias,
         )
