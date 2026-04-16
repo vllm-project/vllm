@@ -29,6 +29,7 @@ try:
         AmdSmiException,
         amdsmi_get_gpu_asic_info,
         amdsmi_get_gpu_device_uuid,
+        amdsmi_get_gpu_topo_numa_affinity,
         amdsmi_get_processor_handles,
         amdsmi_init,
         amdsmi_shut_down,
@@ -954,3 +955,34 @@ class RocmPlatform(Platform):
             rms_norm = default
 
         return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+
+    @classmethod
+    def get_device_numa_node(cls, device_id: int = 0) -> int | None:
+        physical_device_id = cls.device_id_to_physical_device_id(device_id)
+        handle = amdsmi_get_processor_handles()[physical_device_id]
+        numa_node = None
+        try:
+            numa_node = amdsmi_get_gpu_topo_numa_affinity(handle)
+        except AmdSmiException as error:
+            logger.error("amdsmi gpu numa affinity query failed ", exc_info=error)
+        return numa_node
+
+    @classmethod
+    def get_all_device_numa_nodes(cls) -> list[int] | None:
+        """Get NUMA nodes for all visible GPU devices."""
+        try:
+            numa_nodes = []
+            for device_id in range(cls.device_count()):
+                numa_node = cls.get_device_numa_node(device_id)
+                if numa_node is None:
+                    logger.warning(
+                        "Could not detect NUMA node for GPU %d, "
+                        "disabling automatic NUMA binding",
+                        device_id,
+                    )
+                    return None
+                numa_nodes.append(numa_node)
+            return numa_nodes
+        except Exception as e:
+            logger.warning("Failed to get NUMA nodes for GPUs: %s", e)
+            return None
