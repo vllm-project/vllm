@@ -160,7 +160,6 @@ class OpenAIServingTranslation(OpenAISpeechToText):
         request_metadata: RequestResponseMetadata,
         audio_duration_s: float,
         separator: str,
-        chunk_start_times: list[float],
     ) -> AsyncGenerator[str, None]:
         generator = self._speech_to_text_stream_generator(
             request=request,
@@ -172,5 +171,6 @@ class OpenAIServingTranslation(OpenAISpeechToText):
             response_stream_choice_class=TranslationResponseStreamChoice,
             stream_response_class=TranslationStreamResponse,
             separator=separator,
-            chunk_start_times=chunk_start_times,
         )
+        async for chunk in generator:
+            yield chunk
