@@ -533,6 +533,15 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+                reason="InternVL2 custom code calls Tensor.item() during model "
+                "init, which is incompatible with Transformers v5 meta device "
+                "initialization. The fix requires upstreaming the model to "
+                "Transformers. See: https://github.com/vllm-project/vllm/issues/38425",
+            )
+        ],
     ),
     "intern_vl-video": VLMTestInfo(
         models=[
@@ -959,6 +968,15 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 2},
             )
             for inp in custom_inputs.different_patch_input_cases_internvl()
+        ],
+        marks=[
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+                reason="InternVL2 custom code calls Tensor.item() during model "
+                "init, which is incompatible with Transformers v5 meta device "
+                "initialization. The fix requires upstreaming the model to "
+                "Transformers. See: https://github.com/vllm-project/vllm/issues/38425",
+            )
         ],
     ),
     "llava_onevision-multiple-images": VLMTestInfo(
