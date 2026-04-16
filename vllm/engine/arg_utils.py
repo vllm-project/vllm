@@ -2362,13 +2362,15 @@ class EngineArgs:
                     self.max_num_batched_tokens,
                 )
 
-            # When using default settings,
-            # Ensure max_num_batched_tokens does not exceed model limit.
-            # Some models (e.g., Whisper) have embeddings tied to max length.
-            self.max_num_batched_tokens = min(
-                self.max_num_seqs * model_config.max_model_len,
-                self.max_num_batched_tokens,
-            )
+                # Ensure max_num_batched_tokens does not exceed model limit.
+                # Some models (e.g., Whisper) have embeddings tied to max
+                # length. Skip this for chunked prefill because it processes
+                # tokens in chunks across requests, so the batch token limit
+                # does not need to be bounded by max_num_seqs * max_model_len.
+                self.max_num_batched_tokens = min(
+                    self.max_num_seqs * model_config.max_model_len,
+                    self.max_num_batched_tokens,
+                )
 
             logger.debug(
                 "Defaulting max_num_batched_tokens to %d for %s usage context.",

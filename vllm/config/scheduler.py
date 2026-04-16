@@ -278,7 +278,10 @@ class SchedulerConfig:
                 f"({self.max_num_seqs})."
             )
 
-        if self.max_num_batched_tokens > self.max_num_seqs * max_model_len:
+        if (
+            self.max_num_batched_tokens > self.max_num_seqs * max_model_len
+            and not self.enable_chunked_prefill
+        ):
             logger.warning(
                 "max_num_batched_tokens (%d) exceeds max_num_seqs "
                 "* max_model_len (%d). This may lead to unexpected behavior.",
