@@ -381,6 +381,11 @@ class SingleTypeKVCacheManager(ABC):
             return
         blocks = self.req_to_blocks[request_id]
         num_skipped_blocks = num_skipped_tokens // self.block_size
+        if num_skipped_blocks <= 0:
+            # This indicates that the skipped tokens do not span a full block yet.
+            # Thus we do not need to free any blocks outside attention window.
+            # We only free blocks when the skipped tokens can cover at least one full block.
+            return
         # `num_skipped_tokens` may include tokens that haven't been allocated yet
         # (e.g., when the attention window moves into the external computed tokens
         # range), so we must cap to the number of blocks that currently exist for
