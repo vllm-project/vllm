@@ -44,15 +44,14 @@ from .params import ChatParams
 logger = init_logger(__name__)
 
 
-# Map: id(tokenizer) -> placeholder token ID.
+# Map: id(tokenizer) -> prompt embeds placeholder token ID.
 _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_CACHE: Final[dict[int, int]] = {}
 _PROMPT_EMBEDS_PLACEHOLDER_TOKEN_ID_ERROR: Final[str] = (
     "Expected {token!r} to tokenize to exactly 1 token, got {num_ids} ({ids!r})."
 )
 _PROMPT_EMBEDS_PLACEHOLDER_SPAN_MISMATCH_ERROR: Final[str] = (
     "Expected {expected} prompt_embeds placeholder spans in the "
-    "tokenized prompt, found {actual}. The chat template may have "
-    "stripped or rewritten the <prompt_embeds> special token."
+    "tokenized prompt, found {actual}."
 )
 _MISSING_PROMPT_TOKEN_IDS_ERROR: Final[str] = (
     "Expected prompt_token_ids in rendered prompt when prompt_embeds "
@@ -149,11 +148,7 @@ def _build_mixed_prompt_embeds(
     positions: list[tuple[int, int]],
 ) -> tuple[torch.Tensor, list[bool]]:
     """Build the full-length `prompt_embeds` tensor and the `is_token_ids`
-    mask aligned to `token_ids`.
-
-    Vectorized: builds one index tensor covering every placeholder span and
-    does the tensor-scatter and mask-update in single ops.
-    """
+    mask aligned to `token_ids`."""
     total_len = len(token_ids)
     hidden_size = prompt_embeds_tensors[0].shape[1]
     dtype = prompt_embeds_tensors[0].dtype
