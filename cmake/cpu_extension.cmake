@@ -349,6 +349,7 @@ endif()
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
     "csrc/cpu/utils.cpp"
+    "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
@@ -359,6 +360,7 @@ set(VLLM_EXT_SRC
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
+        "csrc/cpu/activation_lut_bf16.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
@@ -383,6 +385,7 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -395,6 +398,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2 
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files

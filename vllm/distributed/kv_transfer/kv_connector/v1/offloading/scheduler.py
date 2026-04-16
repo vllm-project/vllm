@@ -424,7 +424,10 @@ class OffloadingConnectorScheduler:
                     parent_block_hash=None,
                     token_ids=[],
                     lora_id=None,
-                    block_size=event.block_size,
+                    block_size=0,
                     medium=event.medium,
                     lora_name=None,
                 )
+
+    def shutdown(self) -> None:
+        self.manager.shutdown()

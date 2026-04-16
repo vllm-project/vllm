@@ -155,6 +155,10 @@ class CpuPlatform(Platform):
         torch.cpu.set_device(device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        pass
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
@@ -238,9 +242,17 @@ class CpuPlatform(Platform):
                     "cpp.dynamic_threads": True,
                 }
             )
+            compilation_config.ir_enable_torch_wrap = False
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
+
+        if (
+            cls.get_cpu_architecture() == CpuArchEnum.ARM
+            and "+gelu" not in compilation_config.custom_ops
+            and "-gelu" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+gelu")
 
         vllm_config.profiler_config.torch_profiler_dump_cuda_time_total = False
 
