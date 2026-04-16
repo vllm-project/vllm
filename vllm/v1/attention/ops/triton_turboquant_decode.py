@@ -133,8 +133,12 @@ def _tq_decode_stage1(
 
         page_idx = kv_offs // BLOCK_SIZE
         page_off = kv_offs % BLOCK_SIZE
+        # Clamp OOB lanes to index 0 before pointer arithmetic so Triton's
+        # bounds checker does not fire on masked-out lanes (mask only guards
+        # the output value, not the address computation).
+        safe_page_idx = tl.where(kv_mask, page_idx, 0)
         block_nums = tl.load(
-            Block_table_ptr + bt_base + page_idx,
+            Block_table_ptr + bt_base + safe_page_idx,
             mask=kv_mask,
             other=0,
         )
