@@ -112,17 +112,17 @@ class ModelBlockTransferPolicy(ABC):
         kv_cache_config: KVCacheConfig, tp_size: int
     ) -> ModelBlockTransferPolicy:
         """Create the appropriate policy based on model architecture."""
-        group_flags = [
+        is_mamba_group = [
             isinstance(group.kv_cache_spec, MambaSpec)
             for group in kv_cache_config.kv_cache_groups
         ]
-        if any(group_flags):
+        if any(is_mamba_group):
             return MambaModelBlockTransferPolicy(
                 kv_cache_config=kv_cache_config,
-                group_flags=group_flags,
+                is_mamba_group=is_mamba_group,
                 tp_size=tp_size,
             )
-        return DenseModelBlockTransferPolicy(group_flags=group_flags)
+        return DenseModelBlockTransferPolicy(kv_cache_config)
 
 
 # ======================================================================
@@ -131,8 +131,8 @@ class ModelBlockTransferPolicy(ABC):
 
 
 class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
-    def __init__(self, group_flags: list[bool]):
-        self._group_flags = group_flags
+    def __init__(self, kv_cache_config: KVCacheConfig):
+        self._num_groups = len(kv_cache_config.kv_cache_groups)
 
     @property
     def is_mamba(self) -> bool:
@@ -140,7 +140,7 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     @property
     def mamba_group_flags(self) -> list[bool]:
-        return self._group_flags
+        return [False] * self._num_groups
 
     @property
     def ssm_sizes(self) -> tuple[int, int]:
@@ -181,16 +181,15 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
-        group_flags: list[bool],
+        is_mamba_group: list[bool],
         tp_size: int,
     ):
-        self._group_flags = group_flags
+        self._is_mamba_group = is_mamba_group
 
         mamba_spec = next(
-            spec
+            group.kv_cache_spec
             for group in kv_cache_config.kv_cache_groups
-            for spec in [group.kv_cache_spec]
-            if isinstance(spec, MambaSpec)
+            if isinstance(group.kv_cache_spec, MambaSpec)
         )
         conv_nbytes = torch.tensor(
             [],
@@ -219,7 +218,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     @property
     def mamba_group_flags(self) -> list[bool]:
-        return self._group_flags
+        return self._is_mamba_group
 
     @property
     def ssm_sizes(self) -> tuple[int, int]:

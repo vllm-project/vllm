@@ -20,7 +20,12 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.distributed.kv_transfer.kv_connector.base import (
+        KVConnectorBase,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
+        ModelBlockTransferPolicy,
+    )
     from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
@@ -441,6 +446,7 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
+    policy: "ModelBlockTransferPolicy | None" = None
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
@@ -518,22 +524,21 @@ class TransferTopology:
         )
         if remote_engine_id in self._engines:
             return self._engines[remote_engine_id]
-        info: EngineTransferInfo
-        if self.is_mamba:
-            info = self._build_mamba_info(
-                remote_tp_size=remote_tp_size,
-                remote_block_size=remote_block_size,
-                remote_block_len=remote_block_len,
-                remote_physical_blocks_per_logical=(remote_physical_blocks_per_logical),
-                local_block_len=local_block_len,
-            )
-        else:
-            info = EngineTransferInfo(
-                remote_tp_size=remote_tp_size,
-                remote_block_len=remote_block_len,
-                remote_block_size=remote_block_size,
-                remote_physical_blocks_per_logical=(remote_physical_blocks_per_logical),
-            )
+        assert self.policy is not None, (
+            "TransferTopology.policy must be set before registering engines"
+        )
+        info = self.policy.build_engine_transfer_info(
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            is_mla=self.is_mla,
+            total_num_kv_heads=self.total_num_kv_heads,
+            is_kv_layout_blocks_first=self.is_kv_layout_blocks_first,
+            remote_tp_size=remote_tp_size,
+            remote_block_size=remote_block_size,
+            remote_block_len=remote_block_len,
+            remote_physical_blocks_per_logical=(remote_physical_blocks_per_logical),
+            local_block_len=local_block_len,
+        )
         self._engines[remote_engine_id] = info
         return info
 

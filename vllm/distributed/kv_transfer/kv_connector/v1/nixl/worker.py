@@ -30,6 +30,9 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (
+    ModelBlockTransferPolicy,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
     NixlAgentMetadata,
@@ -157,6 +160,11 @@ class NixlConnectorWorker:
             )
             local_tp = vllm_config.parallel_config.tensor_parallel_size
             self._conv_decomp = derive_mamba_conv_split(mamba_spec, local_tp)
+
+        self.block_transfer_policy = ModelBlockTransferPolicy.create(
+            kv_cache_config=kv_cache_config,
+            tp_size=vllm_config.parallel_config.tensor_parallel_size,
+        )
 
         # Agent.
         non_ucx_backends = [b for b in self.nixl_backends if b != "UCX"]
@@ -652,6 +660,7 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
+            policy=self.block_transfer_policy,
             # SSM States come in tuples (ssm, conv)
             tensor_shape=next(iter(kv_caches.values())).shape
             if not self._has_mamba
