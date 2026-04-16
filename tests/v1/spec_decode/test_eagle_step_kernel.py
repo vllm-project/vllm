@@ -15,8 +15,8 @@ DEVICE_TYPE = current_platform.device_type
 
 # Skip if no CUDA - Triton kernel requires GPU
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
-    pytest.skip("CUDA required for EAGLE kernel tests", allow_module_level=True)
+if not current_platform.is_cuda_alike() and not current_platform.is_xpu():
+    pytest.skip("CUDA/XPU required for EAGLE kernel tests", allow_module_level=True)
 
 
 def _reference_eagle_step_slot_mapping(

@@ -189,6 +189,10 @@ class CudaPlatformBase(Platform):
         _ = torch.zeros(1, device=device)
 
     @classmethod
+    def manual_seed_all(cls, seed: int) -> None:
+        torch.cuda.manual_seed_all(seed)
+
+    @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         raise NotImplementedError
 
@@ -250,6 +254,11 @@ class CudaPlatformBase(Platform):
     ]:
         valid_backends_priorities = []
         invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
+
+        # TurboQuant KV cache: route directly to TQ backend
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            return [(AttentionBackendEnum.TURBOQUANT, 0)], {}
 
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
@@ -545,6 +554,10 @@ class CudaPlatformBase(Platform):
         return cls.is_device_capability(90) or cls.is_device_capability_family(100)
 
     @classmethod
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        return bool(torch.cuda.get_device_properties(device_id).is_integrated)
+
+    @classmethod
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 
@@ -661,7 +674,18 @@ class NvmlCudaPlatform(CudaPlatformBase):
         handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
 
         try:
-            return pynvml.nvmlDeviceGetNumaNodeId(handle)
+            numa_node = pynvml.nvmlDeviceGetNumaNodeId(handle)
+            if cls._numa_node_has_cpus(numa_node):
+                return numa_node
+            # On non-CDMM Grace-Blackwell systems (e.g. GB200), each GPU's HBM
+            # is a separate NUMA node with no CPUs.  Fall through to
+            # CPU-affinity-based detection to find the nearest CPU node.
+            logger.debug(
+                "NUMA node %d for GPU %d has no CPUs (non-CDMM topology), "
+                "falling back to CPU-affinity-based detection",
+                numa_node,
+                device_id,
+            )
         except Exception:
             pass
 
@@ -680,6 +704,17 @@ class NvmlCudaPlatform(CudaPlatformBase):
             logger.warning("Failed to get NUMA node for GPU %d: %s", device_id, e)
 
         return None
+
+    @classmethod
+    def _numa_node_has_cpus(cls, node_id: int) -> bool:
+        """Check whether a NUMA node has any CPUs assigned to it."""
+        from pathlib import Path
+
+        cpulist_file = Path(f"/sys/devices/system/node/node{node_id}/cpulist")
+        try:
+            return cpulist_file.read_text().strip() != ""
+        except (OSError, ValueError):
+            return False
 
     @classmethod
     def _get_device_cpu_affinity(cls, handle) -> list[int]:

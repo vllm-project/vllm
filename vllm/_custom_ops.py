@@ -435,6 +435,7 @@ def fused_qk_norm_rope(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     position_ids: torch.Tensor,
+    forced_token_heads_per_warp: int = -1,
 ) -> None:
     torch.ops._C.fused_qk_norm_rope(
         qkv,
@@ -448,6 +449,7 @@ def fused_qk_norm_rope(
         cos_sin_cache,
         is_neox,
         position_ids,
+        forced_token_heads_per_warp,
     )
 
 
@@ -3298,6 +3300,12 @@ def cpu_gemm_wna16(
     return output
 
 
+def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
+    out = torch.empty_like(input)
+    torch.ops._C.activation_lut_bf16(out, input, activation)
+    return out
+
+
 def cpu_prepack_moe_weight(
     weight: torch.Tensor,
     isa: str,
@@ -3491,3 +3499,38 @@ if hasattr(torch.ops._C, "hadacore_transform"):
     @register_fake("_C::hadacore_transform")
     def _hadacore_transform_fake(x: torch.Tensor, inplace: bool) -> torch.Tensor:
         return torch.empty_like(x) if not inplace else x
+
+
+if hasattr(torch.ops._C, "minimax_allreduce_rms"):
+
+    @register_fake("_C::minimax_allreduce_rms")
+    def _minimax_allreduce_rms_fake(
+        input: torch.Tensor,
+        norm_weight: torch.Tensor,
+        workspace: torch.Tensor,
+        rank: int,
+        nranks: int,
+        eps: float,
+    ) -> torch.Tensor:
+        return torch.empty_like(input)
+
+
+if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
+
+    @register_fake("_C::minimax_allreduce_rms_qk")
+    def _minimax_allreduce_rms_qk_fake(
+        qkv: torch.Tensor,
+        norm_weight_q: torch.Tensor,
+        norm_weight_k: torch.Tensor,
+        workspace: torch.Tensor,
+        q_size: int,
+        kv_size: int,
+        rank: int,
+        nranks: int,
+        eps: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        token_num = qkv.shape[0]
+        return (
+            torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
+            torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
+        )

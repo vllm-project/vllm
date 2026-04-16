@@ -20,7 +20,20 @@ steps:
   - tests/kernels/core
   - tests/kernels/test_concat_mla_q.py
   commands:
-    - pytest -v -s kernels/core kernels/test_concat_mla_q.py
+    - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py
+
+- label: Kernels MiniMax Reduce RMS Test (2 GPUs)
+  timeout_in_minutes: 15
+  num_devices: 2
+  device: h100
+  source_file_dependencies:
+  - csrc/minimax_reduce_rms_kernel.cu
+  - csrc/minimax_reduce_rms_kernel.h
+  - vllm/model_executor/layers/mamba/linear_attn.py
+  - vllm/model_executor/layers/mamba/lamport_workspace.py
+  - tests/kernels/core/test_minimax_reduce_rms.py
+  commands:
+    - pytest -v -s kernels/core/test_minimax_reduce_rms.py
 
 - label: Kernels Attention Test %N
   timeout_in_minutes: 35
@@ -187,7 +200,14 @@ steps:
   timeout_in_minutes: 90
   device: h100
   num_devices: 2
-  optional: true
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
 
@@ -196,6 +216,13 @@ steps:
   timeout_in_minutes: 90
   device: b200
   num_devices: 2
-  optional: true
+  source_file_dependencies:
+  - csrc/quantization/cutlass_w8a8/moe/
+  - csrc/moe/
+  - tests/kernels/moe
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/device_communicators/
+  - vllm/config
   commands:
     - pytest -v -s kernels/moe/test_moe_layer.py
