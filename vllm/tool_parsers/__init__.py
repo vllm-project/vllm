@@ -158,6 +158,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "gemma4_tool_parser",
         "Gemma4ToolParser",
     ),
+    "mimo": (
+        "mimov2_flash_tool_parser",
+        "MimoV2FlashToolParser",
+    ),
 }
 
 
