@@ -462,6 +462,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             key=lambda x: not isinstance(x[0], FullAttentionSpec),
         )
 
+        # Fast path: only 2 groups (full + other) so no convergence loop needed.
+        self.is_simple_hybrid = len(self.attention_groups) == 2 and isinstance(
+            self.attention_groups[0][0], FullAttentionSpec
+        )
+
         # The LCM of the block sizes of all attention types.
         # The cache hit length must be a multiple of the LCM of the block sizes
         # to make sure the cache hit length is a multiple of the block size of
@@ -470,65 +475,31 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         block_sizes = [spec.block_size for spec, _, _ in attention_groups]
         self.lcm_block_size = lcm(*block_sizes)
 
-    def find_longest_cache_hit(
+    def _converge_hit_length(
         self,
-        block_hashes: list[BlockHash],
-        max_cache_hit_length: int,
-    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        hit_length: int,
+        hit_blocks_by_group: list[list[KVCacheBlock] | None],
+        hashes_by_spec: dict[KVCacheSpec, BlockHashList],
+    ) -> int:
         """
-        Find the longest cache hit using an iterative fixed-point algorithm.
-
-        Each attention type either accepts the current candidate length or
-        reduces it. If any type reduces the length, restart checks over all
-        types. This converges because length monotonically decreases and is
+        Run the iterative fixed-point convergence loop across all attention
+        groups. Each group either accepts the current candidate length or
+        reduces it. Converges because length monotonically decreases and is
         bounded below by 0.
-
-        EAGLE drop is applied once after convergence, not inside the loop.
-        This avoids the spiral block dropping problem where repeated EAGLE
-        drops in each iteration would reduce the hit length to 0.
-        See https://github.com/vllm-project/vllm/issues/32802.
-
-        Args:
-            block_hashes: The block hashes of the request.
-            max_cache_hit_length: The maximum length of the cache hit.
-
-        Returns:
-            A tuple containing:
-                - A tuple of the cache hit blocks for each single type manager.
-                - The number of tokens of the longest cache hit.
         """
-
-        def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
-            if kv_cache_spec.block_size == self.hash_block_size:
-                return block_hashes
-            return BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, kv_cache_spec.block_size
-            )
-
-        num_groups = len(self.kv_cache_config.kv_cache_groups)
-        hit_length = max_cache_hit_length
-        hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
-
-        # Phase 1: Iterative convergence (no EAGLE drop, so no spiral).
         while True:
             curr_hit_length = hit_length
 
             for spec, group_ids, manager_cls in self.attention_groups:
-                is_full_attn = isinstance(spec, FullAttentionSpec)
-
                 # Full attention: reuse cached blocks (downward-closed property)
+                is_full_attn = isinstance(spec, FullAttentionSpec)
                 cached_blocks = hit_blocks_by_group[group_ids[0]]
                 if is_full_attn and cached_blocks is not None:
-                    # For full attention, we only need to compute the cache hit
-                    # length once. Starting from the second iteration, if the
-                    # curr_hit_length is reduced by other groups, we can simply
-                    # keep the first (curr_hit_length // block_size) blocks from
-                    # the last iteration.
                     num_blocks = curr_hit_length // spec.block_size
                     curr_hit_length = num_blocks * spec.block_size
                 else:
                     hit_blocks = manager_cls.find_longest_cache_hit(
-                        block_hashes=_get_block_hashes(spec),
+                        block_hashes=hashes_by_spec[spec],
                         max_length=curr_hit_length,
                         kv_cache_group_ids=group_ids,
                         block_pool=self.block_pool,
@@ -543,53 +514,134 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 break
             hit_length = curr_hit_length
 
-        # Phase 2: Truncate all full attention groups to the final hit_length.
-        # A hybrid model can have multiple FullAttentionSpec groups with
-        # different configs (e.g. different num_kv_heads or head_size), so
-        # we must iterate over all of them, not just attention_groups[0].
+        return hit_length
+
+    def _truncate_full_attn(
+        self,
+        hit_length: int,
+        hit_blocks_by_group: list[list[KVCacheBlock] | None],
+    ) -> None:
+        """Truncate full attention blocks to match hit_length."""
         for spec, group_ids, _ in self.attention_groups:
-            if isinstance(spec, FullAttentionSpec):
-                num_blocks = hit_length // spec.block_size
-                for group_id in group_ids:
-                    if (blks := hit_blocks_by_group[group_id]) is not None:
-                        del blks[num_blocks:]
+            # attention_groups is sorted with FullAttentionSpec first,
+            # so we can break as soon as we see a non-full-attn group.
+            if not isinstance(spec, FullAttentionSpec):
+                break
+            num_blocks = hit_length // spec.block_size
+            for group_id in group_ids:
+                if (blks := hit_blocks_by_group[group_id]) is not None:
+                    del blks[num_blocks:]
 
-        # Phase 3: EAGLE drop — applied once after convergence.
-        # Drop one lcm_block_size worth of tokens, then iteratively re-query
-        # non-full-attention groups until they converge. The EAGLE drop is
-        # NOT inside this loop, so the spiral block-dropping problem cannot
-        # recur. Iteration is required because in models with multiple
-        # non-full-attention types (e.g. SlidingWindow + Mamba), one group
-        # may further reduce hit_length and invalidate earlier groups' hits.
-        if self.use_eagle and hit_length > 0:
-            hit_length = max(0, hit_length - self.lcm_block_size)
+    def _simple_hybrid_hit(
+        self,
+        max_length: int,
+        hit_blocks_by_group: list[list[KVCacheBlock] | None],
+        hashes_by_spec: dict[KVCacheSpec, BlockHashList],
+    ) -> int:
+        """
+        Fast path for 1 full-attn + 1 other group.  No convergence loop.
 
-            while True:
-                prev_hit_length = hit_length
-                for spec, group_ids, manager_cls in self.attention_groups:
-                    if not isinstance(spec, FullAttentionSpec):
-                        hit_blocks = manager_cls.find_longest_cache_hit(
-                            block_hashes=_get_block_hashes(spec),
-                            max_length=hit_length,
-                            kv_cache_group_ids=group_ids,
-                            block_pool=self.block_pool,
-                            kv_cache_spec=spec,
-                            alignment_tokens=self.lcm_block_size,
-                        )
-                        hit_length = len(hit_blocks[0]) * spec.block_size
-                        for group_id, blocks in zip(group_ids, hit_blocks):
-                            hit_blocks_by_group[group_id] = blocks
-                if hit_length >= prev_hit_length:
-                    break
+        Full attention is downward-closed: a hit at length L implies a valid
+        hit at any L' <= L, so we only need to query it once to get an upper
+        bound, then query the other group once, then truncate.  On subsequent
+        calls (e.g. after EAGLE drop), full-attn blocks are already cached and
+        only need truncation, and only the other group is re-queried.
+        """
+        full_spec, full_gids, full_mgr = self.attention_groups[0]
+        other_spec, other_gids, other_mgr = self.attention_groups[1]
 
-            # Truncate all full attention groups to the final hit_length
-            # (downward-closed, always safe).
-            for spec, group_ids, _ in self.attention_groups:
-                if isinstance(spec, FullAttentionSpec):
-                    num_blocks = hit_length // spec.block_size
-                    for group_id in group_ids:
-                        if (blks := hit_blocks_by_group[group_id]) is not None:
-                            del blks[num_blocks:]
+        # Full attn: query on first call, truncate on subsequent calls.
+        if hit_blocks_by_group[full_gids[0]] is None:
+            blocks = full_mgr.find_longest_cache_hit(
+                block_hashes=hashes_by_spec[full_spec],
+                max_length=max_length,
+                kv_cache_group_ids=full_gids,
+                block_pool=self.block_pool,
+                kv_cache_spec=full_spec,
+                alignment_tokens=self.lcm_block_size,
+            )
+            hit_length = len(blocks[0]) * full_spec.block_size
+            for gid, blk_list in zip(full_gids, blocks):
+                hit_blocks_by_group[gid] = blk_list
+        else:
+            hit_length = (max_length // full_spec.block_size) * full_spec.block_size
+
+        # Other group: always query at the (possibly tighter) bound.
+        blocks = other_mgr.find_longest_cache_hit(
+            block_hashes=hashes_by_spec[other_spec],
+            max_length=hit_length,
+            kv_cache_group_ids=other_gids,
+            block_pool=self.block_pool,
+            kv_cache_spec=other_spec,
+            alignment_tokens=self.lcm_block_size,
+        )
+        hit_length = len(blocks[0]) * other_spec.block_size
+        for gid, blk_list in zip(other_gids, blocks):
+            hit_blocks_by_group[gid] = blk_list
+
+        # Truncate full attn to final length.
+        num_blocks = hit_length // full_spec.block_size
+        for gid in full_gids:
+            blks = hit_blocks_by_group[gid]
+            assert blks is not None
+            del blks[num_blocks:]
+
+        return hit_length
+
+    def find_longest_cache_hit(
+        self,
+        block_hashes: list[BlockHash],
+        max_cache_hit_length: int,
+    ) -> tuple[tuple[list[KVCacheBlock], ...], int]:
+        """
+        Find the longest cache hit across all attention groups.
+
+        For simple hybrid models (1 full-attn + 1 other), uses a loop-free
+        fast path.  For 3+ groups, uses an iterative fixed-point convergence
+        loop.
+
+        EAGLE drop is applied once after convergence, not inside the loop.
+        This avoids the spiral block dropping problem where repeated EAGLE
+        drops in each iteration would reduce the hit length to 0.
+        See https://github.com/vllm-project/vllm/issues/32802.
+        """
+
+        # Pre-compute block hashes per spec.
+        hashes_by_spec: dict[KVCacheSpec, BlockHashList] = {}
+        for spec, _, _ in self.attention_groups:
+            if spec.block_size == self.hash_block_size:
+                hashes_by_spec[spec] = block_hashes
+            else:
+                hashes_by_spec[spec] = BlockHashListWithBlockSize(
+                    block_hashes, self.hash_block_size, spec.block_size
+                )
+
+        num_groups = len(self.kv_cache_config.kv_cache_groups)
+        hit_blocks_by_group: list[list[KVCacheBlock] | None] = [None] * num_groups
+
+        if self.is_simple_hybrid:
+            # Fast path: exactly 2 queries without convergence loop.
+            hit_length = self._simple_hybrid_hit(
+                max_cache_hit_length, hit_blocks_by_group, hashes_by_spec
+            )
+            if self.use_eagle and hit_length > 0:
+                hit_length = max(0, hit_length - self.lcm_block_size)
+                hit_length = self._simple_hybrid_hit(
+                    hit_length, hit_blocks_by_group, hashes_by_spec
+                )
+        else:
+            # General path: iterative convergence for 3+ attention groups.
+            hit_length = self._converge_hit_length(
+                max_cache_hit_length, hit_blocks_by_group, hashes_by_spec
+            )
+            self._truncate_full_attn(hit_length, hit_blocks_by_group)
+
+            if self.use_eagle and hit_length > 0:
+                hit_length = max(0, hit_length - self.lcm_block_size)
+                hit_length = self._converge_hit_length(
+                    hit_length, hit_blocks_by_group, hashes_by_spec
+                )
+                self._truncate_full_attn(hit_length, hit_blocks_by_group)
 
         return tuple(
             blocks if blocks is not None else [] for blocks in hit_blocks_by_group

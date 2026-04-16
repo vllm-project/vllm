@@ -683,6 +683,26 @@ def test_prefill_hybrid_model_eagle():
         4,
     )
 
+    # Evict last block of full attention AND first two blocks of SW groups.
+    # Full attn: 5 blocks → EAGLE → 4 blocks (positions 0-3).
+    # SW: blocks 0,1 evicted → only 2 contiguous at positions 2,3,
+    # which is less than the required 3 → total cache miss.
+    _test_partial_request_hit(
+        manager,
+        block_size,
+        num_full_blocks,
+        "9",
+        all_token_ids,
+        [
+            make_block_hash_with_group_id(block_hashes[-1], 0),
+            make_block_hash_with_group_id(block_hashes[0], 1),
+            make_block_hash_with_group_id(block_hashes[0], 2),
+            make_block_hash_with_group_id(block_hashes[1], 1),
+            make_block_hash_with_group_id(block_hashes[1], 2),
+        ],
+        0,
+    )
+
 
 def _test_partial_request_hit(
     manager: KVCacheManager,
