@@ -4,7 +4,7 @@
 
 from collections.abc import Callable
 from enum import Enum, EnumMeta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -130,6 +130,18 @@ class AttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         """Clear any override for this backend, reverting to the default."""
         _ATTN_OVERRIDES.pop(self, None)
 
+    def get_config(self) -> Any:
+        """Get the configuration for this backend.
+
+        Returns:
+            The backend configuration, or None if not set.
+        """
+        return _ATTN_BACKEND_CONFIGS.get(self)
+
+    def clear_config(self) -> None:
+        """Clear any configuration for this backend."""
+        _ATTN_BACKEND_CONFIGS.pop(self, None)
+
 
 class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
     """Enumeration of all supported mamba attention backends.
@@ -193,6 +205,18 @@ class MambaAttentionBackendEnum(Enum, metaclass=_AttentionBackendEnumMeta):
         """Clear any override for this backend, reverting to the default."""
         _MAMBA_ATTN_OVERRIDES.pop(self, None)
 
+    def get_config(self) -> Any:
+        """Get the configuration for this backend.
+
+        Returns:
+            The backend configuration, or None if not set.
+        """
+        return _MAMBA_ATTN_BACKEND_CONFIGS.get(self)
+
+    def clear_config(self) -> None:
+        """Clear any configuration for this backend."""
+        _MAMBA_ATTN_BACKEND_CONFIGS.pop(self, None)
+
 
 MAMBA_TYPE_TO_BACKEND_MAP = {
     "mamba1": MambaAttentionBackendEnum.MAMBA1.name,
@@ -207,11 +231,15 @@ MAMBA_TYPE_TO_BACKEND_MAP = {
 _ATTN_OVERRIDES: dict[AttentionBackendEnum, str] = {}
 _MAMBA_ATTN_OVERRIDES: dict[MambaAttentionBackendEnum, str] = {}
 
+_ATTN_BACKEND_CONFIGS: dict[AttentionBackendEnum, Any] = {}
+_MAMBA_ATTN_BACKEND_CONFIGS: dict[MambaAttentionBackendEnum, Any] = {}
+
 
 def register_backend(
     backend: AttentionBackendEnum | MambaAttentionBackendEnum,
     class_path: str | None = None,
     is_mamba: bool = False,
+    backend_config: Any = None,
 ) -> Callable[[type], type]:
     """Register or override a backend implementation.
 
@@ -219,6 +247,10 @@ def register_backend(
         backend: The AttentionBackendEnum member to register
         class_path: Optional class path. If not provided and used as
             decorator, will be auto-generated from the class.
+        is_mamba: Whether this is a mamba attention backend.
+        backend_config: Optional configuration to associate with the
+            backend. Can be any type (dict, dataclass, etc.). Retrievable
+            via ``backend.get_config()`` or ``get_backend_config(backend)``.
 
     Returns:
         Decorator function if class_path is None, otherwise a no-op
@@ -239,18 +271,27 @@ def register_backend(
         class MyCustomBackend:
             ...
 
-        # Direct registration
+        # Direct registration with configuration
         register_backend(
             AttentionBackendEnum.CUSTOM,
-            "my.module.MyCustomBackend"
+            "my.module.MyCustomBackend",
+            backend_config={"log_level": "debug", "sample_rate": 0.1},
         )
     """
+
+    def _store_config() -> None:
+        if backend_config is not None:
+            if is_mamba:
+                _MAMBA_ATTN_BACKEND_CONFIGS[backend] = backend_config  # type: ignore[index]
+            else:
+                _ATTN_BACKEND_CONFIGS[backend] = backend_config  # type: ignore[index]
 
     def decorator(cls: type) -> type:
         if is_mamba:
             _MAMBA_ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
         else:
             _ATTN_OVERRIDES[backend] = f"{cls.__module__}.{cls.__qualname__}"  # type: ignore[index]
+        _store_config()
         return cls
 
     if class_path is not None:
@@ -258,6 +299,25 @@ def register_backend(
             _MAMBA_ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
         else:
             _ATTN_OVERRIDES[backend] = class_path  # type: ignore[index]
+        _store_config()
         return lambda x: x
 
     return decorator
+
+
+def get_backend_config(
+    backend: AttentionBackendEnum | MambaAttentionBackendEnum,
+) -> Any:
+    """Get the configuration associated with a backend.
+
+    This is the public function form of ``backend.get_config()``.
+
+    Args:
+        backend: The backend enum member to query.
+
+    Returns:
+        The backend configuration, or None if not set.
+    """
+    if isinstance(backend, MambaAttentionBackendEnum):
+        return _MAMBA_ATTN_BACKEND_CONFIGS.get(backend)
+    return _ATTN_BACKEND_CONFIGS.get(backend)
