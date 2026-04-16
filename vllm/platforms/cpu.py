@@ -242,6 +242,7 @@ class CpuPlatform(Platform):
                     "cpp.dynamic_threads": True,
                 }
             )
+            compilation_config.ir_enable_torch_wrap = False
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE

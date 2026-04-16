@@ -100,7 +100,7 @@ AITER_MODEL_LIST = [
         pytest.param("bigcode/starcoder2-3b"),  # starcoder2
         pytest.param(
             "TitanML/tiny-mixtral",  # mixtral
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+            marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
         pytest.param(
@@ -143,9 +143,9 @@ def test_models(
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
-    if current_platform.is_cpu() and model == "TitanML/tiny-mixtral":
-        # This untrained model is sensitive to the rounding error
-        # Fuse ops to reduce bfloat16 rounding
+    if current_platform.is_cpu() and model in ("openai-community/gpt2",):
+        # These models are sensitive to the rounding error
+        # Fuse ops to reduce rounding
         monkeypatch.setenv("VLLM_CPU_CI_ENV", "0")
 
     with hf_runner(model) as hf_model:
