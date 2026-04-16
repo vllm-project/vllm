@@ -174,6 +174,9 @@ class LoRAModel:
                 ):
                     continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                # MoE adapters are validated against two naming conventions:
+                # some models expect leaf names like "down_proj", while others
+                # expand expert-qualified names like "experts.0.down_proj".
                 candidate_module_names = {module_name.rsplit(".", 1)[-1]}
                 if ".experts" in module_name:
                     candidate_module_names.add(
