@@ -237,7 +237,6 @@ class CpuPlatform(Platform):
                 "libomp" in ld_preload_str
                 or "libgomp" in ld_preload_str
                 or "libiomp" in ld_preload_str
-                or "libomp5" in ld_preload_str
             )
         ):
             # We need to LD_PRELOAD PyTorch's libgomp, otherwise only

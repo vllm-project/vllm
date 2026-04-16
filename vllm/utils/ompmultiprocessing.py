@@ -35,7 +35,7 @@ class OMPProcessManager:
 
         self.simulate_multi_node = os.environ.get("VLLM_CPU_SIM_MULTI_NUMA", "0") != "0"
         ld_preload_str = os.getenv("LD_PRELOAD", "")
-        self.use_iomp = "libiomp" in ld_preload_str or "libomp5" in ld_preload_str
+        self.use_iomp = "libiomp" in ld_preload_str or "libomp" in ld_preload_str
         self.use_gomp = "libgomp" in ld_preload_str
 
         assert not (self.use_iomp and self.use_gomp)
