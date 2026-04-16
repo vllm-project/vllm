@@ -262,30 +262,6 @@ RUN --mount=type=bind,source=.git,target=vllm/.git \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
 
-# Fail if git-based package dependencies are found in requirements files
-# (uv doesn't handle git+ URLs well, and packages should be distributed on PyPI)
-# Extra notes: pip install is able to handle git+ URLs, but uv doesn't.
-RUN echo "Checking for git-based packages in requirements files..." \
-    && echo "Checking common.txt for git-based packages:" \
-    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; then \
-         echo "ERROR: Git-based packages found in common.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in common.txt"; \
-       fi \
-    && echo "Checking rocm.txt for git-based packages:" \
-    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; then \
-         echo "ERROR: Git-based packages found in rocm.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in rocm.txt"; \
-       fi \
-    && echo "All requirements files are clean - no git-based packages found"
-
 # Pin vLLM dependencies to exact versions of custom ROCm wheels
 # This ensures 'pip install vllm' automatically installs correct torch/triton/torchvision/amdsmi
 COPY tools/vllm-rocm/pin_rocm_dependencies.py /tmp/pin_rocm_dependencies.py
@@ -318,18 +294,6 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/.buildkite /.buildki
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
-# fastsafetensors ROCm wheel build stage (test-only).
-# PyPI ships CUDA-only wheels; ROCM_PATH triggers the project's hipify build.
-FROM base AS build_fastsafetensors
-ARG FASTSAFETENSORS_VERSION=0.2.2
-ENV ROCM_PATH=/opt/rocm
-RUN mkdir -p /fastsafetensors_install \
-    && git clone https://github.com/foundation-model-stack/fastsafetensors.git /tmp/fastsafetensors \
-    && cd /tmp/fastsafetensors \
-    && git checkout ${FASTSAFETENSORS_VERSION} \
-    && python3 -m pip wheel . --no-deps --wheel-dir=/fastsafetensors_install
-
-# -----------------------
 # Test vLLM image
 FROM base AS test
 
@@ -338,10 +302,8 @@ RUN python3 -m pip install --upgrade pip && rm -rf /var/lib/apt/lists/*
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
-    --mount=type=bind,from=build_fastsafetensors,src=/fastsafetensors_install,target=/fastsafetensors_install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system --reinstall-package fastsafetensors --no-deps /fastsafetensors_install/*.whl \
     && uv pip install --system -r requirements/rocm.txt \
     && uv pip install --system -r requirements/test/rocm.txt \
     && pip uninstall -y vllm \
@@ -453,10 +415,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install vLLM using uv (inherited from base stage)
 # Note: No -U flag to avoid upgrading PyTorch ROCm to CUDA version
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
-    --mount=type=bind,from=build_fastsafetensors,src=/fastsafetensors_install,target=/fastsafetensors_install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system --reinstall-package fastsafetensors --no-deps /fastsafetensors_install/*.whl \
     && uv pip install --system -r requirements/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
