@@ -70,6 +70,10 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             x_fp4, getattr(layer, "weights_padding_cols", 0)
         )
 
+        backend = "cutlass"
+        if current_platform.has_device_capability(120):
+            backend = "b12x"
+
         out = flashinfer_scaled_fp4_mm(
             x_fp4,
             layer.weight,
@@ -77,7 +81,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
             layer.weight_scale,
             layer.alpha,
             output_dtype,
-            backend="cutlass",
+            backend=backend,
         )
 
         out = slice_nvfp4_output(out, output_size)

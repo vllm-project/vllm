@@ -274,21 +274,17 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
 
 
 @functools.cache
-def has_flashinfer_cutedsl_sm12x_moe() -> bool:
-    """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
+def has_flashinfer_b12x_moe() -> bool:
+    """Return ``True`` if FlashInfer B12x fused MoE wrapper is available.
+
+    The B12xMoEWrapper (from FlashInfer PR #3080) provides SM120/SM121-specific
+    fused MoE with pre-allocated workspace, CUDA graph support, and activation
+    selection (SiLU / ReLU2).
+    """
     if not has_flashinfer_moe():
         return False
-
-    required_functions = [
-        ("flashinfer.fused_moe", "cute_dsl_fused_moe_nvfp4"),
-        ("flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"),
-    ]
-
-    for module_name, attr_name in required_functions:
-        mod = _get_submodule(module_name)
-        if not mod or not hasattr(mod, attr_name):
-            return False
-    return True
+    mod = _get_submodule("flashinfer.fused_moe")
+    return mod is not None and hasattr(mod, "B12xMoEWrapper")
 
 
 @functools.cache
@@ -691,7 +687,7 @@ def flashinfer_scaled_fp4_mm(
     assert a.stride(-1) == 1 and b.stride(-1) == 1
     assert a.shape[1] == b.shape[1]
 
-    if backend in ("cutlass", "cudnn"):
+    if backend in ("cutlass", "cudnn", "b12x"):
         block_scale_a = block_scale_a.view(torch.uint8)
         block_scale_b = block_scale_b.view(torch.uint8)
 
@@ -818,7 +814,7 @@ __all__ = [
     "has_flashinfer_cutedsl_moe_nvfp4",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
     "flashinfer_convert_sf_to_mma_layout",
-    "has_flashinfer_cutedsl_sm12x_moe",
+    "has_flashinfer_b12x_moe",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
