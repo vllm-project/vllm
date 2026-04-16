@@ -208,8 +208,8 @@ def triton_per_token_head_attention(
     k_scale_cache: torch.Tensor,
     v_scale_cache: torch.Tensor,
     block_table: torch.Tensor,
-    seq_lens_cpu: torch.Tensor,
-    query_start_loc_cpu: torch.Tensor,
+    q_to_req: torch.Tensor,
+    q_to_klen: torch.Tensor,
     scale: float,
     max_num_kv_splits: int = 32,
     block_kv: int = 16,
@@ -219,6 +219,13 @@ def triton_per_token_head_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
 ) -> torch.Tensor:
+    """Per-token-head split-KV attention.
+
+    ``q_to_req`` and ``q_to_klen`` are precomputed int32 GPU tensors of
+    shape ``(total_q,)`` — typically slices of persistent buffers owned by
+    the metadata builder so their pointers stay stable under CUDA graph
+    capture/replay.
+    """
     total_q, Hq, D = query.shape
     Hk = key_cache.shape[2]
     kv_group = Hq // Hk
@@ -227,8 +234,6 @@ def triton_per_token_head_attention(
     block_size = key_cache.shape[1]
     BLOCK_D = triton.next_power_of_2(D)
     NUM_KV_SPLITS = max_num_kv_splits
-
-    q_to_req, q_to_klen = _build_q_maps(query_start_loc_cpu, seq_lens_cpu, device)
 
     # Pre-allocated buffer reuse (TQ pattern: allocate once, slice by batch)
     if mid_o_buf is not None and mid_o_buf.shape[0] >= total_q:

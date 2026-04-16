@@ -101,6 +101,12 @@ class TritonAttentionMetadata:
     seq_lens_cpu: torch.Tensor | None = None
     query_start_loc_cpu: torch.Tensor | None = None
 
+    # Per-token-head kernel inputs: precomputed on CPU in build() and copied
+    # into pre-allocated GPU buffers so pointers are stable across CUDA graph
+    # capture/replay. Slices into the builder-owned buffers.
+    q_to_req: torch.Tensor | None = None
+    q_to_klen: torch.Tensor | None = None
+
     @staticmethod
     def compute_mm_prefix_range_tensor(
         mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
@@ -152,6 +158,17 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self._is_per_token_head = kv_cache_spec.kv_quant_mode.is_per_token_head
         if self._is_per_token_head:
             self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
+            # Persistent GPU buffers for the kernel's per-query maps. Sized
+            # to max_num_batched_tokens — the scheduler's upper bound on
+            # tokens per forward. Pointers stay stable across CUDA graph
+            # capture/replay; build() writes contents via .copy_().
+            max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self._q_to_req_buf = torch.empty(
+                max_tokens, dtype=torch.int32, device=device
+            )
+            self._q_to_klen_buf = torch.empty(
+                max_tokens, dtype=torch.int32, device=device
+            )
 
         self.block_size = kv_cache_spec.block_size
 
@@ -272,6 +289,43 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                     ql_pref = query_lens_cpu[num_decodes:]
                     sl_pref = seq_lens_cpu[num_decodes:].to(ql_pref.dtype)
                     prefill_is_first_chunk = bool(torch.equal(ql_pref, sl_pref))
+
+                # Compute per-query maps on CPU and stage into persistent
+                # GPU buffers. Pointers are stable; only contents change.
+                q_lens_i32 = query_lens_cpu.to(torch.int32)
+                num_reqs_total = q_lens_i32.shape[0]
+                total_q = int(qsl_cpu[-1].item())
+                if total_q > 0:
+                    if num_reqs_total == total_q:
+                        # Pure decode fast path: q_to_req = arange,
+                        # q_to_klen = seq_lens.
+                        q_to_req_cpu = torch.arange(
+                            num_reqs_total, dtype=torch.int32
+                        )
+                        q_to_klen_cpu = seq_lens_cpu.to(torch.int32)
+                    else:
+                        qsl_i32 = qsl_cpu[:-1].to(torch.int32)
+                        seq_lens_i32 = seq_lens_cpu.to(torch.int32)
+                        q_to_req_cpu = torch.repeat_interleave(
+                            torch.arange(num_reqs_total, dtype=torch.int32),
+                            q_lens_i32,
+                        )
+                        cached_len_per_req = seq_lens_i32 - q_lens_i32
+                        pos_in_req = (
+                            torch.arange(total_q, dtype=torch.int32)
+                            - qsl_i32[q_to_req_cpu.long()]
+                        )
+                        q_to_klen_cpu = (
+                            cached_len_per_req[q_to_req_cpu.long()]
+                            + pos_in_req
+                            + 1
+                        )
+                    self._q_to_req_buf[:total_q].copy_(
+                        q_to_req_cpu, non_blocking=True
+                    )
+                    self._q_to_klen_buf[:total_q].copy_(
+                        q_to_klen_cpu, non_blocking=True
+                    )
         else:
             all_pure_first_prefill = False
 
@@ -315,6 +369,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             prefill_is_first_chunk=prefill_is_first_chunk,
             seq_lens_cpu=seq_lens_cpu,
             query_start_loc_cpu=qsl_cpu,
+            q_to_req=(
+                self._q_to_req_buf[:num_actual_tokens]
+                if self._is_per_token_head and num_actual_tokens > 0
+                else None
+            ),
+            q_to_klen=(
+                self._q_to_klen_buf[:num_actual_tokens]
+                if self._is_per_token_head and num_actual_tokens > 0
+                else None
+            ),
         )
         return attn_metadata
 
@@ -375,9 +439,7 @@ class TritonAttentionBackend(AttentionBackend):
             cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype_str]
             scale_pad = get_dtype_size(torch.float32) // get_dtype_size(cache_dtype)
             # Fused K+V layout: [K_data|K_scale|V_data|V_scale] per slot.
-            # Dim 1 is size-1 to keep the 5-dim rank expected by the stride
-            # order / allocator contract. Physically K and V are adjacent per
-            # position in the last dim (slot_size).
+            # Dim 1 is size-1 to keep the 5-dim rank for stride_order compat.
             slot_size = 2 * (head_size + scale_pad)
             return (num_blocks, 1, block_size, num_kv_heads, slot_size)
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
@@ -459,9 +521,19 @@ class TritonAttentionImpl(AttentionImpl):
 
         Creates zero-copy views that existing Triton kernels (store + read)
         can consume via ``.stride()`` without any kernel code changes.
+
+        Rebuilt only when the underlying storage pointer changes (e.g. first
+        call, or if the cache tensor was reallocated). Caching by storage
+        identity avoids stale views across CUDA graph capture/replay while
+        still being cheap.
         """
-        if self._k_scale_cache is not None:
+        cur_ptr = kv_cache.data_ptr()
+        if (
+            self._k_scale_cache is not None
+            and getattr(self, "_pth_cache_ptr", None) == cur_ptr
+        ):
             return
+        self._pth_cache_ptr = cur_ptr
         from vllm.utils.torch_utils import get_dtype_size
 
         num_blocks, _, block_size, nkv, slot_size = kv_cache.shape
@@ -791,13 +863,13 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
 
-            # Dedicated kernel disabled: _build_q_maps does CPU allocations
-            # incompatible with CUDA graph capture. Layout change alone is
-            # the main win — unified_attention below benefits from it.
-            if False and (
+            # Dedicated split-KV kernel for decode + small continuation
+            # prefill. Gated on max_query_len ≤ threshold; larger shapes
+            # fall through to unified_attention (better BLOCK_Q sharing).
+            if (
                 attn_metadata.max_query_len <= _CONTINUATION_DECODE_THRESHOLD
-                and attn_metadata.seq_lens_cpu is not None
-                and attn_metadata.query_start_loc_cpu is not None
+                and attn_metadata.q_to_req is not None
+                and attn_metadata.q_to_klen is not None
                 and self.alibi_slopes is None
                 and not self.use_alibi_sqrt
                 and self.sinks is None
@@ -816,8 +888,8 @@ class TritonAttentionImpl(AttentionImpl):
                     k_scale_cache=k_scale_cache,
                     v_scale_cache=v_scale_cache,
                     block_table=attn_metadata.block_table,
-                    seq_lens_cpu=attn_metadata.seq_lens_cpu,
-                    query_start_loc_cpu=attn_metadata.query_start_loc_cpu,
+                    q_to_req=attn_metadata.q_to_req,
+                    q_to_klen=attn_metadata.q_to_klen,
                     scale=self.scale,
                     max_num_kv_splits=self.max_num_kv_splits,
                     output=output[:num_actual_tokens],
