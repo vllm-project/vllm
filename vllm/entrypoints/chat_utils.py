@@ -36,7 +36,7 @@ from PIL import Image
 from pydantic import BaseModel, ConfigDict, TypeAdapter
 
 # pydantic needs the TypedDict from typing_extensions
-from typing_extensions import Required, TypedDict
+from typing_extensions import Required, TypedDict, override
 
 from vllm import envs
 from vllm.config import ModelConfig
@@ -934,6 +934,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
     def model_config(self) -> ModelConfig:
         return self._tracker.model_config
 
+    @override
     def parse_prompt_embeds(self, data: str) -> None:
         """Decode a base64 tensor and record a placeholder of matching length."""
         if not self.model_config.enable_prompt_embeds:
@@ -1069,6 +1070,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     def model_config(self) -> ModelConfig:
         return self._tracker.model_config
 
+    @override
     def parse_prompt_embeds(self, data: str) -> None:
         """Decode the prompt_embeds tensor and register it with the tracker."""
         if not self.model_config.enable_prompt_embeds:
