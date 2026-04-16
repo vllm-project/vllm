@@ -1553,6 +1553,24 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             return sequences
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
+def qianfan_ocr_hf_model_kwargs(model_name: str) -> dict:
+    """Return hf_model_kwargs with a patched config for QianfanOCR.
+
+    The upstream transformers modeling code expects ``image_size`` and
+    ``patch_size`` in the vision config to be tuples, but the HF repo
+    stores them as plain ints.  We load the config, normalise those
+    fields, and hand it back so that ``AutoModel.from_pretrained`` gets
+    a config it can work with.
+    """
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    vc = config.vision_config
+    if isinstance(vc.image_size, int):
+        vc.image_size = (vc.image_size, vc.image_size)
+    if isinstance(vc.patch_size, int):
+        vc.patch_size = (vc.patch_size, vc.patch_size)
+    return {"config": config}
+
+
 def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches an HfRunner instance to run QianfanOCR model inference.
 
@@ -1564,7 +1582,6 @@ def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     class QianfanOCRProcessor:
         def __init__(self, hf_runner: HfRunner):
-            self.num_image_token = hf_runner.model.num_image_token
             self.tokenizer = hf_runner.tokenizer
 
             from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
@@ -1574,6 +1591,15 @@ def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.min_num = self.config.min_dynamic_patch
             self.max_num = self.config.max_dynamic_patch
             self.image_size = self.vision_config.image_size
+
+            # Compute num_image_token from config instead of model attribute,
+            # since the transformers-native model doesn't expose it.
+            image_size = self.config.force_image_size or self.vision_config.image_size
+            patch_size = self.vision_config.patch_size
+            downsample_ratio = self.config.downsample_ratio
+            self.num_image_token = int(
+                (image_size // patch_size) ** 2 * (downsample_ratio ** 2)
+            )
 
         def __call__(
             self,

@@ -620,16 +620,13 @@ VLM_TEST_SETTINGS = {
         models=["bairongz/QianfanOCR"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<image>\nWhat's the content in the center of the image?",
-                "cherry_blossom": "<image>\nWhat is the season?",
-            }
-        ),
-        multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
         max_model_len=4096,
         use_tokenizer_eos=True,
-        patch_hf_runner=model_utils.qianfan_ocr_patch_hf_runner,
+        auto_cls=AutoModelForImageTextToText,
+        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs(
+            "bairongz/QianfanOCR"
+        ),
     ),
     "isaac": VLMTestInfo(
         # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF

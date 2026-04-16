@@ -28,6 +28,8 @@ class QianfanOCRVisionConfig(PretrainedConfig):
         norm_type: str = "layer_norm",
         initializer_range: float = 0.02,
         initializer_factor: float = 0.1,
+        use_mask_token: bool = False,
+        use_mean_pooling: bool = True,
         **kwargs: Any,
     ):
         super().__init__(**kwargs)
@@ -47,6 +49,8 @@ class QianfanOCRVisionConfig(PretrainedConfig):
         self.norm_type = norm_type
         self.initializer_range = initializer_range
         self.initializer_factor = initializer_factor
+        self.use_mask_token = use_mask_token
+        self.use_mean_pooling = use_mean_pooling
 
 
 class QianfanOCRConfig(PretrainedConfig):
