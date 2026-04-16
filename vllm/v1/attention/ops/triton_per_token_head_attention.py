@@ -367,6 +367,7 @@ def _pth_prefill_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_D: tl.constexpr,
     HEAD_DIM: tl.constexpr,
+    QK_INT8_WMMA: tl.constexpr = False,
 ):
     """Prefill attention over paged KV cache with per-token-head dequant.
 
@@ -379,6 +380,14 @@ def _pth_prefill_kernel(
     ``q_pos = cached_len + offs_m`` where ``cached_len = seq_len - q_len``,
     so queries attend to the cached prefix plus their own prefix within the
     current chunk.
+
+    When ``QK_INT8_WMMA`` is set, Q is dynamically quantized per-row to int8
+    once (outside the K loop) and the Q·Kᵀ dot is issued as
+    ``tl.dot(int8, int8, out_dtype=int32)`` — Triton lowers this to
+    ``v_wmma_i32_16x16x16_iu8`` on RDNA3/4 and ``v_mfma_i32_16x16x16i8`` on
+    CDNA2/3, which run at ~2× bf16 throughput. Requires an int8 cache.
+    P·V stays in bf16: per-tile P quantization measured as a regression on
+    gfx1100 (see the unified-attention PR that validated this approach).
     """
     req_id = tl.program_id(0)
     head_id = tl.program_id(1)
@@ -416,6 +425,16 @@ def _pth_prefill_kernel(
     )
     q_dtype = q.dtype
 
+    # Per-row symmetric int8 quantization of Q, reused across all K tiles.
+    # Lifting this out of the loop turns a per-tile int8→bf16 cast on K into
+    # a single per-Q-tile fp32→int8 cast on Q, and the int32 accumulator of
+    # the WMMA/MFMA int8 instruction carries full precision.
+    if QK_INT8_WMMA:
+        q_f32 = q.to(tl.float32)
+        q_absmax = tl.max(tl.abs(q_f32), axis=1)
+        q_scale_pt = tl.maximum(q_absmax * (1.0 / 127.0), 1e-6)
+        q_i8 = tl.clamp(q_f32 * (1.0 / q_scale_pt)[:, None], -128.0, 127.0).to(tl.int8)
+
     m_i = tl.full([BLOCK_M], -float("inf"), dtype=tl.float32)
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_D], dtype=tl.float32)
@@ -444,11 +463,20 @@ def _pth_prefill_kernel(
             + kv_head * stride_kc_head
             + offs_d[:, None]
         )
-        k = tl.load(
-            K_cache_ptr + k_addrs,
-            mask=valid_k[None, :] & d_mask[:, None],
-            other=0.0,
-        )
+        # `other` must stay integer in the int8 path so Triton doesn't promote
+        # the load result to float and break the int8 tl.dot.
+        if QK_INT8_WMMA:
+            k = tl.load(
+                K_cache_ptr + k_addrs,
+                mask=valid_k[None, :] & d_mask[:, None],
+                other=0,
+            )
+        else:
+            k = tl.load(
+                K_cache_ptr + k_addrs,
+                mask=valid_k[None, :] & d_mask[:, None],
+                other=0.0,
+            )
 
         k_sc_addrs = (
             block_nums * stride_ks_blk
@@ -457,8 +485,15 @@ def _pth_prefill_kernel(
         )
         k_scales = tl.load(K_scale_ptr + k_sc_addrs, mask=valid_k, other=0.0)
 
-        qk = tl.dot(q, k.to(q_dtype))
-        qk = qk * k_scales[None, :] * SM_SCALE
+        if QK_INT8_WMMA:
+            # Fused rescale: softmax_scale * q_scale(per row) * k_scale(per col).
+            qk_i32 = tl.dot(q_i8, k, out_dtype=tl.int32)
+            qk = qk_i32.to(tl.float32) * (
+                SM_SCALE * q_scale_pt[:, None] * k_scales[None, :]
+            )
+        else:
+            qk = tl.dot(q, k.to(q_dtype))
+            qk = qk * k_scales[None, :] * SM_SCALE
 
         causal = k_pos[None, :] <= q_pos[:, None]
         full_mask = causal & valid_k[None, :]
@@ -526,6 +561,7 @@ def triton_per_token_head_prefill(
     softmax_scale: float,
     num_reqs: int,
     max_query_len: int,
+    use_qk_int8_wmma: bool = False,
 ) -> torch.Tensor:
     """Flash-attention prefill with paged per-token-head dequant.
 
@@ -537,6 +573,10 @@ def triton_per_token_head_prefill(
     both the cached prefix and the queries within the current chunk. The
     KV cache must already include the new tokens (i.e. the reshape-and-
     cache step has run before this kernel).
+
+    Set ``use_qk_int8_wmma=True`` only when ``key_cache.dtype is
+    torch.int8`` — it routes the Q·Kᵀ dot through native int8 matrix
+    instructions (RDNA3/4 WMMA, CDNA2/3 MFMA) for ~2× throughput.
     """
     total_q, Hq, D = query.shape
     Hkv = key_cache.shape[2]
@@ -586,6 +626,7 @@ def triton_per_token_head_prefill(
         BLOCK_N=BLOCK_N,
         BLOCK_D=BLOCK_D,
         HEAD_DIM=D,
+        QK_INT8_WMMA=use_qk_int8_wmma,
         num_warps=4 if D <= 64 else 8,
         num_stages=2,
     )
