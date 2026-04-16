@@ -77,6 +77,8 @@ class ModelArchConfigConvertorBase:
             "num_key_value_heads",
             # For ChatGLM:
             "multi_query_group_num",
+            # For Step3p5:
+            "num_attention_groups",
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
