@@ -6,8 +6,7 @@ from typing import Union
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -229,9 +228,6 @@ class FusedMoEQuantConfig:
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
     is_nvfp4_scale_swizzled: bool = True
-    # CK MXFP4 (gfx950) padding info for rocm_aiter_ops.fused_moe()
-    hidden_pad: int = 0
-    intermediate_pad: int = 0
 
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
@@ -1172,8 +1168,13 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
+    # Defaults to hidden_dim if not specified.
+    hidden_dim_unpadded: int | None = None
+    # Defaults to intermediate_size_per_partition if not specified.
+    intermediate_size_per_partition_unpadded: int | None = None
+
     moe_backend: str = "auto"
-    max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+    max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
@@ -1194,6 +1195,13 @@ class FusedMoEConfig:
 
         if self.router_logits_dtype is None:
             self.router_logits_dtype = self.in_dtype
+
+        if self.hidden_dim_unpadded is None:
+            self.hidden_dim_unpadded = self.hidden_dim
+        if self.intermediate_size_per_partition_unpadded is None:
+            self.intermediate_size_per_partition_unpadded = (
+                self.intermediate_size_per_partition
+            )
 
     @property
     def tp_size(self):

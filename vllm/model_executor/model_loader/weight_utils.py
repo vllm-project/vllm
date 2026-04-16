@@ -239,10 +239,12 @@ def convert_bin_to_safetensor_file(
     sf_size = os.stat(sf_filename).st_size
     pt_size = os.stat(pt_filename).st_size
     if (sf_size - pt_size) / pt_size > 0.01:
-        raise RuntimeError(f"""The file size different is more than 1%:
+        raise RuntimeError(
+            f"""The file size different is more than 1%:
          - {sf_filename}: {sf_size}
          - {pt_filename}: {pt_size}
-         """)
+         """
+        )
 
     # check if the tensors are the same
     reloaded = load_file(sf_filename)
@@ -294,6 +296,13 @@ def get_quant_config(
         )
 
     if hf_quant_config is not None:
+        if model_config.quantization_config is not None:
+            raise ValueError(
+                "Setting `quantization_config` for online "
+                "quantization when the model checkpoint already "
+                "has a `quantization_config` is not supported"
+            )
+
         # For modelopt_mixed, config.json's quantization_config may or may
         # not contain the per-layer quantized_layers map.  Newer checkpoints
         # embed it directly; older ones keep it only in hf_quant_config.json.
@@ -317,6 +326,12 @@ def get_quant_config(
     quantization_config_file = hf_overrides.get("quantization_config_file", None)
     if quantization_config_file is not None:
         if hasattr(quant_cls, "from_config_file"):
+            if model_config.quantization_config is not None:
+                raise ValueError(
+                    "Setting `quantization_config` for online "
+                    "quantization when the model checkpoint already "
+                    "has a `quantization_config` is not supported"
+                )
             return quant_cls.from_config_file(quantization_config_file)
         else:
             raise NotImplementedError(
@@ -327,6 +342,12 @@ def get_quant_config(
     quantization_config_json = hf_overrides.get("quantization_config_dict_json", None)
     if quantization_config_json is not None:
         if hasattr(quant_cls, "from_config_dict_json"):
+            if model_config.quantization_config is not None:
+                raise ValueError(
+                    "Setting `quantization_config` for online "
+                    "quantization when the model checkpoint already "
+                    "has a `quantization_config` is not supported"
+                )
             return quant_cls.from_config_dict_json(quantization_config_json)
         else:
             raise NotImplementedError(
@@ -334,6 +355,19 @@ def get_quant_config(
                 "but quant_cls.from_config_dict_json is not implemented in "
                 f"{quant_cls}"
             )
+
+    # Online quantization doesn't read from checkpoint configs — it quantizes
+    # fp16/bf16 weights on the fly during loading.
+    if model_config.quantization_config is not None:
+        from vllm.config.quantization import OnlineQuantizationConfigArgs
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        assert isinstance(
+            model_config.quantization_config, OnlineQuantizationConfigArgs
+        )
+        return OnlineQuantizationConfig(args=model_config.quantization_config)
 
     # Inflight BNB quantization
     if model_config.quantization == "bitsandbytes":
@@ -729,31 +763,24 @@ def np_cache_weights_iterator(
         yield name, torch.from_numpy(param)
 
 
-def _checkpoints_fit_in_ram(files: list[str], threshold: float = 0.9) -> bool:
-    """Return True if total size of *files* fits within *threshold* of available RAM."""
+def _get_checkpoints_size_bytes(files: list[str]) -> int:
+    """Return the total size of the checkpoint files in bytes."""
     if not files:
-        return True
+        return 0
+    return sum(os.path.getsize(f) for f in files)
+
+
+def _get_available_ram_bytes() -> int:
+    """Return the available RAM in bytes."""
     import psutil
 
-    total_size = sum(os.path.getsize(f) for f in files)
-    available_ram = psutil.virtual_memory().available
-    fits = total_size <= threshold * available_ram
-    if not fits:
-        logger.warning(
-            "NFS detected but checkpoint total size (%.2f GiB) exceeds "
-            "%.0f%% of available RAM (%.2f GiB). Skipping prefetching checkpoints.",
-            total_size / (1024**3),
-            threshold * 100,
-            available_ram / (1024**3),
-        )
-    return fits
+    return psutil.virtual_memory().available
 
 
-def _is_nfs_path(files: list[str]) -> bool:
-    """Check whether the first file in *files* resides on an NFS
-    filesystem (Linux only)."""
+def _get_fs_type(files: list[str]) -> str:
+    """Get the filesystem type of the first file in *files* (Linux only)."""
     if not files:
-        return False
+        return ""
     try:
         # Only the first file is checked — all checkpoint shards reside
         # in the same directory and therefore on the same filesystem.
@@ -776,12 +803,11 @@ def _is_nfs_path(files: list[str]) -> bool:
                 ) and len(mount_point) > len(best_mount):
                     best_mount = mount_point
                     best_fstype = fstype
-        return best_fstype in ("nfs", "nfs4")
+        return best_fstype
     except Exception:
         # /proc/mounts is Linux-specific; on other OSes (or if the read
-        # fails for any reason) we fall back to "not NFS" rather than
-        # crashing model loading.
-        return False
+        # fails for any reason) we fall back to an empty string.
+        return ""
 
 
 def _prefetch_checkpoint(file_path: str) -> None:
@@ -867,11 +893,63 @@ def safetensors_weights_iterator(
 
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
-    should_prefetch = safetensors_load_strategy == "prefetch" or (
-        safetensors_load_strategy is None
-        and _is_nfs_path(sorted_files)
-        and _checkpoints_fit_in_ram(sorted_files)
+    fs_type = _get_fs_type(sorted_files)
+    is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
+    total_bytes = _get_checkpoints_size_bytes(sorted_files)
+    avail_bytes = _get_available_ram_bytes()
+    ram_threshold_pct = 90
+    fits_in_ram = total_bytes <= (ram_threshold_pct / 100.0) * avail_bytes
+    fs_name = fs_type.upper() if fs_type else "unknown"
+
+    logger.info_once(
+        "Filesystem type for checkpoints: %s. Checkpoint size: %.2f GiB. "
+        "Available RAM: %.2f GiB.",
+        fs_name,
+        total_bytes / 1024**3,
+        avail_bytes / 1024**3,
     )
+
+    should_prefetch = safetensors_load_strategy == "prefetch"
+    if safetensors_load_strategy is None:
+        if is_net_fs and fits_in_ram:
+            should_prefetch = True
+        elif is_net_fs and not fits_in_ram:
+            logger.warning_once(
+                "Network filesystem (%s) detected but checkpoint total size "
+                "(%.2f GiB) exceeds %d%% of available RAM (%.2f GiB). "
+                "Skipping auto-prefetch.",
+                fs_name,
+                total_bytes / 1024**3,
+                ram_threshold_pct,
+                avail_bytes / 1024**3,
+            )
+        elif not is_net_fs and fits_in_ram:
+            logger.info_once(
+                "Auto-prefetch is disabled because the filesystem (%s) is not a "
+                "recognized network FS (NFS/Lustre). If you want to force "
+                "prefetching, start vLLM with --safetensors-load-strategy=prefetch.",
+                fs_name,
+            )
+        elif not is_net_fs and not fits_in_ram:
+            logger.info_once(
+                "Auto-prefetch is disabled because the filesystem (%s) is not a "
+                "recognized network FS (NFS/Lustre) and the checkpoint size "
+                "(%.2f GiB) exceeds %d%% of available RAM (%.2f GiB).",
+                fs_name,
+                total_bytes / 1024**3,
+                ram_threshold_pct,
+                avail_bytes / 1024**3,
+            )
+    elif should_prefetch and not fits_in_ram:
+        logger.warning_once(
+            "safetensors_load_strategy='prefetch' was explicitly specified, but "
+            "checkpoint total size (%.2f GiB) exceeds %d%% of available RAM "
+            "(%.2f GiB). This may cause out-of-memory errors.",
+            total_bytes / 1024**3,
+            ram_threshold_pct,
+            avail_bytes / 1024**3,
+        )
+
     if should_prefetch:
         _prefetch_all_checkpoints(sorted_files)
 
@@ -1222,6 +1300,49 @@ def gguf_quant_weights_iterator(
             yield name, param
 
 
+def gguf_quant_weights_iterator_multi(
+    gguf_files: list[str], gguf_to_hf_name_map: dict[str, str]
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """
+    Iterate over the quant weights across multiple GGUF shard files
+    and convert them to torch tensors.
+
+    Like gguf_quant_weights_iterator, we yield all weight types first
+    before yielding any weights data to avoid issues with packed layers
+    that have different quant types.
+    """
+    readers = [gguf.GGUFReader(f) for f in gguf_files]
+
+    # First pass: yield all weight types across all shards
+    for reader in readers:
+        for tensor in reader.tensors:
+            if tensor.name in gguf_to_hf_name_map:
+                weight_type = tensor.tensor_type
+                name = gguf_to_hf_name_map[tensor.name]
+                if weight_type.name not in ("F32", "BF16", "F16"):
+                    weight_type_name = name.replace("weight", "qweight_type")
+                    weight_type = torch.tensor(weight_type)
+                    yield weight_type_name, weight_type
+
+    # Second pass: yield all weight data across all shards
+    for reader in readers:
+        for tensor in reader.tensors:
+            if tensor.name in gguf_to_hf_name_map:
+                weight = tensor.data
+                weight_type = tensor.tensor_type
+                name = gguf_to_hf_name_map[tensor.name]
+                if weight_type.name not in ("F32", "BF16", "F16"):
+                    name = name.replace("weight", "qweight")
+                if weight_type.name == "BF16" and tensor.data.dtype == np.uint8:
+                    weight = weight.view(np.uint16)
+                    if reader.byte_order == "S":
+                        weight = weight.byteswap()
+                    param = torch.tensor(weight).view(torch.bfloat16)
+                else:
+                    param = torch.tensor(weight)
+                yield name, param
+
+
 def convert_pyslice_to_tensor(x: Any) -> torch.Tensor:
     """convert PySafeSlice object from safetensors to torch.Tensor
 
@@ -1243,8 +1364,8 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
         if param.numel() == 1 and loaded_weight.numel() == 1:
             # Sometimes scalar values aren't considered tensors with shapes
             # so if both param and loaded_weight are a scalar,
-            # "broadcast" instead of copy
-            param.data.fill_(loaded_weight.item())
+            # reshape to match before copying
+            param.data.copy_(loaded_weight.view(param.shape))
         else:
             assert param.size() == loaded_weight.size(), (
                 f"Attempted to load weight ({loaded_weight.size()}) "
@@ -1323,31 +1444,20 @@ def initialize_dummy_weights(
     is fixed, the random values generated by this function only depends on
     the parameter's number of elements and its data type.
     """
-
-    # Check if any module uses online quantization with meta device weights.
-    # If so, we'll skip initializing params on meta device since they'll be
-    # handled in `process_weights_after_loading`.
-    def uses_meta_device(module: torch.nn.Module) -> bool:
-        quant_method = getattr(module, "quant_method", None)
-        return getattr(quant_method, "uses_meta_device", False)
-
-    has_online_quant = any(uses_meta_device(m) for m in model.modules())
-
     for param in model.state_dict().values():
-        if has_online_quant and param.device == torch.device("meta"):
-            # For online quantization, weights are created on meta device and
-            # dummy weight init will happen in `process_weights_after_loading`.
-            continue
-
         initialize_single_dummy_weight(param, low, high, seed)
 
 
+@torch.no_grad()
 def initialize_single_dummy_weight(
     param: torch.Tensor,
     low: float = -1e-3,
     high: float = 1e-3,
     seed: int = 1234,
 ) -> None:
+    if param.device.type == "meta":
+        return  # deferred to finalize_layerwise_processing (e.g. online quant)
+
     if not torch.is_floating_point(param):
         if current_platform.is_rocm():
             # On ROCm, integer params (e.g. GPTQ qweight/qzeros) are left

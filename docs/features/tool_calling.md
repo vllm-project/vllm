@@ -505,7 +505,7 @@ Here is a summary of a plugin file:
 
         # adjust request. e.g.: set skip special tokens
         # to False for tool call output.
-        def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+        def adjust_request(self, request: ChatCompletionRequest | ResponsesRequest) -> ChatCompletionRequest | ResponsesRequest:
             return request
 
         # implement the tool call parse for stream call
