@@ -232,14 +232,14 @@ def _fp16_to_fp4_simulate(
     mantissa_last = (val_view >> (half_mantissa_bits - 1)) & 1
 
     exp_unbias = exp - half_exp_bias
-    new_exp = exp_unbias + FLOAT4_EXP_BIAS
+    new_exp = exp_unbias + _FLOAT4_EXP_BIAS
 
     exp_shift = (new_exp <= 0) * (1 - new_exp)
 
     # Typically 9.
     # Take the min to prevent overflow on `uint16_t half`. This is the case for
     # very small values, correctly mapped to `round_close`.
-    tail_bits = half_mantissa_bits - FLOAT4_MANTISSA_BITS + exp_shift
+    tail_bits = half_mantissa_bits - _FLOAT4_MANTISSA_BITS + exp_shift
     tail_bits[tail_bits >= 16] = 16
 
     mantissa_plus_one = val_view & ((1 << (half_mantissa_bits + 1)) - 1)
