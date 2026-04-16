@@ -73,7 +73,6 @@ impl HfChatRenderer {
             .tool_parsing_enabled()
             .then(|| to_template_tools(&request.tools));
         trace!(
-            request_id = %request.request_id,
             message_count = messages.len(),
             content_format = ?effective_template.content_format(),
             ?messages,
@@ -102,10 +101,8 @@ impl HfChatRenderer {
             .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
 
         trace!(
-            request_id = %request.request_id,
             prompt_len = prompt.len(),
-            prompt,
-            "rendered chat template prompt"
+            prompt, "rendered chat template prompt"
         );
 
         Ok(RenderedPrompt { prompt })

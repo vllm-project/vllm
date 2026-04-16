@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures::{Stream, StreamExt};
 use futures_async_stream::try_stream;
 use serde::{Deserialize, Serialize};
-use tracing::debug;
+use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
 use vllm_engine_core_client::protocol::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput};
@@ -226,6 +226,8 @@ pub async fn decoded_text_event_stream(
         if let Some(reason) = finish_reason {
             // Flush any remaining buffered text.
             let (last_chunk, mut text) = decoder.flush(truncate_output_to)?;
+            let text_len = text.len();
+            let full_text = tracing::enabled!(Level::TRACE).then(|| text.clone());
 
             if intermediate {
                 if let Some(chunk) = last_chunk {
@@ -240,15 +242,15 @@ pub async fn decoded_text_event_stream(
                 text = delta.unwrap_or_default();
             }
 
-            let text_len = text.len();
-
             debug!(
-                %request_id,
                 finish_reason = ?reason,
                 text_length_bytes = text_len,
                 output_token_count = output_token_count,
                 "request finished with terminal output"
             );
+            if let Some(full_text) = full_text {
+                trace!(full_text, "request finished with terminal decoded text");
+            }
 
             // Intentionally drop the stream with explicit cause, so that the engine core can
             // distinguish between such normal completion vs an unexpected early drop.

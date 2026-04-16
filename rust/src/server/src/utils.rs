@@ -8,6 +8,12 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResolvedRequestContext {
+    pub request_id: String,
+    pub data_parallel_rank: Option<u32>,
+}
+
 /// Return the current Unix timestamp in seconds for OpenAI response objects.
 pub fn unix_timestamp() -> u64 {
     SystemTime::now()
@@ -64,10 +70,10 @@ pub fn convert_logit_bias(
 
 /// Extract common request metadata from HTTP headers: the external request ID
 /// and the optional data-parallel rank used for engine routing.
-pub fn process_common_headers(
-    headers: HeaderMap,
+pub fn resolve_request_context(
+    headers: &HeaderMap,
     request_id: Option<&str>,
-) -> (String, Option<u32>) {
+) -> ResolvedRequestContext {
     // `None` when the header is absent or cannot be parsed as a `u32`.
     let data_parallel_rank = headers
         .get("X-data-parallel-rank")
@@ -79,7 +85,11 @@ pub fn process_common_headers(
         .get("X-Request-Id")
         .and_then(|value| value.to_str().ok());
     let request_id = resolve_base_request_id(request_id_header, request_id);
-    (request_id, data_parallel_rank)
+
+    ResolvedRequestContext {
+        request_id,
+        data_parallel_rank,
+    }
 }
 
 /// Resolve the base external request ID before API-specific prefixes such as `chatcmpl-`.

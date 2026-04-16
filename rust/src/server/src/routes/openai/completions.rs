@@ -13,7 +13,8 @@ use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
+use tracing_futures::Instrument as _;
 use vllm_text::{DecodedTextEvent, FinishReason, TextOutputStream, TextOutputStreamExt as _};
 
 use super::utils::logprobs::{
@@ -30,7 +31,7 @@ use crate::routes::openai::completions::types::{
 use crate::routes::openai::utils::types::LogProbs;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::unix_timestamp;
+use crate::utils::{resolve_request_context, unix_timestamp};
 
 /// Validate one completions request and proxy it into the shared `vllm-text` stack.
 pub async fn completions(
@@ -40,11 +41,17 @@ pub async fn completions(
 ) -> Response {
     let stream = body.stream;
     let logprobs = body.logprobs;
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
 
-    let prepared = match prepare_completion_request(body, &state.model_id, headers) {
+    let prepared = match prepare_completion_request(body, &state.model_id, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    let request_span = tracing::info_span!(
+        "completions",
+        request_id = %prepared.request_id,
+        engine_request_id = tracing::field::Empty,
+    );
 
     let created = unix_timestamp();
     let include_prompt_logprobs = prepared
@@ -54,7 +61,13 @@ pub async fn completions(
         .is_some();
     let log_request = state.enable_log_requests;
 
-    let text_stream = match state.chat.text().generate(prepared.text_request).await {
+    let text_stream = match state
+        .chat
+        .text()
+        .generate(prepared.text_request)
+        .instrument(request_span.clone())
+        .await
+    {
         Ok(stream) => stream,
         Err(error) => {
             return server_error!(
@@ -78,7 +91,7 @@ pub async fn completions(
             prepared.return_token_ids,
             prepared.return_tokens_as_token_ids,
         );
-        let sse_stream = completion_sse_stream(chunk_stream);
+        let sse_stream = completion_sse_stream(chunk_stream).instrument(request_span);
 
         Sse::new(sse_stream).into_response()
     } else {
@@ -93,6 +106,7 @@ pub async fn completions(
             prepared.return_token_ids,
             prepared.return_tokens_as_token_ids,
         )
+        .instrument(request_span.clone())
         .await
         {
             Ok(response) => response,
@@ -102,7 +116,7 @@ pub async fn completions(
         if log_request {
             let usage = response.usage.as_ref();
             info!(
-                request_id = %response.id,
+                parent: &request_span,
                 model = %response.model,
                 prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
                 output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
@@ -213,7 +227,7 @@ async fn completion_chunk_stream(
             Ok(DecodedTextEvent::Start {
                 prompt_token_ids, ..
             }) => {
-                debug!(%request_id, "completion stream started");
+                debug!("completion stream started");
                 if let Some(prompt) = echo.as_ref() {
                     visible_text_len = text_len(prompt);
                     let mut chunk =
@@ -267,12 +281,12 @@ async fn completion_chunk_stream(
                 if let Some(finished) = finished {
                     if log_request {
                         info!(
-                            %request_id,
+                            stream = true,
                             model = %response_model,
                             prompt_tokens = finished.prompt_token_count,
                             output_tokens = finished.output_token_count,
                             finish_reason = finished.finish_reason.as_str(),
-                            "completion finished [stream]"
+                            "completion finished"
                         );
                     }
                     yield CompletionSseChunk::Chunk(final_chunk(
@@ -297,7 +311,6 @@ async fn completion_chunk_stream(
             }
             Err(error) => {
                 error!(
-                    %request_id,
                     error = %error.as_report(),
                     "completion stream failed"
                 );
@@ -388,6 +401,7 @@ async fn completion_sse_stream(stream: impl Stream<Item = Result<CompletionSseCh
 /// Serialize one OpenAI chunk payload into one SSE `data:` event.
 fn to_sse_event(chunk: &CompletionSseChunk) -> Event {
     let payload = serde_json::to_string(chunk).expect("completion chunk must serialize to JSON");
+    trace!(payload, "completion emitting chunk");
     Event::default().data(payload)
 }
 
@@ -395,11 +409,13 @@ fn to_sse_event(chunk: &CompletionSseChunk) -> Event {
 fn to_error_sse_event(error: &ApiError) -> Event {
     let payload = serde_json::to_string(&error.to_error_response())
         .expect("ErrorResponse must serialize to JSON");
+    trace!(payload, "completion emitting error");
     Event::default().data(payload)
 }
 
 /// Build the terminal OpenAI SSE sentinel event.
 fn done_sse_event() -> Event {
+    trace!("completion emitting done");
     Event::default().data("[DONE]")
 }
 

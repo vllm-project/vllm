@@ -1,3 +1,4 @@
+use tracing::Span;
 use vllm_engine_core_client::EngineCoreClient;
 
 mod error;
@@ -66,6 +67,9 @@ impl Llm {
     pub async fn generate(&self, req: GenerateRequest) -> Result<GenerateOutputStream> {
         let prepared = req.prepare(self.randomize_request_id)?;
         let prompt_token_ids = prepared.prompt_token_ids().into();
+
+        // Record internal engine-core request ID in the current tracing span.
+        Span::current().record("engine_request_id", &prepared.engine_request.request_id);
 
         let request_metrics = RequestMetricsTracker::new(
             self.client.model_name().to_string(),

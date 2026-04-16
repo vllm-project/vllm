@@ -11,6 +11,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
 use tracing::info;
+use tracing_futures::Instrument as _;
 use vllm_engine_core_client::protocol::{Logprobs, PositionLogprobs};
 use vllm_llm::{CollectedGenerateOutput, GenerateOutputStreamExt as _};
 
@@ -21,6 +22,7 @@ use crate::routes::openai::utils::logprobs::clamp_logprob;
 use crate::routes::openai::utils::types::{ChatLogProbs, ChatLogProbsContent, TopLogProb};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
+use crate::utils::resolve_request_context;
 
 /// Validate one token-in/token-out request and proxy it into the shared `vllm-text` stack.
 pub async fn generate(
@@ -28,16 +30,28 @@ pub async fn generate(
     headers: HeaderMap,
     ValidatedJson(body): ValidatedJson<GenerateRequest>,
 ) -> Response {
-    let prepared = match prepare_generate_request(body, &state.model_id, headers) {
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
+    let prepared = match prepare_generate_request(body, &state.model_id, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    let request_span = tracing::info_span!(
+        "generate",
+        request_id = %prepared.request_id,
+        engine_request_id = tracing::field::Empty,
+    );
 
     let log_request = state.enable_log_requests;
     let include_logprobs = prepared.include_logprobs;
     let include_prompt_logprobs = prepared.include_prompt_logprobs;
 
-    let raw_stream = match state.chat.text().generate_raw(prepared.text_request).await {
+    let raw_stream = match state
+        .chat
+        .text()
+        .generate_raw(prepared.text_request)
+        .instrument(request_span.clone())
+        .await
+    {
         Ok(stream) => stream,
         Err(error) => {
             return server_error!(
@@ -48,7 +62,11 @@ pub async fn generate(
         }
     };
 
-    let collected = match raw_stream.collect_output().await {
+    let collected = match raw_stream
+        .collect_output()
+        .instrument(request_span.clone())
+        .await
+    {
         Ok(collected) => collected,
         Err(error) => {
             return server_error!(
@@ -61,7 +79,7 @@ pub async fn generate(
 
     if log_request {
         info!(
-            request_id = %collected.request_id,
+            parent: &request_span,
             prompt_tokens = collected.prompt_token_ids.len(),
             output_tokens = collected.token_ids.len(),
             finish_reason = collected.finish_reason.as_str(),

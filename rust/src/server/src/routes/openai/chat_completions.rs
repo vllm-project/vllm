@@ -15,7 +15,8 @@ use futures::{Stream, StreamExt as _, pin_mut};
 use futures_async_stream::try_stream;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, trace};
+use tracing_futures::Instrument as _;
 use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
     CollectedAssistantMessage, FinishReason,
@@ -36,7 +37,7 @@ use crate::routes::openai::utils::types::{
 };
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
-use crate::utils::unix_timestamp;
+use crate::utils::{resolve_request_context, unix_timestamp};
 
 /// Validate one chat completion request and proxy it into the shared `vllm-chat` stack.
 pub async fn chat_completions(
@@ -45,16 +46,27 @@ pub async fn chat_completions(
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
     let stream = body.stream;
+    let request_context = resolve_request_context(&headers, body.request_id.as_deref());
 
-    let prepared = match prepare_chat_request(body, &state.model_id, headers) {
+    let prepared = match prepare_chat_request(body, &state.model_id, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
     };
+    let request_span = tracing::info_span!(
+        "chat_completions",
+        request_id = %prepared.request_id,
+        engine_request_id = tracing::field::Empty,
+    );
 
     let created = unix_timestamp();
     let log_request = state.enable_log_requests;
 
-    let chat_stream = match state.chat.chat(prepared.chat_request).await {
+    let chat_stream = match state
+        .chat
+        .chat(prepared.chat_request)
+        .instrument(request_span.clone())
+        .await
+    {
         Ok(stream) => stream,
         Err(error) => {
             return server_error!(
@@ -78,7 +90,7 @@ pub async fn chat_completions(
             prepared.return_token_ids,
             prepared.return_tokens_as_token_ids,
         );
-        let sse_stream = chat_completion_sse_stream(chunk_stream);
+        let sse_stream = chat_completion_sse_stream(chunk_stream).instrument(request_span);
 
         Sse::new(sse_stream).into_response()
     } else {
@@ -93,6 +105,7 @@ pub async fn chat_completions(
             prepared.return_token_ids,
             prepared.return_tokens_as_token_ids,
         )
+        .instrument(request_span.clone())
         .await
         {
             Ok(response) => response,
@@ -102,7 +115,7 @@ pub async fn chat_completions(
         if log_request {
             let usage = response.usage.as_ref();
             info!(
-                request_id = %response.id,
+                parent: &request_span,
                 model = %response.model,
                 prompt_tokens = usage.map_or(0, |u| u.prompt_tokens),
                 output_tokens = usage.and_then(|u| u.completion_tokens).unwrap_or(0),
@@ -284,16 +297,15 @@ async fn chat_completion_chunk_stream(
                 }
             }
             Ok(ChatEvent::BlockStart { kind, .. }) => {
-                debug!(%request_id, ?kind, "starting new block");
+                debug!(?kind, "starting new block");
             }
             Ok(ChatEvent::BlockEnd { .. }) => {
-                debug!(%request_id, "ending current block");
+                debug!("ending current block");
             }
             Ok(ChatEvent::ToolCallStart { id, name, .. }) => {
                 let tool_index = tool_call_indices.len() as u32;
                 tool_call_indices.insert(id.clone(), tool_index);
                 debug!(
-                    %request_id,
                     tool_call_id = %id,
                     tool_call_name = %name,
                     "starting new tool call"
@@ -313,7 +325,7 @@ async fn chat_completion_chunk_stream(
             }
             Ok(ChatEvent::ToolCallArgumentsDelta { id, delta, .. }) => {
                 let Some(&tool_index) = tool_call_indices.get(&id) else {
-                    error!(%request_id, tool_call_id = %id, "missing tool call index");
+                    error!(tool_call_id = %id, "missing tool call index");
                     bail_server_error!("tool call stream state is inconsistent");
                 };
                 if let Some(pending_chunk) = pending_chunk.as_mut() {
@@ -330,7 +342,7 @@ async fn chat_completion_chunk_stream(
                 }
             }
             Ok(ChatEvent::ToolCallEnd { .. }) => {
-                debug!(%request_id, "ending current tool call");
+                debug!("ending current tool call");
             }
             Ok(ChatEvent::Done {
                 prompt_token_count,
@@ -340,12 +352,12 @@ async fn chat_completion_chunk_stream(
             }) => {
                 if log_request {
                     info!(
-                        %request_id,
+                        stream = true,
                         model = %response_model,
                         prompt_tokens = prompt_token_count,
                         output_tokens = output_token_count,
                         finish_reason = finish_reason.as_str(),
-                        "chat completion finished [stream]"
+                        "chat completion finished"
                     );
                 }
 
@@ -366,7 +378,6 @@ async fn chat_completion_chunk_stream(
                     Ok(chunk) => yield chunk,
                     Err(error) => {
                         error!(
-                            %request_id,
                             error = %error.to_error_response().error.message,
                             "invalid terminal finish reason"
                         );
@@ -387,7 +398,6 @@ async fn chat_completion_chunk_stream(
             }
             Err(error) => {
                 error!(
-                    %request_id,
                     error = %error.as_report(),
                     "chat stream failed"
                 );
@@ -558,6 +568,7 @@ async fn chat_completion_sse_stream(
 fn to_sse_event(chunk: &ChatCompletionStreamResponse) -> Event {
     let payload =
         serde_json::to_string(chunk).expect("ChatCompletionStreamResponse must serialize to JSON");
+    trace!(payload, "chat completion emitting chunk");
     Event::default().data(payload)
 }
 
@@ -565,11 +576,13 @@ fn to_sse_event(chunk: &ChatCompletionStreamResponse) -> Event {
 fn to_error_sse_event(error: &ApiError) -> Event {
     let payload = serde_json::to_string(&error.to_error_response())
         .expect("ErrorResponse must serialize to JSON");
+    trace!(payload, "chat completion emitting error");
     Event::default().data(payload)
 }
 
 /// Build the terminal OpenAI SSE sentinel event.
 fn done_sse_event() -> Event {
+    trace!("chat completion emitting done");
     Event::default().data("[DONE]")
 }
 
@@ -700,7 +713,6 @@ fn final_chunk(
     let finish_reason = chat_finish_reason_to_openai(&finish_reason, saw_tool_calls)?;
 
     debug!(
-        %request_id,
         finish_reason = %finish_reason,
         stop_reason = ?stop_reason,
         "chat stream finished"

@@ -18,6 +18,7 @@ thiserror-ext.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
+tracing-futures.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 validator.workspace = true

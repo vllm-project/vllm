@@ -1,10 +1,9 @@
-use axum::http::HeaderMap;
 use vllm_text::{Prompt, TextDecodeOptions, TextRequest};
 
 use super::types::GenerateRequest;
 use super::validate;
 use crate::error::ApiError;
-use crate::utils::{merge_kv_transfer_params, process_common_headers};
+use crate::utils::{ResolvedRequestContext, merge_kv_transfer_params};
 
 /// Lowered generate request plus the response request ID.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,12 +18,10 @@ pub struct PreparedRequest {
 pub fn prepare_generate_request(
     request: GenerateRequest,
     configured_model: &str,
-    headers: HeaderMap,
+    ctx: ResolvedRequestContext,
 ) -> Result<PreparedRequest, ApiError> {
     validate::validate_request_compat(&request, configured_model)?;
 
-    let (request_id, data_parallel_rank) =
-        process_common_headers(headers, request.request_id.as_deref());
     let include_logprobs = request.sampling_params.logprobs.is_some();
     let include_prompt_logprobs = request.sampling_params.prompt_logprobs.is_some();
     let mut sampling_params = request.sampling_params;
@@ -34,7 +31,7 @@ pub fn prepare_generate_request(
     );
 
     let text_request = TextRequest {
-        request_id: request_id.clone(),
+        request_id: ctx.request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
         sampling_params,
         decode_options: TextDecodeOptions::default(),
@@ -42,11 +39,11 @@ pub fn prepare_generate_request(
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
-        data_parallel_rank,
+        data_parallel_rank: ctx.data_parallel_rank,
     };
 
     Ok(PreparedRequest {
-        request_id,
+        request_id: ctx.request_id,
         text_request,
         include_logprobs,
         include_prompt_logprobs,
@@ -55,12 +52,12 @@ pub fn prepare_generate_request(
 
 #[cfg(test)]
 mod tests {
-    use axum::http::HeaderMap;
     use serde_json::json;
     use vllm_text::Prompt;
 
     use super::prepare_generate_request;
     use crate::routes::inference::generate::types::GenerateRequest;
+    use crate::utils::ResolvedRequestContext;
 
     #[test]
     fn prepare_generate_request_maps_token_prompt_and_sampling_params() {
@@ -81,9 +78,12 @@ mod tests {
         }))
         .expect("parse request");
 
-        let prepared =
-            prepare_generate_request(request, "Qwen/Qwen1.5-0.5B-Chat", HeaderMap::new())
-                .expect("prepare");
+        let prepared = prepare_generate_request(
+            request,
+            "Qwen/Qwen1.5-0.5B-Chat",
+            ResolvedRequestContext::default(),
+        )
+        .expect("prepare");
 
         assert_eq!(
             prepared.text_request.prompt,

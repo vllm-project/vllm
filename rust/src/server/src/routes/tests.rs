@@ -11,7 +11,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::body::{Body, to_bytes};
-use axum::http::{HeaderMap, Request, StatusCode};
+use axum::http::{Request, StatusCode};
 use bytes::Bytes;
 use futures::StreamExt as _;
 use rmpv::Value;
@@ -2406,7 +2406,7 @@ async fn prepared_openai_request_streams_text_events() {
         }))
         .expect("decode request"),
         "Qwen/Qwen1.5-0.5B-Chat",
-        HeaderMap::new(),
+        crate::utils::ResolvedRequestContext::default(),
     )
     .expect("prepare request");
 
