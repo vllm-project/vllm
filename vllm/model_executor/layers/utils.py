@@ -159,6 +159,10 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
+    if envs.VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM:
+        from aiter.tuned_gemm import tgemm
+        return tgemm.mm(x, weight, bias)
+
     if use_skinny_reduce_counting:
         return ops.wvSplitKrc(x, weight, cu_count, bias)
 

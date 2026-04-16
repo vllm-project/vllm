@@ -123,9 +123,11 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
+    VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM: bool = False
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1045,6 +1047,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_SKINNY_GEMM": lambda: (
         os.getenv("VLLM_ROCM_USE_SKINNY_GEMM", "True").lower() in ("true", "1")
     ),
+    # Use aiter tuned gemms for unquantized gemms
+    "VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM", "True").lower() in ("true", "1")
+    ),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
     # Pad the weights for the moe kernel
@@ -1052,6 +1058,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use the shuffled kv cache layout
     "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT": lambda: (
         os.getenv("VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT", "False").lower() in ("true", "1")
+    ),
+    # Disable dynamic MXFP4 quantization for attention linear layers on ROCm
+    "VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT": lambda: (
+        os.getenv("VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT", "False").lower() in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4 or NONE

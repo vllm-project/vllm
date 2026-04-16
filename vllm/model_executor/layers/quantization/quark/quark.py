@@ -139,8 +139,10 @@ class QuarkConfig(QuantizationConfig):
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
+            import vllm.envs as envs
             if (
-                "self_attn" not in prefix  # only quantize attention projections
+                envs.VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT
+                or "self_attn" not in prefix # only quantize attention projections
                 or not getattr(self, "dynamic_mxfp4_quant", False)
                 or not isinstance(layer, LinearBase)  # Ignore other methods
             ):
