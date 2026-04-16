@@ -41,6 +41,7 @@ Sorted alphabetically by GitHub handle:
 - [@robertgshaw2-redhat](https://github.com/robertgshaw2-redhat): Core, distributed, disagg
 - [@ruisearch42](https://github.com/ruisearch42): Pipeline parallelism, Ray Support
 - [@russellb](https://github.com/russellb): Structured output, engine core, security
+- [@sfeng33](https://github.com/sfeng33): Tool use and reasoning parser
 - [@sighingnow](https://github.com/sighingnow): Qwen models, new model support
 - [@simon-mo](https://github.com/simon-mo): Project lead, API entrypoints, community
 - [@tdoublep](https://github.com/tdoublep): State space models
@@ -119,7 +120,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - State space models: The state space models implementation in vLLM
     - @tdoublep, @tlrmchlsmth
 - Reasoning and tool calling parsers
-    - @chaunceyjiang, @aarnphm
+    - @chaunceyjiang, @aarnphm, @sfeng33
 
 ### Entrypoints
 
