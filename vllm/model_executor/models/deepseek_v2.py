@@ -351,6 +351,16 @@ class DeepseekV2MoE(nn.Module):
             else torch.bfloat16
         )
 
+        # Pre-cast the bias to match the gate output dtype so the
+        # conversion is not repeated on every forward pass.  All
+        # downstream references (FusedMoE, router) share the same
+        # nn.Parameter object, so mutating .data propagates everywhere.
+        # Weight loading uses copy_(), which handles the dtype conversion.
+        if self.gate.e_score_correction_bias is not None:
+            self.gate.e_score_correction_bias.data = (
+                self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
+            )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
