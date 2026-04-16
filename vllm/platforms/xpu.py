@@ -228,6 +228,10 @@ class XPUPlatform(Platform):
         # ref. https://openucx.readthedocs.io/en/master/faq.html
         os.environ["UCX_MEMTYPE_CACHE"] = "n"
 
+        # spawn is the only supported multiprocessing method on XPU
+        if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
