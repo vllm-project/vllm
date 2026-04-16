@@ -106,13 +106,11 @@ ENV SCCACHE_IDLE_TIMEOUT=${USE_SCCACHE:+0}
 
 # torch profiler hotfix for 7.2.2: cherry-pick ROCm/rocm-systems#5062 and rebuild CLR
 # will be removed once we move to ROCm 7.13
-ARG CLR_HOTFIX_BRANCH="users/saleelk/7.2cp2"
-ARG CLR_HOTFIX_REPO="https://github.com/ROCm/rocm-systems.git"
-RUN git clone --no-checkout --filter=blob:none ${CLR_HOTFIX_REPO} /tmp/rocm-systems \
+RUN git clone --no-checkout --filter=blob:none https://github.com/ROCm/rocm-systems /tmp/rocm-systems \
     && cd /tmp/rocm-systems \
     && git sparse-checkout init --cone \
     && git sparse-checkout set projects/hip projects/clr \
-    && git checkout ${CLR_HOTFIX_BRANCH} \
+    && git checkout 35e8c7bf8911862e5389509800e65fdf125412b3 \
     && export CLR_DIR=/tmp/rocm-systems/projects/clr \
     && export HIP_DIR=/tmp/rocm-systems/projects/hip \
     && mkdir -p $CLR_DIR/build && cd $CLR_DIR/build \
