@@ -20,10 +20,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
-    flashinfer_convert_sf_to_mma_layout,
     flashinfer_cute_dsl_fused_moe_nvfp4,
+    has_flashinfer_b12x_moe,
     has_flashinfer_cutedsl_moe_nvfp4,
-    has_flashinfer_cutedsl_sm12x_moe,
 )
 
 
@@ -173,22 +172,28 @@ class FlashInferCuteDSLExperts(mk.FusedMoEExpertsModular):
                 moe_output=output,
             )
 
-class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
-    """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121).
+
+class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
+    """FlashInfer B12x fused MoE expert for SM12x (SM120/SM121).
 
     Targets RTX Pro 6000 / DGX Spark (Blackwell GeForce).
 
-    Uses ``cute_dsl_fused_moe_nvfp4`` from FlashInfer PR #3066 which fuses
-    token dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction
-    into a single kernel call.  Input quantization (BF16→FP4) is performed
-    inside the kernel so BF16 hidden states are passed directly.
+    Uses ``B12xMoEWrapper`` from FlashInfer with pre-allocated workspace
+    and CUDA graph support.  The wrapper caches weight views (MMA layout
+    conversion) internally and supports both SiLU (gated) and ReLU2
+    (non-gated, e.g. Nemotron-H) activations via the ``activation``
+    parameter.
 
-    Weight scale factors must be in the MMA layout produced by
-    ``convert_sf_to_mma_layout``; this conversion is performed on every
-    forward pass since it is a zero-copy strided view.
+    Input quantization (BF16 -> FP4) is performed inside the kernel so
+    BF16 hidden states are passed directly.
 
     Only NVFP4 (kNvfp4Static/kNvfp4Dynamic) quantization is supported.
     """
+
+    _ACTIVATION_MAP: dict[MoEActivation, str] = {
+        MoEActivation.SILU: "silu",
+        MoEActivation.RELU2_NO_MUL: "relu2",
+    }
 
     def __init__(
         self,
@@ -197,11 +202,33 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
     ):
         super().__init__(moe_config=moe_config, quant_config=quant_config)
         assert quant_config.quant_dtype == "nvfp4", (
-            "FlashInferCuteDSLSM12xExperts only supports nvfp4 quantization."
+            "FlashInferB12xExperts only supports nvfp4 quantization."
         )
         self.out_dtype = moe_config.in_dtype
         self.num_local_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
+
+        # Shape params for B12xMoEWrapper construction.
+        self.global_num_experts = moe_config.num_experts
+        self.topk = moe_config.experts_per_token
+        self.hidden_dim = moe_config.hidden_dim
+        self.intermediate_size_per_partition = (
+            moe_config.intermediate_size_per_partition
+        )
+        self.max_num_tokens = moe_config.max_num_tokens
+        self.local_expert_offset = self.ep_rank * self.num_local_experts
+
+        activation = moe_config.activation
+        if activation not in self._ACTIVATION_MAP:
+            raise ValueError(
+                f"FlashInferB12xExperts does not support "
+                f"activation {activation!r}. "
+                f"Supported: {list(self._ACTIVATION_MAP.keys())}"
+            )
+        self._activation_str = self._ACTIVATION_MAP[activation]
+
+        # Lazily created on first apply() call.
+        self._wrapper: object | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # The SM12x kernel uses w1_alpha as *both* the activation input_gs and
@@ -237,12 +264,12 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         return (
             p.is_cuda()
             and p.is_device_capability_family(120)
-            and has_flashinfer_cutedsl_sm12x_moe()
+            and has_flashinfer_b12x_moe()
         )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
@@ -253,7 +280,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation == MoEActivation.SILU
+        return activation in (MoEActivation.SILU, MoEActivation.RELU2_NO_MUL)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -263,7 +290,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # cute_dsl_fused_moe_nvfp4 applies topk weights internally.
+        # B12xMoEWrapper applies topk weights internally.
         return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
@@ -277,7 +304,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # cute_dsl_fused_moe_nvfp4 manages its own internal workspace.
+        # B12xMoEWrapper manages its own internal workspace.
         workspace1 = (1,)
         workspace2 = (0,)
         output_shape = (M, K)
@@ -285,12 +312,29 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # cute_dsl_fused_moe_nvfp4 expects BF16 hidden states and performs
-        # its own FP4 quantization internally.  Returning True prevents the
-        # modular kernel from pre-quantizing activations, which would produce
-        # an FP4-packed tensor with size(-1)=k//2 and break the scale-factor
-        # conversion that expects size(-1)=k.
+        # B12xMoEWrapper expects BF16 hidden states and performs its own FP4
+        # quantization internally.  Returning True prevents the modular kernel
+        # from pre-quantizing activations.
         return True
+
+    def _ensure_wrapper(self) -> None:
+        """Lazily create B12xMoEWrapper on first use."""
+        if self._wrapper is not None:
+            return
+
+        from flashinfer.fused_moe import B12xMoEWrapper
+
+        self._wrapper = B12xMoEWrapper(
+            num_experts=self.global_num_experts,
+            top_k=self.topk,
+            hidden_size=self.hidden_dim,
+            intermediate_size=self.intermediate_size_per_partition,
+            use_cuda_graph=True,
+            max_num_tokens=self.max_num_tokens,
+            num_local_experts=self.num_local_experts,
+            local_expert_offset=self.local_expert_offset,
+            activation=self._activation_str,
+        )
 
     def apply(
         self,
@@ -311,65 +355,26 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         apply_router_weight_on_input: bool | None,
     ):
         assert self.w1_scale is not None and self.w2_scale is not None, (
-            "w1_scale and w2_scale must not be None for FlashInferCuteDSLSM12xExperts"
+            "w1_scale and w2_scale must not be None for FlashInferB12xExperts"
         )
         assert self.g1_alphas is not None and self.g2_alphas is not None, (
-            "g1_alphas and g2_alphas must not be None for FlashInferCuteDSLSM12xExperts"
+            "g1_alphas and g2_alphas must not be None for FlashInferB12xExperts"
         )
         assert self.a2_gscale is not None, (
-            "a2_gscale must not be None for FlashInferCuteDSLSM12xExperts"
+            "a2_gscale must not be None for FlashInferB12xExperts"
         )
 
-        top_k = topk_ids.shape[1]
-        local_expert_offset = self.ep_rank * self.num_local_experts
-
-        # Convert swizzled scale factors to the 6D MMA layout expected by
-        # cute_dsl_fused_moe_nvfp4.  This is a zero-copy view+permute.
-        num_experts_w1, m1, k1_sf = self.w1_scale.shape
-        k1 = k1_sf * 16  # sf_vec_size = 16
-        w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1,
-            num_groups=num_experts_w1,
-        )
-
-        num_experts_w2, m2, k2_sf = self.w2_scale.shape
-        k2 = k2_sf * 16
-        w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2,
-            num_groups=num_experts_w2,
-        )
-
-        # x_sf is ignored by the SM12x kernel (quantization is fused
-        # internally), but the API requires a tensor argument.
-        x_sf_placeholder = (
-            a1q_scale if a1q_scale is not None else hidden_states.new_zeros(1)
-        )
-
-        # TODO: Use the plan/run() API from FlashInfer PR #3066 instead of
-        # calling cute_dsl_fused_moe_nvfp4 directly.  The plan object can be
-        # created once in __init__ (shapes are fixed for MoE layers) and
-        # plan.run() called here, avoiding workspace allocation and kernel
-        # parameter setup overhead on every forward pass.
-        flashinfer_cute_dsl_fused_moe_nvfp4(
+        self._ensure_wrapper()
+        self._wrapper.run(
             x=hidden_states,
-            x_sf=x_sf_placeholder,
-            token_selected_experts=topk_ids.to(torch.int32),
-            token_final_scales=topk_weights,
             w1_weight=w1,
-            w1_weight_sf=w1_sf_mma,
+            w1_weight_sf=self.w1_scale,
             w1_alpha=self.g1_alphas,
             fc2_input_scale=self.a2_gscale,
             w2_weight=w2,
-            w2_weight_sf=w2_sf_mma,
+            w2_weight_sf=self.w2_scale,
             w2_alpha=self.g2_alphas,
-            num_experts=global_num_experts,
-            top_k=top_k,
-            num_local_experts=self.num_local_experts,
-            local_expert_offset=local_expert_offset,
-            output_dtype=self.out_dtype,
+            token_selected_experts=topk_ids.to(torch.int32),
+            token_final_scales=topk_weights,
             moe_output=output,
         )
