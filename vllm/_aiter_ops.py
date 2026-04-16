@@ -3,17 +3,22 @@
 import functools
 from collections.abc import Callable
 
-import pandas as pd
 import torch
 from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 # fp8_dtype is not cached.
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
