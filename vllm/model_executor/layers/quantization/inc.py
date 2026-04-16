@@ -477,75 +477,105 @@ class INCConfig(QuantizationConfig):
         return None
 
 
-def _create_inc_weights(
-    layer: torch.nn.Module,
-    input_size_per_partition: int,
-    output_partition_sizes: list[int],
-    params_dtype: torch.dtype,
-    weight_loader: Any,
-    group_size: int,
-    pack_factor: int,
-    *,
-    set_layer_attrs: bool = False,
-) -> None:
-    output_size_per_partition = sum(output_partition_sizes)
-    scales_and_zp_size = input_size_per_partition // group_size
+class _INCXPULinearBase(LinearMethodBase):
+    _set_layer_attrs_on_create = False
 
-    if set_layer_attrs:
-        layer.in_features = input_size_per_partition
-        layer.out_features = output_size_per_partition
-        layer.params_dtype = params_dtype
+    def __init__(self, weight_bits: int, group_size: int, sym: bool):
+        self.weight_bits = weight_bits
+        self.group_size = group_size
+        self.sym = sym
+        self.pack_factor = 32 // weight_bits
 
-    qweight = PackedvLLMParameter(
-        data=torch.empty(
-            input_size_per_partition // pack_factor,
-            output_size_per_partition,
-            dtype=torch.int32,
-        ),
-        input_dim=0,
-        output_dim=1,
-        packed_dim=0,
-        packed_factor=pack_factor,
-        weight_loader=weight_loader,
-    )
+    @classmethod
+    def _create_inc_weights(
+        cls,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        params_dtype: torch.dtype,
+        weight_loader: Any,
+        group_size: int,
+        pack_factor: int,
+    ) -> None:
+        output_size_per_partition = sum(output_partition_sizes)
+        scales_and_zp_size = input_size_per_partition // group_size
 
-    scales = GroupQuantScaleParameter(
-        data=torch.empty(
-            scales_and_zp_size,
-            output_size_per_partition,
-            dtype=params_dtype,
-        ),
-        input_dim=0,
-        output_dim=1,
-        weight_loader=weight_loader,
-    )
+        if cls._set_layer_attrs_on_create:
+            layer.in_features = input_size_per_partition
+            layer.out_features = output_size_per_partition
+            layer.params_dtype = params_dtype
 
-    qzeros = PackedvLLMParameter(
-        data=torch.empty(
-            scales_and_zp_size,
-            output_size_per_partition // pack_factor,
-            dtype=torch.int32,
-        ),
-        input_dim=0,
-        output_dim=1,
-        packed_dim=1,
-        packed_factor=pack_factor,
-        weight_loader=weight_loader,
-    )
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // pack_factor,
+                output_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=pack_factor,
+            weight_loader=weight_loader,
+        )
 
-    layer.register_parameter("qweight", qweight)
-    layer.register_parameter("scales", scales)
-    layer.register_parameter("qzeros", qzeros)
+        scales = GroupQuantScaleParameter(
+            data=torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            input_dim=0,
+            output_dim=1,
+            weight_loader=weight_loader,
+        )
 
-    g_idx = RowvLLMParameter(
-        data=torch.tensor(
-            [i // group_size for i in range(input_size_per_partition)],
-            dtype=torch.int32,
-        ),
-        input_dim=0,
-        weight_loader=weight_loader,
-    )
-    layer.register_parameter("g_idx", g_idx)
+        qzeros = PackedvLLMParameter(
+            data=torch.empty(
+                scales_and_zp_size,
+                output_size_per_partition // pack_factor,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("qweight", qweight)
+        layer.register_parameter("scales", scales)
+        layer.register_parameter("qzeros", qzeros)
+
+        g_idx = RowvLLMParameter(
+            data=torch.tensor(
+                [i // group_size for i in range(input_size_per_partition)],
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            weight_loader=weight_loader,
+        )
+        layer.register_parameter("g_idx", g_idx)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del input_size, output_size
+        type(self)._create_inc_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            params_dtype=params_dtype,
+            weight_loader=extra_weight_attrs.get("weight_loader"),
+            group_size=self.group_size,
+            pack_factor=self.pack_factor,
+        )
 
 
 def _get_ark_type_str(dtype: torch.dtype) -> str:
@@ -560,19 +590,17 @@ def _get_ark_type_str(dtype: torch.dtype) -> str:
         raise ValueError(f"Unsupported dtype for ARK: {dtype}")
 
 
-class INCXPULinearARKMethod(LinearMethodBase):
+class INCXPULinearARKMethod(_INCXPULinearBase):
     """XPU linear method for INC quantization utilizing the ARK backend.
 
     Repacks GPTQ/INC weights into ARK's layout.
     """
 
+    _set_layer_attrs_on_create = True
     _ark_instance: Any | None = None
 
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
-        self.weight_bits = weight_bits
-        self.group_size = group_size
-        self.sym = sym
-        self.pack_factor = 32 // weight_bits
+        super().__init__(weight_bits=weight_bits, group_size=group_size, sym=sym)
 
         self.weight_type = f"int{weight_bits}"
         self.asym = not sym
@@ -583,42 +611,15 @@ class INCXPULinearARKMethod(LinearMethodBase):
     def _get_ark_instance(cls):
         if cls._ark_instance is None:
             try:
-                from auto_round_extension.ark import auto_round_kernel
+                import auto_round_kernel
 
-                cls._ark_instance = auto_round_kernel.ARK()
-            except ImportError:
-                try:
-                    import auto_round_kernel
-
-                    ark_inst = auto_round_kernel._ark_instance()
-                    cls._ark_instance = ark_inst
-                except ImportError as e:
-                    raise ImportError("Failed to import auto_round_kernel.") from e
+                ark_inst = auto_round_kernel._ark_instance()
+                cls._ark_instance = ark_inst
+            except ImportError as e:
+                raise ImportError("Failed to import auto_round_kernel.") from e
 
         assert cls._ark_instance is not None
         return cls._ark_instance
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del output_size
-        _create_inc_weights(
-            layer=layer,
-            input_size_per_partition=input_size_per_partition,
-            output_partition_sizes=output_partition_sizes,
-            params_dtype=params_dtype,
-            weight_loader=extra_weight_attrs.get("weight_loader"),
-            group_size=self.group_size,
-            pack_factor=self.pack_factor,
-            set_layer_attrs=True,
-        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
@@ -635,6 +636,7 @@ class INCXPULinearARKMethod(LinearMethodBase):
         K_packed, N = qw.shape
 
         # Precompute bit shifts, e.g. int4 -> [0, 4, 8, 12, 16, 20, 24, 28].
+        # int8 -> [0, 8, 16, 24]
         shifts = torch.arange(0, 32, bits, device=device)
 
         # 1. Broadcast shifts and apply bit masking to extract values in
@@ -731,7 +733,7 @@ class INCXPULinearARKMethod(LinearMethodBase):
         return out.reshape(out_shape)
 
 
-class INCXPULinearMethod(LinearMethodBase):
+class INCXPULinearMethod(_INCXPULinearBase):
     """XPU linear method for INC w4a16 GPTQ quantization (symmetric only).
 
     Repacks GPTQ weights from [in_packed, out] to oneDNN [out, in_packed]
@@ -743,33 +745,6 @@ class INCXPULinearMethod(LinearMethodBase):
 
     FIXME(yiliu30): Refine the implementation to reuse XPUwNa16LinearKernel.
     """
-
-    def __init__(self, weight_bits: int, group_size: int, sym: bool):
-        self.weight_bits = weight_bits
-        self.group_size = group_size
-        self.sym = sym
-        self.pack_factor = 32 // weight_bits
-
-    def create_weights(
-        self,
-        layer: torch.nn.Module,
-        input_size_per_partition: int,
-        output_partition_sizes: list[int],
-        input_size: int,
-        output_size: int,
-        params_dtype: torch.dtype,
-        **extra_weight_attrs,
-    ):
-        del output_size  # Unused.
-        _create_inc_weights(
-            layer=layer,
-            input_size_per_partition=input_size_per_partition,
-            output_partition_sizes=output_partition_sizes,
-            params_dtype=params_dtype,
-            weight_loader=extra_weight_attrs.get("weight_loader"),
-            group_size=self.group_size,
-            pack_factor=self.pack_factor,
-        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """Repack GPTQ weights into kernel-ready NT layout."""
