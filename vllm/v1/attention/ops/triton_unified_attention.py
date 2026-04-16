@@ -167,8 +167,6 @@ def kernel_unified_attention_2d(
     KV_QUANT_MODE: tl.constexpr = 0,
     # Use int8 WMMA/MFMA for the QK dot (requires KV_QUANT_MODE==2 and int8 cache)
     QK_INT8_WMMA: tl.constexpr = False,
-    # Use int8 WMMA/MFMA for the PV dot (requires KV_QUANT_MODE==2 and int8 cache)
-    PV_INT8_WMMA: tl.constexpr = False,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
     # Per-token-head scale caches (KV_QUANT_MODE >= 2)
@@ -376,43 +374,26 @@ def kernel_unified_attention_2d(
             )
 
         # V : (TILE_SIZE, HEAD_SIZE)
-        if PV_INT8_WMMA:
-            # Keep V in int8; see K path above — `other` must stay integer.
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0,
-            )
-            V = V_load
-            scale_idx_v = (
-                physical_block_idx * stride_vs_blk
-                + (seq_offset % BLOCK_SIZE) * stride_vs_slot
-                + kv_head_idx * stride_vs_head
-            )
-            v_token_head_scales = tl.load(
-                v_scale_cache_ptr + scale_idx_v, mask=tile_mask, other=1.0
-            )
-        else:
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0.0,
-            )
-            V, v_token_head_scales = _prepare_kv_tile(
-                V_load,
-                Q,
-                v_scale,
-                v_scale_cache_ptr,
-                physical_block_idx,
-                seq_offset,
-                kv_head_idx,
-                stride_vs_blk,
-                stride_vs_slot,
-                stride_vs_head,
-                tile_mask,
-                BLOCK_SIZE,
-                KV_QUANT_MODE,
-            )
+        V_load = tl.load(
+            value_cache_ptr + v_offset,
+            mask=dim_mask[None, :] & tile_mask[:, None],
+            other=0.0,
+        )
+        V, v_token_head_scales = _prepare_kv_tile(
+            V_load,
+            Q,
+            v_scale,
+            v_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            kv_head_idx,
+            stride_vs_blk,
+            stride_vs_slot,
+            stride_vs_head,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
+        )
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -520,25 +501,13 @@ def kernel_unified_attention_2d(
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
-            sw_mask = (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW
-            if PV_INT8_WMMA:
-                # Keep V int8 — zero fill must also be int8 via tl.zeros_like.
-                V = tl.where(sw_mask, V, tl.zeros_like(V))
-            else:
-                V = tl.where(sw_mask, V, 0.0)
+            V = tl.where(
+                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
+            )
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        if PV_INT8_WMMA:
-            # int8 WMMA/MFMA PV: fuse v_scales into P (fp32), quantize per row
-            # to int8, dot against int8 V, then rescale by per-row p_scale.
-            P_v_f32 = P * v_token_head_scales[None, :]
-            p_absmax = tl.max(P_v_f32, axis=1)  # P_v_f32 >= 0 (post-softmax)
-            p_scale = tl.maximum(p_absmax * (1.0 / 127.0), 1e-6)
-            P_v_q = tl.clamp(P_v_f32 * (1.0 / p_scale)[:, None], 0.0, 127.0).to(tl.int8)
-            pv_i32 = tl.dot(P_v_q, V, out_dtype=tl.int32)
-            acc += pv_i32.to(tl.float32) * p_scale[:, None]
-        elif KV_QUANT_MODE >= 2:
-            # Per-token-head quant (bf16 path): apply v_scale to P not V.
+        # Per-token-head quant: apply v_scale to P instead of V.
+        if KV_QUANT_MODE >= 2:
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
@@ -615,10 +584,9 @@ def kernel_unified_attention_3d(
     mm_prefix_range_ptr,  # [num_seqs] - prefix length for each sequence
     # KV cache quantization: 0=none, 1=fp8, 2=per-token-head
     KV_QUANT_MODE: tl.constexpr = 0,
-    # int8 WMMA/MFMA flags — mirror the 2D kernel so the tile-body code
-    # can be shared; the 3D launcher currently leaves both False.
+    # Mirror the 2D kernel's int8 WMMA plumbing so the tile-body code
+    # compiles in both kernels; the 3D launcher leaves this False.
     QK_INT8_WMMA: tl.constexpr = False,
-    PV_INT8_WMMA: tl.constexpr = False,
     # Per-token-head scale caches (KV_QUANT_MODE >= 2)
     # Shape: [num_blocks, block_size, num_kv_heads]
     k_scale_cache_ptr=None,
@@ -830,42 +798,26 @@ def kernel_unified_attention_3d(
             )
 
         # V : (TILE_SIZE, HEAD_SIZE)
-        if PV_INT8_WMMA:
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0,
-            )
-            V = V_load
-            scale_idx_v = (
-                physical_block_idx * stride_vs_blk
-                + (seq_offset % BLOCK_SIZE) * stride_vs_slot
-                + kv_head_idx * stride_vs_head
-            )
-            v_token_head_scales = tl.load(
-                v_scale_cache_ptr + scale_idx_v, mask=tile_mask, other=1.0
-            )
-        else:
-            V_load = tl.load(
-                value_cache_ptr + v_offset,
-                mask=dim_mask[None, :] & tile_mask[:, None],
-                other=0.0,
-            )
-            V, v_token_head_scales = _prepare_kv_tile(
-                V_load,
-                Q,
-                v_scale,
-                v_scale_cache_ptr,
-                physical_block_idx,
-                seq_offset,
-                kv_head_idx,
-                stride_vs_blk,
-                stride_vs_slot,
-                stride_vs_head,
-                tile_mask,
-                BLOCK_SIZE,
-                KV_QUANT_MODE,
-            )
+        V_load = tl.load(
+            value_cache_ptr + v_offset,
+            mask=dim_mask[None, :] & tile_mask[:, None],
+            other=0.0,
+        )
+        V, v_token_head_scales = _prepare_kv_tile(
+            V_load,
+            Q,
+            v_scale,
+            v_scale_cache_ptr,
+            physical_block_idx,
+            seq_offset,
+            kv_head_idx,
+            stride_vs_blk,
+            stride_vs_slot,
+            stride_vs_head,
+            tile_mask,
+            BLOCK_SIZE,
+            KV_QUANT_MODE,
+        )
 
         # Compute attention mask: causal by default (key <= query)
         query_abs_pos = context_len + query_pos[:, None]
@@ -973,25 +925,13 @@ def kernel_unified_attention_3d(
 
         if SLIDING_WINDOW:
             qpos_lo = q_block_local_idx * BLOCK_Q
-            sw_mask = (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW
-            if PV_INT8_WMMA:
-                # Keep V int8 — zero fill must also be int8 via tl.zeros_like.
-                V = tl.where(sw_mask, V, tl.zeros_like(V))
-            else:
-                V = tl.where(sw_mask, V, 0.0)
+            V = tl.where(
+                (context_len + qpos_lo - seq_offset[:, None]) < SLIDING_WINDOW, V, 0.0
+            )
 
         # acc : (BLOCK_M, HEAD_SIZE_PADDED)
-        if PV_INT8_WMMA:
-            # int8 WMMA/MFMA PV: fuse v_scales into P (fp32), quantize per row
-            # to int8, dot against int8 V, then rescale by per-row p_scale.
-            P_v_f32 = P * v_token_head_scales[None, :]
-            p_absmax = tl.max(P_v_f32, axis=1)  # P_v_f32 >= 0 (post-softmax)
-            p_scale = tl.maximum(p_absmax * (1.0 / 127.0), 1e-6)
-            P_v_q = tl.clamp(P_v_f32 * (1.0 / p_scale)[:, None], 0.0, 127.0).to(tl.int8)
-            pv_i32 = tl.dot(P_v_q, V, out_dtype=tl.int32)
-            acc += pv_i32.to(tl.float32) * p_scale[:, None]
-        elif KV_QUANT_MODE >= 2:
-            # Per-token-head quant (bf16 path): apply v_scale to P not V.
+        # Per-token-head quant: apply v_scale to P instead of V.
+        if KV_QUANT_MODE >= 2:
             P_v = (P * v_token_head_scales[None, :]).to(V.dtype)
             acc += tl.dot(P_v, V)
         else:
@@ -1235,11 +1175,10 @@ def unified_attention(
     )
 
     # Route the QK dot through AMD int8 WMMA/MFMA (~2× bf16 throughput on
-    # RDNA3/4 and CDNA2/3) when the KV cache is int8 per-token-head on ROCm.
-    # Also drops the per-tile int8→bf16 cast on K. PV int8 left disabled:
-    # measured regression on gfx1100 (per-tile P quant overhead outweighs
-    # the dot speedup). Only gated for the 2D kernel — 3D accepts the
-    # constexprs for code-reuse but the launcher leaves them False.
+    # RDNA3/4 and CDNA2/3) when the KV cache is int8 per-token-head on
+    # ROCm. Also drops the per-tile int8→bf16 cast on K. Only gated for
+    # the 2D kernel — 3D accepts the constexpr for code-reuse but the
+    # launcher leaves it False.
     use_rocm_int8_wmma_qk = (
         kv_quant_mode == KVQuantMode.INT8_PER_TOKEN_HEAD and current_platform.is_rocm()
     )
@@ -1315,7 +1254,6 @@ def unified_attention(
             USE_FP8=output_scale is not None,
             KV_QUANT_MODE=kv_quant_mode,
             QK_INT8_WMMA=use_rocm_int8_wmma_qk,
-            PV_INT8_WMMA=False,
             k_scale_cache_ptr=k_scale_cache,
             v_scale_cache_ptr=v_scale_cache,
             stride_ks_blk=k_scale_cache.stride(0) if k_scale_cache is not None else 0,
