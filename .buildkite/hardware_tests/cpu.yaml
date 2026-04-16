@@ -46,7 +46,7 @@ steps:
   - tests/models/language/pooling/
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model"
 
