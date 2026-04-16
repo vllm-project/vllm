@@ -299,9 +299,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                     if num_reqs_total == total_q:
                         # Pure decode fast path: q_to_req = arange,
                         # q_to_klen = seq_lens.
-                        q_to_req_cpu = torch.arange(
-                            num_reqs_total, dtype=torch.int32
-                        )
+                        q_to_req_cpu = torch.arange(num_reqs_total, dtype=torch.int32)
                         q_to_klen_cpu = seq_lens_cpu.to(torch.int32)
                     else:
                         qsl_i32 = qsl_cpu[:-1].to(torch.int32)
@@ -316,13 +314,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                             - qsl_i32[q_to_req_cpu.long()]
                         )
                         q_to_klen_cpu = (
-                            cached_len_per_req[q_to_req_cpu.long()]
-                            + pos_in_req
-                            + 1
+                            cached_len_per_req[q_to_req_cpu.long()] + pos_in_req + 1
                         )
-                    self._q_to_req_buf[:total_q].copy_(
-                        q_to_req_cpu, non_blocking=True
-                    )
+                    self._q_to_req_buf[:total_q].copy_(q_to_req_cpu, non_blocking=True)
                     self._q_to_klen_buf[:total_q].copy_(
                         q_to_klen_cpu, non_blocking=True
                     )
