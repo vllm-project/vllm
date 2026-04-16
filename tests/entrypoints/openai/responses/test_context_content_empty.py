@@ -17,34 +17,24 @@ class FakeMessage:
         self.content = content if content is not None else []
 
 
-def test_extract_content_text_with_content():
-    msg = FakeMessage(content=[FakeContent("hello")])
-    assert _extract_content_text(msg) == "hello"
-
-
-def test_extract_content_text_empty_content():
-    msg = FakeMessage(content=[])
-    assert _extract_content_text(msg) == ""
-
-
-def test_extract_content_text_none_like():
-    """Content that is falsy should return empty string."""
-    msg = FakeMessage(content=None)
-    # content=None → not msg.content is True → returns ""
-    assert _extract_content_text(msg) == ""
-
-
-def test_extract_content_text_tool_result():
-    """Helper also works with MCP CallToolResult-like objects."""
-    # MCP CallToolResult has the same .content[0].text pattern
-    result = FakeMessage(content=[FakeContent("tool output")])
-    assert _extract_content_text(result) == "tool output"
-
-
-def test_extract_content_text_empty_tool_result():
-    """Empty tool result content should return empty string, not crash."""
-    result = FakeMessage(content=[])
-    assert _extract_content_text(result) == ""
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ([FakeContent("hello")], "hello"),
+        ([FakeContent("tool output")], "tool output"),
+        ([], ""),
+        (None, ""),
+    ],
+    ids=[
+        "single_text_item",
+        "tool_result_text",
+        "empty_list",
+        "none_content",
+    ],
+)
+def test_extract_content_text(content, expected):
+    msg = FakeMessage(content=content)
+    assert _extract_content_text(msg) == expected
 
 
 def test_original_code_would_crash():
