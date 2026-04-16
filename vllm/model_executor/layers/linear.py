@@ -1143,8 +1143,7 @@ class QKVParallelLinear(ColumnParallelLinear):
                 # works correctly while preserving the parameter shape.
                 for idx in range(param.data.shape[0]):
                     param.load_qkv_weight(
-                        loaded_weight=loaded_weight, shard_id=idx,
-                        tp_rank=self.tp_rank
+                        loaded_weight=loaded_weight, shard_id=idx, tp_rank=self.tp_rank
                     )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
