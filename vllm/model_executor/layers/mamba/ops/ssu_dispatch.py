@@ -214,7 +214,11 @@ def initialize_mamba_ssu_backend(
             f"Valid options: {list(_BACKEND_REGISTRY.keys())}"
         )
 
-    _mamba_ssu_backend = _BACKEND_REGISTRY[backend](mamba_config)
+    backend_cls = _BACKEND_REGISTRY[backend]
+    if isinstance(_mamba_ssu_backend, backend_cls):
+        return
+
+    _mamba_ssu_backend = backend_cls(mamba_config)
     logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
 
 
