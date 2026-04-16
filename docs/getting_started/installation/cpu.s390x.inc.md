@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD041 -->
 --8<-- [start:installation]
 
-vLLM has experimental support for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
+vLLM supports basic model inferencing and serving for s390x architecture on IBM Z platform. For now, users must build from source to natively run on IBM Z platform.
 
 Currently, the CPU implementation for s390x architecture supports FP32, BF16 and FP16.
 

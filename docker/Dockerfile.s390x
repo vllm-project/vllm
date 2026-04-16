@@ -203,7 +203,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
     git clone https://github.com/guidance-ai/llguidance.git && \
     cd llguidance && \
-    git checkout s390x-fix-v2  && \
     uv pip install maturin && \
     python -m maturin build --release --out dist --compatibility linux
 
