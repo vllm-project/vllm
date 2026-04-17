@@ -1554,14 +1554,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.model.generate = types.MethodType(_generate, hf_model.model)
 def qianfan_ocr_hf_model_kwargs(model_name: str) -> dict:
-    """Return hf_model_kwargs with a patched config for QianfanOCR.
-
-    The upstream transformers modeling code expects ``image_size`` and
-    ``patch_size`` in the vision config to be tuples, but the HF repo
-    stores them as plain ints.  We load the config, normalise those
-    fields, and hand it back so that ``AutoModel.from_pretrained`` gets
-    a config it can work with.
-    """
+    """Return hf_model_kwargs with a patched config for QianfanOCR."""
     config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
     vc = config.vision_config
     if isinstance(vc.image_size, int):
