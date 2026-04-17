@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import numpy as np
@@ -33,9 +33,18 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    cache_dtype = vllm_config.cache_config.cache_dtype
     for layer_name, attn_module in attn_layers.items():
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
+            # Let backends override page size for compressed KV.
+            backend = getattr(attn_module, 'attn_backend', None)
+            if isinstance(spec, AttentionSpec) and backend is not None:
+                custom_ps = backend.get_kv_cache_page_size(
+                    spec.block_size, spec.num_kv_heads,
+                    spec.head_size, spec.dtype, cache_dtype)
+                if custom_ps is not None:
+                    spec = replace(spec, custom_page_size=custom_ps)
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
 
