@@ -39,6 +39,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -270,6 +271,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         )
         self._val_data_bytes = math.ceil(head_size * cfg.effective_value_quant_bits / 8)
         self._n_centroids = cfg.n_centroids if not cfg.key_fp8 else 1
+
+        # Detect flash-attn version (FA2/3/4) for prefill paths.
+        self.fa_version = get_flash_attn_version(head_size=head_size)
 
         # Fixed NUM_KV_SPLITS (grid dims must be constant for cudagraph,
         # and benchmarks show no regression vs dynamic in eager mode).
@@ -517,6 +521,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_seqlen_k=attn_metadata.max_query_len,
                 softmax_scale=self.scale,
                 causal=True,
+                fa_version=self.fa_version,
             )
 
         # Continuation or no flash_attn: per-request attention.
@@ -566,6 +571,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         max_seqlen_k=q_len,
                         softmax_scale=self.scale,
                         causal=True,
+                        fa_version=self.fa_version,
                     )
                 else:
                     q_t = q_seq.transpose(0, 1).contiguous()
@@ -740,6 +746,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_seqlen_k=seq_len,
                 softmax_scale=self.scale,
                 causal=True,
+                fa_version=self.fa_version,
             )
         else:
             # SDPA fallback: expand KV for GQA, build causal mask
