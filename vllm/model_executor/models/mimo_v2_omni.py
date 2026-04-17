@@ -4,14 +4,18 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any
 
+import math
+
 import einops
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature, PretrainedConfig
+from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
 
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -26,10 +30,14 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
+from vllm.inputs import MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFieldConfig, MultiModalKwargsItems
-from vllm.multimodal.parse import MultiModalDataItems
+from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    BaseMultiModalProcessor,
+    BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -51,16 +59,14 @@ from .qwen2_5_vl import (
     Qwen2_5_VisionMLP,
     Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionPatchMerger,
-    Qwen2_5_VLDummyInputsBuilder,
     Qwen2_5_VLImageEmbeddingInputs,
     Qwen2_5_VLImageInputs,
     Qwen2_5_VLImagePixelInputs,
-    Qwen2_5_VLMultiModalProcessor,
-    Qwen2_5_VLProcessingInfo,
     Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
 )
+from .qwen2_vl import _create_qwen2vl_field_factory
 from .utils import AutoWeightsLoader, IntermediateTensors, WeightsMapper, maybe_prefix
 
 
@@ -663,7 +669,7 @@ class MiMoVisionTransformer(nn.Module):
         return loaded_params
 
 
-class MiMoV2OmniProcessingInfo(Qwen2_5_VLProcessingInfo):
+class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None, "image": None, "video": None}
 
@@ -685,8 +691,199 @@ class MiMoV2OmniProcessingInfo(Qwen2_5_VLProcessingInfo):
         from vllm.multimodal.parse import MultiModalDataParser
         return MultiModalDataParser(target_sr=24000.0)
 
+    def get_mm_max_tokens_per_item(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(seq_len, mm_counts),
+        }
 
-class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
+    def _get_vision_info(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        num_frames: int = 1,
+        do_resize: bool = True,
+        image_processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[ImageSize, int]:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
+        temporal_patch_size = vision_config.temporal_patch_size
+        tokens_per_second = vision_config.tokens_per_second
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
+
+        if do_resize:
+            resized_height, resized_width = smart_resize(
+                height=image_height,
+                width=image_width,
+                factor=patch_size * merge_size,
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
+            )
+            preprocessed_size = ImageSize(width=resized_width, height=resized_height)
+        else:
+            preprocessed_size = ImageSize(width=image_width, height=image_height)
+
+        # For video, MiMo resamples to tokens_per_second fps before temporal patching,
+        # so effective temporal tokens = num_frames * tokens_per_second / temporal_patch_size.
+        # For images (num_frames == 1) no resampling is applied.
+        if num_frames > 1:
+            effective_frames = num_frames * tokens_per_second
+        else:
+            effective_frames = num_frames
+        padded_num_frames = effective_frames + effective_frames % temporal_patch_size
+        grid_t = max(padded_num_frames // temporal_patch_size, 1)
+        grid_h = preprocessed_size.height // patch_size
+        grid_w = preprocessed_size.width // patch_size
+        num_patches = grid_t * grid_h * grid_w
+        num_vision_tokens = num_patches // (merge_size**2)
+        return preprocessed_size, num_vision_tokens
+
+    def get_num_image_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        image_processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> int:
+        _, num_image_tokens = self._get_vision_info(
+            image_width=image_width,
+            image_height=image_height,
+            num_frames=1,
+            image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
+        )
+        return num_image_tokens
+
+    def get_num_video_tokens(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        num_frames: int,
+        image_processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> int:
+        _, num_video_tokens = self._get_vision_info(
+            image_width=image_width,
+            image_height=image_height,
+            num_frames=num_frames,
+            image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
+        )
+        return num_video_tokens
+
+    def get_image_size_with_most_features(
+        self, max_pixels: int | None = None
+    ) -> ImageSize:
+        hf_config = self.get_hf_config()
+        vision_config = hf_config.vision_config
+        patch_size = vision_config.patch_size
+        merge_size = vision_config.spatial_merge_size
+
+        if max_pixels is None:
+            image_processor = self.get_image_processor()
+            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            size = image_processor.size
+            if override_size := mm_kwargs.get("size"):
+                size = size | override_size
+            if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+                size = size | {"shortest_edge": override_min_pixels}
+            if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+                size = size | {"longest_edge": override_max_pixels}
+            max_pixels = size["longest_edge"]
+
+        unit = patch_size * merge_size
+        max_seq_len = max_pixels // (unit * unit)
+
+        def closest_factor_pair(n: int) -> tuple[int, int]:
+            for d in range(math.isqrt(n), 0, -1):
+                if n % d == 0:
+                    return d, n // d
+            return 1, n
+
+        height_factor, width_factor = 1, max_seq_len
+        for seq_len in range(max_seq_len, 0, -1):
+            height_factor, width_factor = closest_factor_pair(seq_len)
+            if width_factor / height_factor <= 200:
+                break
+
+        return ImageSize(width=unit * width_factor, height=unit * height_factor)
+
+    def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
+        target_width, target_height = self.get_image_size_with_most_features()
+        return self.get_num_image_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            image_processor=image_processor,
+            mm_kwargs={},
+        )
+
+    def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 1) -> int:
+        image_processor = self.get_image_processor()
+        target_width, target_height = self.get_image_size_with_most_features()
+        num_frames = start_num_frames
+        while True:
+            next_num_frames = num_frames + 1
+            next_max_tokens = self.get_num_video_tokens(
+                image_width=target_width,
+                image_height=target_height,
+                num_frames=next_num_frames,
+                image_processor=image_processor,
+                mm_kwargs={},
+            )
+            if next_max_tokens > max_tokens:
+                break
+            num_frames = next_num_frames
+        return num_frames
+
+    def get_num_frames_with_most_features(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        max_frames_per_video: int = 14,
+    ) -> int:
+        max_videos = mm_counts.get("video", 0)
+        max_total_frames = self._get_max_video_frames(seq_len)
+        max_frames_per_video = min(
+            max_total_frames // max(max_videos, 1), max_frames_per_video
+        )
+        return max(max_frames_per_video, 1)
+
+    def get_max_video_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> int:
+        image_processor = self.get_image_processor()
+        target_width, target_height = self.get_image_size_with_most_features()
+        return self.get_num_video_tokens(
+            image_width=target_width,
+            image_height=target_height,
+            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
+            image_processor=image_processor,
+            mm_kwargs={},
+        )
+
+
+class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessingInfo]):
     """vLLM multimodal processor for MiMo-Omni (image + video).
 
     Key differences from Qwen2.5-VL:
@@ -707,8 +904,10 @@ class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
+        merge_size = self.info.get_hf_config().vision_config.spatial_merge_size
         return dict(
-            **super()._get_mm_fields_config(hf_inputs, hf_processor_mm_kwargs),
+            **_create_qwen2vl_field_factory(merge_size)(hf_inputs),
+            second_per_grid_ts=MultiModalFieldConfig.batched("video"),
             video_start_times=MultiModalFieldConfig.batched("video"),
             audio_features=MultiModalFieldConfig.batched("audio"),
             audio_token_lens=MultiModalFieldConfig.batched("audio"),
@@ -886,7 +1085,7 @@ class MiMoV2OmniMultiModalProcessor(Qwen2_5_VLMultiModalProcessor):
         return updates
 
 
-class MiMoV2OmniDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
+class MiMoV2OmniDummyInputsBuilder(BaseDummyInputsBuilder[MiMoV2OmniProcessingInfo]):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -895,6 +1094,36 @@ class MiMoV2OmniDummyInputsBuilder(Qwen2_5_VLDummyInputsBuilder):
         video_ph = "<|vision_start|><|video_pad|><|vision_end|>"
         audio_ph = "<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>"
         return image_ph * num_images + video_ph * num_videos + audio_ph * num_audios
+
+    def get_dummy_mm_data(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions],
+    ) -> MultiModalDataDict:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+
+        target_width, target_height = self.info.get_image_size_with_most_features()
+        target_num_frames = self.info.get_num_frames_with_most_features(
+            seq_len, mm_counts
+        )
+
+        return {
+            "image": self._get_dummy_images(
+                width=target_width,
+                height=target_height,
+                num_images=num_images,
+                overrides=mm_options.get("image"),
+            ),
+            "video": self._get_dummy_videos(
+                width=target_width,
+                height=target_height,
+                num_frames=target_num_frames,
+                num_videos=num_videos,
+                overrides=mm_options.get("video"),
+            ),
+        }
 
 
 @MULTIMODAL_REGISTRY.register_processor(
