@@ -70,6 +70,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "internlm2_tool_parser",
         "Internlm2ToolParser",
     ),
+    "intern-s1": (
+        "intern_s1_tool_parser",
+        "InternS1ToolParser",
+    ),
     "jamba": (
         "jamba_tool_parser",
         "JambaToolParser",
