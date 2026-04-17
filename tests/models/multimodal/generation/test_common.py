@@ -624,9 +624,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
-        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs(
-            "bairongz/QianfanOCR"
-        ),
+        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("bairongz/QianfanOCR"),
     ),
     "isaac": VLMTestInfo(
         # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF

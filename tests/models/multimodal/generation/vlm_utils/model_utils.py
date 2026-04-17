@@ -1585,6 +1585,7 @@ def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             self.tokenizer = hf_runner.tokenizer
 
             from vllm.transformers_utils.configs.qianfan_ocr import QianfanOCRConfig
+
             self.config = QianfanOCRConfig.from_pretrained(hf_runner.model_name)
             self.vision_config = self.config.vision_config
             self.use_thumbnail = self.config.use_thumbnail
@@ -1598,7 +1599,7 @@ def qianfan_ocr_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             patch_size = self.vision_config.patch_size
             downsample_ratio = self.config.downsample_ratio
             self.num_image_token = int(
-                (image_size // patch_size) ** 2 * (downsample_ratio ** 2)
+                (image_size // patch_size) ** 2 * (downsample_ratio**2)
             )
 
         def __call__(

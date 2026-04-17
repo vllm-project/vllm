@@ -66,13 +66,10 @@ def _run_check(
     # = (448 / 14)^2 * 0.5^2 = 1024 * 0.25 = 256
     image_size = config.force_image_size or config.vision_config.image_size
     patch_size = config.vision_config.patch_size
-    num_image_token = int(
-        (image_size // patch_size) ** 2 * config.downsample_ratio ** 2
-    )
+    num_image_token = int((image_size // patch_size) ** 2 * config.downsample_ratio**2)
 
     total_expected_patches = sum(
-        _get_expected_num_patches(config, img, min_num, max_num)
-        for img in images
+        _get_expected_num_patches(config, img, min_num, max_num) for img in images
     )
 
     processed_inputs = processor(
@@ -83,9 +80,7 @@ def _run_check(
 
     image_token_id = tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     img_tok_count = processed_inputs["prompt_token_ids"].count(image_token_id)
-    pixel_shape = (
-        processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"].shape
-    )
+    pixel_shape = processed_inputs["mm_kwargs"].get_data()["pixel_values_flat"].shape
 
     assert img_tok_count == num_image_token * total_expected_patches
     assert pixel_shape[0] == total_expected_patches
