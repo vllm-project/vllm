@@ -280,6 +280,18 @@ def run_single_sample(
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     env["TORCHINDUCTOR_CACHE_DIR"] = str(TORCHINDUCTOR_CACHE)
+    # `vllm` is a console-script; Python sets sys.path[0] = script_dir,
+    # not cwd. The editable-precompiled install on this box drops an
+    # __init__-less `vllm/` dir in site-packages which PathFinder then
+    # returns as a namespace package before _EditableFinder gets a turn.
+    # Forcing PYTHONPATH=REPO_ROOT puts the source tree ahead of
+    # site-packages so `import vllm` resolves to the real __init__.py.
+    # (A pip-install user on their own box doesn't need this; it's a
+    # workaround for the local editable-precompiled install only.)
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        str(REPO_ROOT) + (os.pathsep + existing_pp if existing_pp else "")
+    )
     # Spawn with cwd=REPO_ROOT so PathFinder resolves `import vllm` to the
     # source tree's __init__.py. On this box the editable-precompiled install
     # drops a partial `vllm/` dir in site-packages without an __init__.py; when
