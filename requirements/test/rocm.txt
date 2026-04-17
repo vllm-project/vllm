@@ -76,7 +76,9 @@ attrs==26.1.0
 audioread==3.0.1
     # via librosa
 av==16.1.0
-    # via -r requirements/test/rocm.in
+    # via
+    #   -r requirements/test/../common.txt
+    #   -r requirements/test/rocm.in
 azure-core==1.39.0
     # via
     #   azure-identity
@@ -662,7 +664,6 @@ numba==0.61.2
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
     #   librosa
-    #   resampy
 numkong==7.1.1
     # via albucore
 numpy==2.2.6
@@ -708,7 +709,6 @@ numpy==2.2.6
     #   pytrec-eval-terrier
     #   pywavelets
     #   rasterio
-    #   resampy
     #   rioxarray
     #   rouge-score
     #   runai-model-streamer
@@ -1193,8 +1193,6 @@ requests==2.32.5
     #   tacoreader
     #   tiktoken
     #   wandb
-resampy==0.4.3
-    # via -r requirements/test/rocm.in
 responses==0.26.0
     # via genai-perf
 rfc3339-validator==0.1.4
@@ -1335,6 +1333,7 @@ sortedcontainers==2.4.0
     # via hypothesis
 soundfile==0.13.1
     # via
+    #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
     #   genai-perf
     #   librosa
