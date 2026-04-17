@@ -129,7 +129,6 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 
     def __init__(self) -> None:
         super().__init__(kNvfp4Dynamic)
-        self.QUANT_OP = torch.ops._C.scaled_fp4_quant.out
 
     def get_inputs(self) -> list[torch.Tensor]:
         result = self.empty_quant(5, 32)
@@ -147,7 +146,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             result_silu_mul = self.silu_and_mul_matcher(input)
             at = auto_functionalized(
-                self.QUANT_OP,
+                torch.ops._C.scaled_fp4_quant.out,
                 input=result_silu_mul,
                 input_scale=scale,
                 is_sf_swizzled_layout=True,
