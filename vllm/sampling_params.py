@@ -491,7 +491,7 @@ class SamplingParams(
             self.repetition_detection = RepetitionDetectionParams(
                 max_pattern_size=20,
                 min_pattern_size=1,
-                min_count=3,
+                min_count=5,
             )
 
     def _verify_args(self) -> None:

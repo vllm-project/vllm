@@ -312,7 +312,7 @@ class TestAutoEnableWithStructuredOutputs:
         assert params.repetition_detection is not None
         assert params.repetition_detection.max_pattern_size == 20
         assert params.repetition_detection.min_pattern_size == 1
-        assert params.repetition_detection.min_count == 3
+        assert params.repetition_detection.min_count == 5
 
     def test_auto_enabled_with_regex(self):
         params = SamplingParams(
