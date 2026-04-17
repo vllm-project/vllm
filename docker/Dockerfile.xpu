@@ -110,8 +110,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
 
 # install NIXL and UCX from source code
-ARG UCX_VERSION=e5d98879705239d254ede40b4a52891850cb5349
-ARG NIXL_VERSION=0.7.0
+ARG UCX_VERSION=6bdee3e2bb988591d5450f72eccf41b1ee166b16
+ARG NIXL_VERSION=0.10.1
 
 RUN apt-get update && apt-get install -y \
     pciutils \
@@ -158,7 +158,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd /tmp/nixl_source && \
     uv pip install --upgrade meson pybind11 patchelf && \
     uv pip install -r requirements.txt && \
-    uv pip install . && \
+    uv pip install . && uv pip install nixl==${NIXL_VERSION} && \
     rm -rf /tmp/ucx_source /tmp/nixl_source
 
 # FIX triton
