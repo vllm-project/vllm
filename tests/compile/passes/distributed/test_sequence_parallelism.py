@@ -16,6 +16,7 @@ from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.compilation.passes.vllm_inductor_pass import VllmInductorPass
 from vllm.config import (
     CompilationConfig,
+    CUDAGraphMode,
     DeviceConfig,
     ModelConfig,
     PassConfig,
@@ -266,6 +267,7 @@ def sequence_parallelism_pass_on_test_model(
     custom_ops_list = custom_ops.split(",") if custom_ops else []
     compilation_config = CompilationConfig(
         splitting_ops=[],  # avoid automatic rms_norm enablement
+        cudagraph_mode=CUDAGraphMode.NONE,  # avoid piecewise warnings
         custom_ops=custom_ops_list,
         pass_config=PassConfig(
             enable_sp=True,
