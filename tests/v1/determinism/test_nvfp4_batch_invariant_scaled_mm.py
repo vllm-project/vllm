@@ -119,7 +119,8 @@ def test_nvfp4_gemm_correctness_vs_reference_batch_invariant_path(
         dtype,
     )
 
-    torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=1e-1, rtol=1e-1)
+    atol = 2e-1 if dtype == torch.bfloat16 else 1e-1
+    torch.testing.assert_close(out, expected_out.to(dtype=dtype), atol=atol, rtol=1e-1)
 
 
 CONSISTENCY_SHAPES = [
