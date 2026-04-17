@@ -43,15 +43,35 @@ def _run_ar(
     cudagraph_mode: int,
     parallel_config: ParallelConfig,
 ) -> torch.Tensor:
+    from vllm.v1.engine.exceptions import EngineLoopPausedError
+    from vllm.v1.worker.sentinel.gpu_worker_sentinel import get_pause_event
+
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
     device, group = _get_device_and_group(parallel_config)
-    tensor = torch.zeros(4, dp_size, device=device, dtype=torch.int32)
+    should_pause = parallel_config.enable_fault_tolerance and get_pause_event().is_set()
+    tensor = torch.zeros(5, dp_size, device=device, dtype=torch.int32)
     tensor[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor[2][dp_rank] = 1 if should_ubatch else 0
     tensor[3][dp_rank] = cudagraph_mode
-    dist.all_reduce(tensor, group=group)
+    tensor[4][dp_rank] = 1 if should_pause else 0
+    handle = dist.all_reduce(tensor, group=group, async_op=True)
+    try:
+        handle.wait()
+    except RuntimeError:
+        should_pause = True
+
+    # If the all reduce failed or if any rank signaled to pause, then we should pause
+    if should_pause or bool(tensor[4].any().item()):
+        # Under async scheduling, batch N+1 can enter this DP all-reduce while
+        # batch N is still computing on device. Depending on Gloo/device timeout
+        # ordering, N+1 may hit timeout first here, but its output future can still
+        # be queued behind batch N in engine core and not be consumed immediately.
+        raise EngineLoopPausedError(
+            "Pausing workers due to fault tolerance signal from DP ranks."
+        )
+
     return tensor
 
 

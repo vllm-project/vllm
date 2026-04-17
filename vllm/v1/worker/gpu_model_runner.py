@@ -39,6 +39,7 @@ from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_
 from vllm.distributed.kv_transfer.kv_connector.utils import copy_kv_blocks
 from vllm.distributed.parallel_state import (
     get_dcp_group,
+    get_ep_group,
     get_pp_group,
     get_tp_group,
     graph_capture,
@@ -234,6 +235,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         invalid_req_indices: list[int],
         async_output_copy_stream: torch.cuda.Stream,
         vocab_size: int,
+        ep_rank_mask: torch.Tensor | None = None,
+        last_ep_rank_mask: torch.Tensor | None = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
@@ -246,6 +249,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._sampled_token_ids = sampled_token_ids
         self.vocab_size = vocab_size
         self._logprobs_tensors = logprobs_tensors
+        self.has_fault = None
+        self.ep_rank_mask = ep_rank_mask
 
         # Initiate the copy on a separate stream, but do not synchronize it.
         default_stream = torch.cuda.current_stream()
@@ -259,6 +264,13 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
                 if self._logprobs_tensors
                 else None
             )
+            if ep_rank_mask is not None:
+                comm = get_ep_group().device_communicator
+                assert comm and comm.all2all_manager
+                comm.all2all_manager.query_mask(ep_rank_mask)
+                has_fault = (ep_rank_mask - last_ep_rank_mask).any()
+                self.has_fault = has_fault.to("cpu", non_blocking=True)
+
             self.async_copy_ready_event.record()
 
     def get_output(self) -> ModelRunnerOutput:
@@ -290,6 +302,13 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         output = self._model_runner_output
         output.sampled_token_ids = valid_sampled_token_ids
         output.logprobs = logprobs_lists
+        if self.has_fault:
+            assert self.ep_rank_mask is not None
+            mask = self.ep_rank_mask.cpu().tolist()
+            raise EngineLoopPausedError(
+                f"Fault detected in EP ranks during model execution. "
+                f"Current mask is :{mask}"
+            )
         return output
 
 
@@ -856,15 +875,6 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
-
-        self.pause_event = threading.Event()
-
-    def _check_pause_event(self):
-        if (
-            self.vllm_config.parallel_config.enable_fault_tolerance
-            and self.pause_event.is_set()
-        ):
-            raise EngineLoopPausedError("Worker is paused.")
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -3565,7 +3575,6 @@ class GPUModelRunner(
         torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
-        self._check_pause_event()
         uniform_decode = self._is_uniform_decode(
             max_num_scheduled_tokens=max_num_scheduled_tokens,
             uniform_decode_query_len=self.uniform_decode_query_len,
@@ -4034,7 +4043,6 @@ class GPUModelRunner(
                 defer_finalize=defer_kv_connector_finalize,
             ) as kv_connector_output,
         ):
-            self._check_pause_event()
             model_output = self._model_forward(
                 input_ids=input_ids,
                 positions=positions,
@@ -4042,7 +4050,6 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-            self._check_pause_event()
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -4126,7 +4133,10 @@ class GPUModelRunner(
 
     @torch.inference_mode
     def sample_tokens(
-        self, grammar_output: "GrammarOutput | None"
+        self,
+        grammar_output: "GrammarOutput | None",
+        ep_rank_mask: torch.Tensor | None = None,
+        last_ep_rank_mask: torch.Tensor | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
         if self.execute_model_state is None:
             kv_connector_output = self.kv_connector_output
@@ -4351,6 +4361,8 @@ class GPUModelRunner(
                 invalid_req_indices=invalid_req_indices,
                 async_output_copy_stream=self._get_or_create_async_output_copy_stream(),
                 vocab_size=self.input_batch.vocab_size,
+                ep_rank_mask=ep_rank_mask,
+                last_ep_rank_mask=last_ep_rank_mask,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -5499,7 +5511,6 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
-                self._check_pause_event()
                 outputs = self.model(
                     input_ids=input_ids,
                     positions=positions,
@@ -5507,7 +5518,6 @@ class GPUModelRunner(
                     inputs_embeds=inputs_embeds,
                     **model_kwargs,
                 )
-                self._check_pause_event()
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs

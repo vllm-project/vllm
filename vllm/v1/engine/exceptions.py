@@ -19,9 +19,8 @@ class EngineDeadError(Exception):
 
 
 class EngineLoopPausedError(Exception):
-    """
-    Raised when the EngineCore loop is temporarily paused on purpose,
-    e.g., to handle fault-tolerance.
-    """
+    PREFIX = "[EnginePaused]"
 
-    pass
+    def __init__(self, message=""):
+        full_message = f"{self.PREFIX} {message}" if message else self.PREFIX
+        super().__init__(full_message)

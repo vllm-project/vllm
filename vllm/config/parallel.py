@@ -564,17 +564,14 @@ class ParallelConfig:
 
     @overload
     def stateless_init_dp_group(
-        self,
-        return_store: Literal[False] = False,
+        self, return_store: Literal[False] = ...
     ) -> ProcessGroup: ...
     @overload
     def stateless_init_dp_group(
-        self,
-        return_store: Literal[True] = True,
+        self, return_store: Literal[True] = ...
     ) -> tuple[ProcessGroup, Store]: ...
     def stateless_init_dp_group(
-        self,
-        return_store: bool = False,
+        self, return_store: bool = False
     ) -> ProcessGroup | tuple[ProcessGroup, Store]:
         # NOTE: In high-concurrency scenarios multiple processes
         # can pick the same (currently free) port through a race

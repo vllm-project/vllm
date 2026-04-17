@@ -397,7 +397,7 @@ class MultiprocExecutor(Executor):
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
-                    if "paused" in result:
+                    if EngineLoopPausedError.PREFIX in result:
                         raise EngineLoopPausedError(result)
                     raise RuntimeError(
                         f"Worker failed with error '{result}', please check the"
@@ -916,7 +916,10 @@ class WorkerProc:
         converted to a FAILURE response.
         """
         if isinstance(output, AsyncModelRunnerOutput):
-            output = output.get_output()
+            try:
+                output = output.get_output()
+            except Exception as e:
+                output = e
 
         if isinstance(output, Exception):
             result = (WorkerProc.ResponseStatus.FAILURE, str(output))

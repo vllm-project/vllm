@@ -100,6 +100,12 @@ class All2AllManagerBase:
         # - raise a clear error if extra_tensors is not supported.
         raise NotImplementedError
 
+    def query_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        # This is used in the fault tolerance feature. The mask is a 1D tensor with
+        # length equal to the world size of the EP group. Each rank will set its own
+        # index to 1 if it detects a fault, and 0 otherwise
+        raise NotImplementedError
+
     def set_num_sms(self, num_sms: int):
         pass
 

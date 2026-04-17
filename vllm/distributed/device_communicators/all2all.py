@@ -375,6 +375,10 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
 
     def __init__(self, cpu_group, tcp_store_group=None):
         super().__init__(cpu_group, tcp_store_group)
+        self.enable_ft = (
+            get_current_vllm_config().parallel_config.enable_fault_tolerance
+        )
+        self.buffer = None
 
     def _make_all2all_kwargs(
         self,
@@ -407,14 +411,13 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         assert num_rdma_bytes is not None
         # TODO: remove platform-specific logic
         # once ROCm DeepEP is updated with the latest APIs.
-        enable_ft = get_current_vllm_config().parallel_config.enable_fault_tolerance
         kwargs = dict(
             group=self.cpu_group,
             num_nvl_bytes=num_nvl_bytes,
             num_rdma_bytes=num_rdma_bytes,
             low_latency_mode=True,
             num_qps_per_rank=num_qps_per_rank,
-            enable_shrink=enable_ft,
+            enable_shrink=self.enable_ft,
         )
         if not current_platform.is_rocm():
             kwargs.update(
@@ -436,11 +439,19 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         handle: deep_ep.Buffer = self.handle_cache.get_or_create(
             buffer_kwargs, deep_ep.Buffer
         )
+        self.buffer = handle
         return handle
 
     # DeepEP LL uses RDMA so no SMs are used for communication
     def max_sms_used(self) -> int | None:
         return 0
+
+    def query_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        import deep_ep  # type: ignore[import-not-found]
+
+        assert self.enable_ft, "Fault tolerance must be enabled to use query mask"
+        assert isinstance(self.buffer, deep_ep.Buffer)
+        return self.buffer.low_latency_query_mask_buffer(mask)
 
 
 class NixlEPAll2AllManager(All2AllManagerBase):
@@ -556,6 +567,10 @@ class NixlEPAll2AllManager(All2AllManagerBase):
     # NIXL EP uses RDMA so no SMs are used for communication
     def max_sms_used(self) -> int | None:
         return 0
+
+    def query_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        assert self._buffer is not None
+        return self._buffer[0].query_mask_buffer(mask)
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
