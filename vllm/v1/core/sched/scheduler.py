@@ -641,6 +641,22 @@ class Scheduler(SchedulerInterface):
                                         .get_num_encoder_embeds(i)
                                         for i in evicted_enc
                                     )
+                                if (
+                                    self.lora_config
+                                    and lowest_running.lora_request
+                                    and lowest_running.lora_request
+                                    .lora_int_id > 0
+                                ):
+                                    lora_id = (
+                                        lowest_running.lora_request.lora_int_id
+                                    )
+                                    if not any(
+                                        r.lora_request
+                                        and r.lora_request.lora_int_id
+                                        == lora_id
+                                        for r in scheduled_running_reqs
+                                    ):
+                                        scheduled_loras.discard(lora_id)
                             self._preempt_request(
                                 lowest_running, scheduled_timestamp
                             )
