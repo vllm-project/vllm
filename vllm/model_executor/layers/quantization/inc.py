@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from fractions import Fraction
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import regex as re
@@ -431,7 +432,8 @@ class INCConfig(QuantizationConfig):
             )
 
         if isinstance(layer, (LinearBase, ParallelLMHead)):
-            if _is_auto_round_ark_available():
+            is_ark_available, ark_error, _ = _get_auto_round_ark_state()
+            if is_ark_available:
                 return INCXPULinearARKMethod(
                     weight_bits=weight_bits,
                     group_size=group_size,
@@ -442,7 +444,7 @@ class INCConfig(QuantizationConfig):
                 "ARK backend is unavailable for layer %s; "
                 "falling back to the default XPU INC path. Error: %s",
                 prefix,
-                _ark_availability_error or "unknown error",
+                ark_error or "unknown error",
             )
 
             return INCXPULinearMethod(
@@ -570,49 +572,30 @@ class _INCXPULinearBase(LinearMethodBase):
         )
 
 
-_ark_instance: Any | None = None
-_ark_available: bool | None = None
-_ark_availability_error: str | None = None
-
-
-def _is_auto_round_ark_available() -> bool:
-    global _ark_available, _ark_availability_error
-
-    if _ark_available is not None:
-        return _ark_available
-
+@lru_cache(maxsize=1)
+def _get_auto_round_ark_state() -> tuple[bool, str | None, Any | None]:
+    """Return ARK availability, error details, and cached instance."""
     try:
         import auto_round_kernel
     except ImportError as error:
-        _ark_available = False
-        _ark_availability_error = str(error)
-        return False
+        return False, str(error), None
 
-    if not callable(getattr(auto_round_kernel, "_ark_instance", None)):
-        _ark_available = False
-        _ark_availability_error = "auto_round_kernel does not expose _ark_instance()."
-        return False
+    ark_loader = getattr(auto_round_kernel, "_ark_instance", None)
+    if not callable(ark_loader):
+        return False, "auto_round_kernel does not expose _ark_instance().", None
 
-    _ark_available = True
-    _ark_availability_error = None
-    return True
+    try:
+        return True, None, ark_loader()
+    except Exception as error:
+        return False, str(error), None
 
 
 def _get_auto_round_ark_instance() -> Any:
-    global _ark_instance
-
-    if _ark_instance is not None:
-        return _ark_instance
-
-    if not _is_auto_round_ark_available():
-        reason = _ark_availability_error or "unknown error"
+    is_available, error_str, ark_instance = _get_auto_round_ark_state()
+    if not is_available or ark_instance is None:
+        reason = error_str or "unknown error"
         raise ImportError(f"Failed to import auto_round_kernel. {reason}")
-
-    import auto_round_kernel
-
-    ark_loader = auto_round_kernel._ark_instance
-    _ark_instance = ark_loader()
-    return _ark_instance
+    return ark_instance
 
 
 def _get_ark_type_str(dtype: torch.dtype) -> str:
