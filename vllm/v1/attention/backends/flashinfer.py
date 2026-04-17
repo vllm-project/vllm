@@ -343,7 +343,17 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        return True
+        from vllm.utils.flashinfer import (
+            force_use_trtllm_attention,
+            supports_trtllm_attention,
+        )
+
+        # If TRTLLM can be used on this platform (e.g. Blackwell) and has not
+        # been explicitly disabled, non-causal can route into unsupported
+        # TRTLLM kernels at runtime. Be conservative at selection time.
+        if force_use_trtllm_attention() is False:
+            return True
+        return not supports_trtllm_attention()
 
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
@@ -929,10 +939,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             raise NotImplementedError(
                 "FlashInfer non-causal prefill is not supported with DCP yet."
             )
-        if not causal and num_prefills > 0 and prefill_use_trtllm:
+        uses_trtllm = (num_prefills > 0 and prefill_use_trtllm) or (
+            num_decodes > 0 and decode_use_trtllm
+        )
+        if not causal and uses_trtllm:
             raise NotImplementedError(
-                "FlashInfer non-causal prefill is not supported with TRTLLM "
-                "prefill yet."
+                "FlashInfer non-causal attention is not supported with TRTLLM "
+                "kernels yet."
             )
 
         all_uses_trtllm = (num_prefills == 0 or prefill_use_trtllm) and (
