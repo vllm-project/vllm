@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from vllm.sampling_params import RepetitionDetectionParams, SamplingParams
+from vllm.sampling_params import (
+    RepetitionDetectionParams,
+    SamplingParams,
+    StructuredOutputsParams,
+)
 from vllm.v1.core.sched.utils import check_sequence_repetition, check_stop
 from vllm.v1.request import Request, RequestStatus
 
@@ -288,3 +292,56 @@ class TestRepetitionDetectionIntegration:
         )
         request.append_output_token_ids([10, 20, 10, 20, 10, 20])
         assert not check_stop(request, max_model_len=1024)
+
+
+# ============================================================================
+# AUTO-ENABLE TESTS - repetition detection with structured outputs
+# ============================================================================
+
+
+class TestAutoEnableWithStructuredOutputs:
+    """Tests that repetition detection is auto-enabled when structured
+    output is requested, to guard against infinite loops caused by grammar
+    constraints blocking natural exit tokens."""
+
+    def test_auto_enabled_with_json_schema(self):
+        params = SamplingParams(
+            max_tokens=100,
+            structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+        )
+        assert params.repetition_detection is not None
+        assert params.repetition_detection.max_pattern_size == 20
+        assert params.repetition_detection.min_pattern_size == 1
+        assert params.repetition_detection.min_count == 3
+
+    def test_auto_enabled_with_regex(self):
+        params = SamplingParams(
+            max_tokens=100,
+            structured_outputs=StructuredOutputsParams(regex=r"\d+"),
+        )
+        assert params.repetition_detection is not None
+
+    def test_auto_enabled_with_grammar(self):
+        params = SamplingParams(
+            max_tokens=100,
+            structured_outputs=StructuredOutputsParams(grammar="root ::= [a-z]+"),
+        )
+        assert params.repetition_detection is not None
+
+    def test_explicit_repetition_detection_not_overridden(self):
+        custom = RepetitionDetectionParams(
+            max_pattern_size=5,
+            min_pattern_size=2,
+            min_count=2,
+        )
+        params = SamplingParams(
+            max_tokens=100,
+            structured_outputs=StructuredOutputsParams(json='{"type": "object"}'),
+            repetition_detection=custom,
+        )
+        assert params.repetition_detection is custom
+        assert params.repetition_detection.max_pattern_size == 5
+
+    def test_no_auto_enable_without_structured_outputs(self):
+        params = SamplingParams(max_tokens=100)
+        assert params.repetition_detection is None

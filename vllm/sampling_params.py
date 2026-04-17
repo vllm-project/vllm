@@ -483,6 +483,17 @@ class SamplingParams(
             # we need to skip reading cache at this request.
             self.skip_reading_prefix_cache = self.prompt_logprobs is not None
 
+        if (
+            self.structured_outputs is not None
+            and not self.structured_outputs.all_constraints_none()
+            and self.repetition_detection is None
+        ):
+            self.repetition_detection = RepetitionDetectionParams(
+                max_pattern_size=20,
+                min_pattern_size=1,
+                min_count=3,
+            )
+
     def _verify_args(self) -> None:
         if not isinstance(self.n, int):
             raise ValueError(f"n must be an int, but is of type {type(self.n)}")
