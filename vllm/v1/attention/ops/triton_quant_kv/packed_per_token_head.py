@@ -40,12 +40,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.ops.triton_quant_kv import register
-from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
-    fast_hadamard_transform,
-    single_rht,
-)
-from vllm.v1.attention.ops.triton_quant_kv._helpers import (
+from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
     cdiv_fn,
@@ -53,11 +48,18 @@ from vllm.v1.attention.ops.triton_quant_kv._helpers import (
     compute_tile_loop_bounds,
     init_softmax_M,
     load_qq_bias_tile,
-    pack_int2_quartet,
-    pack_int4_nibbles,
     resolve_seq_and_query_len,
     softmax_step,
     store_segm_reduce_scalars,
+)
+from vllm.v1.attention.ops.triton_quant_kv import register
+from vllm.v1.attention.ops.triton_quant_kv._hadamard import (
+    fast_hadamard_transform,
+    single_rht,
+)
+from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import (
+    pack_int2_quartet,
+    pack_int4_nibbles,
     unpack_int2_quartet,
     unpack_int4_nibbles,
 )

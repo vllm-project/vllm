@@ -1,20 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared ``@triton.jit`` helpers used across the core kernel and the
-per-mode backends.
+"""Shared ``@triton.jit`` helpers used by the unified attention kernel,
+``reduce_segments`` and the sub-byte packed KV backends.
 
-Two groups live here:
-
-  * **Attention-loop helpers** — mask building, ALiBi / QQ-bias score
-    post-processing, and the online-softmax bookkeeping step.  The core
-    kernel and the INT4 / INT2 plugins all run the same online softmax
-    over a tiled key/value sequence; keeping this logic in one place
-    ensures a fix in one (e.g. a sliding-window edge case) lands in
-    every kernel.
-
-  * **Sub-byte packing helpers** — two helpers per layout (pack /
-    unpack) for the INT4-nibble and INT2-quartet formats, shared by
-    the reshape (write) and attention (read) kernels to prevent drift.
+These are plain attention-loop helpers — mask building, ALiBi / QQ-bias
+score post-processing, online-softmax bookkeeping, tile-loop bounds,
+sequence lookup — and have nothing to do with KV cache quantization.
+Keeping them in one place ensures a fix in one (e.g. a sliding-window
+edge case) lands in every kernel that uses them.
 """
 
 from __future__ import annotations
@@ -341,40 +334,3 @@ def softmax_step(S, M, L):
     alpha = tl.exp(M - m_j)
     L_new = L * alpha + l_j
     return m_j, L_new, P, alpha
-
-
-# ===========================================================================
-# Sub-byte packing
-# ===========================================================================
-# INT4 layout: two 4-bit values per uint8 — low nibble = even index,
-# high nibble = odd index.  INT2 layout: four 2-bit values per uint8 in
-# little-endian quartet order (q0 in bits [0:2], q3 in [6:8]).
-
-
-@triton.jit
-def pack_int4_nibbles(lo, hi):
-    """Pack two uint8 values (each in [0, 15]) into one byte."""
-    return (lo & 0xF) | ((hi & 0xF) << 4)
-
-
-@triton.jit
-def unpack_int4_nibbles(packed):
-    """Split one packed byte into the (low, high) nibble pair as uint8."""
-    return packed & 0xF, (packed >> 4) & 0xF
-
-
-@triton.jit
-def pack_int2_quartet(q0, q1, q2, q3):
-    """Pack four uint8 values (each in [0, 3]) into one byte."""
-    return (q0 & 0x3) | ((q1 & 0x3) << 2) | ((q2 & 0x3) << 4) | ((q3 & 0x3) << 6)
-
-
-@triton.jit
-def unpack_int2_quartet(packed):
-    """Split one packed byte into the (q0, q1, q2, q3) quartet as uint8."""
-    return (
-        packed & 0x3,
-        (packed >> 2) & 0x3,
-        (packed >> 4) & 0x3,
-        (packed >> 6) & 0x3,
-    )
