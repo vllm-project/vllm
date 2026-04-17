@@ -224,6 +224,13 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
 
     quantiles = [0.5, 0.001, 0.999]
 
+    # Move the E2M1 lookup table to CUDA ahead of time, as would normally
+    # happen during model loading (process_weights_after_loading).  Both the
+    # Triton and PyTorch reference paths run on CUDA.
+    nvfp4_emulation_utils.kE2M1ToFloat_handle.val = (
+        nvfp4_emulation_utils.kE2M1ToFloat_handle.val.cuda()
+    )
+
     for label, tensor_fp4, tensor_sf, global_scale in test_cases:
         fp4_cuda = tensor_fp4.cuda()
         sf_cuda = tensor_sf.cuda()
@@ -239,7 +246,7 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
             swizzle=False,
         )
 
-        # Reference path
+        # Reference path (PyTorch ops on CUDA, Triton dispatch disabled)
         with monkeypatch.context() as m:
             m.setattr(
                 nvfp4_emulation_utils.current_platform,
@@ -247,15 +254,15 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
                 lambda: False,
             )
             reference = dequantize_to_dtype(
-                tensor_fp4,
-                tensor_sf,
-                global_scale,
+                fp4_cuda,
+                sf_cuda,
+                gs_cuda,
                 torch.bfloat16,
                 block_size,
                 swizzle=False,
             )
 
-        torch.testing.assert_close(triton_result.cpu(), reference, atol=0, rtol=0)
+        torch.testing.assert_close(triton_result, reference, atol=0, rtol=0)
 
         # Benchmark
         shape = list(tensor_fp4.shape)
@@ -271,9 +278,6 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
             ),
             quantiles=quantiles,
         )
-
-        original_lut = nvfp4_emulation_utils.kE2M1ToFloat_handle.val
-        nvfp4_emulation_utils.kE2M1ToFloat_handle.val = original_lut.cuda()
 
         def _reference_bench():
             with monkeypatch.context() as m2:
@@ -295,7 +299,6 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
             _reference_bench,
             quantiles=quantiles,
         )
-        nvfp4_emulation_utils.kE2M1ToFloat_handle.val = original_lut
 
         speedup = ref_ms / triton_ms if triton_ms > 0 else float("inf")
         print(f"  dequantize {label} {shape}:")
@@ -318,6 +321,20 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
     "m, k",
     [
         (1, 16),
+        (1, 4096),
+        (2, 4096),
+        (4, 4096),
+        (8, 4096),
+        (16, 4096),
+        (24, 4096),
+        (32, 4096),
+        (1, 8192),
+        (2, 8192),
+        (4, 8192),
+        (8, 8192),
+        (16, 8192),
+        (24, 8192),
+        (32, 8192),
         (1, 32),
         (2, 48),
         (7, 64),
@@ -330,6 +347,7 @@ def test_triton_dequantize_nvfp4(monkeypatch) -> None:
         (2048, 4096),
         (4096, 7168),
         (8192, 8192),
+        (128, 16384),
     ],
 )
 @pytest.mark.parametrize("global_scale_value", [0.5, 1.0, 0.001])

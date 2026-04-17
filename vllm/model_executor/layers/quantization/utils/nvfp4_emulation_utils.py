@@ -30,7 +30,8 @@ if current_platform.is_cuda_alike():
         scale_ptr,
         global_scale_ptr,
         output_ptr,
-        rows_per_batch,
+        e2m1_lut_ptr,
+        rows_per_batch: tl.constexpr,
         num_blocks: tl.constexpr,
         BLOCK_SIZE: tl.constexpr,
         has_batch_global_scale: tl.constexpr,
@@ -70,30 +71,39 @@ if current_platform.is_cuda_alike():
         scale_f32 = tl.cast(raw_scales, tl.float8e4nv, bitcast=True).to(tl.float32)
         scale_values = (scale_f32 * global_scale)[:, None]
 
-        # Load [TILE_BLOCKS, BLOCK_SIZE] by reading each packed byte twice
-        # (L1-cached). Element position determines low vs high nibble.
-        elem_offsets = tl.arange(0, BLOCK_SIZE)[None, :]
+        # Load [TILE_BLOCKS, BLOCK_PACKED] packed bytes (each byte holds
+        # two FP4 values), then unpack both nibbles in registers.
+        packed_offsets = tl.arange(0, BLOCK_PACKED)[None, :]
         byte_indices = (
             fp4_row_offset
             + (start_block + block_offsets[:, None]) * BLOCK_PACKED
-            + elem_offsets // 2
+            + packed_offsets
         )
         elem_mask = block_mask[:, None]
         raw_bytes = tl.load(fp4_ptr + byte_indices, mask=elem_mask, other=0)
 
-        # Select nibble: even positions → low nibble, odd → high nibble
-        is_high = (elem_offsets % 2) == 1
-        nibble = tl.where(is_high, (raw_bytes >> 4) & 0x0F, raw_bytes & 0x0F)
-        sign = (nibble >> 3) & 1
-        val = _e2m1_lookup(nibble & 0x07)
-        result = tl.where(sign == 1, -val, val) * scale_values
+        low_nibble = raw_bytes & 0x0F
+        high_nibble = (raw_bytes >> 4) & 0x0F
 
+        low_sign = (low_nibble >> 3) & 1
+        low_val = tl.load(e2m1_lut_ptr + (low_nibble & 0x07))
+        low_result = tl.where(low_sign == 1, -low_val, low_val) * scale_values
+
+        high_sign = (high_nibble >> 3) & 1
+        high_val = tl.load(e2m1_lut_ptr + (high_nibble & 0x07))
+        high_result = tl.where(high_sign == 1, -high_val, high_val) * scale_values
+
+        # Interleave low/high into [TILE_BLOCKS, BLOCK_SIZE] for a single
+        # contiguous store: [l0, h0, l1, h1, ...].
+        result = tl.interleave(low_result, high_result)
+
+        elem_offsets = tl.arange(0, BLOCK_SIZE)[None, :]
         out_indices = (
             output_row_offset
             + (start_block + block_offsets[:, None]) * BLOCK_SIZE
             + elem_offsets
         )
-        tl.store(output_ptr + out_indices, result, mask=elem_mask)
+        tl.store(output_ptr + out_indices, result, mask=block_mask[:, None])
 
     @triton.jit
     def _e2m1_lookup(magnitude):
@@ -251,6 +261,7 @@ def _triton_dequantize_nvfp4(
         scale_raw,
         global_scale,
         output,
+        kE2M1ToFloat_handle.val,
         m_per_batch,
         num_blocks,
         block_size,
