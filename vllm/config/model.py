@@ -675,8 +675,10 @@ class ModelConfig:
 
         if self.disable_sliding_window:
             # Set after get_and_verify_max_len to ensure that max_model_len
-            # can be correctly capped to sliding window size
-            self.hf_text_config.sliding_window = None
+            # can be correctly capped to sliding window size.
+            # Use object.__setattr__ to bypass huggingface_hub strict
+            # dataclass validation which rejects None for int-typed fields.
+            object.__setattr__(self.hf_text_config, 'sliding_window', None)
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False

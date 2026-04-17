@@ -9,6 +9,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
+from math import gcd
 from typing import Any, NewType, TypeAlias, overload
 
 from vllm import envs
@@ -25,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVCacheTensor,
     SlidingWindowSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.request import Request
@@ -942,22 +944,30 @@ def unify_kv_cache_spec_page_size(
         # All layers have the same page size, no need to unify.
         return kv_cache_spec
 
-    max_page_size = max(page_sizes)
+    # Use LCM of all page sizes as the target so that every layer's page
+    # size divides the target evenly.  The previous approach used the
+    # maximum page size which fails when sizes aren't exact multiples of
+    # each other (e.g. TurboQuant + heterogeneous head dims in Gemma 4).
+    target_page_size = 1
+    for ps in page_sizes:
+        target_page_size = ps * target_page_size // gcd(ps, target_page_size)
+
     new_kv_cache_spec = {}
     for layer_name, layer_spec in kv_cache_spec.items():
-        if layer_spec.page_size_bytes == max_page_size:
+        layer_page_size = layer_spec.page_size_bytes
+        if layer_page_size == target_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
         else:
-            layer_page_size = layer_spec.page_size_bytes
-            if max_page_size % layer_page_size != 0:
+            if target_page_size % layer_page_size != 0:
                 raise NotImplementedError(
                     "The page size of the layer is not divisible by the "
-                    "maximum page size. Cannot unify by adjusting block_size."
+                    "target (LCM) page size. Cannot unify by adjusting "
+                    "block_size."
                 )
-            ratio = max_page_size // layer_page_size
+            ratio = target_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
             new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == max_page_size
+            assert new_spec.page_size_bytes == target_page_size
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
 
@@ -1252,6 +1262,28 @@ def get_kv_cache_groups(
     """
     if vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
         unify_hybrid_kv_cache_specs(kv_cache_spec)
+
+    # TurboQuant layers create TQFullAttentionSpec (even for sliding-window
+    # layers).  If the model also has non-TQ sliding-window / full-attention
+    # boundary layers the spec mix is heterogeneous.  Force unification so
+    # every spec becomes a FullAttentionSpec sub-type and the
+    # UniformTypeKVCacheSpecs path can handle per-layer page sizes.
+    if not vllm_config.scheduler_config.disable_hybrid_kv_cache_manager:
+        has_tq = any(
+            isinstance(s, TQFullAttentionSpec)
+            for s in kv_cache_spec.values()
+        )
+        has_non_tq_sw = any(
+            isinstance(s, SlidingWindowSpec)
+            and not isinstance(s, TQFullAttentionSpec)
+            for s in kv_cache_spec.values()
+        )
+        if has_tq and has_non_tq_sw:
+            logger.info(
+                "TurboQuant + sliding-window boundary layers detected; "
+                "disabling hybrid KV cache manager for this model."
+            )
+            unify_hybrid_kv_cache_specs(kv_cache_spec)
 
     if is_kv_cache_type_attention_free(kv_cache_spec):
         # This returns an empty list to allow for the KVCacheManager to handle
