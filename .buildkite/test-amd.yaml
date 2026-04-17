@@ -2173,14 +2173,10 @@ steps:
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-gfx942.txt
 
 
-#-----------------------------------------------------------------------------------------------------------------------------------#
-#                                                             mi325                                                                  #
-#-----------------------------------------------------------------------------------------------------------------------------------#
-
 - label: Distributed Torchrun + Examples (4 GPUs) # TBD
   timeout_in_minutes: 80
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2206,8 +2202,8 @@ steps:
 
 - label: Distributed DP Tests (4 GPUs) # TBD
   timeout_in_minutes: 60
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2229,8 +2225,8 @@ steps:
 
 - label: Distributed Compile + Comm (4 GPUs) # TBD
   timeout_in_minutes: 40
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -2250,6 +2246,113 @@ steps:
   - pytest -v -s distributed/test_multiproc_executor.py::test_multiproc_executor_multi_node
 
 
+- label: Distributed Tests (4 GPUs)(A100-MI300) # 20.9m
+  timeout_in_minutes: 37
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/
+  commands:
+  - export TORCH_NCCL_BLOCKING_WAIT=1
+  - pytest -v -s distributed/test_custom_all_reduce.py
+  - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
+  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - pytest -v -s -x lora/test_mixtral.py
+
+
+- label: LM Eval Large Models (4 GPUs)(FP8) # 24.8m
+  timeout_in_minutes: 42
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_DEEP_GEMM=0
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
+
+
+- label: LM Eval Large Models (4 GPUs)(A100-MI300) # 17.3m
+  timeout_in_minutes: 27
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+
+- label: DeepSeek V2-Lite Accuracy # 6.7m
+  timeout_in_minutes: 12
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/model_executor/layers/quantization/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/backends/mla/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
+
+
+- label: Qwen3-30B-A3B-FP8-block Accuracy # 6.4m
+  timeout_in_minutes: 11
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+
+
+#-----------------------------------------------------------------------------------------------------------------------------------#
+#                                                             mi325                                                                  #
+#-----------------------------------------------------------------------------------------------------------------------------------#
+
 - label: Distributed Tests (8 GPUs)(H100-MI325) # 6.4m
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
@@ -2268,6 +2371,28 @@ steps:
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - torchrun --nproc-per-node=8 ../examples/offline_inference/torchrun_dp_example.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
+
+
+- label: ROCm LM Eval Large Models (8 Card) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  agent_pool: mi325_8
+  optional: true
+  num_gpus: 8
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/model_executor/layers/layernorm.py
+  - csrc/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
 
 
 - label: Elastic EP Scaling Test # TBD
@@ -2571,23 +2696,6 @@ steps:
   - CROSS_LAYERS_BLOCKS=True ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
-- label: Distributed Tests (4 GPUs)(A100-MI325) # 20.9m
-  timeout_in_minutes: 37
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/
-  commands:
-  - export TORCH_NCCL_BLOCKING_WAIT=1
-  - pytest -v -s distributed/test_custom_all_reduce.py
-  - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-  - pytest -v -s -x lora/test_mixtral.py
-
-
 - label: LM Eval Small Models # 13.3m
   timeout_in_minutes: 23
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
@@ -2647,93 +2755,6 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi3xx.txt
 
 
-- label: LM Eval Large Models (4 GPUs)(FP8) # 24.8m
-  timeout_in_minutes: 42
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
-
-
-- label: LM Eval Large Models (4 GPUs)(A100-MI325) # 17.3m
-  timeout_in_minutes: 27
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
-
-
-- label: ROCm LM Eval Large Models (8 Card) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_8
-  optional: true
-  num_gpus: 8
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/model_executor/layers/quantization/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - vllm/model_executor/layers/layernorm.py
-  - csrc/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm.txt --tp-size=8
-
-
-- label: DeepSeek V2-Lite Accuracy # 6.7m
-  timeout_in_minutes: 12
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
-  num_gpus: 4
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/distributed/eplb
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/model_executor/layers/quantization/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/backends/mla/
-  - vllm/v1/attention/selector.py
-  - .buildkite/scripts/scheduled_integration_test/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
-
-
 - label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100-MI325) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
@@ -2753,27 +2774,6 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_prefetch_offload.sh 0.25 200 8030
-
-
-- label: Qwen3-30B-A3B-FP8-block Accuracy # 6.4m
-  timeout_in_minutes: 11
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_4
-  optional: true
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/model_executor/models/
-  - vllm/model_executor/model_loader/
-  - vllm/model_executor/layers/quantization/
-  - vllm/distributed/eplb
-  - vllm/model_executor/layers/fused_moe/
-  - vllm/v1/attention/backends/
-  - vllm/v1/attention/selector.py
-  - .buildkite/scripts/scheduled_integration_test/
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # 10.9m
@@ -2797,6 +2797,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
+
 
 ##### .buildkite/test_areas/compile.yaml #####
 # Slowly setting up the tests so that it is also easier for the
