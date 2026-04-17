@@ -79,13 +79,15 @@ Specially, committers are almost all area owners. They author subsystems, review
 
 For a full list of committers and their respective areas, see the [committers](./committers.md) page.
 
-#### Nomination Process
+#### Committer Proposal Process
 
-Any committer can nominate candidates via our private mailing list:
+Any committer can nominate candidates via our private committer mailing list. The process runs as follows:
 
-1. **Nominate**: Any committer may nominate a candidate by email to the private maintainers’ list, citing evidence mapped to the pre‑existing standards with links to PRs, reviews, RFCs, issues, benchmarks, and adoption evidence.
-2. **Vote**: The lead maintainers will group voices support or concerns. Shared concerns can stop the process. The vote typically last 3 working days. For concerns, committers group discuss the clear criteria for such person to be nominated again. The lead maintainers will make the final decision.
-3. **Confirm**: The lead maintainers send invitation, update CODEOWNERS, assign permissions, add to communications channels (mailing list and Slack).
+1. **Nominate**: A committer sends email to the committer group to nominate a candidate, highlighting the candidate’s contributions (e.g., links to PRs, reviews, RFCs, issues, benchmarks, and adoption evidence) and how they map to the standards below.
+2. **Discuss and vote**: The committer group discusses the nomination, votes, and voices concerns if needed. Shared concerns can stop the process. For concerns, the group discusses clear criteria for the person to be nominated again. Most cases are decided by consensus; in contentious cases, the lead maintainers resolve conflicts and make the decision.
+3. **Feedback period**: After a two-week feedback period (allowing time for any last input or concerns), if no blocking concerns arise and the nominator confirms with lead maintainer group to move forward (via the mailing list or committers slack channel), the nominator sends an invitation to the candidate asking them to open a PR to update their code ownership (e.g., CODEOWNERS and committers list).
+4. **Permissions and onboarding**: In parallel, the lead maintainers assign the necessary permissions in GitHub and add the new member to the committer mailing list, the committer-only Slack channel, and other communications channels as appropriate.
+5. **Finalize**: Once the CODEOWNERS/committer PR is ready and permissions are in place, the PR is merged and the new committer is welcomed.
 
 Committership is highly selective and merit based. The selection criteria requires:
 
@@ -132,6 +134,19 @@ Contributors and maintainers often collaborate closely on code changes, especial
 PRs requires at least one committer review and approval. If the code is covered by CODEOWNERS, the PR should be reviewed by the CODEOWNERS. There are cases where the code is trivial or hotfix, the PR can be merged by the lead maintainers directly.
 
 In case where CI didn't pass due to the failure is not related to the PR, the PR can be merged by the lead maintainers using "force merge" option that overrides the CI checks.
+
+### AI Assisted Contributions
+
+AI tools can accelerate development, but contributors remain fully responsible for all code they submit. Like the Developer Certificate of Origin, this policy centers on accountability: contributors must believe they have the right to submit their contribution under vLLM's open source license, regardless of how the code was created.
+
+All AI-assisted contributions must meet the same quality, testing, and review standards as any other code. Contributors must review and understand AI-generated code before submission—just make sure it is good code:
+
+- Do not submit "pure agent" PRs. The human submitter is responsible for reviewing all changed lines, validating behavior end-to-end, and running relevant tests.
+- Attribution preserves legal clarity and community trust. Contributors must disclose AI assistance in pull requests and mark commits with appropriate trailers (e.g. `Co-authored-by:`).
+- Avoid one-off "busywork" PRs (single typo, isolated style cleanup, one mutable default fix, etc.). Bundle mechanical cleanups into a clear, systematic scope.
+
+!!! warning
+    These topics are outlined for agents in [AGENTS.md](../../AGENTS.md) with instructions for how to autonomously implement them.
 
 ### Slack
 

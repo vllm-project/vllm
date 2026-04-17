@@ -37,6 +37,7 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
+from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -52,8 +53,6 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
-    ModalityData,
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -78,11 +77,15 @@ from vllm.transformers_utils.configs.hunyuan_vl import (
     HunYuanVLVisionConfig,
 )
 from vllm.transformers_utils.processors.hunyuan_vl import HunYuanVLProcessor
-from vllm.transformers_utils.processors.hunyuan_vl_image import smart_resize
+from vllm.transformers_utils.processors.hunyuan_vl_image import (
+    HunYuanVLImageProcessor,
+    smart_resize,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
@@ -596,7 +599,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
     def get_image_processor(
         self,
         **kwargs: object,
-    ) -> HunYuanVLProcessor:
+    ) -> HunYuanVLImageProcessor:
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_data_parser(self):
@@ -624,23 +627,30 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: HunYuanVLProcessor | None,
+        image_processor: HunYuanVLImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
-
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         spatial_merge_size = vision_config.spatial_merge_size
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_merge_size,
-                min_pixels=image_processor.min_pixels,
-                max_pixels=image_processor.max_pixels,
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -662,29 +672,37 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: HunYuanVLProcessor | None,
+        image_processor: HunYuanVLImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_image_tokens
 
     def get_image_size_with_most_features(self) -> ImageSize:
+        image_processor = self.get_image_processor()
+
         max_image_size, _ = self._get_vision_info(
             image_width=512,
             image_height=8192,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
         return max_image_size
 
     def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
+
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
 
 
@@ -692,7 +710,7 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
 
-        hf_processor = self.info.get_hf_processor()
+        hf_processor = self.info.get_hf_processor(typ=HunYuanVLProcessor)
         image_token: str = hf_processor.image_token
 
         return image_token * num_images
@@ -701,7 +719,7 @@ class HunYuanVLDummyInputsBuilder(BaseDummyInputsBuilder[HunYuanVLProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 1)
 
@@ -783,6 +801,7 @@ class HunYuanVLForConditionalGeneration(
     SupportsPP,
     SupportsQuant,
     SupportsXDRoPE,
+    SupportsEagle,
     SupportsEagle3,
 ):
     # To ensure correct weight loading and mapping.
@@ -969,13 +988,6 @@ class HunYuanVLForConditionalGeneration(
                 image_embeddings = self._process_image_input(multimodal_input)
                 multimodal_embeddings += tuple(image_embeddings)
         return multimodal_embeddings
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.language_model.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.language_model.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def forward(
         self,

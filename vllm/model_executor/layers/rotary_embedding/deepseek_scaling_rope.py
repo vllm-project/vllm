@@ -120,14 +120,14 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         query_rot = query[..., : self.rotary_dim]
         key_rot = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim :]
             key_pass = key[..., self.rotary_dim :]
 
-        cos_sin = self.cos_sin_cache[
+        cos_sin = cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)
@@ -151,6 +151,23 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             query = query_rot
             key = key_rot
         return query, key
+
+    def forward_xpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return torch.ops.vllm.xpu_ops_deepseek_scaling_rope(
+            positions,
+            query,
+            key,
+            offsets,
+            self._match_cos_sin_cache_dtype(query),
+            self.rotary_dim,
+            self.is_neox_style,
+        )
 
     def forward_hip(
         self,

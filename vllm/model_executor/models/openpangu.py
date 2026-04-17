@@ -1029,7 +1029,6 @@ class OpenPanguModel(nn.Module):
         self.config = config
         self.num_redundant_experts = eplb_config.num_redundant_experts
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank or (

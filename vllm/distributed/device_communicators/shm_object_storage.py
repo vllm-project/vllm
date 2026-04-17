@@ -197,6 +197,7 @@ class SingleWriterShmRingBuffer:
         """
         assert self.is_writer, "Only the writer can allocate buffers."
         assert size > 0, "Size must be greater than 0"
+        assert self.shared_memory.buf is not None, "Buffer has been closed"
         size += self.MD_SIZE  # add metadata size to the buffer size
         # reset to beginning if the buffer does have enough contiguous space
         buffer_end_reset = self.data_buffer_end % self.data_buffer_size
@@ -239,6 +240,7 @@ class SingleWriterShmRingBuffer:
 
     @contextmanager
     def access_buf(self, address: int):
+        assert self.shared_memory.buf is not None, "Buffer has been closed"
         buf_idx = address % self.data_buffer_size
 
         # read metadata

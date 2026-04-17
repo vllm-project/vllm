@@ -12,6 +12,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -27,7 +28,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -48,11 +48,10 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.configs.deepseek_vl2 import DeepseekVLV2Config
-from vllm.transformers_utils.processors.deepseek_ocr2 import (
+from vllm.transformers_utils.processors.deepseek_ocr import (
     BASE_SIZE,
     CROP_MODE,
-    IMAGE_SIZE,
-    DeepseekOCR2Processor,
+    DeepseekOCRProcessor,
 )
 
 from ...transformers_utils.processors.deepseek_ocr import count_tiles
@@ -62,6 +61,7 @@ from .deepseek_ocr import DeepseekOCRImagePixelInputs
 from .deepseek_vl2 import MlpProjector
 
 # The image token id may be various
+IMAGE_SIZE = 768  # different from deepseek-ocr
 _IMAGE_TOKEN = "<image>"
 
 
@@ -70,7 +70,17 @@ class DeepseekOCR2ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(DeepseekVLV2Config)
 
     def get_hf_processor(self, **kwargs: object):
-        return self.ctx.get_hf_processor(DeepseekOCR2Processor, **kwargs)
+        v2_processor_config = dict(
+            image_size=IMAGE_SIZE,
+            base_size=BASE_SIZE,
+            crop_mode=CROP_MODE,
+            strategy="v2",
+        )
+
+        return self.ctx.get_hf_processor(
+            DeepseekOCRProcessor,
+            **{**v2_processor_config, **kwargs},
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -129,7 +139,7 @@ class DeepseekOCR2DummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 

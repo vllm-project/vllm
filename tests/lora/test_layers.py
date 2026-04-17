@@ -60,8 +60,12 @@ pytestmark = pytest.mark.skipif(
     reason="Backend not supported",
 )
 
+DEVICE_TYPE = current_platform.device_type
 DEVICES = (
-    [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+    [
+        f"{DEVICE_TYPE}:{i}"
+        for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    ]
     if current_platform.is_cuda_alike()
     else ["cpu"]
 )
@@ -196,7 +200,7 @@ def create_random_inputs(
     input_size: tuple[int, ...],
     input_range: tuple[float, float],
     input_type: torch.dtype = torch.int,
-    device: torch.device = "cuda",
+    device: torch.device = DEVICE_TYPE,
 ) -> tuple[list[torch.Tensor], list[int], list[int]]:
     """Creates random inputs.
 
@@ -260,7 +264,7 @@ def test_embeddings(
     # device, see: https://github.com/triton-lang/triton/issues/2925
     # Same below.
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
     max_loras = 8
@@ -353,13 +357,13 @@ def test_embeddings(
 @torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
-@pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 256512])
+@pytest.mark.parametrize("vocab_size", [64000, 256512, 258048])
 @pytest.mark.parametrize("stage", STAGES)
 def test_lm_head_logits_processor(
     default_vllm_config, dist_init, num_loras, device, vocab_size, stage
 ) -> None:
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     torch.set_default_device(device)
     max_loras = 8
@@ -469,6 +473,31 @@ def test_lm_head_logits_processor(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("vocab_size", [258049, 300000])
+@pytest.mark.parametrize("device", DEVICES)
+def test_lm_head_logits_processor_invalid_vocab_size(
+    default_vllm_config, dist_init, vocab_size, device
+) -> None:
+    """Test that LogitsProcessorWithLoRA raises ValueError for invalid vocab sizes."""
+    if current_platform.is_cuda_alike():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    max_loras = 8
+    lora_config = LoRAConfig(
+        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
+    )
+
+    logits_processor = LogitsProcessor(vocab_size)
+    lora_logits_processor = LogitsProcessorWithLoRA(
+        logits_processor, 1024, torch.float16, device, None
+    )
+
+    with pytest.raises(ValueError, match="vocab size must be <= 258048"):
+        lora_logits_processor.create_lora_weights(max_loras, lora_config)
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("stage", STAGES)
@@ -480,7 +509,7 @@ def test_linear_replicated(
     stage,
 ) -> None:
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)
@@ -492,8 +521,10 @@ def test_linear_replicated(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-    def create_random_linear_replicated_layer():
-        linear = ReplicatedLinear(4096, 4096, bias=False, params_dtype=torch.float16)
+    def create_random_linear_replicated_layer(idx: int = 0):
+        linear = ReplicatedLinear(
+            4096, 4096, bias=False, params_dtype=torch.float16, prefix=f"layer_{idx}"
+        )
         linear.weight.data = torch.rand_like(linear.weight.data)
         lora_linear = ReplicatedLinearWithLoRA(linear)
 
@@ -510,7 +541,7 @@ def test_linear_replicated(
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, lora_linear = create_random_linear_replicated_layer()
+        linear, lora_linear = create_random_linear_replicated_layer(i)
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
@@ -587,7 +618,7 @@ def test_linear_parallel(
     default_vllm_config, dist_init, num_loras, orientation, fully_shard, device, stage
 ) -> None:
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)
@@ -600,10 +631,14 @@ def test_linear_parallel(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-    def create_random_linear_parallel_layer():
+    def create_random_linear_parallel_layer(idx: int = 0):
         if orientation == "row":
             linear = RowParallelLinear(
-                4096, 4096, bias=False, params_dtype=torch.float16
+                4096,
+                4096,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -613,7 +648,11 @@ def test_linear_parallel(
             )
         else:
             linear = ColumnParallelLinear(
-                4096, 4096, bias=False, params_dtype=torch.float16
+                4096,
+                4096,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -635,7 +674,7 @@ def test_linear_parallel(
         set_random_seed(i)
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, lora_linear = create_random_linear_parallel_layer()
+        linear, lora_linear = create_random_linear_parallel_layer(i)
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, _ = populate_loras(
@@ -712,7 +751,7 @@ def test_column_parallel_packed(
     default_vllm_config, dist_init, num_loras, repeats, fully_shard, device, stage
 ) -> None:
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)
@@ -725,10 +764,14 @@ def test_column_parallel_packed(
     punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
     assert check_punica_wrapper(punica_wrapper)
 
-    def create_column_parallel_packed_layer():
+    def create_column_parallel_packed_layer(idx: int = 0):
         if repeats == 2:
             linear = MergedColumnParallelLinear(
-                4096, [4096] * repeats, bias=False, params_dtype=torch.float16
+                4096,
+                [4096] * repeats,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -738,7 +781,12 @@ def test_column_parallel_packed(
             )
         elif repeats == 3:
             linear = QKVParallelLinear(
-                4096, 64, 32, bias=False, params_dtype=torch.float16
+                4096,
+                64,
+                32,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -748,7 +796,12 @@ def test_column_parallel_packed(
             )
         else:
             linear = QKVParallelLinear(
-                4096, 64, 32, bias=False, params_dtype=torch.float16
+                4096,
+                64,
+                32,
+                bias=False,
+                params_dtype=torch.float16,
+                prefix=f"layer_{idx}",
             )
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
@@ -781,7 +834,7 @@ def test_column_parallel_packed(
 
         id_to_index = get_random_id_to_index(num_loras, max_loras)
 
-        linear, lora_linear = create_column_parallel_packed_layer()
+        linear, lora_linear = create_column_parallel_packed_layer(i)
         assert torch.equal(linear.weight, lora_linear.weight)
         lora_linear.set_mapping(punica_wrapper)
         lora_dict, sublora_dict = populate_loras(
@@ -860,7 +913,7 @@ def test_merged_column_parallel_variable_slice(
     default_vllm_config, dist_init, num_loras, num_slices, device, stage
 ) -> None:
     if current_platform.is_cuda_alike():
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
 
     max_loras = 8
     torch.set_default_device(device)
@@ -873,10 +926,14 @@ def test_merged_column_parallel_variable_slice(
     output_sizes = [1024 + i * 256 for i in range(num_slices)]
     total_output = sum(output_sizes)
 
-    def create_layer():
+    def create_layer(idx: int = 0):
         # Create linear layer
         linear = MergedColumnParallelLinear(
-            4096, output_sizes, bias=False, params_dtype=torch.float16
+            4096,
+            output_sizes,
+            bias=False,
+            params_dtype=torch.float16,
+            prefix=f"layer_{idx}",
         )
         linear.weight.data = torch.rand_like(linear.weight.data)
 
@@ -888,7 +945,7 @@ def test_merged_column_parallel_variable_slice(
     for i in range(NUM_RANDOM_SEEDS):
         set_random_seed(i)
         id_to_index = get_random_id_to_index(num_loras, max_loras)
-        linear, lora_linear = create_layer()
+        linear, lora_linear = create_layer(i)
         lora_linear.set_mapping(punica_wrapper)
 
         # Populate LoRA weights

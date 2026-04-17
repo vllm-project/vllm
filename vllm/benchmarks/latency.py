@@ -3,7 +3,6 @@
 """Benchmark the latency of processing a single batch of requests."""
 
 import argparse
-import dataclasses
 import json
 import os
 import time
@@ -85,7 +84,7 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     assert llm.llm_engine.model_config.max_model_len >= (
         args.input_len + args.output_len
     ), (

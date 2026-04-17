@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.platform_utils import num_compute_units
 
 from .quant_utils import pack_cols, unpack_cols
 
@@ -45,14 +46,15 @@ def query_marlin_supported_quant_types(
     if current_platform.is_cpu():
         return _query_cpu_marlin_supported_quant_types(has_zp, include_fp_type)
 
-    if device_capability is None:
-        capability_tuple = current_platform.get_device_capability()
-        device_capability = (
-            -1 if capability_tuple is None else capability_tuple.to_int()
-        )
+    if not current_platform.is_rocm():
+        if device_capability is None:
+            capability_tuple = current_platform.get_device_capability()
+            device_capability = (
+                -1 if capability_tuple is None else capability_tuple.to_int()
+            )
 
-    if device_capability < 75:
-        return []
+        if device_capability < 75:
+            return []
 
     # - has_zp is True: return quant_types that has zero points
     # - has_zp is False: return quant_types that has not zero points
@@ -209,8 +211,6 @@ def check_marlin_supports_shape(
 
 
 def check_marlin_supports_layer(layer: LinearBase, group_size: int) -> bool:
-    if current_platform.is_rocm():
-        return False
     output_size_per_partition = (
         getattr(layer, "output_size_per_partition", None) or layer.output_size
     )
@@ -254,24 +254,12 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
     return w2_packed.size(1) * marlin_tile_size
 
 
-def marlin_make_workspace(
-    output_size_per_partition: int, device: torch.device
-) -> torch.Tensor:
-    max_workspace_size = (
-        output_size_per_partition // GPTQ_MARLIN_MIN_THREAD_N
-    ) * GPTQ_MARLIN_MAX_PARALLEL
-
-    return torch.zeros(
-        max_workspace_size, dtype=torch.int, device=device, requires_grad=False
-    )
-
-
 def marlin_make_workspace_new(
     device: torch.device, max_blocks_per_sm: int = 1
 ) -> torch.Tensor:
     # In the new marlin kernel, we use the num of threadblocks as workspace
     # size. The num of threadblocks is sms_count * max_blocks_per_sm.
-    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    sms = num_compute_units(device.index)
     return torch.zeros(
         sms * max_blocks_per_sm, dtype=torch.int, device=device, requires_grad=False
     )
@@ -291,12 +279,6 @@ def marlin_repeat_scales_on_all_ranks(
 
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
-    return torch.nn.Parameter(
-        torch.empty(0, dtype=torch.int, device=device), requires_grad=False
-    )
-
-
-def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(
         torch.empty(0, dtype=torch.int, device=device), requires_grad=False
     )

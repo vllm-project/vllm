@@ -66,7 +66,6 @@ def test_incremental_detokenization(
             external_req_id=f"request-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -85,6 +84,7 @@ def test_incremental_detokenization(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
+        prompts_list=dummy_test_vectors.prompt_tokens,
         request_ids=[req.request_id for req in requests],
     )
 
@@ -487,7 +487,6 @@ def test_logprobs_processor(
             external_req_id=request_id_list[idx],
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -508,6 +507,7 @@ def test_logprobs_processor(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
+        prompts_list=dummy_test_vectors.prompt_tokens,
         generated_logprobs_raw=None
         if num_sample_logprobs is None
         else dummy_test_vectors.generation_logprobs,
@@ -663,6 +663,19 @@ def test_stop_token(
     prompt_string = dummy_test_vectors.prompt_strings[0]
     prompt_tokens = dummy_test_vectors.prompt_tokens[0]
 
+    sampling_params = SamplingParams(
+        skip_special_tokens=False,
+        spaces_between_special_tokens=False,
+        output_kind=RequestOutputKind.DELTA,
+        stop=[],
+        stop_token_ids=stop_token_ids,
+        include_stop_str_in_output=include_stop_str_in_output,
+        logprobs=num_sample_logprobs,
+        prompt_logprobs=None,
+        ignore_eos=ignore_eos,
+    )
+    sampling_params.update_from_generation_config({}, eos_token_id)
+
     # Make request.
     request_id = "request-0"
     request = EngineCoreRequest(
@@ -670,32 +683,21 @@ def test_stop_token(
         external_req_id=request_id + "-ext",
         prompt_token_ids=prompt_tokens,
         mm_features=None,
-        eos_token_id=eos_token_id,
         arrival_time=0,
         lora_request=None,
         cache_salt=None,
         data_parallel_rank=None,
-        sampling_params=SamplingParams(
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
-            output_kind=RequestOutputKind.DELTA,
-            stop=[],
-            stop_token_ids=stop_token_ids,
-            include_stop_str_in_output=include_stop_str_in_output,
-            logprobs=num_sample_logprobs,
-            prompt_logprobs=None,
-            ignore_eos=ignore_eos,
-        ),
+        sampling_params=sampling_params,
         pooling_params=None,
     )
 
     engine_core = MockEngineCore(
         tokens_list=[generation_tokens],
+        prompts_list=dummy_test_vectors.prompt_tokens,
         generated_logprobs_raw=[generation_logprobs] if do_logprobs else None,
         prompt_logprobs_raw=None,
-        eos_token_id=eos_token_id,
-        stop_token_ids=stop_token_ids,
-        ignore_eos=ignore_eos,
+        eos_token_id=sampling_params.eos_token_id,
+        stop_token_ids=sampling_params.stop_token_ids,
         request_ids=[request.request_id],
     )
 
@@ -775,7 +777,6 @@ def test_stop_string(
             external_req_id=request_id_list[idx],
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -796,6 +797,7 @@ def test_stop_string(
 
     engine_core = MockEngineCore(
         tokens_list=dummy_test_vectors.generation_tokens,
+        prompts_list=dummy_test_vectors.prompt_tokens,
         generated_logprobs_raw=dummy_test_vectors.generation_logprobs
         if num_sample_logprobs
         else None,
@@ -907,7 +909,6 @@ def test_iteration_stats(dummy_test_vectors):
             external_req_id=f"request-{idx}-ext",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -920,6 +921,7 @@ def test_iteration_stats(dummy_test_vectors):
 
     engine_core = MockEngineCore(
         dummy_test_vectors.generation_tokens,
+        dummy_test_vectors.prompt_tokens,
         request_ids=[req.request_id for req in requests],
     )
 
@@ -930,7 +932,7 @@ def test_iteration_stats(dummy_test_vectors):
     inactive_request = requests[num_active]
 
     # First iteration has 2 prefills.
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
     total_prompt_tokens = sum(
@@ -944,7 +946,7 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
     # Just decodes in this step.
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
 
@@ -954,7 +956,7 @@ def test_iteration_stats(dummy_test_vectors):
     # Add a new request - prefill and 2 decodes in this step.
     output_processor.add_request(inactive_request, None)
     num_active += 1
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
     total_prompt_tokens = len(dummy_test_vectors.prompt_tokens[num_active - 1])
@@ -963,7 +965,7 @@ def test_iteration_stats(dummy_test_vectors):
     assert iteration_stats.num_generation_tokens == num_active
 
     # Just decodes in this step.
-    outputs = engine_core.get_outputs()[:num_active]
+    outputs = engine_core.get_outputs(num_active)
     iteration_stats = IterationStats()
     output_processor.process_outputs(outputs, engine_core_timestamp, iteration_stats)
 
@@ -994,7 +996,6 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
             external_req_id=f"request-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=lora_assignments[idx],
             cache_salt=None,
@@ -1007,6 +1008,7 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
 
     engine_core = MockEngineCore(
         dummy_test_vectors.generation_tokens,
+        dummy_test_vectors.prompt_tokens,
         request_ids=[req.request_id for req in requests],
     )
 
@@ -1315,7 +1317,6 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             external_req_id=f"external-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,

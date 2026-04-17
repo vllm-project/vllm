@@ -14,7 +14,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
@@ -27,13 +27,11 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
-    ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -726,12 +724,12 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = feature_extractor.sampling_rate
         num_audios = mm_counts.get("audio", 0)
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         max_audio_len = getattr(
             self.info.get_hf_processor(), "max_audio_len", DEFAULT_MAX_AUDIO_LEN_S
@@ -740,7 +738,9 @@ class GlmAsrDummyInputsBuilder(BaseDummyInputsBuilder[GlmAsrProcessingInfo]):
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -807,9 +807,9 @@ class GlmAsrMultiModalProcessor(BaseMultiModalProcessor["GlmAsrProcessingInfo"])
 
         # Postprocess: rename mask and add chunk counts
         # Handle different key names from different transformers versions
-        if "input_feature_mask" in outputs:
-            outputs["feature_attention_mask"] = outputs.pop("input_feature_mask")
-        elif "feature_attention_mask" not in outputs and "input_features" in outputs:
+        if "input_features_mask" in outputs:
+            outputs["feature_attention_mask"] = outputs.pop("input_features_mask")
+        elif "input_features_mask" not in outputs and "input_features" in outputs:
             # If no mask is provided, create one from input_features
             input_features = outputs["input_features"]
             if isinstance(input_features, torch.Tensor):
