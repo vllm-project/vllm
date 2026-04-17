@@ -347,11 +347,7 @@ class InternS1MultiModalProcessor(BaseMultiModalProcessor[InternS1ProcessingInfo
 
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
         tokenizer = hf_processor.tokenizer
-        video_token_id = tokenizer.encode(
-            hf_processor.video_token, add_special_tokens=False
-        )
-        assert len(video_token_id) == 1
-        video_token_id = video_token_id[0]
+        video_token_id = tokenizer.convert_tokens_to_ids(hf_processor.video_token)
 
         prompt = re.sub(hf_processor.image_token, "<image_placeholder>", prompt)
         prompt = re.sub(hf_processor.video_token, "<video_placeholder>", prompt)

@@ -995,13 +995,12 @@ class NemotronH_Nano_VL_V2(
         # Pre-tokenize special tokens for video processing
         # to avoid repeated tokenization
         tokenizer = cached_tokenizer_from_config(model_config)
-        self._img_start_token_ids = tokenizer.encode(
-            IMG_START, add_special_tokens=False
+        img_start_id, img_end_id, img_context_id = tokenizer.convert_tokens_to_ids(
+            [IMG_START, IMG_END, IMG_CONTEXT]
         )
-        self._img_end_token_ids = tokenizer.encode(IMG_END, add_special_tokens=False)
-        self._img_context_token_ids = tokenizer.encode(
-            IMG_CONTEXT, add_special_tokens=False
-        )
+        self._img_start_token_ids = [img_start_id]
+        self._img_end_token_ids = [img_end_id]
+        self._img_context_token_ids = [img_context_id]
         self.dynamic_resolution = BaseNanoNemotronVLProcessor.use_dynamic_resolution(
             config
         )
