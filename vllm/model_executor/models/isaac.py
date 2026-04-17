@@ -745,7 +745,11 @@ class Siglip2VisionTransformer(nn.Module):
 def _resolve_vision_token_id(model_config: ModelConfig, vision_token: str) -> int:
     tokenizer = cached_tokenizer_from_config(model_config)
     assert tokenizer is not None
-    return tokenizer.encode(vision_token, add_special_tokens=False)[0]
+    token_id = tokenizer.convert_tokens_to_ids(vision_token)
+    assert token_id is not None and token_id != tokenizer.unk_token_id, (
+        f"Vision token {vision_token!r} not found in tokenizer vocabulary"
+    )
+    return token_id
 
 
 class IsaacVisionEmbedding(nn.Module):
