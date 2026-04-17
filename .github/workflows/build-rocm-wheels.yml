@@ -51,16 +51,18 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          # Install torch from the nightly ROCm index first, so that
-          # the requirements file's torch==2.11.0 pin (which would
-          # resolve to the CUDA build from PyPI) is already satisfied
-          # by the ROCm nightly wheel.
+          # Install torch/torchvision/torchaudio from the nightly ROCm
+          # index, then the remaining build deps from the requirements
+          # file (with torch lines stripped so uv doesn't replace the
+          # ROCm wheel with the CUDA build from PyPI).
           uv pip install --system \
             torch torchvision torchaudio \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-first-match
-          uv pip install --system -r requirements/build/rocm.txt \
+          grep -v -E '^(torch|torchvision|torchaudio)==' requirements/build/rocm.txt \
+            | grep -v 'download.pytorch.org' \
+            | uv pip install --system -r - \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-first-match
