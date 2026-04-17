@@ -387,7 +387,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.impl.supports_quant_query_input
-            and self.kv_cache_dtype.startswith("fp8")
+            and (
+                self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
+            )
             and not self.kv_cache_dtype.endswith("per_token_head")
         ):
             is_per_head = (
@@ -492,7 +494,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # which reduces overheads during decoding.
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
-            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
+            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3", "nvfp4"}
 
             # check if query quantization is supported
             if self.impl.supports_quant_query_input:

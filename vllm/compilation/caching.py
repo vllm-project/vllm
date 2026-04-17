@@ -184,6 +184,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         vllm_backend: Any | None = None,
         sym_tensor_indices: list[int] | None = None,
         aot_autograd_config: dict[str, Any] | None = None,
+        execution_code: str | None = None,
+        submod_names: list[str] | None = None,
     ) -> None:
         assert isinstance(graph_module, torch.fx.GraphModule)
         self.graph_module = graph_module
@@ -194,6 +196,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         self.shape_env = None
         self.vllm_backend = vllm_backend
         self.sym_tensor_indices = sym_tensor_indices
+        self.execution_code = execution_code
+        self.submod_names = submod_names
         self._fake_mode: Any | None = None
 
         import torch._functorch.config as functorch_config
@@ -453,7 +457,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
     standalone_compile_artifacts.load_all()
 
-    submod_names = standalone_compile_artifacts.submodule_names()
+    piecewise_submod_names = standalone_compile_artifacts.submodule_names()
     compiled_callables: dict[str, dict[str, Callable[..., Any]]] = {}
 
     for cache_key in standalone_compile_artifacts.submodule_bytes:
@@ -473,13 +477,13 @@ def reconstruct_serializable_fn_from_mega_artifact(
 
     # spot check that cached submodules exist in the graph structure
     graph_children = {name for name, _ in split_gm.named_children()}
-    missing = set(submod_names) - graph_children
+    missing = set(piecewise_submod_names) - graph_children
     assert not missing, (
         f"artifacts reference submodules not in graph: {missing}. "
         f"graph has: {sorted(graph_children)}"
     )
 
-    for i, submod_name in enumerate(submod_names):
+    for i, submod_name in enumerate(piecewise_submod_names):
         assert submod_name in sym_shape_indices_map and submod_name in returns_tuple_map
 
         sym_shape_indices = sym_shape_indices_map[submod_name]
@@ -490,7 +494,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
             graph=None,  # not needed for cached artifacts
             vllm_config=vllm_config,
             piecewise_compile_index=i,
-            total_piecewise_compiles=len(submod_names),
+            total_piecewise_compiles=len(piecewise_submod_names),
             sym_shape_indices=sym_shape_indices,
             vllm_backend=vllm_backend,
             returns_tuple=returns_tuple,
@@ -498,7 +502,7 @@ def reconstruct_serializable_fn_from_mega_artifact(
         )
 
         is_first = i == 0
-        is_last = i == len(submod_names) - 1
+        is_last = i == len(piecewise_submod_names) - 1
         wrapped_backend = wrap_with_cudagraph_if_needed(
             piecewise_backend,
             vllm_config,
@@ -513,6 +517,21 @@ def reconstruct_serializable_fn_from_mega_artifact(
             submod_name,
         )
 
+    # Use codegen'd execution code if available, fall back to split_gm
+    execution_code = state.get("execution_code")
+    submod_names = state.get("submod_names")
+    if execution_code is not None and submod_names is not None:
+        from vllm.compilation.codegen import compile_execution_fn
+
+        submod_callables = {
+            name: getattr(split_gm, name) for name, _ in split_gm.named_children()
+        }
+        runtime_callable = compile_execution_fn(
+            execution_code, submod_callables, submod_names
+        )
+    else:
+        runtime_callable = split_gm
+
     if compilation_config.cudagraph_copy_inputs:
         sym_tensor_indices = state["sym_tensor_indices"]
         input_buffers = [
@@ -521,9 +540,11 @@ def reconstruct_serializable_fn_from_mega_artifact(
             )
             for idx in sym_tensor_indices
         ]
-        optimized_call = make_copy_and_call(sym_tensor_indices, input_buffers, split_gm)
+        optimized_call = make_copy_and_call(
+            sym_tensor_indices, input_buffers, runtime_callable
+        )
     else:
-        optimized_call = split_gm
+        optimized_call = runtime_callable
 
     fn = VllmSerializableFunction(
         **state,
