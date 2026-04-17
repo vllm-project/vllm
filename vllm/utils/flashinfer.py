@@ -143,9 +143,7 @@ flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
-flashinfer_tinygemm_bf16 = _lazy_import_wrapper(
-    "flashinfer.gemm", "tinygemm_bf16"
-)
+flashinfer_tinygemm_bf16 = _lazy_import_wrapper("flashinfer.gemm", "tinygemm_bf16")
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",

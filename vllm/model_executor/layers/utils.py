@@ -96,9 +96,12 @@ def _tinygemm_bf16_impl(
 ) -> torch.Tensor:
     """Real implementation: calls FlashInfer tinygemm via lazy wrapper."""
     from vllm.utils.flashinfer import flashinfer_tinygemm_bf16
+
     out = torch.empty(
-        input.shape[0], weight.shape[0],
-        dtype=torch.bfloat16, device=input.device,
+        input.shape[0],
+        weight.shape[0],
+        dtype=torch.bfloat16,
+        device=input.device,
     )
     flashinfer_tinygemm_bf16(input, weight, out, bias=bias)
     return out
@@ -111,8 +114,10 @@ def _tinygemm_bf16_fake(
 ) -> torch.Tensor:
     """Fake implementation for torch.compile graph tracing."""
     return torch.empty(
-        input.shape[0], weight.shape[0],
-        dtype=torch.bfloat16, device=input.device,
+        input.shape[0],
+        weight.shape[0],
+        dtype=torch.bfloat16,
+        device=input.device,
     )
 
 
@@ -124,6 +129,7 @@ def _init_tinygemm():
     global _TINYGEMM_AVAILABLE
     try:
         from vllm.utils.flashinfer import has_flashinfer
+
         if not has_flashinfer():
             return
         capability = current_platform.get_device_capability()
@@ -160,11 +166,15 @@ def _tinygemm_unquantized_gemm(
     ):
         if bias is None:
             bias = torch.zeros(
-                weight.shape[0], dtype=torch.bfloat16, device=x.device,
+                weight.shape[0],
+                dtype=torch.bfloat16,
+                device=x.device,
             )
         out_shape = (*x.shape[:-1], weight.shape[0])
         result = torch.ops.vllm.tinygemm_bf16(
-            x.view(num_tokens, -1), weight, bias,
+            x.view(num_tokens, -1),
+            weight,
+            bias,
         )
         return result.view(out_shape)
     return torch.nn.functional.linear(x, weight, bias)

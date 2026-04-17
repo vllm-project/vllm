@@ -255,6 +255,16 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         ).to(layer.w2_weight_scale.dtype)
         layer.w2_weight_scale_2.data.fill_(1.0)
 
+        # The SM12x kernel uses dynamic per-block quantization for FC2 input
+        # activations (the SwiGLU output before the down projection).  The
+        # calibrated a2_gscale from the modelopt checkpoint (~tens to hundreds)
+        # is intended for static-quantisation backends (TRTLLM/CUTLASS) and
+        # causes every intermediate activation to saturate at max FP4 when
+        # multiplied by values that large.  Force to 1.0 so the kernel uses
+        # its own per-block dynamic scale — matching the unit-test convention.
+        if self.a2_gscale is not None:
+            self.a2_gscale.fill_(1.0)
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
