@@ -97,14 +97,13 @@ direct_register_aiter_op(
 
 _static_quant_fp8_16bit_per_tensor = (
     lambda x, scale, fp8_dtype, num_token_padding=None: (
-        fp8_dtype == torch.float8_e4m3fnuz
-        and scale.numel() == 1
+        scale.numel() == 1
         and x.dtype in (torch.float16, torch.bfloat16)
         and num_token_padding is None
     )
 )
 """AITER static_quant_fp8 requires a scalar (per-tensor) scale, 16-bit activations,
-and no token padding. Per-token scales and padding fall through to native."""
+and no token padding. Per-token scales are not supported"""
 
 
 @ir.ops.static_quant_fp8.register_impl(
@@ -118,7 +117,6 @@ def static_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
-    assert fp8_dtype == torch.float8_e4m3fnuz
     assert scale.numel() == 1  # Only per tensor
     assert x.dtype in (torch.float16, torch.bfloat16)
     assert num_token_padding is None
@@ -180,8 +178,7 @@ direct_register_aiter_op(
 
 _dynamic_quant_fp8_16bit_no_ub = (
     lambda x, per_token, fp8_dtype, scale_ub=None, num_token_padding=None: (
-        fp8_dtype == torch.float8_e4m3fnuz
-        and scale_ub is None
+        scale_ub is None
         and num_token_padding is None
         and x.dtype in (torch.float16, torch.bfloat16)
     )
@@ -202,7 +199,6 @@ def dynamic_quant_fp8(
     scale_ub: Tensor | None = None,
     num_token_padding: int | None = None,
 ) -> tuple[Tensor, Tensor]:
-    assert fp8_dtype == torch.float8_e4m3fnuz
     assert scale_ub is None
     assert num_token_padding is None
     assert x.dtype in (torch.float16, torch.bfloat16)
@@ -240,8 +236,7 @@ direct_register_aiter_op(
 
 _dynamic_group_quant_fp8_128_rowmajor = (
     lambda x, group_shape, column_major, use_ue8m0, fp8_dtype, scale_alignment=1: (
-        fp8_dtype == torch.float8_e4m3fnuz
-        and group_shape[-1] == 128
+        group_shape[-1] == 128
         and not column_major
         and not use_ue8m0
         and x.is_contiguous()
@@ -250,7 +245,7 @@ _dynamic_group_quant_fp8_128_rowmajor = (
     )
 )
 """AITER dynamic_group_quant_fp8 requires group_size=128, row-major scales,
-no ue8m0 exponent format, contiguous input, hidden dim divisible by 128, 
+no ue8m0 exponent format, contiguous input, hidden dim divisible by 128,
 and 16-bit activations."""
 
 
@@ -267,7 +262,6 @@ def dynamic_group_quant_fp8(
     fp8_dtype: torch.dtype,
     scale_alignment: int = 1,
 ) -> tuple[Tensor, Tensor]:
-    assert fp8_dtype == torch.float8_e4m3fnuz
     assert group_shape[-1] == 128
     assert not column_major
     assert not use_ue8m0
