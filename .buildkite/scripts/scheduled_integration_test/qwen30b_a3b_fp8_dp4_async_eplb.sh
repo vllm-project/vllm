@@ -16,7 +16,7 @@ wait_for_server() {
     done'
 }
 
-MODEL="QWen/Qwen3-30B-A3B-FP8"
+MODEL="Qwen/Qwen3-30B-A3B-FP8"
 BACK="allgather_reducescatter"
 
 cleanup() {
