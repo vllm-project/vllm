@@ -87,10 +87,8 @@ def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
         return model_tokenizer.version < 11
     # For HF tokenizers, check if [ARGS] token exists in vocab
     # which indicates a v11+ equivalent tokenizer
-    vocab = getattr(model_tokenizer, "get_vocab", lambda: {})()
-    if "[ARGS]" in vocab:
-        return False
-    return True
+    vocab: dict[str, int] = getattr(model_tokenizer, "get_vocab", lambda: {})()
+    return "[ARGS]" not in vocab
 
 
 class MistralToolParser(ToolParser):
