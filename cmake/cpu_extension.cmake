@@ -102,11 +102,13 @@ if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64" OR ENABLE_X86_ISA)
         "-mavx512f"
         "-mavx512vl"
         "-mavx512bw"
-        "-mavx512dq"
-        "-mavx512bf16"
-        "-mavx512vnni"
+        "-mavx512dq")
+    list(APPEND CXX_COMPILE_FLAGS_AVX512_AMX 
+        ${CXX_COMPILE_FLAGS_AVX512}
         "-mamx-bf16"
-        "-mamx-tile")
+        "-mamx-tile"
+        "-mavx512bf16"
+        "-mavx512vnni")
     list(APPEND CXX_COMPILE_FLAGS_AVX2
         "-mavx2")
 elseif (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
@@ -314,7 +316,8 @@ endif()
 
 # TODO: Refactor this
 if (ENABLE_X86_ISA)
-    message(STATUS "CPU extension (AVX512) compile flags: ${CXX_COMPILE_FLAGS_AVX512}")
+    message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) compile flags: ${CXX_COMPILE_FLAGS_AVX512_AMX}")
+    message(STATUS "CPU extension (AVX512F) compile flags: ${CXX_COMPILE_FLAGS_AVX512}")
     message(STATUS "CPU extension (AVX2) compile flags: ${CXX_COMPILE_FLAGS_AVX2}")
 else()
     message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
@@ -346,6 +349,7 @@ endif()
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
     "csrc/cpu/utils.cpp"
+    "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
     "csrc/cpu/mla_decode.cpp"
     "csrc/cpu/pos_encoding.cpp"
@@ -356,6 +360,7 @@ set(VLLM_EXT_SRC
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
+        "csrc/cpu/activation_lut_bf16.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
@@ -366,17 +371,21 @@ if(USE_ONEDNN)
 endif()
 
 if (ENABLE_X86_ISA)
-    set(VLLM_EXT_SRC_AVX512
+    set(VLLM_EXT_SRC_SGL
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
-        "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8.cpp")
+
+    set(VLLM_EXT_SRC_AVX512
         "csrc/cpu/shm.cpp"
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
@@ -389,6 +398,7 @@ if (ENABLE_X86_ISA)
 
     set(VLLM_EXT_SRC_AVX2 
         "csrc/cpu/utils.cpp"
+        "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
@@ -398,31 +408,48 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-    message(STATUS "CPU extension (AVX512) source files: ${VLLM_EXT_SRC_AVX512}")
+    message(STATUS "CPU extension (AVX512F + BF16 + VNNI + AMX) source files: ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}")
+    message(STATUS "CPU extension (AVX512F) source files: ${VLLM_EXT_SRC_AVX512}")
     message(STATUS "CPU extension (AVX2) source files: ${VLLM_EXT_SRC_AVX2}")
 
+    set(_C_LIBS numa dnnl_ext)
+    set(_C_AVX512_LIBS numa dnnl_ext)
+    set(_C_AVX2_LIBS numa)
+
+    # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
         _C
         DESTINATION vllm
         LANGUAGE CXX
+        SOURCES ${VLLM_EXT_SRC_AVX512} ${VLLM_EXT_SRC_SGL}
+        LIBRARIES ${_C_LIBS}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512_AMX}
+        USE_SABI 3
+        WITH_SOABI
+    )
+
+    # For AMX kernels
+    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
+
+    # AVX512F 
+    define_extension_target(
+        _C_AVX512
+        DESTINATION vllm
+        LANGUAGE CXX
         SOURCES ${VLLM_EXT_SRC_AVX512}
-        LIBRARIES ${LIBS}
+        LIBRARIES ${_C_AVX512_LIBS}
         COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
         USE_SABI 3
         WITH_SOABI
     )
 
-    # For SGL kernels
-    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AVX512")
-    # For AMX kernels
-    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
-
+    # AVX2 
     define_extension_target(
         _C_AVX2
         DESTINATION vllm
         LANGUAGE CXX
         SOURCES ${VLLM_EXT_SRC_AVX2}
-        LIBRARIES ${LIBS}
+        LIBRARIES ${_C_AVX2_LIBS}
         COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX2}
         USE_SABI 3
         WITH_SOABI

@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from functools import cache, partial
 from importlib.metadata import version
@@ -10,8 +11,10 @@ from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 import huggingface_hub
-from huggingface_hub import get_safetensors_metadata
+import torch
+from huggingface_hub import constants, get_safetensors_metadata
 from packaging.version import Version
+from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
@@ -28,6 +31,7 @@ from vllm.transformers_utils.utils import (
     parse_safetensors_file_metadata,
     without_trust_remote_code,
 )
+from vllm.utils.torch_utils import common_broadcastable_dtype
 
 from .config_parser_base import ConfigParserBase
 from .gguf_utils import (
@@ -77,8 +81,9 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     anymodel="AnyModelConfig",
     bagel="BagelConfig",
+    umm="CheersConfig",
     chatglm="ChatGLMConfig",
-    colmodernvbert="ColModernVBertConfig",
+    modernvbert="ColModernVBertConfig",
     colpali="ColPaliConfig",
     colqwen3="ColQwen3Config",
     ops_colqwen3="OpsColQwen3Config",
@@ -86,6 +91,7 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    fireredlid="FireRedLIDConfig",
     funaudiochat="FunAudioChatConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
@@ -102,7 +108,6 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     nemotron="NemotronConfig",
-    olmo3="Olmo3Config",
     olmo_hybrid="OlmoHybridConfig",
     ovis="OvisConfig",
     ultravox="UltravoxConfig",
@@ -116,6 +121,8 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
 )
+
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
 
 _CONFIG_ATTRS_MAPPING: dict[str, str] = {
     "llm_config": "text_config",
@@ -134,6 +141,19 @@ def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     if not rope_parameters:
         return False
     return set(rope_parameters.keys()).issubset(ALLOWED_ATTENTION_LAYER_TYPES)
+
+
+@contextmanager
+def _mistral_patch_hf_hub_constants() -> Iterator[None]:
+    hf_safetensors_single_file = constants.SAFETENSORS_SINGLE_FILE
+    hf_safetensors_index_file = constants.SAFETENSORS_INDEX_FILE
+    constants.SAFETENSORS_SINGLE_FILE = "consolidated.safetensors"
+    constants.SAFETENSORS_INDEX_FILE = "consolidated.safetensors.index.json"
+    try:
+        yield
+    finally:
+        constants.SAFETENSORS_SINGLE_FILE = hf_safetensors_single_file
+        constants.SAFETENSORS_INDEX_FILE = hf_safetensors_index_file
 
 
 class HFConfigParser(ConfigParserBase):
@@ -175,7 +195,7 @@ class HFConfigParser(ConfigParserBase):
                 dummy_model_type = hf_overrides(dummy_config).model_type
                 model_type = dummy_model_type.removeprefix("dummy_")
 
-        if model_type in _CONFIG_REGISTRY:
+        if model_type in _SPECULATIVE_DECODING_CONFIGS:
             config_class = _CONFIG_REGISTRY[model_type]
             config = config_class.from_pretrained(
                 model,
@@ -185,6 +205,14 @@ class HFConfigParser(ConfigParserBase):
                 **kwargs,
             )
         else:
+            if model_type in _CONFIG_REGISTRY:
+                # Register the config class to AutoConfig to ensure it's used in future
+                # calls to `from_pretrained`
+                config_class = _CONFIG_REGISTRY[model_type]
+                config_class.model_type = model_type
+                AutoConfig.register(model_type, config_class, exist_ok=True)
+                # Now that it is registered, it is not considered remote code anymore
+                trust_remote_code = False
             try:
                 kwargs = _maybe_update_auto_config_kwargs(kwargs, model_type=model_type)
                 config = AutoConfig.from_pretrained(
@@ -245,6 +273,25 @@ class MistralConfigParser(ConfigParserBase):
             )
         except OSError:  # Not found
             hf_config_dict = {}
+
+        if config_dict.get("dtype") is None:
+            with _mistral_patch_hf_hub_constants():
+                model_str = model if isinstance(model, str) else model.as_posix()
+                param_mt = get_safetensors_params_metadata(model_str, revision=revision)
+            if param_mt:
+                param_dtypes: set[torch.dtype] = {
+                    _SAFETENSORS_TO_TORCH_DTYPE[dtype]
+                    for info in param_mt.values()
+                    if (dtype := info.get("dtype", None))
+                    and dtype in _SAFETENSORS_TO_TORCH_DTYPE
+                }
+
+                if param_dtypes:
+                    config_dict["dtype"] = common_broadcastable_dtype(param_dtypes)
+                    logger.info_once(
+                        "Inferred from consolidated*.safetensors files "
+                        f"{config_dict['dtype']} dtype."
+                    )
 
         config = adapt_config_dict(config_dict, defaults=hf_config_dict)
 
@@ -507,6 +554,7 @@ def maybe_override_with_speculators(
     trust_remote_code: bool,
     revision: str | None = None,
     vllm_speculative_config: dict[str, Any] | None = None,
+    hf_token: bool | str | None = None,
     **kwargs,
 ) -> tuple[str, str | None, dict[str, Any] | None]:
     """
@@ -521,6 +569,7 @@ def maybe_override_with_speculators(
         trust_remote_code: Whether to trust remote code
         revision: Model revision
         vllm_speculative_config: Existing vLLM speculative config
+        hf_token: HuggingFace token for authenticated model access
 
     Returns:
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
@@ -537,6 +586,7 @@ def maybe_override_with_speculators(
     config_dict, _ = PretrainedConfig.get_config_dict(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
+        token=hf_token,
         **without_trust_remote_code(kwargs),
     )
     speculators_config = config_dict.get("speculators_config")
@@ -1019,6 +1069,7 @@ def try_get_generation_config(
     trust_remote_code: bool,
     revision: str | None = None,
     config_format: str | ConfigFormat = "auto",
+    hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
     # GGUF files don't have generation_config.json - their config is embedded
     # in the file header. Skip all filesystem lookups to avoid re-reading the
@@ -1031,6 +1082,7 @@ def try_get_generation_config(
         return GenerationConfig.from_pretrained(
             model,
             revision=revision,
+            token=hf_token,
         )
     except OSError:  # Not found
         try:
@@ -1039,6 +1091,7 @@ def try_get_generation_config(
                 trust_remote_code=trust_remote_code,
                 revision=revision,
                 config_format=config_format,
+                token=hf_token,
             )
             return GenerationConfig.from_model_config(config)
         except OSError:  # Not found
