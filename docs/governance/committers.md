@@ -14,6 +14,7 @@ Sorted alphabetically by GitHub handle:
 - [@aarnphm](https://github.com/aarnphm): Structured output
 - [@alexm-redhat](https://github.com/alexm-redhat): Performance
 - [@ApostaC](https://github.com/ApostaC): Connectors, offloading
+- [@bbrowning](https://github.com/bbrowning): Tool use and reasoning parser
 - [@benchislett](https://github.com/benchislett): Engine core and spec decode
 - [@bigPYJ1151](https://github.com/bigPYJ1151): Intel CPU/XPU integration
 - [@chaunceyjiang](https://github.com/chaunceyjiang): Tool use and reasoning parser
@@ -121,7 +122,7 @@ If you have PRs touching the area, please feel free to ping the area owner for r
 - State space models: The state space models implementation in vLLM
     - @tdoublep, @tlrmchlsmth
 - Reasoning and tool calling parsers
-    - @chaunceyjiang, @aarnphm, @sfeng33
+    - @chaunceyjiang, @aarnphm, @sfeng33, @bbrowning
 
 ### Entrypoints
 
