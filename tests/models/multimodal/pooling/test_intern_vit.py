@@ -12,6 +12,11 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import ImageTestAssets
 
+pytestmark = pytest.mark.skip(
+    reason="InternVisionModel's custom code is incompatible with "
+    "transformers v5 (missing all_tied_weights_keys)"
+)
+
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
 DOWNLOAD_PATTERN = ["*.json", "*.py", "*.safetensors", "*.txt", "*.model"]
