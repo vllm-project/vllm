@@ -940,6 +940,35 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )  # (N, B, V) and contiguous because W_UV is contiguous
             out.copy_(mat.transpose(0, 1).reshape_as(out))
 
+    def _v_up_proj_functional(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
+        if self.is_aiter_triton_fp4_bmm_enabled:
+            out = x.new_empty(x.shape[0], x.shape[1], self.v_head_dim)
+            out = rocm_aiter_ops.batched_gemm_a16wfp4(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                out,
+                transpose_bm=True,
+                prequant=True,
+                y_scale=None,
+            )
+            return out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        elif self.is_aiter_triton_fp8_bmm_enabled:
+            out = x.new_empty(x.shape[0], x.shape[1], self.v_head_dim)
+            rocm_aiter_ops.triton_fp8_bmm(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                group_size=128,
+                transpose_bm=True,
+                YQ=out,
+            )
+            return out.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        else:
+            mat = torch.bmm(x, self.W_UV)
+            return mat.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
     ) -> torch.Tensor:
@@ -1075,11 +1104,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
             )
 
-        # v_up_proj BMM on full batch (CUDA-graph-safe), writes to a
-        # temporary buffer so that output is only mutated once (by the
-        # merge op below), avoiding auto-functionalization ordering issues
-        decode_result = torch.empty_like(output)
-        self._v_up_proj(attn_out, out=decode_result)
+        # v_up_proj BMM on full batch (CUDA-graph-safe, functional).
+        # Returns a new tensor so output is only mutated once (by the
+        # merge op below), satisfying auto-functionalization constraints.
+        decode_result = self._v_up_proj_functional(attn_out)
 
         # Single cudagraph_unsafe op merges decode[0:D] and prefill[D:B]
         torch.ops.vllm.mla_merge_prefill_decode_output(
@@ -1213,18 +1241,15 @@ direct_register_custom_op(
 # =====================================================================
 
 
-def mla_split_batch(q: torch.Tensor, layer_name: str) -> int:
-    """Returns n_decode_tokens for batch splitting.
+torch.library.define(
+    "vllm::mla_split_batch",
+    "(Tensor q, str layer_name) -> SymInt",
+    tags=torch.Tag.pt2_compliant_tag,
+)
 
-    This custom op returns the number of decode tokens from attention metadata,
-    enabling the prefill/decode split to be visible to torch.compile.
-    The value is data-dependent - marked cudagraph_unsafe.
 
-    Args:
-        q: A tensor argument needed for device dispatch (not used for
-            computation).
-        layer_name: The name of the attention layer.
-    """
+@torch.library.impl("vllm::mla_split_batch", "cuda")
+def mla_split_batch_cuda(q: torch.Tensor, layer_name: str) -> int:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
     if isinstance(attn_metadata, dict):
@@ -1234,21 +1259,11 @@ def mla_split_batch(q: torch.Tensor, layer_name: str) -> int:
     return attn_metadata.num_decode_tokens
 
 
+@torch.library.register_fake("vllm::mla_split_batch")
 def mla_split_batch_fake(q: torch.Tensor, layer_name: str) -> int:
-    """Fake implementation for torch.compile."""
-    # Return unbacked SymInt - tells torch.compile that the value is dynamic
+    """Fake implementation for FakeTensor mode and shape inference."""
     ctx = torch.library.get_ctx()
     return ctx.new_dynamic_size()
-
-
-direct_register_custom_op(
-    op_name="mla_split_batch",
-    op_func=mla_split_batch,
-    mutates_args=[],
-    fake_impl=mla_split_batch_fake,
-    dispatch_key=current_platform.dispatch_key,
-    tags=(torch._C.Tag.cudagraph_unsafe,),
-)
 
 
 def mla_write_kv_cache(
