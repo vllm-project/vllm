@@ -20,27 +20,18 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class RoutedExpertsPendingCopy:
-    """Pending non-blocking D2H copy for routed experts capture.
+class RoutedExpertsSnapshot:
+    """Snapshot of routed experts data for async D2H copy.
 
-    Both ``cpu_buffer`` and ``slot_mapping`` are copied from GPU with
-    ``non_blocking=True`` on the default stream.  Call :meth:`finalize`
-    only after the stream has been synchronized (or an event recorded on
-    that stream has been waited on).
-
-    NOTE: ``cpu_buffer`` holds a **reference** to the shared pinned
-    buffer on GPUModelRunner, not a copy.  ``finalize()`` must be called
-    before the next ``execute_model()`` overwrites the buffer.  This is
-    guaranteed when ``batch_queue_size <= 1`` (sync scheduling).
+    ``routing_data`` is a device-side clone of the shared capturer buffer
+    (already sliced to the scheduled tokens), safe to copy on any stream
+    without racing with the next forward pass.
+    ``slot_mapping_cpu`` is a CPU tensor whose D2H was issued on the
+    default stream before this snapshot was created.
     """
 
-    cpu_buffer: torch.Tensor
-    total: int
-    slot_mapping: torch.Tensor  # D2H in-flight; call .numpy() after sync
-
-    def finalize(self) -> tuple[np.ndarray, np.ndarray]:
-        """Convert to numpy arrays after D2H synchronization."""
-        return self.cpu_buffer[: self.total].numpy(), self.slot_mapping.numpy()
+    routing_data: torch.Tensor
+    slot_mapping_cpu: torch.Tensor
 
 
 def get_num_experts(hf_config) -> int:
@@ -71,7 +62,7 @@ class RoutedExpertsCapturer:
     ) -> None:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts = get_num_experts(hf_config)
-        dtype = torch.uint8 if num_experts <= 256 else torch.int32
+        dtype = torch.uint8 if num_experts <= 256 else torch.uint16
         self.device_buffer = torch.zeros(
             (
                 max_num_batched_tokens,
@@ -166,7 +157,7 @@ class RoutedExpertsManager:
         # Routed experts indexed by KV-cache slot.
         hf_config = vllm_config.model_config.hf_text_config
         num_experts = get_num_experts(hf_config)
-        dtype = np.uint8 if num_experts <= 256 else np.int32
+        dtype = np.uint8 if num_experts <= 256 else np.uint16
         # Use the full block pool size: block IDs span [0, num_blocks)
         # regardless of how many kv_cache_groups exist, because all groups
         # share the same physical block pool.

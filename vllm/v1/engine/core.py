@@ -1593,17 +1593,22 @@ class EngineCoreProc(EngineCore):
     def _send_abort_outputs_to_client(
         self, req_ids: list[str], client_index: int
     ) -> None:
-        outputs = [
-            EngineCoreOutput(
-                req_id,
-                [],
-                finish_reason=FinishReason.ABORT,
-                routed_experts=self.scheduler.pop_aborted_routed_experts(req_id),
+        if self.vllm_config.model_config.enable_return_routed_experts:
+            outputs = [
+                EngineCoreOutput(
+                    req_id,
+                    [],
+                    finish_reason=FinishReason.ABORT,
+                    routed_experts=self.scheduler.pop_aborted_routed_experts(req_id),
+                )
+                for req_id in req_ids
+            ]
+            eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+            self.output_queue.put_nowait((client_index, eco))
+        else:
+            self._send_finish_outputs_to_client(
+                req_ids, client_index, FinishReason.ABORT
             )
-            for req_id in req_ids
-        ]
-        eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
-        self.output_queue.put_nowait((client_index, eco))
 
     def _send_error_outputs_to_client(
         self, req_ids: list[str], client_index: int

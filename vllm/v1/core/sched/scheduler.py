@@ -1403,9 +1403,6 @@ class Scheduler(SchedulerInterface):
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )
-                # Prefill complete and routing data is in blocks now;
-                # discard stale preemption cache if any.
-                self._aborted_routed_experts.pop(req_id, None)
             elif request.pooling_params and pooler_output is not None:
                 # Pooling stops as soon as there is output.
                 request.status = RequestStatus.FINISHED_STOPPED
@@ -1432,6 +1429,9 @@ class Scheduler(SchedulerInterface):
             finish_reason = None
             if stopped:
                 routed_experts = self._get_routed_experts(request)
+                # Request completed normally; clean up any stale
+                # preemption cache now that blocks have full routing.
+                self._aborted_routed_experts.pop(req_id, None)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
@@ -1618,8 +1618,6 @@ class Scheduler(SchedulerInterface):
             return None
         block_ids = self._get_routed_experts_block_ids(request)
         num_tokens = request.num_tokens - 1
-        if not block_ids or num_tokens <= 0:
-            return None
         return self.routed_experts_mgr.get(block_ids, num_tokens)
 
     def pop_aborted_routed_experts(self, req_id: str) -> np.ndarray | None:
