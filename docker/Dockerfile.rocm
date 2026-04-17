@@ -22,11 +22,11 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 # Ref: https://discourse.ubuntu.com/t/archive-ubuntu-com-failed-to-fetch-file-has-unexpected-size/80320
 RUN set -eux; \
     if [ -f /etc/apt/sources.list ]; then \
-        sed -i -E 's|https?://(archive|security)\.ubuntu\.com/ubuntu|http://mirrors.kernel.org/ubuntu|g' /etc/apt/sources.list; \
+        sed -i -E 's#https?://(archive|security)\.ubuntu\.com/ubuntu#http://mirrors.kernel.org/ubuntu#g' /etc/apt/sources.list; \
     fi; \
     for f in /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
         [ -f "$f" ] || continue; \
-        sed -i -E 's|https?://(archive|security)\.ubuntu\.com/ubuntu|http://mirrors.kernel.org/ubuntu|g' "$f"; \
+        sed -i -E 's#https?://(archive|security)\.ubuntu\.com/ubuntu#http://mirrors.kernel.org/ubuntu#g' "$f"; \
     done
 
 # Install some basic utilities
