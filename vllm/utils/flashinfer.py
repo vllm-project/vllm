@@ -268,6 +268,15 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
 
 
 @functools.cache
+def has_flashinfer_b12x_gemm() -> bool:
+    """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+)."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.gemm")
+    return mod is not None and hasattr(mod, "Sm120BlockScaledDenseGemmKernel")
+
+
+@functools.cache
 def has_flashinfer_cutedsl_sm12x_moe() -> bool:
     """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
     if not has_flashinfer_moe():
@@ -845,6 +854,7 @@ __all__ = [
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
     "has_flashinfer_cutedsl_sm12x_moe",
+    "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
