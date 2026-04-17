@@ -51,10 +51,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          uv pip install --system -r requirements/rocm-build.txt \
-            --extra-index-url ${{ env.PYTORCH_INDEX_URL }} \
-            --index-strategy unsafe-first-match
-          uv pip install --system -r requirements/build.txt \
+          uv pip install --system -r requirements/build/rocm.txt \
             --extra-index-url ${{ env.PYTORCH_INDEX_URL }} \
             --index-strategy unsafe-first-match
 
