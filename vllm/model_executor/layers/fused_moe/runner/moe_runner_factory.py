@@ -31,7 +31,6 @@ def create_moe_runner(
     quant_method: FusedMoEMethodBase,
     enable_dbo: bool,
     routed_output_transform: torch.nn.Module | None = None,
-    apply_routed_scale_to_fused_output: bool = False,
     routed_scaling_factor: float = 1.0,
 ) -> MoERunner:
     return DefaultMoERunner(
@@ -44,6 +43,5 @@ def create_moe_runner(
         quant_method,
         enable_dbo,
         routed_output_transform=routed_output_transform,
-        apply_routed_scale_to_fused_output=apply_routed_scale_to_fused_output,
         routed_scaling_factor=routed_scaling_factor,
     )

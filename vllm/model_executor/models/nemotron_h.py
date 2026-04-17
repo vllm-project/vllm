@@ -234,7 +234,7 @@ class NemotronHMoE(nn.Module):
             if self.use_latent_moe
             else None,
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_fused_output=True,
+            apply_routed_scale_to_output=True,
             router_logits_dtype=self.gate.out_dtype,
         )
 

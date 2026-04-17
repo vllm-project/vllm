@@ -199,7 +199,6 @@ class MoERunnerBase(MoERunner):
         quant_method: FusedMoEMethodBase,
         enable_dbo: bool,
         routed_output_transform: torch.nn.Module | None = None,
-        apply_routed_scale_to_fused_output: bool = False,  # Flip sense and change name?
         routed_scaling_factor: float = 1.0,
     ):
         super().__init__()
@@ -207,9 +206,6 @@ class MoERunnerBase(MoERunner):
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
-        self.apply_routed_scale_to_fused_output = (
-            apply_routed_scale_to_fused_output and routed_scaling_factor != 1.0
-        )
         self.routed_scaling_factor = routed_scaling_factor
         self.gate = gate
         self.quant_method = quant_method
@@ -304,7 +300,7 @@ class MoERunnerBase(MoERunner):
             fused_output = r[0] if isinstance(r, tuple) else r
         return fused_output
 
-    def _maybe_apply_routed_scale_to_fused_output(
+    def _maybe_apply_routed_scale_to_output(
         self,
         shared_output: torch.Tensor | None,
         fused_output: torch.Tensor,
@@ -312,12 +308,11 @@ class MoERunnerBase(MoERunner):
         """Apply routed_scaling_factor to the output with FP16 overflow
         protection.
 
-        When apply_routed_scale_to_fused_output is True, scales the fused expert output
-        by routed_scaling_factor. For FP16, avoid overflow by dividing
-        shared_output by the scale instead (the decoder layer compensates
-        with matching divisions).
+        Scale the fused expert output by routed_scaling_factor. For FP16,
+        avoid overflow by dividing shared_output by the scale instead
+        (the decoder layer compensates with matching divisions).
         """
-        if self.apply_routed_scale_to_fused_output:
+        if self.routed_scaling_factor != 1.0:
             if fused_output.dtype != torch.float16:
                 fused_output *= self.routed_scaling_factor
             elif shared_output is not None:
@@ -352,7 +347,7 @@ class MoERunnerBase(MoERunner):
         here. Skipped when sequence-parallel is active (SP handles its
         own reduction) or when the early path already reduced both outputs.
         """
-        result = states[..., :trunc_size]
+        result = states[..., :trunc_size].contiguous()
 
         # We don't need to reduce the final output if:
         # - We are not running with TP or DP
@@ -584,7 +579,7 @@ class MoERunnerBase(MoERunner):
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output)
 
-        shared_output, fused_output = self._maybe_apply_routed_scale_to_fused_output(
+        shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
             shared_output, fused_output
         )
 
