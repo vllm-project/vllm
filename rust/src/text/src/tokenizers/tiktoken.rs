@@ -62,6 +62,10 @@ pub struct TiktokenTokenizer {
     /// tool-call markers and `<think>` / `</think>`. Reserved-slot placeholders are not in
     /// this set (they default to special and get skipped).
     non_special_added_ids: FxHashSet<u32>,
+    /// Reverse map for special / added token strings populated from the reserved range. This lets
+    /// `token_to_id` answer special-token lookups directly without round-tripping through
+    /// `tiktoken-rs`'s encoder, which can panic for unknown special-looking strings.
+    special_token_ids_by_text: FxHashMap<String, u32>,
     /// Set of out-of-vocab token IDs we have already warned about. The reserved-slot population
     /// in the constructor should keep this empty under normal operation; it only fills up if a
     /// model emits ids at or above `vocab_upper_bound` (e.g. an engine sampling bug). We dedupe
@@ -154,7 +158,14 @@ impl TiktokenTokenizer {
         //   1. `vocab_size` from config.json if present (the accurate, per-model answer),
         //   2. otherwise `num_base_tokens + 256` (the Kimi/Llama 3 default convention),
         //   3. extended further to cover any explicit `added_tokens_decoder` id beyond either.
-        let num_base_tokens = encoder.len() as u32;
+        //
+        // Note: `*.tiktoken` ranks are token ids, and they are not guaranteed to be contiguous.
+        // We therefore define the base-vocab boundary as `max_rank + 1`, not `encoder.len()`.
+        let num_base_tokens = encoder
+            .values()
+            .copied()
+            .max()
+            .map_or(0, |max_rank| max_rank.saturating_add(1));
         let max_added_id = added_tokens_by_id.keys().copied().max().unwrap_or(0);
         let reserved_end = vocab_size_from_config
             .unwrap_or_else(|| num_base_tokens.saturating_add(FALLBACK_NUM_RESERVED_SPECIAL_TOKENS))
@@ -180,6 +191,7 @@ impl TiktokenTokenizer {
             special_tokens_encoder.insert(name, id);
         }
 
+        let special_token_ids_by_text = special_tokens_encoder.clone();
         let bpe = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN).map_err(
             |error| {
                 Error::Tokenizer(format!(
@@ -194,6 +206,7 @@ impl TiktokenTokenizer {
             num_base_tokens,
             vocab_upper_bound: reserved_end,
             non_special_added_ids,
+            special_token_ids_by_text,
             warned_unknown_ids: Mutex::new(FxHashSet::default()),
         })
     }
@@ -266,9 +279,14 @@ impl Tokenizer for TiktokenTokenizer {
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
-        // tiktoken-rs has no direct `token_to_id`; encode the token and return the ID only if
-        // it maps to exactly one token.
-        let ids = self.inner.encode_with_special_tokens(token);
+        if let Some(&token_id) = self.special_token_ids_by_text.get(token) {
+            return Some(token_id);
+        }
+
+        // Fall back to ordinary encoding for regular vocabulary items. This deliberately avoids
+        // `encode_with_special_tokens`: older `tiktoken-rs` versions can panic if the input text
+        // merely *looks* like a special token but is not registered in `special_tokens_encoder`.
+        let ids = self.inner.encode_ordinary(token);
         if ids.len() == 1 { Some(ids[0]) } else { None }
     }
 
@@ -334,6 +352,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::TiktokenTokenizer;
+    use crate::backends::hf::{ResolvedModelFiles, TokenizerSource};
     use crate::tokenizers::Tokenizer;
 
     /// Write a minimal `*.tiktoken` BPE file (one token per byte 0..=255) into `dir` and
@@ -347,6 +366,26 @@ mod tests {
         }
         let path = dir.join("test.tiktoken");
         fs::write(&path, content).expect("write tiktoken file");
+        path
+    }
+
+    /// Write a synthetic `*.tiktoken` file whose base-vocab ranks are sparse/non-contiguous.
+    ///
+    /// This reproduces the important edge case for `num_base_tokens`: it must be derived from
+    /// `max_rank + 1`, not `encoder.len()`, otherwise high-rank base tokens get misclassified as
+    /// reserved/special ids.
+    fn write_sparse_rank_bpe_file(dir: &std::path::Path) -> PathBuf {
+        let mut content = String::new();
+        for byte in 0u8..=255 {
+            let b64 = base64::engine::general_purpose::STANDARD.encode([byte]);
+            content.push_str(&format!("{b64} {}\n", byte as u32));
+        }
+
+        let high_rank_token = base64::engine::general_purpose::STANDARD.encode(b"SPARSE");
+        content.push_str(&format!("{high_rank_token} 1000\n"));
+
+        let path = dir.join("sparse-rank.tiktoken");
+        fs::write(&path, content).expect("write sparse-rank tiktoken file");
         path
     }
 
@@ -408,6 +447,27 @@ mod tests {
         let out_of_range_placeholder = format!("<|reserved_token_{out_of_range_id}|>");
         assert_eq!(backend.decode(&[out_of_range_id], false).unwrap(), "");
         assert_eq!(backend.token_to_id(&out_of_range_placeholder), None);
+    }
+
+    /// Sparse/non-contiguous BPE ranks must still count as base-vocab ids.
+    ///
+    /// Regression shape:
+    /// - base vocabulary contains ids 0..=255 and also a normal BPE token at id 1000
+    /// - if `num_base_tokens` were computed as `encoder.len()` (257), id 1000 would be
+    ///   misclassified as special/reserved and disappear under `skip_special_tokens = true`
+    #[test]
+    fn tiktoken_sparse_base_ranks_are_not_misclassified_as_special() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bpe_path = write_sparse_rank_bpe_file(dir.path());
+        fs::write(dir.path().join("config.json"), r#"{"vocab_size": 1002}"#)
+            .expect("write config.json");
+        let backend = TiktokenTokenizer::new(&bpe_path).expect("load tiktoken backend");
+
+        let sparse_id = backend.token_to_id("SPARSE");
+        assert_eq!(sparse_id, Some(1000));
+        assert!(!backend.is_special_id(1000));
+        assert_eq!(backend.decode(&[1000], false).unwrap(), "SPARSE");
+        assert_eq!(backend.decode(&[1000], true).unwrap(), "SPARSE");
     }
 
     /// `skip_special_tokens` must:
@@ -571,5 +631,74 @@ mod tests {
 
         assert_eq!(output, text);
         assert_eq!(full_text, text);
+    }
+
+    #[test]
+    fn tiktoken_token_to_id_uses_added_special_token_map_directly() {
+        let dir = tempfile::tempdir().expect("create temp dir");
+        let bpe_path = write_synthetic_bpe_file(dir.path());
+        fs::write(
+            dir.path().join("tokenizer_config.json"),
+            r#"{
+                "added_tokens_decoder": {
+                    "257": { "content": "<think>", "special": false },
+                    "258": { "content": "</think>", "special": false }
+                }
+            }"#,
+        )
+        .expect("write tokenizer_config.json");
+        fs::write(dir.path().join("config.json"), r#"{"vocab_size": 259}"#)
+            .expect("write config.json");
+        let backend = TiktokenTokenizer::new(&bpe_path).expect("load tiktoken backend");
+
+        assert_eq!(backend.token_to_id("<think>"), Some(257));
+        assert_eq!(backend.token_to_id("</think>"), Some(258));
+        assert_eq!(
+            backend.decode(&[257, 258], true).unwrap(),
+            "<think></think>"
+        );
+    }
+
+    #[test]
+    fn tiktoken_token_to_id_handles_unknown_special_like_text_without_panicking() {
+        let (backend, _dir) = tiktoken_backend();
+
+        assert_eq!(backend.token_to_id("<|definitely_not_registered|>"), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access to Hugging Face and downloads the real Kimi K2.5 tokenizer"]
+    async fn tiktoken_real_kimi_k25_tokenizer_files_load_and_handle_special_tokens() {
+        let files = ResolvedModelFiles::new("moonshotai/Kimi-K2.5")
+            .await
+            .expect("resolve real Kimi K2.5 model files");
+
+        let tokenizer_path = match &files.tokenizer {
+            TokenizerSource::Tiktoken(path) => path.clone(),
+            other => panic!("expected tiktoken tokenizer source, got {other:?}"),
+        };
+
+        let backend = TiktokenTokenizer::new(&tokenizer_path).expect("load real Kimi tokenizer");
+
+        let think_id = backend.token_to_id("<think>").expect("resolve <think>");
+        let end_think_id = backend.token_to_id("</think>").expect("resolve </think>");
+        let tool_section_id = backend
+            .token_to_id("<|tool_calls_section_begin|>")
+            .expect("resolve tool call section marker");
+
+        assert_eq!(
+            (think_id, end_think_id, tool_section_id),
+            (163606, 163607, 163595)
+        );
+        assert_eq!(backend.decode(&[think_id], true).unwrap(), "<think>");
+        assert_eq!(backend.decode(&[end_think_id], true).unwrap(), "</think>");
+        assert_eq!(
+            backend.decode(&[tool_section_id], true).unwrap(),
+            "<|tool_calls_section_begin|>"
+        );
+
+        // Special-looking text that is not actually registered should fail gracefully.
+        assert_eq!(backend.token_to_id("◁think▷"), None);
+        assert_eq!(backend.token_to_id("<|definitely_not_registered|>"), None);
     }
 }
