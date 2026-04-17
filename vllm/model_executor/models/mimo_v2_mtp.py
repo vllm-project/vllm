@@ -8,7 +8,7 @@ Supports both MiMo-V2-Pro and MiMo-V2-Flash checkpoints.
 Checkpoint weight layout (model.mtp.layers.{idx}.*):
   enorm            - RMSNorm for token embeddings
   hnorm            - RMSNorm for previous hidden states
-  eh_proj          - Linear(hidden*2 -> hidden)
+  eh_proj          - ReplicatedLinear(hidden*2 -> hidden)
   input_layernorm  - pre-attention RMSNorm
   self_attn.*      - attention weights; format differs by variant:
                        Pro:   fused qkv_proj  [Q;K;V] concatenated
@@ -30,6 +30,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -42,18 +43,16 @@ from vllm.sequence import IntermediateTensors
 from .mimo_v2 import MiMoV2Attention, MiMoV2MLP
 from .utils import maybe_prefix
 
-# Number of MTP layers present in the MiMo-V2-Pro and MiMo-V2-Flash checkpoints.
-# Neither config.json includes num_nextn_predict_layers; we fall back to this constant.
-_MIMO_V2_PRO_NUM_MTP_LAYERS = 3
-_MIMO_V2_FLASH_NUM_MTP_LAYERS = 3
+# MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
+# only the first layer and only one speculative token.
+_MIMO_V2_PRO_NUM_MTP_LAYERS = 1
+_MIMO_V2_FLASH_NUM_MTP_LAYERS = 1
 
 
 class MiMoV2MTPLayer(nn.Module):
     """Single MTP predictor layer for MiMo-V2 (Pro and Flash).
 
-    Uses full (non-sliding-window) attention regardless of the main model's
-    hybrid_layer_pattern.  attention_sink_bias is still present because the
-    checkpoint was trained with it.
+    Mirrors the single-layer MiMo-V2 nextn reference implementation.
     """
 
     def __init__(
@@ -67,26 +66,34 @@ class MiMoV2MTPLayer(nn.Module):
         # Predictor head components
         self.enorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
-        self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        self.eh_proj = ReplicatedLinear(
+            config.hidden_size * 2, config.hidden_size, bias=False
+        )
 
-        # Transformer block (flat, no mtp_block sub-module)
+        # MTP uses the SWA attention configuration
+        # implementation.
+        swa_rope_theta = getattr(
+            config,
+            "swa_rope_theta",
+            getattr(config, "rope_theta", 1000000),
+        )
+        sliding_window_size = getattr(config, "sliding_window_size", -1)
+
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.layernorm_epsilon)
         self.self_attn = MiMoV2Attention(
             hidden_size=config.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            head_dim=config.head_dim,
-            v_head_dim=getattr(config, "v_head_dim", None),
+            num_heads=config.swa_num_attention_heads,
+            num_kv_heads=config.swa_num_key_value_heads,
+            head_dim=config.swa_head_dim,
+            v_head_dim=getattr(config, "swa_v_head_dim", None),
             v_scale=getattr(config, "attention_value_scale", None),
-            sliding_window_size=-1,  # full attention for MTP
+            sliding_window_size=sliding_window_size,
             attention_bias=config.attention_bias,
-            # The checkpoint contains attention_sink_bias; create the parameter
-            # so the weight is loaded even though we run full attention.
             add_swa_attention_sink_bias=getattr(
                 config, "add_swa_attention_sink_bias", False
             ),
             layer_id=0,
-            rope_theta=getattr(config, "rope_theta", 1_000_000),
+            rope_theta=swa_rope_theta,
             max_position_embeddings=getattr(config, "max_position_embeddings", 32768),
             quant_config=quant_config,
             partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
@@ -110,14 +117,10 @@ class MiMoV2MTPLayer(nn.Module):
         positions: torch.Tensor,
         previous_hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        # Mask position-0 embeddings (not needed by MTP)
-        inputs_embeds = inputs_embeds.clone()
-        inputs_embeds[positions == 0] = 0
-
         # Combine token embedding and previous hidden state
-        h = self.eh_proj(
+        h, _ = self.eh_proj(
             torch.cat(
-                [self.hnorm(previous_hidden_states), self.enorm(inputs_embeds)], dim=-1
+                [self.enorm(inputs_embeds), self.hnorm(previous_hidden_states)], dim=-1
             )
         )
 
@@ -161,9 +164,12 @@ class MiMoV2MultiTokenPredictor(nn.Module):
 
         config = vllm_config.model_config.hf_config
         spec_cfg = vllm_config.speculative_config
-        # Use the number of speculative tokens as the number of MTP layers to
-        # instantiate (the checkpoint may have more layers than we need).
-        num_mtp_layers = spec_cfg.num_speculative_tokens
+        assert spec_cfg is not None
+        if spec_cfg.num_speculative_tokens != 1:
+            raise ValueError(
+                "MiMo-V2 MTP in vLLM only supports num_speculative_tokens=1."
+            )
+        num_mtp_layers = 1
 
         self.num_mtp_layers = num_mtp_layers
 
@@ -171,6 +177,7 @@ class MiMoV2MultiTokenPredictor(nn.Module):
             config.vocab_size,
             config.hidden_size,
         )
+
 
         self.mtp = _MiMoV2MTPLayers(
             config=config,
@@ -192,6 +199,7 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         if inputs_embeds is None:
             inputs_embeds = self.embed_input_ids(input_ids)
         return self.mtp.layers[str(spec_step_idx)](
@@ -204,6 +212,7 @@ class MiMoV2MultiTokenPredictor(nn.Module):
         lm_head: ParallelLMHead,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         return self.logits_processor(lm_head, hidden_states)
 
 
@@ -232,6 +241,7 @@ class MiMoV2MTP(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         return self.model(
             input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
         )
@@ -241,6 +251,7 @@ class MiMoV2MTP(nn.Module):
         hidden_states: torch.Tensor,
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
+        assert spec_step_idx == 0, "MiMo-V2 MTP only supports one speculative token."
         return self.model.compute_logits(hidden_states, self.lm_head, spec_step_idx)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -271,7 +282,12 @@ class MiMoV2MTP(nn.Module):
             ):
                 continue
 
-            # Support fused qkv_proj checkpoint (Pro format)
+            # Support fused qkv_proj checkpoint (Pro format).
+            # The checkpoint is stored pre-sharded for TP=8 as
+            # [Q_rank0, K_rank0, V_rank0, Q_rank1, ...], so splitting along
+            # dim 0 with chunk(tp_size) gives each rank its Q+K+V slice for
+            # both the FP8 weight and the block weight_scale_inv. This matches
+            # how the main model loads the same layout.
             if "qkv_proj" in name:
                 if name in params_dict:
                     param = params_dict[name]
@@ -287,7 +303,10 @@ class MiMoV2MTP(nn.Module):
                 if weight_name not in name:
                     continue
                 name_rewritten = name.replace(weight_name, param_name)
-                if name_rewritten.endswith(".bias") and name_rewritten not in params_dict:
+                if (
+                    name_rewritten.endswith(".bias")
+                    and name_rewritten not in params_dict
+                ):
                     continue
                 if name_rewritten not in params_dict:
                     continue

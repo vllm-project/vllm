@@ -267,11 +267,8 @@ class SpeculativeConfig:
             )
 
             hf_config.model_type = "mimo_v2_mtp"
-            # num_nextn_predict_layers is absent from the MiMo-V2-Pro config.json;
-            # fall back to the known checkpoint value.
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            if n_predict is None:
-                n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_PRO_NUM_MTP_LAYERS
             hf_config.update(
                 {
                     "num_hidden_layers": 0,
@@ -287,11 +284,8 @@ class SpeculativeConfig:
             )
 
             hf_config.model_type = "mimo_v2_mtp"
-            # num_nextn_predict_layers is absent from the MiMo-V2-Flash config.json;
-            # fall back to the known checkpoint value.
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
-            if n_predict is None:
-                n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
+            # vLLM currently supports only the first MiMo-V2 MTP layer.
+            n_predict = _MIMO_V2_FLASH_NUM_MTP_LAYERS
             hf_config.update(
                 {
                     "num_hidden_layers": 0,
