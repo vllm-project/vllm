@@ -184,7 +184,7 @@ impl ChatLlm {
         let tool_parsing_enabled =
             matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
         let tool_parser = if tool_parsing_enabled {
-            Some(self.resolve_tool_parser(&request.tools)?)
+            Some(self.resolve_tool_parser(request)?)
         } else {
             None
         };
@@ -196,7 +196,7 @@ impl ChatLlm {
         })
     }
 
-    fn resolve_tool_parser(&self, tools: &[ChatTool]) -> Result<Box<dyn ToolParser>> {
+    fn resolve_tool_parser(&self, request: &mut ChatRequest) -> Result<Box<dyn ToolParser>> {
         let parser_name = match &self.tool_call_parser {
             ParserSelection::Auto => self
                 .tool_parser_factory
@@ -209,7 +209,17 @@ impl ChatLlm {
             ParserSelection::Explicit(name) => name.as_str(),
         };
 
-        let parser = self.tool_parser_factory.create(parser_name, tools)?;
+        let parser = self
+            .tool_parser_factory
+            .create(parser_name, &request.tools)?;
+
+        parser
+            .adjust_request(request)
+            .map_err(|error| Error::ParserInitialization {
+                kind: "tool",
+                name: parser_name.to_string(),
+                error: error.into(),
+            })?;
 
         TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
         Ok(parser)

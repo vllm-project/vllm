@@ -9,11 +9,12 @@
 
 mod external;
 
-use async_trait::async_trait;
+use std::collections::{BTreeMap, btree_map};
+
 use thiserror::Error;
 
 use crate::parser::ParserFactory;
-use crate::request::ChatTool;
+use crate::request::{ChatRequest, ChatTool};
 
 /// Result alias for tool parser operations.
 pub type Result<T> = std::result::Result<T, ToolParserError>;
@@ -60,28 +61,82 @@ pub struct ToolParseResult {
     pub calls: Vec<ToolCallDelta>,
 }
 
+impl ToolParseResult {
+    /// Append another parser result onto this one.
+    ///
+    /// Note that this does not attempt to merge multiple deltas for the same tool call into one
+    /// complete item. Call `coalesce_calls()` after if that behavior is desired.
+    pub(crate) fn append(&mut self, mut other: Self) {
+        self.normal_text.push_str(&other.normal_text);
+        self.calls.append(&mut other.calls);
+    }
+
+    /// Merge multiple deltas for the same tool call into one complete item.
+    ///
+    /// This is primarily used by the default `parse_complete()` implementation, which delegates
+    /// through the incremental parser lifecycle and then needs to collapse streaming-style argument
+    /// fragments into one final tool call.
+    pub(crate) fn coalesce_calls(mut self) -> Self {
+        let mut merged = BTreeMap::<usize, ToolCallDelta>::new();
+        let mut order = Vec::new();
+
+        for call in self.calls {
+            match merged.entry(call.tool_index) {
+                btree_map::Entry::Vacant(entry) => {
+                    order.push(call.tool_index);
+                    entry.insert(call);
+                }
+                btree_map::Entry::Occupied(mut entry) => {
+                    let existing = entry.get_mut();
+                    if existing.name.is_none() {
+                        existing.name = call.name;
+                    }
+                    existing.arguments.push_str(&call.arguments);
+                }
+            }
+        }
+
+        self.calls = order
+            .into_iter()
+            .filter_map(|tool_index| merged.remove(&tool_index))
+            .collect();
+        self
+    }
+}
+
 /// Incremental parser that extracts tool calls from assistant output.
-#[async_trait]
 pub trait ToolParser: Send {
     /// Construct a boxed parser instance for one request stream.
     fn create(tools: &[ChatTool]) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static;
 
+    /// Adjust request-level settings before rendering and decoding start.
+    ///
+    /// Parsers may use this hook to request decode behavior that matches their
+    /// output protocol, such as retaining special tokens in streamed text.
+    fn adjust_request(&self, _request: &mut ChatRequest) -> Result<()> {
+        Ok(())
+    }
+
+    /// Feed one decoded text delta into the parser.
+    fn push(&mut self, chunk: &str) -> Result<ToolParseResult>;
+
+    /// Flush any buffered partial state at end of stream.
+    fn finish(&mut self) -> Result<ToolParseResult> {
+        Ok(ToolParseResult::default())
+    }
+
     /// Parse complete tool calls from final output.
     ///
-    /// Although this entrypoint receives the whole final output at once, it
-    /// still returns the same delta-oriented result model as incremental
-    /// parsing. This keeps the northbound contract stable while the current
-    /// external implementation still needs a more robust full-output fallback.
-    async fn parse_complete(&self, output: &str) -> Result<ToolParseResult>;
-
-    /// Parse tool calls incrementally from one assistant text chunk.
-    async fn parse_incremental(&mut self, chunk: &str) -> Result<ToolParseResult>;
-
-    /// Return tool arguments that were buffered until end-of-stream.
-    fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallDelta>> {
-        None
+    /// The default implementation reuses the incremental parser lifecycle by
+    /// feeding the full output through `push()` and then calling `finish()`.
+    /// This keeps one source of truth for robust parsers whose incremental
+    /// state machine is equivalent across arbitrary chunking.
+    fn parse_complete(&mut self, output: &str) -> Result<ToolParseResult> {
+        let mut result = self.push(output)?;
+        result.append(self.finish()?);
+        Ok(result.coalesce_calls())
     }
 }
 

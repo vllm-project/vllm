@@ -1,4 +1,6 @@
-use async_trait::async_trait;
+use std::future::Future;
+
+use futures::FutureExt as _;
 use openai_protocol::common::Tool as OpenAiTool;
 
 use super::{Result, ToolCallDelta, ToolParseResult};
@@ -22,47 +24,74 @@ impl<P> ExternalToolParserAdaptor<P>
 where
     P: tool_parser::ToolParser,
 {
-    async fn parse_complete(&self, output: &str) -> Result<ToolParseResult> {
-        self.inner
-            .parse_complete(output)
-            .await
-            .map(|(normal_text, tool_calls)| {
-                // The external `parse_complete()` path does not receive tools and may therefore
-                // return calls with invalid names. Filter them here against the request-scoped tool
-                // set captured at parser creation time.
-                let calls = tool_calls
-                    .into_iter()
-                    .filter(|tool_call| {
-                        self.tools
-                            .iter()
-                            .any(|tool| tool.function.name == tool_call.function.name)
-                    })
-                    .enumerate()
-                    .map(|(tool_index, tool_call)| ToolCallDelta {
-                        tool_index,
-                        name: Some(tool_call.function.name),
-                        arguments: tool_call.function.arguments,
-                    })
-                    .collect();
+    /// Delagating to the external `parse_complete()`.
+    ///
+    /// We don't rely on the default `push()+finish()` lifecycle, because some external parsers may
+    /// not correctly handle the full text passed to incremental `push()` interface.
+    // TODO: instead of working around like this, we should make incremental `push()` robust enough
+    // to handle decoded text in arbitrary chunk sizes, as optimizations like speculative decoding
+    // or batching may still make the chunk "too long" to be correctly parsed in one `push()` call.
+    fn parse_complete(&mut self, output: &str) -> Result<ToolParseResult> {
+        let (normal_text, calls) = poll_external(self.inner.parse_complete(output))?;
 
-                ToolParseResult { normal_text, calls }
+        // The external `parse_complete()` path does not receive tools and may therefore
+        // return calls with invalid names. Filter them here against the request-scoped tool
+        // set captured at parser creation time.
+        let calls = calls
+            .into_iter()
+            .filter(|tool_call| {
+                self.tools
+                    .iter()
+                    .any(|tool| tool.function.name == tool_call.function.name)
             })
-            .map_err(Into::into)
+            .enumerate()
+            .map(|(tool_index, tool_call)| ToolCallDelta {
+                tool_index,
+                name: Some(tool_call.function.name),
+                arguments: tool_call.function.arguments,
+            })
+            .collect();
+
+        Ok(ToolParseResult { normal_text, calls })
     }
 
-    async fn parse_incremental(&mut self, chunk: &str) -> Result<ToolParseResult> {
-        self.inner
-            .parse_incremental(chunk, &self.tools)
-            .await
-            .map(convert_parse_result)
-            .map_err(Into::into)
+    fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+        poll_external(self.inner.parse_incremental(chunk, &self.tools)).map(convert_parse_result)
     }
 
-    fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallDelta>> {
-        self.inner
+    fn finish(&mut self) -> Result<ToolParseResult> {
+        let calls = self
+            .inner
             .get_unstreamed_tool_args()
-            .map(|items| items.into_iter().map(convert_tool_call_item).collect())
+            .unwrap_or_default()
+            .into_iter()
+            .map(convert_tool_call_item)
+            .collect();
+
+        Ok(ToolParseResult {
+            normal_text: String::new(),
+            calls,
+        })
     }
+}
+
+/// Bridge the external async trait into our synchronous local trait.
+///
+/// This is intentionally a temporary compatibility layer: the current external parser
+/// implementations are CPU-only and their async fns do not actually suspend. As long as that
+/// dependency behavior stays unchanged, `now_or_never()` is a robust adaptation strategy and we
+/// don't have to spawn a thread to `block_on()` the future.
+fn poll_external<T>(
+    future: impl Future<Output = tool_parser::errors::ParserResult<T>>,
+) -> Result<T> {
+    future
+        .now_or_never()
+        .ok_or_else(|| {
+            tool_parser::errors::ParserError::ParsingFailed(
+                "external tool parser future unexpectedly yielded".to_string(),
+            )
+        })?
+        .map_err(Into::into)
 }
 
 fn convert_tool_call_item(item: tool_parser::types::ToolCallItem) -> ToolCallDelta {
@@ -95,7 +124,6 @@ macro_rules! def_external_tool_parser {
         )]
         pub struct $name(ExternalToolParserAdaptor<tool_parser::parsers::$external>);
 
-        #[async_trait]
         impl ToolParser for $name {
             fn create(tools: &[ChatTool]) -> Result<Box<dyn ToolParser>> {
                 Ok(Box::new(Self(ExternalToolParserAdaptor::new(
@@ -104,16 +132,16 @@ macro_rules! def_external_tool_parser {
                 ))))
             }
 
-            async fn parse_complete(&self, output: &str) -> Result<ToolParseResult> {
-                self.0.parse_complete(output).await
+            fn parse_complete(&mut self, output: &str) -> Result<ToolParseResult> {
+                self.0.parse_complete(output)
             }
 
-            async fn parse_incremental(&mut self, chunk: &str) -> Result<ToolParseResult> {
-                self.0.parse_incremental(chunk).await
+            fn push(&mut self, chunk: &str) -> Result<ToolParseResult> {
+                self.0.push(chunk)
             }
 
-            fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallDelta>> {
-                self.0.get_unstreamed_tool_args()
+            fn finish(&mut self) -> Result<ToolParseResult> {
+                self.0.finish()
             }
         }
     };

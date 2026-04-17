@@ -50,7 +50,7 @@ impl ToolState {
 
     /// Convert one semantic assistant text delta into zero or more tool-aware
     /// internal events.
-    async fn process_text_delta(
+    fn process_text_delta(
         &mut self,
         kind: AssistantBlockKind,
         delta: String,
@@ -65,26 +65,10 @@ impl ToolState {
             return events;
         }
 
-        let parse_result = self.parser.parse_incremental(&delta).await;
+        let parse_result = self.parser.push(&delta);
 
         match parse_result {
-            Ok(result) => {
-                // When we are not currently streaming a tool call, preserve
-                // plain text first and then surface any new tool call items.
-                if self.open_calls.is_empty() {
-                    push_text_delta(&mut events, kind, result.normal_text);
-                    self.process_tool_items(result.calls, &mut events);
-                } else {
-                    // Once a tool call is open, prioritize tool deltas first.
-                    // If the parser emits normal text again, close the tool
-                    // call and resume plain text output.
-                    self.process_tool_items(result.calls, &mut events);
-                    if !result.normal_text.is_empty() {
-                        self.close_all_open_calls(&mut events);
-                        push_text_delta(&mut events, kind, result.normal_text);
-                    }
-                }
-            }
+            Ok(result) => self.process_parse_result(kind, result, &mut events),
             Err(error) => {
                 if !self.parser_failed {
                     warn!(
@@ -99,6 +83,30 @@ impl ToolState {
         }
 
         events
+    }
+
+    /// Apply one parsed tool result to the current stream state.
+    fn process_parse_result(
+        &mut self,
+        kind: AssistantBlockKind,
+        result: ToolParseResult,
+        events: &mut Vec<AssistantEvent>,
+    ) {
+        // When we are not currently streaming a tool call, preserve plain
+        // text first and then surface any new tool call items.
+        if self.open_calls.is_empty() {
+            push_text_delta(events, kind, result.normal_text);
+            self.process_tool_items(result.calls, events);
+        } else {
+            // Once a tool call is open, prioritize tool deltas first. If the
+            // parser emits normal text again, close the tool call and resume
+            // plain text output.
+            self.process_tool_items(result.calls, events);
+            if !result.normal_text.is_empty() {
+                self.close_all_open_calls(events);
+                push_text_delta(events, kind, result.normal_text);
+            }
+        }
     }
 
     /// Apply one batch of parsed tool-call deltas emitted by the parser.
@@ -159,6 +167,30 @@ impl ToolState {
             push_tool_call_end(events, open_call);
         }
     }
+
+    /// Flush parser state at end-of-stream and close any remaining open calls.
+    fn finish(&mut self) -> Vec<AssistantEvent> {
+        let mut events = Vec::new();
+
+        if self.parser_failed {
+            self.close_all_open_calls(&mut events);
+            return events;
+        }
+
+        match self.parser.finish() {
+            Ok(result) => self.process_parse_result(AssistantBlockKind::Text, result, &mut events),
+            Err(error) => {
+                warn!(
+                    error = %error.as_report(),
+                    "tool parser finish failed; closing open tool calls with buffered state"
+                );
+                self.parser_failed = true;
+            }
+        }
+
+        self.close_all_open_calls(&mut events);
+        events
+    }
 }
 
 /// Emit one `ToolCallEnd` event from a completed open call.
@@ -189,14 +221,13 @@ fn generate_tool_call_id() -> String {
 
 /// Tool parsing when `intermediate=false` (`FinalOnly` mode).
 ///
-/// We keep this separate because some parsers may not correctly handle the full text passed to
-/// `parse_incremental`, which can result in tool arguments being lost in some cases. In this
-/// separate path, we call `parse_complete` once on the full text when the stream is done, which is
-/// more likely to succeed.
+/// We keep this separate because some adaptor-backed parsers may not correctly handle the full text
+/// passed to incremental `push` interface, but override `parse_complete()` with a dedicated
+/// one-shot implementation to ensure correctness.
 #[try_stream(ok = AssistantEvent, error = Error)]
 async fn final_only_tool_event_stream(
     stream: impl ContentEventStream,
-    parser: Box<dyn ToolParser>,
+    mut parser: Box<dyn ToolParser>,
 ) {
     pin_mut!(stream);
 
@@ -235,7 +266,7 @@ async fn final_only_tool_event_stream(
                 finish_reason,
                 kv_transfer_params,
             } => {
-                match parser.parse_complete(&final_text).await {
+                match parser.parse_complete(&final_text) {
                     Ok(ToolParseResult { normal_text, calls }) => {
                         if !normal_text.is_empty() {
                             yield AssistantEvent::TextDelta {
@@ -327,7 +358,7 @@ pub(crate) async fn tool_event_stream(
                 }
             }
             ContentEvent::TextDelta { kind, delta } => {
-                for next in state.process_text_delta(kind, delta).await {
+                for next in state.process_text_delta(kind, delta) {
                     yield next;
                 }
             }
@@ -346,16 +377,7 @@ pub(crate) async fn tool_event_stream(
                 finish_reason,
                 kv_transfer_params,
             } => {
-                let mut flush_events = Vec::new();
-                // Some parsers buffer a trailing arguments fragment and only
-                // expose it once streaming is complete.
-                if !state.parser_failed
-                    && let Some(remaining) = state.parser.get_unstreamed_tool_args()
-                {
-                    state.process_tool_items(remaining, &mut flush_events);
-                }
-                state.close_all_open_calls(&mut flush_events);
-                for next in flush_events {
+                for next in state.finish() {
                     yield next;
                 }
 
@@ -383,13 +405,12 @@ mod tests {
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
     use crate::request::ChatTool;
     use crate::stream::ChatEventStream;
-    use crate::tool::{Result, ToolCallDelta, ToolParseResult, ToolParser};
+    use crate::tool::{Result, ToolParseResult, ToolParser};
 
     struct FailingParser {
         fail_next: bool,
     }
 
-    #[async_trait::async_trait]
     impl ToolParser for FailingParser {
         fn create(_tools: &[ChatTool]) -> crate::tool::Result<Box<dyn ToolParser>>
         where
@@ -398,11 +419,7 @@ mod tests {
             Ok(Box::new(Self { fail_next: false }))
         }
 
-        async fn parse_complete(&self, _output: &str) -> Result<ToolParseResult> {
-            Ok(ToolParseResult::default())
-        }
-
-        async fn parse_incremental(&mut self, _chunk: &str) -> Result<ToolParseResult> {
+        fn push(&mut self, _chunk: &str) -> Result<ToolParseResult> {
             if self.fail_next {
                 self.fail_next = false;
                 return Err(
@@ -411,10 +428,6 @@ mod tests {
             }
 
             Ok(ToolParseResult::default())
-        }
-
-        fn get_unstreamed_tool_args(&self) -> Option<Vec<ToolCallDelta>> {
-            None
         }
     }
 

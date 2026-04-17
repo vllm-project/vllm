@@ -74,7 +74,7 @@ tokio = { version = "1.47.1", features = [
     "time",
 ] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
-tool-parser = "1.2.0"
+tool-parser = "=1.2.0"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.6.8", features = ["trace"] }
 tracing = { version = "0.1.44", features = ["release_max_level_debug"] }
