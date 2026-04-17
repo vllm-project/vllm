@@ -403,8 +403,15 @@ def _has_module(module_name: str) -> bool:
 
 
 def has_deep_ep() -> bool:
-    """Whether the optional `deep_ep` package is available."""
-    return _has_module("deep_ep")
+    """Whether the optional `deep_ep` package is available and importable."""
+    if not _has_module("deep_ep"):
+        return False
+    try:
+        import deep_ep  # noqa: F401
+
+        return True
+    except (ImportError, OSError):
+        return False
 
 
 def has_deep_gemm() -> bool:
@@ -418,8 +425,20 @@ def has_deep_gemm() -> bool:
 
 
 def has_nixl_ep() -> bool:
-    """Whether the optional `nixl_ep` package is available."""
-    return _has_module("nixl_ep")
+    """Whether the optional `nixl_ep` package is available and importable.
+
+    Checks that the package is not only installed but can actually be loaded
+    (e.g. its native extension can find the required shared libraries such as
+    libcudart).
+    """
+    if not _has_module("nixl_ep"):
+        return False
+    try:
+        import nixl_ep  # noqa: F401
+
+        return True
+    except (ImportError, OSError):
+        return False
 
 
 def has_triton_kernels() -> bool:
@@ -464,8 +483,15 @@ def has_aiter() -> bool:
 
 
 def has_mori() -> bool:
-    """Whether the optional `mori` package is available."""
-    return _has_module("mori")
+    """Whether the optional `mori` package is available and importable."""
+    if not _has_module("mori"):
+        return False
+    try:
+        import mori  # noqa: F401
+
+        return True
+    except (ImportError, OSError):
+        return False
 
 
 def has_fbgemm_gpu() -> bool:
