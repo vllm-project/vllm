@@ -353,9 +353,9 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
     into a single kernel call.  Input quantization (BF16→FP4) is performed
     inside the kernel so BF16 hidden states are passed directly.
 
-    Weight scale factors must be in the MMA layout produced by
-    ``convert_sf_to_mma_layout``; this conversion is performed on every
-    forward pass since it is a zero-copy strided view.
+    Weight scale factors are converted to the MMA layout produced by
+    ``convert_sf_to_mma_layout`` once during ``process_weights_after_loading``
+    and cached as ``w1_sf_mma`` / ``w2_sf_mma``.
 
     Only NVFP4 (kNvfp4Static/kNvfp4Dynamic) quantization is supported.
     """
@@ -402,10 +402,33 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         # calibrated a2_gscale from the modelopt checkpoint (~tens to hundreds)
         # is intended for static-quantisation backends (TRTLLM/CUTLASS) and
         # causes every intermediate activation to saturate at max FP4 when
-        # multiplied by values that large.  Force to 1.0 so the kernel uses
-        # its own per-block dynamic scale — matching the unit-test convention.
+        # multiplied by values that large.  Keep the original a2_gscale intact
+        # and store a separate ones tensor to pass to the SM12x kernel so it
+        # uses its own per-block dynamic scale.
         if self.a2_gscale is not None:
-            self.a2_gscale.fill_(1.0)
+            self.a2_gscale_ones = torch.ones_like(self.a2_gscale)
+        else:
+            self.a2_gscale_ones = None
+
+        # Precompute MMA-layout views of the weight scale factors once here
+        # rather than recomputing on every forward pass.
+        num_experts_w1, m1, k1_sf = self.w1_scale.shape
+        k1 = k1_sf * 16
+        self.w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
+            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
+            m=m1,
+            k=k1,
+            num_groups=num_experts_w1,
+        )
+
+        num_experts_w2, m2, k2_sf = self.w2_scale.shape
+        k2 = k2_sf * 16
+        self.w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
+            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
+            m=m2,
+            k=k2,
+            num_groups=num_experts_w2,
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -503,32 +526,12 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         top_k = topk_ids.shape[1]
         local_expert_offset = self.ep_rank * self.num_local_experts
 
-        # Convert swizzled scale factors to the 6D MMA layout expected by
-        # cute_dsl_fused_moe_nvfp4.  This is a zero-copy view+permute.
-        num_experts_w1, m1, k1_sf = self.w1_scale.shape
-        k1 = k1_sf * 16  # sf_vec_size = 16
-        w1_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w1_scale.reshape(num_experts_w1 * m1, k1_sf),
-            m=m1,
-            k=k1,
-            num_groups=num_experts_w1,
-        )
-
-        num_experts_w2, m2, k2_sf = self.w2_scale.shape
-        k2 = k2_sf * 16
-        w2_sf_mma = flashinfer_convert_sf_to_mma_layout(
-            self.w2_scale.reshape(num_experts_w2 * m2, k2_sf),
-            m=m2,
-            k=k2,
-            num_groups=num_experts_w2,
-        )
-
         # x_sf is ignored by the SM12x kernel (quantization is fused
         # internally), but the API requires a tensor argument.
         x_sf_placeholder = (
             a1q_scale
             if a1q_scale is not None
-            else hidden_states.new_zeros(1)
+            else hidden_states.new_zeros(1, dtype=torch.float8_e4m3fn)
         )
 
         # TODO: Use the plan/run() API from FlashInfer PR #3066 instead of
@@ -540,13 +543,13 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
             x=hidden_states,
             x_sf=x_sf_placeholder,
             token_selected_experts=topk_ids.to(torch.int32),
-            token_final_scales=topk_weights,
+            token_final_scales=topk_weights.float(),
             w1_weight=w1,
-            w1_weight_sf=w1_sf_mma,
+            w1_weight_sf=self.w1_sf_mma,
             w1_alpha=self.g1_alphas,
-            fc2_input_scale=self.a2_gscale,
+            fc2_input_scale=self.a2_gscale_ones,
             w2_weight=w2,
-            w2_weight_sf=w2_sf_mma,
+            w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
             num_experts=global_num_experts,
             top_k=top_k,
