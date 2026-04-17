@@ -127,7 +127,7 @@ def test_flashinfer_sampler():
 # =============================================================================
 
 
-@pytest.mark.skipif("CPU" in DEVICE_TYPE, reason="CUDA/XPU not available")
+@pytest.mark.skipif("cpu" in DEVICE_TYPE, reason="CUDA/XPU not available")
 class TestTritonTopkTopp:
     """Tests for the Triton top-k/top-p kernel."""
 

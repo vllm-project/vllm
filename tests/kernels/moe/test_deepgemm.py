@@ -175,7 +175,7 @@ def test_deepgemm_vs_triton(m, n, k, topk, num_experts, monkeypatch, workspace_i
         mp.setenv("VLLM_USE_DEEP_GEMM", "1")
 
         _DeepGemmExperts = importlib.import_module(
-            "vllm.model_executor.layers.fused_moe.deep_gemm_moe"
+            "vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe"
         ).DeepGemmExperts
 
         call_counter = {"cnt": 0}
