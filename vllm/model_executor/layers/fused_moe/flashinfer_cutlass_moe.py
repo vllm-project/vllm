@@ -61,6 +61,11 @@ def is_valid_flashinfer_cutlass_fused_moe(
 
 
 class FlashInferExperts(mk.FusedMoEExpertsModular):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.quant_config.use_nvfp4_w4a4:
+            layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
+            layer.w2_weight_scale_2.data.mul_(layer.w2_input_scale)
+
     def __init__(
         self,
         moe_config: mk.FusedMoEConfig,
@@ -125,7 +130,14 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 p.is_device_capability(90)
                 or p.is_device_capability_family(100)
                 or p.is_device_capability_family(110)
-                or p.is_device_capability_family(120)
+                or p.is_device_capability(120)
+                # NOTE: SM121 (DGX Spark) is excluded because the bf16
+                # unquantized CUTLASS MoE GEMM in flashinfer <= 0.6.7 has no
+                # Relu2 template instantiation and throws "Invalid activation
+                # type" on Nemotron-H. Fixed upstream by
+                # https://github.com/flashinfer-ai/flashinfer/pull/2926
+                # (merged 2026-04-01, not yet in a stable release); lift this
+                # restriction once flashinfer >= 0.6.8 is the minimum.
             )
             and has_flashinfer_cutlass_fused_moe()
         )
@@ -356,7 +368,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             fc1_expert_weights = w1
             fc2_expert_weights = w2
         else:
-            quant_scales = None
+            quant_scales = []
             a1q_scale = None
             fc1_expert_weights = w1
             fc2_expert_weights = w2

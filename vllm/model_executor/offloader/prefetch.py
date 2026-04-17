@@ -20,8 +20,7 @@ import torch.nn as nn
 # Import prefetch_ops to register custom ops at module load time
 import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.logger import init_logger
-from vllm.model_executor.offloader.base import BaseOffloader
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.model_executor.offloader.base import BaseOffloader, should_pin_memory
 
 logger = init_logger(__name__)
 
@@ -431,9 +430,31 @@ class _ModuleOffloader:
 
         Called after process_weights_after_loading to ensure _cpu_storage
         contains the final processed weights, not stale pre-loading data.
+
+        Parameters whose underlying nn.Parameter was deleted by
+        process_weights_after_loading (e.g. transient KV-cache scale params)
+        are pruned from self._param_offloaders so they do not participate in
+        buffer-pool allocation or prefetching.
         """
         for param_offloader in self._param_offloaders.values():
             param_offloader.sync_cpu_storage()
+
+        # Remove offloaders whose parameter was deleted during
+        # process_weights_after_loading (e.g. k_scale / v_scale).
+        deleted = [
+            name
+            for name, offloader in self._param_offloaders.items()
+            if getattr(offloader, "_param_deleted", False)
+        ]
+        if deleted:
+            logger.debug(
+                "Pruning %d transient offloaded param(s) that were deleted "
+                "by process_weights_after_loading: %s",
+                len(deleted),
+                deleted,
+            )
+            for name in deleted:
+                del self._param_offloaders[name]
 
     def get_param_infos(self) -> list[ParamInfo]:
         """Get parameter metadata for buffer pool allocation.
@@ -506,7 +527,7 @@ class _ModuleOffloader:
                 gpu_buffer = offloader._gpu_buffer
                 assert cpu_storage is not None, "CPU storage not initialized"
                 assert gpu_buffer is not None, "GPU buffer not assigned"
-                assert not is_pin_memory_available() or cpu_storage.is_pinned(), (
+                assert not should_pin_memory() or cpu_storage.is_pinned(), (
                     f"CPU storage for {name} is not pinned! "
                     "non_blocking=True H2D copy from non-pinned memory "
                     "causes stream synchronization that breaks "
@@ -590,6 +611,11 @@ class _CpuParamOffloader(_BaseParamOffloader):
         super().__init__(module, param_name)
         self._cpu_storage: torch.Tensor | None = None
         self._gpu_buffer: torch.Tensor | None = None  # Store reference to GPU buffer
+        # Set to True if the underlying nn.Parameter was deleted by
+        # process_weights_after_loading (e.g. transient KV-cache scale params
+        # such as k_scale/v_scale created by BaseKVCacheMethod.create_weights
+        # and deleted after copying into permanent _k_scale buffers).
+        self._param_deleted: bool = False
 
         # Offload to CPU immediately to free GPU memory during model loading
         self._offload_to_cpu_internal()
@@ -602,7 +628,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         original GPU tensor is garbage collected.
         """
         param = self._param
-        pin_memory = is_pin_memory_available()
+        pin_memory = should_pin_memory()
 
         # Create pinned CPU storage and copy current GPU data
         self._cpu_storage = torch.empty_strided(
@@ -639,7 +665,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         param = self._param
 
         if param.data.device.type == "cpu":
-            if is_pin_memory_available() and not param.data.is_pinned():
+            if should_pin_memory() and not param.data.is_pinned():
                 pinned = torch.empty_strided(
                     size=param.data.size(),
                     stride=param.data.stride(),
@@ -696,8 +722,22 @@ class _CpuParamOffloader(_BaseParamOffloader):
         1. process_weights_after_loading may transform weights (quantization)
         2. device_loading_context creates NEW CPU tensors when moving back
         3. Our old _cpu_storage would have pre-processed or stale data
+
+        If the parameter no longer exists on the module (e.g. transient
+        KV-cache scale parameters such as k_scale/v_scale that are created
+        by BaseKVCacheMethod.create_weights() and then deleted by
+        process_weights_after_loading() after copying their values into
+        permanent _k_scale buffers), the offloader marks itself as deleted
+        and skips the sync.  The caller (_ModuleOffloader.sync_cpu_storage)
+        is responsible for removing these stale entries.
         """
-        self._update_cpu_storage_from_param()
+        try:
+            self._update_cpu_storage_from_param()
+        except AttributeError:
+            # The parameter was deleted by process_weights_after_loading.
+            # Drop the now-stale CPU storage so this offloader can be pruned.
+            self._param_deleted = True
+            self._cpu_storage = None
 
     def post_init(self):
         """No-op: offloading done in offload_to_cpu/assign_static_buffer."""
