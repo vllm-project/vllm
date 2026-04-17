@@ -52,7 +52,8 @@ jobs:
       - name: Install build dependencies
         run: |
           uv pip install --system -r requirements/build/rocm.txt \
-            --extra-index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-first-match
 
       - name: Expose GitHub Actions cache env vars
@@ -144,7 +145,8 @@ jobs:
           uv pip install --system dist/*.whl \
             pytest pytest-timeout numpy \
             tblib transformers huggingface_hub sentencepiece pillow \
-            --extra-index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-first-match
           # Nightly torchvision has operator ABI mismatch with nightly torch.
           # Our kernel tests don't need it; remove to prevent conftest crash.
