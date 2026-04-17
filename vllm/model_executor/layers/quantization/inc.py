@@ -478,17 +478,14 @@ class INCConfig(QuantizationConfig):
 
 
 class _INCXPULinearBase(LinearMethodBase):
-    _set_layer_attrs_on_create = False
-
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.sym = sym
         self.pack_factor = 32 // weight_bits
 
-    @classmethod
     def _create_inc_weights(
-        cls,
+        self,
         layer: torch.nn.Module,
         input_size_per_partition: int,
         output_partition_sizes: list[int],
@@ -499,11 +496,6 @@ class _INCXPULinearBase(LinearMethodBase):
     ) -> None:
         output_size_per_partition = sum(output_partition_sizes)
         scales_and_zp_size = input_size_per_partition // group_size
-
-        if cls._set_layer_attrs_on_create:
-            layer.in_features = input_size_per_partition
-            layer.out_features = output_size_per_partition
-            layer.params_dtype = params_dtype
 
         qweight = PackedvLLMParameter(
             data=torch.empty(
@@ -567,7 +559,7 @@ class _INCXPULinearBase(LinearMethodBase):
         **extra_weight_attrs,
     ):
         del input_size, output_size
-        type(self)._create_inc_weights(
+        self._create_inc_weights(
             layer=layer,
             input_size_per_partition=input_size_per_partition,
             output_partition_sizes=output_partition_sizes,
@@ -641,15 +633,35 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
     Repacks GPTQ/INC weights into ARK's layout.
     """
 
-    _set_layer_attrs_on_create = True
-
     def __init__(self, weight_bits: int, group_size: int, sym: bool):
         super().__init__(weight_bits=weight_bits, group_size=group_size, sym=sym)
 
         self.weight_type = f"int{weight_bits}"
-        self.asym = not sym
 
         self.ark = _get_auto_round_ark_instance()
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer=layer,
+            input_size_per_partition=input_size_per_partition,
+            output_partition_sizes=output_partition_sizes,
+            input_size=input_size,
+            output_size=output_size,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+        layer.in_features = input_size_per_partition
+        layer.out_features = sum(output_partition_sizes)
+        layer.params_dtype = params_dtype
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
@@ -693,15 +705,15 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
 
         scale = layer.scales.data.contiguous()
 
-        if self.asym:
+        if self.sym:
+            # Per the ARK C++ implementation, symmetric quantization passes
+            # an empty tensor here.
+            zp = torch.empty(0, dtype=torch.int8, device=device)
+        else:
             qz = layer.qzeros.data  # [groups, N // pack_factor]
             groups, N_packed = qz.shape
             unpacked_z = (qz.unsqueeze(-1) >> shifts) & ((1 << bits) - 1)
             zp = unpacked_z.view(groups, -1).to(torch.int8).contiguous()
-        else:
-            # Per the ARK C++ implementation, symmetric quantization passes
-            # an empty tensor here.
-            zp = torch.empty(0, dtype=torch.int8, device=device)
 
         assert self.ark is not None
         packw = self.ark.repack_quantized_weight(
@@ -712,7 +724,7 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
             compute_type,
             self.weight_type,
             scale_type,
-            self.asym,
+            not self.sym,
         )
 
         # Wrap as a Parameter and disable gradients.
@@ -755,7 +767,7 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
             layer.compute_type,  # fp16 / bf16
             self.weight_type,  # int4
             layer.scale_type,  # fp16 / bf16
-            self.asym,  # False
+            not self.sym,
         )
 
         return out.reshape(out_shape)
