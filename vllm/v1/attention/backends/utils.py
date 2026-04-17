@@ -868,32 +868,49 @@ def reorder_batch_to_split_cp_and_normal(
     input_batch: "InputBatch",
     scheduler_output: "SchedulerOutput",
 ) -> bool:
-    """Move CP-flagged requests to the front of the batch."""
-    # logger.info(f"chenxiao--debug input_batch:{input_batch._req_ids}")
+    """Move CP requests to the front while preserving in-group order.
+
+    The final order is a stable partition of the current batch:
+    [cp0, cp1, ..., ncp0, ncp1, ...].
+    """
     req_ids = input_batch.req_ids
-    is_cp = np.array([True if scheduler_output.cp_rank_scheduled_tokens[rid] > 1 else False for rid in req_ids])
-    if not is_cp.any() or is_cp.all():
+    num_reqs = len(req_ids)
+    cp_indices = [
+        idx
+        for idx, req_id in enumerate(req_ids)
+        if scheduler_output.cp_rank_scheduled_tokens[req_id] > 1
+    ]
+    ncp_indices = [
+        idx
+        for idx, req_id in enumerate(req_ids)
+        if scheduler_output.cp_rank_scheduled_tokens[req_id] <= 1
+    ]
+    target_order = cp_indices + ncp_indices
+
+    if target_order == list(range(num_reqs)):
         return False
-    tgt = np.arange(len(req_ids))
-    tgt_cp, tgt_ncp = tgt[is_cp], tgt[~is_cp]
-    tgt[:] = np.concatenate([tgt_cp, tgt_ncp])
-    visited = np.zeros(len(tgt), dtype=bool)
-    for src, dst in enumerate(tgt):
-        if not visited[src] and src != dst:
-            # 处理一个完整的循环链
-            current = src
-            cycle = []
-            
-            # 收集整个循环链
-            while not visited[current]:
-                visited[current] = True
-                cycle.append(current)
-                current = tgt[current]
-            
-            # 在循环链内交换元素
-            if len(cycle) > 1:
-                for i in range(len(cycle) - 1):
-                    pos1, pos2 = cycle[i], cycle[i + 1]
-                    # logger.info(f"chenxiao--debug swap_states src: {pos1}, dst: {pos2}")
-                    input_batch.swap_states(pos1, pos2)
+
+    if hasattr(input_batch, "apply_permutation"):
+        return input_batch.apply_permutation(target_order)
+
+    # Reorder to match target_order using O(num_reqs) metadata and at most
+    # one swap per destination position. Each "item" below is the original
+    # request index currently sitting at a given position.
+    items_at_pos = list(range(num_reqs))
+    pos_of_item = list(range(num_reqs))
+
+    for dst_pos, target_item in enumerate(target_order):
+        src_pos = pos_of_item[target_item]
+        if src_pos == dst_pos:
+            continue
+
+        input_batch.swap_states(dst_pos, src_pos)
+
+        displaced_item = items_at_pos[dst_pos]
+        items_at_pos[dst_pos], items_at_pos[src_pos] = (
+            items_at_pos[src_pos],
+            items_at_pos[dst_pos],
+        )
+        pos_of_item[target_item] = dst_pos
+        pos_of_item[displaced_item] = src_pos
     return True

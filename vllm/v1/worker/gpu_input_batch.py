@@ -4,6 +4,7 @@
 
 from dataclasses import dataclass
 from typing import cast
+from collections.abc import Sequence
 
 import numpy as np
 import torch
@@ -628,6 +629,146 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i2],
                 self.allowed_token_ids_mask_cpu_tensor[i1],
             )
+
+
+    def _get_swap_moves_for_permutation(
+        self, permutation: Sequence[int]
+    ) -> list[tuple[int, int, MoveDirectionality]]:
+        """Encode a permutation as an equivalent sequence of swaps."""
+        num_reqs = len(permutation)
+        items_at_pos = list(range(num_reqs))
+        pos_of_item = list(range(num_reqs))
+        moves: list[tuple[int, int, MoveDirectionality]] = []
+
+        for dst_pos, target_item in enumerate(permutation):
+            src_pos = pos_of_item[target_item]
+            if src_pos == dst_pos:
+                continue
+
+            moves.append((dst_pos, src_pos, MoveDirectionality.SWAP))
+            displaced_item = items_at_pos[dst_pos]
+            items_at_pos[dst_pos], items_at_pos[src_pos] = (
+                items_at_pos[src_pos],
+                items_at_pos[dst_pos],
+            )
+            pos_of_item[target_item] = dst_pos
+            pos_of_item[displaced_item] = src_pos
+
+        return moves
+
+    def apply_permutation(self, permutation: Sequence[int]) -> bool:
+        """Reorder the active batch according to ``permutation``.
+
+        ``permutation[new_index] = old_index`` for the active request range
+        ``[0, self.num_reqs)``.
+        """
+        num_reqs = self.num_reqs
+        if num_reqs <= 1:
+            return False
+
+        permutation_np = np.asarray(permutation, dtype=np.int32)
+        if permutation_np.shape != (num_reqs,):
+            raise ValueError(
+                f"Permutation length mismatch: expected {num_reqs}, "
+                f"got shape {permutation_np.shape}"
+            )
+        if not np.array_equal(
+            np.sort(permutation_np), np.arange(num_reqs, dtype=np.int32)
+        ):
+            raise ValueError(f"Invalid permutation: {permutation_np.tolist()}")
+        if np.array_equal(permutation_np, np.arange(num_reqs, dtype=np.int32)):
+            return False
+
+        permutation_list = permutation_np.tolist()
+
+        old_req_ids = self._req_ids[:num_reqs].copy()
+        self._req_ids[:num_reqs] = [
+            old_req_ids[old_idx] for old_idx in permutation_list
+        ]
+
+        old_output_token_ids = self.req_output_token_ids[:num_reqs].copy()
+        self.req_output_token_ids[:num_reqs] = [
+            old_output_token_ids[old_idx] for old_idx in permutation_list
+        ]
+
+        old_spec_token_ids = self.spec_token_ids[:num_reqs].copy()
+        self.spec_token_ids[:num_reqs] = [
+            old_spec_token_ids[old_idx] for old_idx in permutation_list
+        ]
+
+        self.req_id_to_index = {
+            cast(str, req_id): idx
+            for idx, req_id in enumerate(self._req_ids[:num_reqs])
+            if req_id is not None
+        }
+
+        self.token_ids_cpu[:num_reqs] = self.token_ids_cpu[permutation_np].copy()
+        self.is_token_ids[:num_reqs] = self.is_token_ids[permutation_np].copy()
+        self.num_tokens[:num_reqs] = self.num_tokens[permutation_np].copy()
+        self.num_tokens_no_spec[:num_reqs] = (
+            self.num_tokens_no_spec[permutation_np].copy()
+        )
+        self.num_prompt_tokens[:num_reqs] = (
+            self.num_prompt_tokens[permutation_np].copy()
+        )
+        self.num_computed_tokens_cpu[:num_reqs] = (
+            self.num_computed_tokens_cpu[permutation_np].copy()
+        )
+        self.request_lora_mapping[:num_reqs] = (
+            self.request_lora_mapping[permutation_np].copy()
+        )
+        self.logits_processing_needs_token_ids[:num_reqs] = (
+            self.logits_processing_needs_token_ids[permutation_np].copy()
+        )
+
+        self.block_table.apply_permutation(permutation_list)
+
+        self.req_prompt_embeds = {
+            new_idx: self.req_prompt_embeds[old_idx]
+            for new_idx, old_idx in enumerate(permutation_list)
+            if old_idx in self.req_prompt_embeds
+        }
+
+        self.batch_update_builder.batch_changed = True
+        if self.is_pooling_model:
+            return True
+
+        self.temperature_cpu[:num_reqs] = self.temperature_cpu[permutation_np].copy()
+        self.top_p_cpu[:num_reqs] = self.top_p_cpu[permutation_np].copy()
+        self.top_k_cpu[:num_reqs] = self.top_k_cpu[permutation_np].copy()
+        self.frequency_penalties_cpu[:num_reqs] = (
+            self.frequency_penalties_cpu[permutation_np].copy()
+        )
+        self.presence_penalties_cpu[:num_reqs] = (
+            self.presence_penalties_cpu[permutation_np].copy()
+        )
+        self.repetition_penalties_cpu[:num_reqs] = (
+            self.repetition_penalties_cpu[permutation_np].copy()
+        )
+        self.num_accepted_tokens_cpu[:num_reqs] = (
+            self.num_accepted_tokens_cpu[permutation_np].copy()
+        )
+
+        self.generators = {
+            new_idx: self.generators[old_idx]
+            for new_idx, old_idx in enumerate(permutation_list)
+            if old_idx in self.generators
+        }
+        self.bad_words_token_ids = {
+            new_idx: self.bad_words_token_ids[old_idx]
+            for new_idx, old_idx in enumerate(permutation_list)
+            if old_idx in self.bad_words_token_ids
+        }
+
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            self.allowed_token_ids_mask_cpu_tensor[:num_reqs] = (
+                self.allowed_token_ids_mask_cpu_tensor[permutation_list].clone()
+            )
+
+        self.batch_update_builder.moved.extend(
+            self._get_swap_moves_for_permutation(permutation_list)
+        )
+        return True
 
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
