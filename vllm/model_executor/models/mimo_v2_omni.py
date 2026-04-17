@@ -1168,7 +1168,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             vision_config,
             norm_eps=getattr(vllm_config, "rms_norm_eps", 1e-6),
             quant_config=None,
-            prefix=maybe_prefix("visual", prefix),
+            prefix=maybe_prefix(prefix, "visual"),
         )
         audio_config = getattr(config, "audio_config", None)
         model_path = vllm_config.model_config.model
@@ -1178,7 +1178,7 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
             self.audio_encoder = None
         self.language_model = MiMoV2FlashForCausalLM(
             vllm_config=vllm_config,
-            prefix=maybe_prefix("language_model", prefix),
+            prefix=maybe_prefix(prefix, "language_model"),
         )
 
         self.make_empty_intermediate_tensors = (
