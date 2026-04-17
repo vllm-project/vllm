@@ -139,12 +139,14 @@ impl VllmEventFormatter {
         full_path: bool,
         ansi: bool,
     ) -> fmt::Result {
-        let Some(mut file) = file else {
+        let Some(file) = file else {
             return Ok(());
         };
-        if !full_path {
-            file = file.rsplit_once('/').map_or(file, |(_, name)| name)
-        }
+        let file = if full_path {
+            file
+        } else {
+            shorten_file_path(file)
+        };
         if ansi {
             writer.write_str(GREY)?;
         }
@@ -222,6 +224,37 @@ where
     }
 }
 
+/// Shorten a source file path for log output while preserving enough context for
+/// common Rust entrypoint and module filenames.
+///
+/// - For `mod.rs`, keep the parent directory as `parent/mod.rs`.
+/// - For `src/lib.rs` and `src/main.rs`, keep one additional component as `crate/src/lib.rs` or
+///   `crate/src/main.rs` when available.
+/// - Other files are displayed as just the basename.
+fn shorten_file_path(file: &str) -> &str {
+    let mut parts = file.rsplit('/');
+    let name = parts.next().unwrap_or(file);
+    let parent = parts.next();
+    let grandparent = parts.next();
+
+    let Some(parent) = parent else {
+        return file;
+    };
+
+    if name == "mod.rs" {
+        return &file[file.len() - parent.len() - 1 - name.len()..];
+    }
+
+    if !matches!(name, "lib.rs" | "main.rs") || parent != "src" {
+        return name;
+    }
+    let Some(grandparent) = grandparent else {
+        return file;
+    };
+
+    &file[file.len() - grandparent.len() - 1 - parent.len() - 1 - name.len()..]
+}
+
 fn write_colored(
     writer: &mut Writer<'_>,
     ansi: bool,
@@ -278,5 +311,22 @@ mod tests {
         let filter = build_targets_filter(Some("bogus"), None);
 
         assert_eq!(filter.to_string(), "info");
+    }
+
+    #[test]
+    fn location_path_uses_filename_for_non_ambiguous_files() {
+        assert_eq!(shorten_file_path("src/cmd/src/logging.rs"), "logging.rs");
+        assert_eq!(shorten_file_path("src/chat/lib.rs"), "lib.rs");
+        assert_eq!(shorten_file_path("src/chat/main.rs"), "main.rs");
+        assert_eq!(shorten_file_path("src/chat/src/xmod.rs"), "xmod.rs");
+    }
+
+    #[test]
+    fn location_path_keeps_more_context_for_common_entrypoint_filenames() {
+        assert_eq!(shorten_file_path("src/lib.rs"), "src/lib.rs");
+        assert_eq!(shorten_file_path("src/chat/src/lib.rs"), "chat/src/lib.rs");
+        assert_eq!(shorten_file_path("src/cmd/src/main.rs"), "cmd/src/main.rs");
+        assert_eq!(shorten_file_path("mod.rs"), "mod.rs");
+        assert_eq!(shorten_file_path("src/chat/src/tool/mod.rs"), "tool/mod.rs");
     }
 }
