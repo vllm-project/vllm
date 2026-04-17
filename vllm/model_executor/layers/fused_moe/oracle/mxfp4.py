@@ -20,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantDesc,
     RoutingMethodType,
     mxfp4_mxfp8_moe_quant_config,
+    mxfp4_w4a4_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
@@ -1470,6 +1471,7 @@ def make_mxfp4_moe_quant_config(
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=swiglu_limit,
         )
+<<<<<<< HEAD
     elif mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe.layer import FusedMoE
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
@@ -1478,6 +1480,15 @@ def make_mxfp4_moe_quant_config(
 
         assert isinstance(layer, FusedMoE)
         return get_humming_moe_quant_config(layer)
+=======
+    elif mxfp4_backend in (Mxfp4MoeBackend.XPU,):
+        return mxfp4_w4a4_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
+>>>>>>> f359f9936 (refactor)
     else:
         return ocp_mx_moe_quant_config(
             quant_dtype="mxfp4",
