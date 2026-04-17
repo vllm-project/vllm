@@ -53,6 +53,10 @@ MMF_CLASS_TO_FACTORY: dict[type[BaseMultiModalField], str] = {
 
 bytestr: TypeAlias = bytes | bytearray | memoryview | zmq.Frame
 
+# Cache for dataclasses.fields() results, keyed by class type.
+_DATACLASS_FIELDS_CACHE: dict[type, tuple[dataclasses.Field, ...]] = {}
+
+
 
 class OOBTensorConsumer(ABC):
     @abstractmethod
@@ -306,7 +310,12 @@ class MsgpackEncoder:
 
         # We just need to copy all of the field values in order
         # which will be then used to reconstruct the field.
-        factory_kw = {f.name: getattr(field, f.name) for f in dataclasses.fields(field)}
+        cls = field.__class__
+        fields = _DATACLASS_FIELDS_CACHE.get(cls)
+        if fields is None:
+            fields = dataclasses.fields(field)
+            _DATACLASS_FIELDS_CACHE[cls] = fields
+        factory_kw = {f.name: getattr(field, f.name) for f in fields}
         return name, factory_kw
 
 
