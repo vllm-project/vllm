@@ -922,6 +922,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             force_use_trtllm=self.attention_config.use_trtllm_attention,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
+            has_sliding_window=self.window_left != -1,
         )
         decode_use_trtllm = (
             self.use_trtllm_decode_attention and self.dcp_world_size <= 1
@@ -1544,6 +1545,16 @@ class FlashInferImpl(AttentionImpl):
                                 dtype=seq_lens_prefill.dtype,
                             ),
                         ]
+                    )
+                    # fmha_v2 SM120 path does not yet support sliding
+                    # window (the kernel raises "Sliding window attention
+                    # is not yet supported for FMHAv2 on SM120"), so the
+                    # batch must have been disqualified from the trtllm
+                    # path upstream when any layer has window_left != -1.
+                    assert self.window_left == -1, (
+                        "SM120 fmha_v2 does not support sliding window; "
+                        "expected use_trtllm_attention() to disqualify this "
+                        "path when window_left != -1"
                     )
                     fmha_v2_workspace = _get_trtllm_gen_workspace_buffer()
                     fmha_v2_kwargs: dict = {}
