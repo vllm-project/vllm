@@ -1656,8 +1656,8 @@ class DPEngineCoreProc(EngineCoreProc):
         """Two-phase DP-aware pause.
 
         Phase 1: Set local pause state and ``pending_pause`` flag. If the
-        engines are idle, kick-start them with a ``start_wave`` so that all
-        ranks enter the stepping loop and reach the all-reduce consensus
+        engines are idle, kick-start them by setting ``engines_running`` to True
+        so ranks enter the stepping loop and reach the all-reduce consensus
         checkpoint in ``_has_global_unfinished_reqs``.
 
         Phase 2 (in ``_has_global_unfinished_reqs``): Once the all-reduce
@@ -1703,6 +1703,9 @@ class DPEngineCoreProc(EngineCoreProc):
                 not self.engines_running
                 and self.scheduler.pause_state == PauseState.UNPAUSED
             ):
+                # Request received for an already-completed wave, notify
+                # front-end that we need to start the next one.
+                self.engines_running = True
                 self.output_queue.put_nowait(
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
@@ -1715,6 +1718,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 "resuming."
             )
         if self.engines_running:
+            logger.debug("Resume called while engines are not paused, ignoring.")
             return
 
         super().resume_scheduler()
@@ -1723,10 +1727,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # Barrier: wait for all DP ranks to have resumed (and cleared
         # ignore_start_dp_wave) before any rank starts stepping. Uses
         # the existing all-reduce which is safe because engines are
-        # stopped. We set engines_running directly rather than going
-        # through the coordinator's start_wave mechanism because the
-        # coordinator deduplicates same-wave starts — the second
-        # engine's start_wave would be silently dropped.
+        # stopped.
         has_global_unfinished = ParallelConfig.has_unfinished_dp(
             self.dp_group, self.scheduler.has_unfinished_requests()
         )
