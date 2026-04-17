@@ -393,8 +393,9 @@ def init_fp8_linear_kernel(
                 scope="global",
             )
 
-        # TODO: unify block_scaled_mm and scaled_mm in same base.
-        if kernel_type is MarlinFP8ScaledMMLinearKernel:
+        # TODO make scaled_mm kernels inherit from MMLinearKernel
+        # only MarlinFP8ScaledMMLinearKernel is a type of FP8ScaledMMLinearKernel.
+        if issubclass(kernel_type, FP8ScaledMMLinearKernel):
             return kernel_type(
                 scaled_mm_linear_kernel_config,
                 layer_param_names=[
@@ -412,7 +413,7 @@ def init_fp8_linear_kernel(
     else:
         kernel_type = choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[misc]
+            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
             force_kernel=force_kernel,
         )
         if module_name:
