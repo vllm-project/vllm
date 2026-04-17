@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -15,8 +14,6 @@ from vllm.multimodal.video import (
 )
 
 from .utils import create_video_from_image
-
-_has_pyav = importlib.util.find_spec("av") is not None
 
 pytestmark = pytest.mark.cpu_test
 
@@ -318,7 +315,6 @@ def dummy_video_path(tmp_path):
 # ============================================================================
 
 
-@pytest.mark.skipif(not _has_pyav, reason="PyAV not installed")
 def test_pyav_backend_loads_frames(dummy_video_path, monkeypatch: pytest.MonkeyPatch):
     """Test that the pyav backend can load frames from a valid video."""
     with monkeypatch.context() as m:
@@ -340,28 +336,6 @@ def test_pyav_backend_loads_frames(dummy_video_path, monkeypatch: pytest.MonkeyP
         assert "duration" in metadata
 
 
-@pytest.mark.skipif(not _has_pyav, reason="PyAV not installed")
-def test_pyav_backend_seek_path(dummy_video_path, monkeypatch: pytest.MonkeyPatch):
-    """Test that the PyAV seek path works by lowering the threshold."""
-    import vllm.multimodal.video as video_mod
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "pyav")
-        m.setattr(video_mod, "_PYAV_SEEK_FRAME_THRESHOLD", 0)
-
-        with open(dummy_video_path, "rb") as f:
-            video_data = f.read()
-
-        loader = VIDEO_LOADER_REGISTRY.load("pyav")
-        frames, metadata = loader.load_bytes(video_data, num_frames=8)
-
-        assert frames.ndim == 4
-        assert frames.shape[3] == 3  # RGB
-        assert frames.shape[0] == 8
-        assert frames.shape[0] == len(metadata["frames_indices"])
-
-
-@pytest.mark.skipif(not _has_pyav, reason="PyAV not installed")
 def test_pyav_dynamic_backend_loads_frames(
     dummy_video_path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -422,26 +396,13 @@ def test_pyav_dynamic_backend_loads_frames(
             id="molmo2-fps",
         ),
         # pyav: same sampling logic as opencv
-        pytest.param(
-            "pyav",
-            {"num_frames": 32},
-            32,
-            id="pyav-num_frames",
-            marks=pytest.mark.skipif(not _has_pyav, reason="PyAV not installed"),
-        ),
-        pytest.param(
-            "pyav",
-            {"fps": 2},
-            120,
-            id="pyav-fps",
-            marks=pytest.mark.skipif(not _has_pyav, reason="PyAV not installed"),
-        ),
+        pytest.param("pyav", {"num_frames": 32}, 32, id="pyav-num_frames"),
+        pytest.param("pyav", {"fps": 2}, 120, id="pyav-fps"),
         pytest.param(
             "pyav",
             {"num_frames": 500, "fps": 2},
             120,
             id="pyav-num_frames_wins_fps",
-            marks=pytest.mark.skipif(not _has_pyav, reason="PyAV not installed"),
         ),
         # pyav_dynamic: same sampling logic as opencv_dynamic
         pytest.param(
@@ -449,14 +410,12 @@ def test_pyav_dynamic_backend_loads_frames(
             {"fps": 1, "max_duration": 60},
             60,
             id="pyav_dynamic-within_max_duration",
-            marks=pytest.mark.skipif(not _has_pyav, reason="PyAV not installed"),
         ),
         pytest.param(
             "pyav_dynamic",
             {"fps": 2, "max_duration": 30},
             60,
             id="pyav_dynamic-exceeds_max_duration",
-            marks=pytest.mark.skipif(not _has_pyav, reason="PyAV not installed"),
         ),
     ],
 )

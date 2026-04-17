@@ -966,20 +966,13 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         return frames, metadata
 
 
-# Threshold for switching from sequential scan to per-frame seeking
-# in PyAV backends.  At 30 fps, 5000 frames ≈ 3 minutes.  Scan holds
-# the GIL continuously; seek releases it between frames, which is
-# critical for concurrent serving with long videos.
-_PYAV_SEEK_FRAME_THRESHOLD = 5000
-
-
 class PyAVVideoBackendMixin:
     """Shared utilities for PyAV-based video backends.
 
     Decodes video using the PyAV library (Python bindings for FFmpeg).
-    Short videos are decoded via sequential scan; long videos use
-    per-frame seeking to release the GIL between frames and allow
-    concurrent request processing.
+    Frames are extracted via per-frame `container.seek()`, which
+    releases the GIL between frames and scales with the number of
+    sampled frames rather than the video length.
     """
 
     _video_backend_name: str
@@ -1002,38 +995,13 @@ class PyAVVideoBackendMixin:
         return VideoSourceMetadata(total_frames, fps, duration)
 
     @staticmethod
-    def _decode_frames_scan(
-        container: "av.container.InputContainer",
-        frame_indices: list[int],
-    ) -> tuple[npt.NDArray, list[int]]:
-        """Decode frames by sequential scan (best for short videos)."""
-        target_set = set(frame_indices)
-        max_idx = max(frame_indices)
-        frames_list: list[npt.NDArray] = []
-        valid_indices: list[int] = []
-
-        container.streams.video[0].thread_type = "AUTO"
-        for idx, frame in enumerate(container.decode(video=0)):
-            if idx > max_idx:
-                break
-            if idx in target_set:
-                frames_list.append(frame.to_ndarray(format="rgb24"))
-                valid_indices.append(idx)
-
-        return np.stack(frames_list), valid_indices
-
-    @staticmethod
-    def _decode_frames_seek(
+    def _decode_frames(
         container: "av.container.InputContainer",
         frame_indices: list[int],
         fps: float,
         duration: float,
     ) -> tuple[npt.NDArray, list[int]]:
-        """Decode frames by seeking to timestamps (best for long videos).
-
-        Releases the GIL between frames (via seek + decode boundaries),
-        allowing other requests to make progress under concurrency.
-        """
+        """Decode target frames via per-frame seek + keyframe decode."""
         stream = container.streams.video[0]
         # SLICE parallelizes within a single frame without the
         # one-frame-per-thread latency penalty of FRAME threading.
@@ -1057,26 +1025,6 @@ class PyAVVideoBackendMixin:
         return np.stack(frames_list), valid_indices
 
     @classmethod
-    def _decode_frames(
-        cls,
-        container: "av.container.InputContainer",
-        frame_indices: list[int],
-        source: VideoSourceMetadata,
-        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
-    ) -> tuple[npt.NDArray, list[int]]:
-        """Decode frames, choosing scan or seek based on video length.
-
-        Scan holds the GIL continuously — fine for short videos.
-        Seek releases the GIL between frames, critical for concurrency
-        with long videos.
-        """
-        if source.total_frames_num >= seek_threshold and source.original_fps > 0:
-            return cls._decode_frames_seek(
-                container, frame_indices, source.original_fps, source.duration
-            )
-        return cls._decode_frames_scan(container, frame_indices)
-
-    @classmethod
     def _prepare_source(
         cls,
         source: VideoSourceMetadata,
@@ -1090,7 +1038,6 @@ class PyAVVideoBackendMixin:
         num_frames: int,
         fps: int,
         max_duration: int,
-        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """Shared implementation for all PyAV-based load_bytes methods."""
         with av.open(BytesIO(data)) as container:
@@ -1102,7 +1049,7 @@ class PyAVVideoBackendMixin:
                 target=VideoTargetMetadata(num_frames, fps, max_duration),
             )
             frames, valid_frame_indices = cls._decode_frames(
-                container, frame_idx, source, seek_threshold
+                container, frame_idx, source.original_fps, source.duration
             )
 
         if len(valid_frame_indices) < len(frame_idx):
@@ -1134,10 +1081,9 @@ class PyAVVideoBackend(VideoLoader, PyAVVideoBackendMixin):
         num_frames: int = -1,
         fps: int = -1,
         max_duration: int = 300,
-        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        return cls._load_bytes_impl(data, num_frames, fps, max_duration, seek_threshold)
+        return cls._load_bytes_impl(data, num_frames, fps, max_duration)
 
 
 @VIDEO_LOADER_REGISTRY.register("pyav_dynamic")
@@ -1176,7 +1122,6 @@ class PyAVDynamicVideoBackend(VideoLoader, PyAVVideoBackendMixin):
         num_frames: int = -1,
         fps: int = 2,
         max_duration: int = 300,
-        seek_threshold: int = _PYAV_SEEK_FRAME_THRESHOLD,
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
-        return cls._load_bytes_impl(data, num_frames, fps, max_duration, seek_threshold)
+        return cls._load_bytes_impl(data, num_frames, fps, max_duration)
