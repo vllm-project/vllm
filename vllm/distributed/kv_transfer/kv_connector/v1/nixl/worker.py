@@ -64,7 +64,6 @@ from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    get_tp_group,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -294,16 +293,6 @@ class NixlConnectorWorker:
         self.engine_id: EngineId = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
-
-        # In multi-node TP, each node independently generates a random
-        # engine_id. Broadcast rank 0's engine_id to ensure consistency.
-        if self.world_size > 1:
-            self.engine_id = get_tp_group().broadcast_object(self.engine_id, src=0)
-            logger.debug(
-                "TP engine_id standardized to %s from previous config value %s",
-                self.engine_id,
-                engine_id,
-            )
 
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
