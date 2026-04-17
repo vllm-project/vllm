@@ -61,7 +61,7 @@ class SpecDecodeMetadata:
         parents_np = np.arange(num_tokens, dtype=np.int32) - 1
         if num_tokens > 0:
             cu_starts = np.cumsum([0] + num_draft_tokens[:-1], dtype=np.int32)
-            parents_np[cu_starts] = -1
+            parents_np[cu_starts[cu_starts < num_tokens]] = -1
         parents_tensor = torch.from_numpy(parents_np).to(device)
 
         return cls(
