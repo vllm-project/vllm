@@ -3,6 +3,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
@@ -10,6 +12,8 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
 from vllm.reasoning import ReasoningParserManager
 from vllm.tool_parsers import ToolParserManager
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def _build_tokenizer():

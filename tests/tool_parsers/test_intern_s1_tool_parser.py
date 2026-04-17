@@ -16,22 +16,20 @@ from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.intern_s1_tool_parser import _build_initial_arguments_delta
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 @pytest.fixture
-def tokenizer(default_tokenizer: TokenizerLike) -> TokenizerLike:
-    tokenizer_vocab = default_tokenizer.get_vocab()
-    default_tokenizer.get_vocab = MagicMock()
-    tokenizer_vocab.update(
-        {
-            "<|action_start|>": 92540,
-            "<|plugin|>": 92541,
-            "<|action_end|>": 92542,
-            "<think>": 92543,
-            "</think>": 92544,
-        }
-    )
-    default_tokenizer.get_vocab.return_value = tokenizer_vocab
-    return default_tokenizer
+def tokenizer() -> TokenizerLike:
+    tokenizer = MagicMock()
+    tokenizer.get_vocab.return_value = {
+        "<|action_start|>": 92540,
+        "<|plugin|>": 92541,
+        "<|action_end|>": 92542,
+        "<think>": 92543,
+        "</think>": 92544,
+    }
+    return tokenizer
 
 
 @pytest.fixture
@@ -53,7 +51,7 @@ def tools() -> list[ChatCompletionToolsParam]:
 
 
 @pytest.fixture
-def request(tools: list[ChatCompletionToolsParam]) -> ChatCompletionRequest:
+def chat_request(tools: list[ChatCompletionToolsParam]) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         messages=[],
         model="test-model",
@@ -75,12 +73,12 @@ def test_intern_s1_tool_parser_registered():
     assert parser_cls.__name__ == "InternS1ToolParser"
 
 
-def test_nonstreaming_supports_spaced_special_tokens(tool_parser, request):
+def test_nonstreaming_supports_spaced_special_tokens(tool_parser, chat_request):
     content, tool_calls = run_tool_extraction(
         tool_parser,
         '<|action_start|> <|plugin|>\n{"name": "get_weather", '
         '"parameters": {"city": "Tokyo"}}\n<|action_end|>',
-        request=request,
+        request=chat_request,
         streaming=False,
     )
 
@@ -90,7 +88,7 @@ def test_nonstreaming_supports_spaced_special_tokens(tool_parser, request):
     assert json.loads(tool_calls[0].function.arguments) == {"city": "Tokyo"}
 
 
-def test_nonstreaming_supports_multiple_action_blocks(tool_parser, request):
+def test_nonstreaming_supports_multiple_action_blocks(tool_parser, chat_request):
     content, tool_calls = run_tool_extraction(
         tool_parser,
         '<|action_start|><|plugin|>{"name": "get_weather", '
@@ -98,7 +96,7 @@ def test_nonstreaming_supports_multiple_action_blocks(tool_parser, request):
         '<|action_start|><|plugin|>{"name": "get_time", '
         '"parameters": {"timezone": "Asia/Tokyo"}}<|action_end|>\n'
         "Visible answer.",
-        request=request,
+        request=chat_request,
         streaming=False,
     )
 
@@ -111,12 +109,15 @@ def test_nonstreaming_supports_multiple_action_blocks(tool_parser, request):
     ]
 
 
-def test_nonstreaming_gracefully_handles_malformed_json(tool_parser, request):
+def test_nonstreaming_gracefully_handles_malformed_json(
+    tool_parser,
+    chat_request,
+):
     content, tool_calls = run_tool_extraction(
         tool_parser,
         '<|action_start|><|plugin|>{"name": "get_weather", "parameters": {'
         "<|action_end|>",
-        request=request,
+        request=chat_request,
         streaming=False,
     )
 
