@@ -20,12 +20,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
-    from vllm.distributed.kv_transfer.kv_connector.base import (
-        KVConnectorBase,
-    )
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
-        ModelBlockTransferPolicy,
-    )
+    from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
     from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
@@ -446,7 +441,6 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
-    policy: "ModelBlockTransferPolicy | None" = None
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
@@ -499,24 +493,12 @@ class TransferTopology:
     def register_remote_engine(
         self,
         remote_engine_id: EngineId,
-        remote_tp_size: int,
-        remote_block_size: int,
-        remote_block_len: int,
-        remote_physical_blocks_per_logical: int,
-        *,
-        local_block_len: int = 0,
+        info: EngineTransferInfo,
     ) -> EngineTransferInfo:
         """Register a remote engine, unifying worker dicts state.
 
-        Only remote engines should be registered here — the local engine's
-        identity (tp_size, block_size, etc.) is set via ``__init__`` params.
-
-        For Mamba models, also computes the Mamba transfer plan and
-        builds the FA source lookup caches.
-
-        Args:
-            local_block_len: Local representative block_len (bytes).
-                Required for Mamba models to compute ``fa_descriptor_bytes``.
+        The caller (worker) is responsible for computing the info via
+        the transfer policy.  This method only stores and deduplicates.
         """
         assert remote_engine_id != self.engine_id, (
             f"Cannot register local engine {self.engine_id} as remote. "
@@ -524,21 +506,6 @@ class TransferTopology:
         )
         if remote_engine_id in self._engines:
             return self._engines[remote_engine_id]
-        assert self.policy is not None, (
-            "TransferTopology.policy must be set before registering engines"
-        )
-        info = self.policy.build_engine_transfer_info(
-            tp_rank=self.tp_rank,
-            tp_size=self.tp_size,
-            is_mla=self.is_mla,
-            total_num_kv_heads=self.total_num_kv_heads,
-            is_kv_layout_blocks_first=self.is_kv_layout_blocks_first,
-            remote_tp_size=remote_tp_size,
-            remote_block_size=remote_block_size,
-            remote_block_len=remote_block_len,
-            remote_physical_blocks_per_logical=(remote_physical_blocks_per_logical),
-            local_block_len=local_block_len,
-        )
         self._engines[remote_engine_id] = info
         return info
 
