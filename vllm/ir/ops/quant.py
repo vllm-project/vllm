@@ -33,6 +33,7 @@ def static_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
+    """Static per-tensor or per-token FP8 quantization with pre-computed scale"""
     fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
     out = x.to(torch.float32) * scale.to(torch.float32).reciprocal()
     out_clamped = out.clamp(fp8_min, fp8_max).to(fp8_dtype)
@@ -46,6 +47,7 @@ def static_group_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
+    """Static group FP8 quantization with pre-computed per-group scales"""
     fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
 
     # Normalize scale to 2D: [num_groups] -> [1, num_groups]
@@ -80,6 +82,7 @@ def dynamic_quant_fp8(
     scale_ub: Tensor | None = None,
     num_token_padding: int | None = None,
 ) -> tuple[Tensor, Tensor]:
+    """Dynamic per-tensor or per-token FP8 quantization with computed scale"""
     fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
     fp8_min_scaling_factor = 1.0 / (fp8_max * 512.0)
     if per_token:
@@ -108,6 +111,7 @@ def dynamic_group_quant_fp8(
     fp8_dtype: torch.dtype,
     scale_alignment: int = 1,
 ) -> tuple[Tensor, Tensor]:
+    """Dynamic group FP8 quantization with computed per-group scales"""
     fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
     fp8_min_scaling_factor = 1.0 / (fp8_max * 512.0)
     orig_shape = x.shape
