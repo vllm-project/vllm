@@ -121,7 +121,8 @@ class MistralToolParser(ToolParser):
         self.current_tool_name: str | None = None
         self.current_tool_mistral_id: str | None = None
         self.starting_new_tool = False
-        if _is_pre_v11_tokeniser(self.model_tokenizer):
+        self._is_pre_v11 = _is_pre_v11_tokeniser(self.model_tokenizer)
+        if self._is_pre_v11:
             self.parse_coro = ijson.parse_coro(
                 self.update_stream_state_pre_v11_tokenizer()
             )
@@ -129,7 +130,6 @@ class MistralToolParser(ToolParser):
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*}\]", re.DOTALL)
-        self._is_pre_v11 = _is_pre_v11_tokeniser(self.model_tokenizer)
 
         if self.bot_token_id is None:
             raise RuntimeError(
