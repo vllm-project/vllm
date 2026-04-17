@@ -277,7 +277,7 @@ fastar==0.10.0
     # via fastapi-cloud-cli
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors==0.2.2
+fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@65d80088fca7a8f567fba30415fbcc80f7d2259c
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
