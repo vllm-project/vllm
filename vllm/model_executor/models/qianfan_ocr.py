@@ -75,7 +75,7 @@ class QianfanOCRForConditionalGeneration(InternVLChatModel):
             _FP8_IGNORED_LAYERS = [
                 *(
                     layer
-                    for i in range(24)
+                    for i in range(config.vision_config.num_hidden_layers)
                     for layer in [
                         f"vision_model.encoder.layers.{i}.attn.qkv",
                         f"vision_model.encoder.layers.{i}.attn.proj",
