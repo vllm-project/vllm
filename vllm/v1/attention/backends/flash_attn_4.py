@@ -50,6 +50,13 @@ class FlashAttention4Metadata:
 class FlashAttention4Backend(AttentionBackend):
     """Attention backend using flash-attn-4 CuTe DSL kernels."""
 
+    # flash_attn_varlen_func allocates and returns its own output tensor
+    # (no out= parameter on the kernel). vLLM's unified_attention_with_output
+    # only exposes an output-buffer calling path, so the impl copies the
+    # kernel's output into the caller buffer. Leaving this True matches
+    # that calling convention; the one-shot copy is unavoidable until
+    # flash-attn-4 upstream adds an out= parameter or vLLM grows a
+    # non-output-buffer dispatch variant.
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
@@ -173,7 +180,10 @@ class FlashAttention4Impl(AttentionImpl):
             self.sliding_window = (-1, -1)
 
         if alibi_slopes is not None:
-            logger.warning("FlashAttention4 does not support ALiBi. Ignoring.")
+            # Silently dropping alibi_slopes would produce incorrect output
+            # for models that require ALiBi. Raise so the attention selector
+            # falls back to a backend that supports it.
+            raise NotImplementedError("FlashAttention4 does not support ALiBi slopes")
 
         self.softcap = logits_soft_cap or 0.0
 
@@ -198,15 +208,18 @@ class FlashAttention4Impl(AttentionImpl):
         from flash_attn.cute.interface import flash_attn_varlen_func
 
         num_actual_tokens = attn_metadata.num_actual_tokens
-        query = query[:num_actual_tokens]
+        q_actual = query[:num_actual_tokens]
 
         # Separate K and V from paged cache
         # kv_cache: (2, num_blocks, block_size, num_kv_heads, head_dim)
         key_cache, value_cache = kv_cache.unbind(0)
 
-        # flash_attn_varlen_func with page_table for paged KV
+        # flash_attn_varlen_func does not expose an out= parameter; it
+        # allocates its own tensor. We copy the actual-token slice into
+        # the caller-provided output buffer so padded-batch callers
+        # (e.g. CUDA graph capture) see the expected shape.
         out, *_ = flash_attn_varlen_func(
-            q=query,
+            q=q_actual,
             k=key_cache,
             v=value_cache,
             cu_seqlens_q=attn_metadata.query_start_loc,
