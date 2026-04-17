@@ -109,6 +109,45 @@ class LogprobsTensors(NamedTuple):
         )
 
 
+class RoutedExpertsTensors(NamedTuple):
+    """Snapshot of routed experts data for async D2H copy.
+
+    Both fields are tensors, sliced to the tokens of the current step.
+    They may live on device (right after forward) or on CPU (after D2H).
+    ``routing_data`` should be a private clone when sourced from a shared
+    capturer buffer, so the next forward pass does not race with a pending
+    copy.
+    """
+
+    # (num_tokens, num_layers, num_experts_per_tok)
+    routing_data: torch.Tensor
+    # (num_tokens,)
+    slot_mapping: torch.Tensor
+
+    def to_cpu_nonblocking(self) -> "RoutedExpertsTensors":
+        if self.routing_data.device.type == "cpu":
+            return self
+        return RoutedExpertsTensors(
+            self.routing_data.to("cpu", non_blocking=True),
+            self.slot_mapping.to("cpu", non_blocking=True),
+        )
+
+    def tolists(self) -> "RoutedExpertsLists":
+        return RoutedExpertsLists(
+            self.routing_data.cpu().numpy(),
+            self.slot_mapping.cpu().numpy(),
+        )
+
+
+class RoutedExpertsLists(NamedTuple):
+    """CPU-side routed experts, the form ``store_batch`` consumes."""
+
+    # (num_tokens, num_layers, num_experts_per_tok)
+    routing_data: np.ndarray
+    # (num_tokens,)
+    slot_mapping: np.ndarray
+
+
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
@@ -201,10 +240,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # (batch_data, slot_mapping) — batch_data shape
-    # (num_tokens, num_layers, num_experts_per_tok), slot_mapping shape
-    # (num_tokens,).  Scheduler writes slot_buffer[slot_mapping] = batch_data.
-    routed_experts: tuple[np.ndarray, np.ndarray] | None = None
+    # routing_data shape (num_tokens, num_layers, num_experts_per_tok);
+    # slot_mapping shape (num_tokens,). Scheduler writes
+    # slot_buffer[slot_mapping] = routing_data.
+    routed_experts: RoutedExpertsLists | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

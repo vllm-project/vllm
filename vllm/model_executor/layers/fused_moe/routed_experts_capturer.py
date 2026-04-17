@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -35,21 +34,6 @@ def _get_num_experts_per_tok(hf_config) -> int:
             "'num_experts_per_tok' nor 'top_k_experts'"
         )
     return val
-
-
-@dataclass
-class RoutedExpertsSnapshot:
-    """Snapshot of routed experts data for async D2H copy.
-
-    ``routing_data`` is a device-side clone of the shared capturer buffer
-    (already sliced to the scheduled tokens), safe to copy on any stream
-    without racing with the next forward pass.
-    ``slot_mapping_cpu`` is a CPU tensor whose D2H was issued on the
-    default stream before this snapshot was created.
-    """
-
-    routing_data: torch.Tensor
-    slot_mapping_cpu: torch.Tensor
 
 
 def get_num_experts(hf_config) -> int:

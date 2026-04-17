@@ -945,7 +945,7 @@ class Scheduler(SchedulerInterface):
             # Only overwrite if new data is at least as complete as
             # the existing cache (guards against chunked-prefill
             # producing shorter routing after a prior full preemption).
-            if existing is None or re.shape[0] >= existing.shape[0]:
+            if existing is None or re.shape[0] > existing.shape[0]:
                 self.aborted_routed_experts[request.request_id] = re
                 logger.info(
                     "Cached routed_experts before preemption: "
@@ -1324,8 +1324,8 @@ class Scheduler(SchedulerInterface):
 
         # Store routed experts into slot buffer (one batch write).
         if model_runner_output.routed_experts is not None:
-            batch_data, slot_mapping = model_runner_output.routed_experts
-            self.routed_experts_mgr.store_batch(batch_data, slot_mapping)
+            re = model_runner_output.routed_experts
+            self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1607,13 +1607,22 @@ class Scheduler(SchedulerInterface):
         return all_block_ids[self.routed_experts_mgr.attn_gid]
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
-        # Use num_computed_tokens, not num_tokens - 1: only tokens that have
-        # gone through the forward pass have routing data written to their
-        # slots. num_computed_tokens reflects this precisely (including spec
-        # decoding rejections and chunked prefill), while num_tokens - 1 can
-        # over-read zero-initialized slots when a request is aborted mid-
-        # prefill or preempted.
-        num_tokens = request.num_computed_tokens
+        # Two upper bounds on how many slot entries are safe to read:
+        #   - num_tokens - 1: the shape downstream expects (prompt + output
+        #     minus the last sampled token not yet forwarded).
+        #   - num_computed_tokens - num_output_placeholders: slots physically
+        #     written and confirmed. Excludes:
+        #       * async-scheduled but not-yet-appended tokens (placeholders);
+        #       * rejected spec-decode drafts (both counters are decremented);
+        #       * un-forwarded slots during chunked prefill or post-preempt
+        #         re-prefill (num_computed is still small).
+        # Taking the min keeps the returned shape aligned with downstream
+        # expectations whenever possible, while never over-reading into
+        # stale/unwritten slots.
+        num_tokens = min(
+            request.num_tokens - 1,
+            request.num_computed_tokens - request.num_output_placeholders,
+        )
         block_ids = self._get_routed_experts_block_ids(request)
         return self.routed_experts_mgr.get(block_ids, num_tokens)
 
@@ -1808,7 +1817,7 @@ class Scheduler(SchedulerInterface):
                 # Only overwrite if new data is at least as complete
                 # (e.g. a RUNNING request aborted during chunked re-prefill
                 # may have fewer routing entries than the prior preemption).
-                if existing is None or re.shape[0] >= existing.shape[0]:
+                if existing is None or re.shape[0] > existing.shape[0]:
                     self.aborted_routed_experts[request.request_id] = re
 
             delay_free_blocks = False
