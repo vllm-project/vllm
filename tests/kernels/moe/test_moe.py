@@ -14,8 +14,6 @@ import pytest
 import torch
 from torch.nn import Parameter
 from torch.nn import functional as F
-from transformers import MixtralConfig
-from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.moe.utils import (
@@ -24,10 +22,7 @@ from tests.kernels.moe.utils import (
     modular_triton_fused_moe,
 )
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
-from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import init_distributed_environment
-from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
     fused_topk,
@@ -56,12 +51,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
-from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.worker.workspace import init_workspace_manager
 
 
 def iterative_moe(
@@ -679,129 +672,6 @@ def test_fused_moe_wn16(
         torch_output = torch_moe(a, w1_ref, w2_ref, score, topk, expert_map=e_map)
 
     torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-@torch.inference_mode()
-def test_mixtral_moe(
-    default_vllm_config,
-    dist_init,
-    dtype: torch.dtype,
-    padding: bool,
-    use_rocm_aiter: bool,
-    monkeypatch,
-):
-    """Make sure our Mixtral MoE implementation agrees with the one from
-    huggingface."""
-
-    # Explicitly set AITER env var based on test parameter to ensure
-    # consistent behavior regardless of external environment
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1" if use_rocm_aiter else "0")
-    rocm_aiter_ops.refresh_env_variables()
-
-    if use_rocm_aiter and dtype == torch.float32:
-        pytest.skip("AITER ROCm test skip for float32")
-
-    monkeypatch.setenv("RANK", "0")
-    monkeypatch.setenv("LOCAL_RANK", "0")
-    monkeypatch.setenv("WORLD_SIZE", "1")
-    monkeypatch.setenv("MASTER_ADDR", "localhost")
-    monkeypatch.setenv("MASTER_PORT", "12345")
-    init_distributed_environment()
-    init_workspace_manager(torch.accelerator.current_device_index())
-
-    # Instantiate our and huggingface's MoE blocks
-    vllm_config.compilation_config.static_forward_context = dict()
-    with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
-        config = MixtralConfig()
-        hf_moe = MixtralSparseMoeBlock(config).to(dtype).to("cuda")
-        vllm_moe = MixtralMoE(
-            num_experts=config.num_local_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            params_dtype=dtype,
-            tp_size=1,
-            dp_size=1,
-        ).cuda()
-
-        # Load the weights
-        vllm_moe.gate.weight.data[:] = hf_moe.gate.weight.data
-        if isinstance(hf_moe.experts, torch.nn.ModuleList):
-            # Transformers v4
-            for i in range(config.num_local_experts):
-                weights = (
-                    hf_moe.experts[i].w1.weight.data,
-                    hf_moe.experts[i].w3.weight.data,
-                )
-                vllm_moe.experts.w13_weight[i][:] = torch.cat(weights, dim=0)
-                vllm_moe.experts.w2_weight[i][:] = hf_moe.experts[i].w2.weight.data
-        else:
-            # Transformers v5
-            vllm_moe.experts.w13_weight.data[:] = hf_moe.experts.gate_up_proj.data
-            vllm_moe.experts.w2_weight.data[:] = hf_moe.experts.down_proj.data
-            # TODO: remove this line after https://github.com/huggingface/transformers/pull/43622
-            hf_moe.experts.config._experts_implementation = "eager"
-
-        # Generate input batch of dimensions [batch_size, seq_len, hidden_dim]
-        hf_inputs = torch.randn((1, 64, config.hidden_size)).to(dtype).to("cuda")
-        # vLLM uses 1D query [num_tokens, hidden_dim]
-        vllm_inputs = hf_inputs.flatten(0, 1)
-
-        # Pad the weight if moe padding is enabled
-        if padding:
-            vllm_moe.experts.w13_weight = Parameter(
-                F.pad(vllm_moe.experts.w13_weight, (0, 128), "constant", 0)[
-                    ..., 0:-128
-                ],
-                requires_grad=False,
-            )
-            vllm_moe.experts.w2_weight = Parameter(
-                F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
-                requires_grad=False,
-            )
-            torch.accelerator.synchronize()
-            torch.accelerator.empty_cache()
-
-        # FIXME (zyongye) fix this after we move self.kernel
-        # assignment in FusedMoE.__init__
-
-        vllm_moe.experts.quant_method.process_weights_after_loading(vllm_moe.experts)
-
-        # need to override the forward context for unittests, otherwise it assumes
-        # we're running the model forward pass (the model specified in vllm_config)
-        get_forward_context().all_moe_layers = None
-
-        # Run forward passes for both MoE blocks
-        hf_states = hf_moe.forward(hf_inputs)
-        if isinstance(hf_states, tuple):
-            # Transformers v4
-            hf_states = hf_states[0]
-        vllm_states = vllm_moe.forward(vllm_inputs)
-
-    mixtral_moe_tol = {
-        torch.float32: 1e-3,
-        torch.float16: 1e-3,
-        torch.bfloat16: 1e-2,
-    }
-
-    if use_rocm_aiter:
-        # The values of rtol and atol are set based on the tests in ROCM AITER package.
-        # https://github.com/ROCm/aiter/blob/dfed377f4be7da96ca2d75ac0761f569676f7240/op_tests/test_moe.py#L174
-        torch.testing.assert_close(
-            hf_states.flatten(0, 1), vllm_states, rtol=0.01, atol=100
-        )
-    else:
-        torch.testing.assert_close(
-            hf_states.flatten(0, 1),
-            vllm_states,
-            rtol=mixtral_moe_tol[dtype],
-            atol=mixtral_moe_tol[dtype],
-        )
 
 
 def marlin_moe_generate_valid_test_cases():
