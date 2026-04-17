@@ -128,6 +128,10 @@ fn factory_new_resolves_external_default_patterns() {
         factory.resolve_name_for_model("command-r-plus"),
         Some(names::COHERE)
     );
+    assert_eq!(
+        factory.resolve_name_for_model("google/gemma-4-27b-it"),
+        Some(names::GEMMA4)
+    );
 }
 
 #[test]

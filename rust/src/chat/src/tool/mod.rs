@@ -8,6 +8,8 @@
 //! gradually replace them with native parsers as needed.
 
 mod external;
+mod gemma4;
+pub(super) mod streaming;
 
 use std::collections::{BTreeMap, btree_map};
 
@@ -20,6 +22,7 @@ use crate::request::{ChatRequest, ChatTool};
 pub type Result<T> = std::result::Result<T, ToolParserError>;
 
 pub use external::*;
+pub use gemma4::Gemma4ToolParser;
 
 /// Canonical public names for registered tool parsers.
 pub mod names {
@@ -28,6 +31,7 @@ pub mod names {
     pub const DEEPSEEK_V31: &str = "deepseek_v31";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
+    pub const GEMMA4: &str = "gemma4";
     pub const JSON: &str = "json";
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
@@ -164,6 +168,7 @@ impl ToolParserFactory {
             .register_parser::<DeepSeekV31ToolParser>(names::DEEPSEEK_V31)
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
+            .register_parser::<Gemma4ToolParser>(names::GEMMA4)
             .register_parser::<JsonToolParser>(names::JSON)
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
@@ -196,6 +201,8 @@ impl ToolParserFactory {
             .register_pattern("glm-4.6", names::GLM45)
             .register_pattern("glm-4.5", names::GLM45)
             .register_pattern("glm-", names::JSON)
+            .register_pattern("gemma4", names::GEMMA4)
+            .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("step-3", names::STEP3)
             .register_pattern("step3", names::STEP3)
             .register_pattern("kimi-k2", names::KIMI_K2)
