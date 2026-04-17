@@ -295,13 +295,13 @@ def kernel_unified_attention_2d(
         # where q_abs = context_len + q
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
+        q_abs = context_len + qpos_lo
         if BLOCK_LOCAL_LOOKBACK > -1:
-            q_abs = context_len + qpos_lo
             first_allowed_key = (
                 (q_abs // BLOCK_LOCAL_BLOCK_SIZE) - BLOCK_LOCAL_LOOKBACK
             ) * BLOCK_LOCAL_BLOCK_SIZE
         else:
-            first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
+            first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
@@ -701,13 +701,13 @@ def kernel_unified_attention_3d(
         # where q_abs = context_len + q
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
+        q_abs = context_len + qpos_lo
         if BLOCK_LOCAL_LOOKBACK > -1:
-            q_abs = context_len + qpos_lo
             first_allowed_key = (
                 (q_abs // BLOCK_LOCAL_BLOCK_SIZE) - BLOCK_LOCAL_LOOKBACK
             ) * BLOCK_LOCAL_BLOCK_SIZE
         else:
-            first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
+            first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
         # Convert to tile indices and clamp
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
