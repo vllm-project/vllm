@@ -286,11 +286,15 @@ def run_single_sample(
     # cwd is outside the repo, PathFinder (meta_path[4]) returns a namespace
     # package from site-packages and the setuptools _EditableFinder
     # (meta_path[5]) never runs, so `from vllm import SamplingParams` fails.
+    #
+    # [apr-17] Switched from `python -m vllm.entrypoints.openai.api_server`
+    # to `vllm serve <model> --port N`. The CLI path is what users actually
+    # invoke via `pip install vllm && vllm serve ...`; measuring it includes
+    # an extra ~1-2 s of CLI-layer startup that the `-m` path skipped.
+    vllm_cli = str(Path(sys.executable).parent / "vllm")
     cmd = [
-        sys.executable,
-        "-m",
-        "vllm.entrypoints.openai.api_server",
-        "--model",
+        vllm_cli,
+        "serve",
         model,
         "--port",
         str(port),
