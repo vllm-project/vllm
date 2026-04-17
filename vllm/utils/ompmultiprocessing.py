@@ -56,7 +56,7 @@ def _get_cpu_topology_json() -> bytes:
     on NUMA node 0, which is sufficient for the OMP place-list builder.
     """
     if platform.system() == "Linux":
-        return subprocess.run(["lscpu", "-Je"], check=True, capture_output=True).stdout
+        return subprocess.run(["lscpu", "-b", "-Je"], check=True, capture_output=True).stdout
 
     # Fallback for non-Linux (macOS, etc.)
     cpu_count = os.cpu_count() or 1
