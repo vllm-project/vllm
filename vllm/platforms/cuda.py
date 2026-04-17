@@ -133,6 +133,15 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLEX_ATTENTION,
                 AttentionBackendEnum.TURBOQUANT,
             ]
+        elif device_capability.major == 12:
+            # SM120 (consumer Blackwell): flash-attn-4 CuTe DSL kernels
+            # have native SM120 support. FlashInfer is fallback.
+            return [
+                AttentionBackendEnum.FLASH_ATTN_4,
+                AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLEX_ATTENTION,
+            ]
         else:
             return [
                 AttentionBackendEnum.FLASH_ATTN,
