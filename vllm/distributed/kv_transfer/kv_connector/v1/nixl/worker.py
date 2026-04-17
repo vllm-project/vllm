@@ -228,7 +228,12 @@ class NixlConnectorWorker:
         self.dst_num_blocks: dict[EngineId, int] = {}
         self._registered_descs: list[Any] = []
 
-        # Per-engine physical-blocks-per-logical ratio (only used for Mamba).
+        # Mamba-HMA per-engine state (only used when is_mamba).
+        # NOTE (ZhanqiuHu): _physical_blocks_per_logical MUST be per-engine.
+        # physical_blocks_per_logical = ceil((conv_bytes + ssm_bytes) / block_len)
+        # where conv/ssm bytes are per-TP-rank (dimension-sharded).  With
+        # heterogeneous TP the per-rank sizes differ, so the ratio differs:
+        #   e.g. Nemotron 30B: P(TP=4) -> 131, D(TP=1) -> 261.
         self._physical_blocks_per_logical: dict[EngineId, int] = {}
 
         # In progress transfers.
@@ -291,6 +296,8 @@ class NixlConnectorWorker:
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
+        if self.transfer_policy.is_mamba:
+            assert self._is_hma_required
 
         self.enforce_compat_hash = self.kv_transfer_config.get_from_extra_config(
             "enforce_handshake_compat", True
@@ -985,6 +992,9 @@ class NixlConnectorWorker:
         )
 
         ### (Optional) Register local agent memory regions. MLA is not split.
+        # Remote tp_size > local tp_size: read from multiple remote ranks.
+        # Logically "split" own regions into |tp_ratio| chunks. Mind that
+        # we only do this once per remote tp_size (replica-friendly).
         if (
             tp_ratio < 0
             and not self.use_mla
@@ -1594,12 +1604,17 @@ class NixlConnectorWorker:
             # Get side handles.
             if tp_ratio < 0 and not self.use_mla:
                 assert remote_block_size == self.block_size
+                # Remote tp_size > local tp_size: we must perform multiple
+                # reads. Get the memory chunk onto which we will write to.
                 local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[tp_ratio][i]
             else:
+                # Single read from remote, we write to the whole memory region.
+                # Also handle remote block size different from local block size.
                 local_xfer_side_handle = self.src_xfer_handles_by_block_size[
                     remote_block_size
                 ]
 
+            # Destination handle: remote_engine_id -> remote_rank -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
                 spec.remote_rank
             ]
@@ -1615,7 +1630,9 @@ class NixlConnectorWorker:
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
 
-        if self.use_mla and tp_ratio < 0:
+        if self.use_mla and tp_ratio < 0 and read_specs:
+            # Notify remote ranks that were not read from so they can update
+            # request state (cache is duplicated under MLA).
             notif_id = f"{req_id}:{self.world_size}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             read_ranks = {s.remote_rank for s in read_specs}

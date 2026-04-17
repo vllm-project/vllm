@@ -252,6 +252,8 @@ class ModelBlockTransferPolicy(ABC):
         result: list[tuple[int, int, int]] = []
         n_blocks = num_blocks * block_size_ratio
         for i, base_addr in enumerate(base_addresses):
+            # The new block_len is using prefill block_len;
+            # and num_blocks is multiple with N
             kv_block_len = (
                 self.get_block_len(
                     i,
@@ -261,8 +263,11 @@ class ModelBlockTransferPolicy(ABC):
                 )
                 // block_size_ratio
             )
+            # Jump one page_size, but ssm page_size may be bigger when kernel
+            # locks block size to a specific value.
             page_stride = block_len_per_layer[i] // block_size_ratio
             for block_id in range(n_blocks):
+                # (addr, len, device id)
                 result.append(
                     (
                         base_addr + block_id * page_stride,
@@ -277,7 +282,11 @@ class ModelBlockTransferPolicy(ABC):
                     block_len_per_layer,
                     is_blocks_first,
                 )
+                # Separate and interleave K/V regions to maintain the same
+                # descs ordering. This is needed for selecting contiguous heads
+                # when split across TP ranks.
                 for block_id in range(n_blocks):
+                    # Register addresses for V cache (K registered first).
                     v_addr = base_addr + block_id * page_stride + kv_block_len
                     result.append(
                         (
@@ -339,6 +348,7 @@ class ModelBlockTransferPolicy(ABC):
         The worker iterates the result without model-specific branching.
         MLA trimming (keeping only the first spec) is handled by the worker.
         """
+        _ = (physical_blocks_per_logical, transfer_config)
         return [
             ReadSpec(
                 remote_rank=rank,
@@ -481,6 +491,25 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
             for group in block_ids
         ]
 
+    def compute_read_specs(
+        self,
+        local_block_ids,
+        remote_block_ids,
+        remote_ranks,
+        physical_blocks_per_logical=1,
+        transfer_config=None,
+    ):
+        _ = (physical_blocks_per_logical, transfer_config)
+        expanded = self.logical_to_kernel_block_ids(remote_block_ids)
+        return [
+            ReadSpec(
+                remote_rank=rank,
+                local_block_ids=local_block_ids,
+                remote_block_ids=expanded,
+            )
+            for rank in remote_ranks
+        ]
+
     def build_local_descs(
         self,
         base_addresses,
@@ -515,21 +544,29 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         tp_size: int = 1,
         total_num_kv_heads: int = 1,
     ):
+        # With homogeneous TP, D pulls the whole kv cache from corresponding
+        # rank. With heterogeneous TP, prepare the descriptors by splitting the
+        # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
+        # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
+        # Register all remote blocks, but only the corresponding kv heads.
         _ = (tp_size, total_num_kv_heads, physical_blocks_per_logical, transfer_config)
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(
             nixl_agent_meta.kv_caches_base_addr,
         ):
+            # Read our whole local region size from remote.
             local_block_len = self.get_block_len(
                 i,
                 True,
                 block_len_per_layer,
                 is_blocks_first,
             )
+            # using remote kv_block_len as transfer unit
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
                 local_block_len = remote_kv_block_len
             if tp_ratio < 0 and not use_mla:
+                # Remote tp is bigger: read a chunk of local region from remote
                 local_block_len = local_block_len // (-tp_ratio)
             rank_offset = (
                 tp_rank % tp_ratio * remote_kv_block_len if indexes_into_remote else 0
@@ -686,8 +723,11 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         is_blocks_first,
         mamba_view=False,
     ):
+        # For indexing only half (either just the K or V part).
         if is_blocks_first:
             if mamba_view:
+                # NOTE (NickLucche) Mamba Opt: this is already skipping the
+                # padding so we're only transferring the minimum required bytes.
                 return self._ssm_sizes[not first_split]
             return block_len_per_layer[layer_idx] // 2
         return block_len_per_layer[layer_idx]
@@ -701,6 +741,16 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         block_size_ratio=None,
         physical_blocks_per_logical=1,
     ):
+        # NOTE (NickLucche) With HMA, every kv group has the same number of
+        # layers and layers from different groups share the same kv tensor.
+        # eg block_ids=[[1,2],[3]]->blocks [1,2] need to be read across all
+        # regions, same for [3], but group0-group1 blocks will always differ
+        # (different areas).  Therefore we can just flatten the block_ids and
+        # compute the descs ids for all groups at once.
+
+        # Compute desc ids per group using the right stride: FA descs have
+        # num_blocks entries per region (kernel granularity), SSM descs have
+        # logical_blocks entries per region (no kernel splitting).
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
@@ -708,6 +758,14 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         ratio = physical_blocks_per_logical
         logical_blocks = num_blocks // ratio
         num_fa_descs = num_regions * num_blocks
+        # NOTE (NickLucche) SSM and Attention blocks regions can be exchanged
+        # arbitrarily by manager. Therefore, descs are duplicated for SSM and
+        # Attention like so:
+        # desc_handle->[descs_fa (all regions) | descs_ssm (all regions)].
+        # This is like having two "low-level views" of the same storage.
+        # `num_fa_descs` offset must be computed per-engine since P and D can
+        # have different num_blocks (and thus different FA descs counts).
+        # 3-read mamba: 4 regions per unique cache tensor (x, B, C, ssm).
         mamba_region_ids = np.arange(
             len(block_len_per_layer) * 4,
         )[:, None]
@@ -715,6 +773,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)[None, :]
             if self._is_mamba_group[i]:
+                # Mamba blocks are 1:1 logical-to-physical (no expansion).
                 all_descs.append(
                     (
                         mamba_region_ids * logical_blocks + group_arr + num_fa_descs
@@ -790,6 +849,12 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         )
         num_regions = len(base_addresses) * (2 if is_blocks_first else 1)
         assert len(fa_descs) == num_regions * num_blocks
+        # TODO (ZhanqiuHu): For homogeneous TP (tp_ratio == 1), the 3-read
+        # split is unnecessary — a single conv desc per block suffices.
+        # Consider adding a fast path that falls back to the standard 2-region
+        # registration when no hetero-TP remote has been seen.  Currently we
+        # always register 4 regions because local descs are created before
+        # knowing the remote TP.
         logger.debug("Registering local Mamba descriptors (4 regions/layer)")
         mamba_descs = self._build_mamba_local_descs(
             base_addresses,
@@ -810,12 +875,16 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
     ) -> list[tuple[int, int, int]]:
         """Build 4 desc regions (x, B, C, ssm) per layer for local
         mamba blocks, enabling the 3-read transfer with DS conv layout.
+
+        Conv state sub-projection decomposition requires DS (dim, state_len)
+        conv layout so that x/B/C sub-projections are contiguous in memory.
         """
         assert block_size_ratio == 1, (
             "Mamba 3-read transfer with block_size_ratio != 1 "
             f"is not tested. Got block_size_ratio={block_size_ratio}."
         )
         conv_offsets = self._conv_decomp.local_conv_offsets
+        # SSM States come in tuples (conv_size, ssm_state_size)
         conv_size, ssm_size = self._ssm_sizes
         n_blocks = logical_num_blocks * block_size_ratio
         phys_ratio = self._physical_blocks_per_logical
@@ -823,6 +892,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
             page_stride = block_len_per_layer[i] // block_size_ratio * phys_ratio
+            # 3 conv sub-projection regions (x, B, C)
             for off, sz in conv_offsets:
                 for blk in range(n_blocks):
                     result.append(
@@ -832,6 +902,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                             device_id,
                         )
                     )
+            # SSM temporal state follows the conv state.
             for blk in range(n_blocks):
                 result.append(
                     (
@@ -857,6 +928,8 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         tp_size: int = 1,
         total_num_kv_heads: int = 1,
     ):
+        # indexes_into_remote is not used for Mamba: FA offset is computed
+        # via fa_rank_offset which accounts for GQA/HMA head mapping.
         _ = indexes_into_remote
         info = cast(MambaEngineTransferInfo, transfer_config)
         result: list[tuple[int, int, int]] = []
@@ -961,18 +1034,27 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         physical_blocks_per_logical,
     ):
         """Build 4 remote desc regions (x, B, C, ssm) per layer
-        for the 3-read transfer."""
+        for the 3-read transfer.
+
+        Mamba conv state is always TP-sharded, even when attention KV
+        is replicated (num_kv_heads < tp_size).
+        """
         effective_ratio = max(tp_ratio, 1)
         local_offset = tp_rank % effective_ratio
         conv_size_remote = nixl_agent_meta.ssm_sizes[0]
 
         if tp_ratio >= 1:
+            # D_TP >= P_TP: P page is larger, D reads its slice.
             conv_offsets = self._conv_decomp.remote_conv_offsets(
                 local_offset,
                 effective_ratio,
             )
+            # SSM temporal state is also TP-sharded on the heads dimension.
             ssm_read_size = self._ssm_sizes[1]
         else:
+            # NOTE (ZhanqiuHu): tp_ratio < 0 means P_TP > D_TP, so P pages
+            # are smaller than D's.  self._conv_decomp has D-sized dimensions,
+            # but we need P-sized offsets.  Scale down by |tp_ratio|.
             abs_ratio = -tp_ratio
             xb_p = self._conv_decomp.x_bytes // abs_ratio
             bb_p = self._conv_decomp.b_bytes // abs_ratio
@@ -983,6 +1065,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
             ]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
+        # Assume same num_blocks for mamba and fa
         remote_ratio = physical_blocks_per_logical
         num_blocks = nixl_agent_meta.num_blocks // remote_ratio
         dev_id = nixl_agent_meta.device_id
@@ -991,6 +1074,8 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         for i, base_addr in enumerate(
             nixl_agent_meta.kv_caches_base_addr,
         ):
+            # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
+            # block lengths vary across layers (e.g. MLA).
             page_stride = nixl_agent_meta.block_lens[i] * remote_ratio
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
