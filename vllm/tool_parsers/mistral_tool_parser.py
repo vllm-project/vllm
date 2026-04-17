@@ -478,8 +478,7 @@ class MistralToolParser(ToolParser):
                 delta_function_name = delta_text.split("{")[0]
                 self.current_tool_name += delta_function_name
                 # HF tokenizers may include [ARGS] in the text
-                self.current_tool_name = self.current_tool_name.replace(
-                    "[ARGS]", "")
+                self.current_tool_name = self.current_tool_name.replace("[ARGS]", "")
                 delta_text = delta_text[len(delta_function_name) :]
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS
             else:
