@@ -53,8 +53,3 @@ import json; acc=json.load(open('${OUT}'))['accuracy']
 print(f"${MODEL} ${BACK}: accuracy {acc:.3f}")
 assert acc >= ${THRESHOLD}, f"${MODEL} ${BACK} accuracy {acc}"
 PY
-
-  cleanup
-  SERVER_PID=
-  sleep 1
-  PORT=$((PORT+1))
