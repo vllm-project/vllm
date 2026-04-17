@@ -16,19 +16,6 @@ FROM ${BASE_IMAGE} AS base
 ARG ARG_PYTORCH_ROCM_ARCH
 ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
-# Swap apt sources to mirrors.kernel.org to work around recurring
-# archive.ubuntu.com / security.ubuntu.com fetch failures. Handles both
-# legacy sources.list and deb822 .sources (24.04+) formats.
-# Ref: https://discourse.ubuntu.com/t/archive-ubuntu-com-failed-to-fetch-file-has-unexpected-size/80320
-RUN set -eux; \
-    if [ -f /etc/apt/sources.list ]; then \
-        sed -i -E 's#https?://(archive|security)\.ubuntu\.com/ubuntu#http://mirrors.kernel.org/ubuntu#g' /etc/apt/sources.list; \
-    fi; \
-    for f in /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list; do \
-        [ -f "$f" ] || continue; \
-        sed -i -E 's#https?://(archive|security)\.ubuntu\.com/ubuntu#http://mirrors.kernel.org/ubuntu#g' "$f"; \
-    done
-
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
