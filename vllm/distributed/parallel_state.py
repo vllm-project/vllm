@@ -107,6 +107,18 @@ def _split_tensor_dict(
 _group_name_counter: dict[str, int] = {}
 
 
+def _reset_group_name_registry() -> None:
+    """Reset the group name counter and stale group references.
+
+    Must be called before re-creating distributed groups (e.g. after
+    snapshot restore) so that newly created groups receive the same
+    unique names (``tp:0``, ``dp:0``, …) that torch.compiled graphs
+    have already baked in.
+    """
+    _group_name_counter.clear()
+    _groups.clear()
+
+
 def _get_unique_name(name: str) -> str:
     """Get a unique name for the group.
     Example:
@@ -1949,6 +1961,7 @@ def cleanup_dist_env_for_snapshot(shutdown_ray: bool = False):
     destroy_model_parallel()
     logger.info("destroy_model_parallel() end")
     destroy_distributed_environment()
+    _reset_group_name_registry()
     if shutdown_ray:
         import ray  # Lazy import Ray
         ray.shutdown()

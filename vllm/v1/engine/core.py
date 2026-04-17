@@ -1718,13 +1718,20 @@ class EngineCoreProc(EngineCore):
         # 销毁engine core的dp通信域
         logger.info(f"[snapshot] [engine] " + "-"*20 + "rebuild engie core dp_group" + "-"*20)
         stateless_destroy_torch_distributed_process_group(self.dp_group)
-        # 重建engine core 通信域
-        while len(self.vllm_config.parallel_config._data_parallel_master_port_list) > 1:
-            self.vllm_config.parallel_config._data_parallel_master_port_list.pop()
+        # Pre-snapshot ports are stale in the new environment.  Clear the
+        # list so get_next_dp_init_port() falls back to
+        # data_parallel_master_port — the only value guaranteed identical
+        # across all DP engine-core processes (even on different nodes),
+        # because it was set once in __post_init__ and serialized to every
+        # process.  This ensures both sides attempt the same port.
+        self.vllm_config.parallel_config._data_parallel_master_port_list.clear()
         self.dp_group = self.vllm_config.parallel_config.stateless_init_dp_group()
 
         logger.info(f"[snapshot] [engine] " + "-"*20 + "re_load_weights" + "-"*20)
         self.collective_rpc("re_load_weights", args=(model_path, ))
+
+        logger.info(f"[snapshot] [engine] " + "-"*20 + "recapture_graph" + "-"*20)
+        self.collective_rpc("recapture_graph")
 
 
 class DPEngineCoreProc(EngineCoreProc):
