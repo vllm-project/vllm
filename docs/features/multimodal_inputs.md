@@ -780,6 +780,98 @@ vllm serve Qwen/Qwen3-VL-30B-A3B-Instruct \
 
 Works with common video formats like MP4 when using OpenCV backends.
 
+#### Uploading Local Media Files
+
+When a multimodal file lives on the client (not the server) and is too large
+to base64-encode into a JSON payload, you can upload it once via the
+`/v1/files` endpoint and reference it in subsequent chat completions with
+the `vllm-file://<id>` URL scheme.
+
+This avoids the two existing pain points for large local media:
+
+- Base64 data URLs inflate the payload ~33% and can exceed shell `ARG_MAX`
+  for videos over ~8 MB.
+- `file://` URLs require the file to already exist on the **server** machine
+  and the server to have been launched with `--allowed-local-media-path`.
+
+The endpoint is **off by default**. Launch the server with
+`--enable-file-uploads` to expose it:
+
+```bash
+vllm serve allenai/Molmo2-8B \
+  --trust-remote-code --max-model-len 6144 \
+  --enable-file-uploads \
+  --file-upload-max-size-mb 128
+```
+
+**Upload a local video and reference it in a chat completion:**
+
+??? code
+
+    ```python
+    from openai import OpenAI
+
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+    # 1. Upload the file once
+    with open("clip.mp4", "rb") as f:
+        uploaded = client.files.create(file=f, purpose="vision")
+
+    # 2. Reference it via vllm-file:// in any number of chat completions
+    response = client.chat.completions.create(
+        model="allenai/Molmo2-8B",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "video_url",
+                 "video_url": {"url": f"vllm-file://{uploaded.id}"}},
+                {"type": "text",
+                 "text": "Describe what happens in this video."},
+            ],
+        }],
+        max_completion_tokens=150,
+    )
+
+    print(response.choices[0].message.content)
+
+    # 3. Clean up (files also expire after --file-upload-ttl-seconds)
+    client.files.delete(uploaded.id)
+    ```
+
+**Or with curl:**
+
+??? code
+
+    ```bash
+    # Upload
+    FILE_ID=$(curl -s http://localhost:8000/v1/files \
+      -F "file=@clip.mp4" \
+      -F "purpose=vision" | jq -r .id)
+
+    # Reference in chat completion
+    curl -s http://localhost:8000/v1/chat/completions \
+      -H "Content-Type: application/json" \
+      -d "{
+        \"model\": \"allenai/Molmo2-8B\",
+        \"messages\": [{
+          \"role\": \"user\",
+          \"content\": [
+            {\"type\": \"video_url\", \"video_url\": {\"url\": \"vllm-file://$FILE_ID\"}},
+            {\"type\": \"text\", \"text\": \"Describe this video.\"}
+          ]
+        }]
+      }"
+    ```
+
+The same endpoint accepts images, audio, and video (within the supported
+media allowlist). Files are scoped per-server by default, automatically
+expire after a configurable TTL (default 1 hour), and are capped by both
+per-file and total-disk quotas.
+
+See [Files API](../serving/openai_compatible_server.md#files-api) for the
+full endpoint reference, all `--file-upload-*` flags, and deployment
+patterns for gateway-fronted servers.
+
 #### Custom RGBA Background Color
 
 To use a custom background color for RGBA images, pass the `rgba_background_color` parameter via `--media-io-kwargs`:
