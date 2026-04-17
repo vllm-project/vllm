@@ -3366,4 +3366,3 @@ steps:
   commands:
   - pip install modelscope
   - pytest -v -s test_regression.py
-
