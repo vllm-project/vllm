@@ -397,8 +397,6 @@ class Fp8LinearMethod(LinearMethodBase):
         if self.block_quant:
             assert not self.act_q_static
 
-            self.fp8_linear.process_weights_after_loading(layer)
-
         # If checkpoint not serialized fp8, quantize the weights.
         else:
             # If checkpoint is fp8 per-tensor, handle that there are N scales for N
@@ -427,6 +425,8 @@ class Fp8LinearMethod(LinearMethodBase):
             replace_parameter(layer, "input_scale", input_scale)
         else:
             layer.input_scale = None
+
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,

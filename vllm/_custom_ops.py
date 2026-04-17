@@ -435,6 +435,7 @@ def fused_qk_norm_rope(
     cos_sin_cache: torch.Tensor,
     is_neox: bool,
     position_ids: torch.Tensor,
+    forced_token_heads_per_warp: int = -1,
 ) -> None:
     torch.ops._C.fused_qk_norm_rope(
         qkv,
@@ -448,6 +449,7 @@ def fused_qk_norm_rope(
         cos_sin_cache,
         is_neox,
         position_ids,
+        forced_token_heads_per_warp,
     )
 
 
@@ -3296,6 +3298,12 @@ def cpu_gemm_wna16(
         isa_hint,
     )
     return output
+
+
+def cpu_activation_lut_bf16(input: torch.Tensor, activation: str) -> torch.Tensor:
+    out = torch.empty_like(input)
+    torch.ops._C.activation_lut_bf16(out, input, activation)
+    return out
 
 
 def cpu_prepack_moe_weight(
