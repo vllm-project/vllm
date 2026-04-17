@@ -106,6 +106,14 @@ class StructuredOutputsParams:
             )
         )
 
+    def _uses_grammar_constraint(self) -> bool:
+        """Returns True if this request uses a grammar-based constraint
+        (json, json_object, grammar) that restricts the token space via
+        a bitmask and could amplify model repetition tendencies."""
+        return (self.json is not None
+                or self.json_object is not None  # noqa: SIM222
+                or self.grammar is not None)
+
 
 @dataclass
 class RepetitionDetectionParams:
@@ -427,6 +435,28 @@ class SamplingParams(
 
         # eos_token_id is added to this by the engine
         self._all_stop_token_ids.update(self.stop_token_ids)
+
+        # Auto-enable repetition detection for grammar-constrained structured
+        # output requests (json, json_object, grammar) to prevent infinite
+        # repetition loops.  Some models (e.g. Gemma 4) produce degenerate
+        # loops when the grammar mask restricts the token space.  The generous
+        # thresholds below only trigger on truly degenerate output and will
+        # not false-positive on legitimate JSON.
+        # To explicitly disable, pass RepetitionDetectionParams() (all zeros).
+        # See: https://github.com/vllm-project/vllm/issues/40080
+        if (self.structured_outputs is not None
+                and self.repetition_detection is None
+                and self.structured_outputs._uses_grammar_constraint()):
+            self.repetition_detection = RepetitionDetectionParams(
+                max_pattern_size=20,
+                min_pattern_size=3,
+                min_count=4,
+            )
+            logger.info_once(
+                "Auto-enabled repetition detection for structured output "
+                "request (max_pattern_size=20, min_count=4). To disable, "
+                "pass repetition_detection=RepetitionDetectionParams(). "
+                "See: https://github.com/vllm-project/vllm/issues/40080")
 
         if self.skip_reading_prefix_cache is None:
             # If prefix caching is enabled,
