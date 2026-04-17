@@ -44,6 +44,17 @@ class ToolParser:
     derived classes.
     """
 
+    # When True (default), the serving layer uses the standard JSON-based
+    # parsing for tool_choice="required" and named function tool_choice,
+    # which works for models where guided decoding produces well-formed
+    # JSON output (e.g. Hermes).
+    # Subclasses set False when the standard parsing does not work for
+    # their model's output format (e.g. GLM models that use XML).  When
+    # False, the serving layer falls back to the tool_parser's
+    # extract_tool_calls / extract_tool_calls_streaming methods for
+    # required/named tool_choice, treating them the same as "auto".
+    supports_required_and_named: bool = True
+
     def __init__(
         self,
         tokenizer: TokenizerLike,
