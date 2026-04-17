@@ -17,13 +17,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsMxfp4,
 )
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    MarlinExperts,
-)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
+)
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    select_gpt_oss_mxfp4_moe_backend as select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
@@ -187,7 +187,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             prepare_moe_fp4_layer_for_marlin(layer)
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config is not None:
+        if self.moe_quant_config is not None and self.experts_cls is not None:
             self.moe_kernel = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
