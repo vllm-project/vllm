@@ -39,8 +39,8 @@
 #####################################################################################################################################
 #                                                                                                                                   #
 # IMPORTANT:                                                                                                                        #
-#   * Currently AMD CI has MI250 agents, MI300 agents, and MI355 agents. All upcoming feature improvements are tracked in:          #
-#         https://github.com/vllm-project/vllm/issues/34994                                                                         #
+#   * Currently AMD CI has MI250 agents, MI300 agents, MI325 agents, and MI355 agents. All upcoming feature improvements are        #
+#         tracked in: https://github.com/vllm-project/vllm/issues/34994                                                             #
 #                                                                                                                                   #
 #-----------------------------------------------------------------------------------------------------------------------------------#
 #                                                                                                                                   #
