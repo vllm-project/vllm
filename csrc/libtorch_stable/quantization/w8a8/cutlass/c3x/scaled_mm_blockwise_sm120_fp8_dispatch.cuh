@@ -15,6 +15,7 @@
 #include "cutlass/gemm/kernel/tile_scheduler_params.h"
 #include "cutlass/epilogue/dispatch_policy.hpp"
 #include "cutlass/epilogue/collective/collective_builder.hpp"
+#include "cutlass/kernel_hardware_info.h"
 
 #include "cutlass_gemm_caller.cuh"
 
@@ -38,7 +39,6 @@ struct cutlass_3x_gemm_fp8_blockwise {
   static constexpr int AlignmentA = 128 / cutlass::sizeof_bits<ElementA>::value;
 
   using ElementB = ElementAB;
-  // ColumnMajor is used for B to match the CUTLASS convention.
   using LayoutB = cutlass::layout::ColumnMajor;
   using LayoutB_Transpose = typename cutlass::layout::LayoutTranspose<LayoutB>::type;
   static constexpr int AlignmentB = 128 / cutlass::sizeof_bits<ElementB>::value;
@@ -48,14 +48,14 @@ struct cutlass_3x_gemm_fp8_blockwise {
   using LayoutD_Transpose = typename cutlass::layout::LayoutTranspose<LayoutD>::type;
   static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
 
-  using ElementC = void; // TODO: support bias
+  using ElementC = void;
   using LayoutC = LayoutD;
   using LayoutC_Transpose = LayoutD_Transpose;
   static constexpr int AlignmentC = AlignmentD;
 
   using ElementAccumulator = float;
   using ElementCompute = float;
-  using ElementBlockScale = float; 
+  using ElementBlockScale = float;
 
   using ScaleConfig = conditional_t<swap_ab,
       cutlass::detail::Sm120BlockwiseScaleConfig<
@@ -65,7 +65,6 @@ struct cutlass_3x_gemm_fp8_blockwise {
         ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
         cute::UMMA::Major::MN, cute::UMMA::Major::K>>;
 
-  // layout_SFA and layout_SFB cannot be swapped since they are deduced.
   using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
   using LayoutSFB = decltype(ScaleConfig::deduce_layoutSFB());
 
@@ -92,8 +91,8 @@ struct cutlass_3x_gemm_fp8_blockwise {
       EpilogueScheduler,
       DefaultOperation
   >::CollectiveOp;
- 
-  using StageCountType = cutlass::gemm::collective::StageCountAuto; 
+
+  using StageCountType = cutlass::gemm::collective::StageCountAuto;
   using CollectiveMainloop = conditional_t<swap_ab,
       typename cutlass::gemm::collective::CollectiveBuilder<
           ArchTag,
@@ -126,22 +125,105 @@ struct cutlass_3x_gemm_fp8_blockwise {
           MainloopScheduler
       >::CollectiveOp>;
 
-  // SM12x family to support both SM120 (RTX 5090) and SM121 (DGX Spark)
   using KernelType = enable_sm120_family<cutlass::gemm::kernel::GemmUniversal<
       Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>>;
 
   struct GemmKernel : public KernelType {};
 };
 
+// Custom variant that allows specifying EpilogueTile (needed for very small M)
+template <class OutType, int ScaleGranularityM,
+          int ScaleGranularityN, int ScaleGranularityK,
+          class MmaTileShape, class ClusterShape,
+          class EpilogueScheduler, class MainloopScheduler,
+          class EpilogueTile>
+struct cutlass_3x_gemm_fp8_blockwise_custom {
+  using ElementAB = cutlass::float_e4m3_t;
+
+  using ElementA = ElementAB;
+  using LayoutA = cutlass::layout::RowMajor;
+  static constexpr int AlignmentA = 128 / cutlass::sizeof_bits<ElementA>::value;
+
+  using ElementB = ElementAB;
+  using LayoutB = cutlass::layout::ColumnMajor;
+  static constexpr int AlignmentB = 128 / cutlass::sizeof_bits<ElementB>::value;
+
+  using ElementD = OutType;
+  using LayoutD = cutlass::layout::RowMajor;
+  static constexpr int AlignmentD = 128 / cutlass::sizeof_bits<ElementD>::value;
+
+  using ElementC = void;
+  using LayoutC = LayoutD;
+  static constexpr int AlignmentC = AlignmentD;
+
+  using ElementAccumulator = float;
+  using ElementCompute = float;
+  using ElementBlockScale = float;
+
+  using ScaleConfig = cutlass::detail::Sm120BlockwiseScaleConfig<
+        ScaleGranularityM, ScaleGranularityN, ScaleGranularityK,
+        cute::UMMA::Major::MN, cute::UMMA::Major::K>;
+
+  using LayoutSFA = decltype(ScaleConfig::deduce_layoutSFA());
+  using LayoutSFB = decltype(ScaleConfig::deduce_layoutSFB());
+
+  using ArchTag = cutlass::arch::Sm120;
+  using OperatorClass = cutlass::arch::OpClassTensorOp;
+
+  static constexpr auto RoundStyle = cutlass::FloatRoundStyle::round_to_nearest;
+  using ElementScalar = float;
+  using DefaultOperation = cutlass::epilogue::fusion::LinearCombination<ElementD, ElementCompute, ElementC, ElementScalar, RoundStyle>;
+  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+      ArchTag,
+      OperatorClass,
+      MmaTileShape,
+      ClusterShape,
+      EpilogueTile,
+      ElementAccumulator,
+      ElementCompute,
+      ElementC,
+      LayoutC,
+      AlignmentC,
+      ElementD,
+      LayoutD,
+      AlignmentD,
+      EpilogueScheduler,
+      DefaultOperation
+  >::CollectiveOp;
+
+  using CollectiveMainloop =
+      typename cutlass::gemm::collective::CollectiveBuilder<
+          ArchTag,
+          OperatorClass,
+          ElementA,
+          cute::tuple<LayoutA, LayoutSFA>,
+          AlignmentA,
+          ElementB,
+          cute::tuple<LayoutB, LayoutSFB>,
+          AlignmentB,
+          ElementAccumulator,
+          MmaTileShape,
+          ClusterShape,
+          cutlass::gemm::collective::StageCountAutoCarveout<static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+          MainloopScheduler
+      >::CollectiveOp;
+
+  using KernelType = enable_sm120_family<cutlass::gemm::kernel::GemmUniversal<
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue>>;
+
+  static constexpr bool swap_ab = false;
+
+  struct GemmKernel : public KernelType {};
+};
+
 // Tile configurations for different M ranges
+
 template <typename OutType>
 struct sm120_blockwise_fp8_config_default {
-  // use 128x128x128 tile with Cooperative (Auto) schedule
   using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   using TileShape = Shape<_128, _128, _128>;
   using ClusterShape = Shape<_1, _1, _1>;
-  // ScaleGranularity must match the actual quantization block size (1, 128, 128)
   using Gemm = cutlass_3x_gemm_fp8_blockwise<
       OutType, 1, 128, 128, TileShape, ClusterShape,
       EpilogueSchedule, KernelSchedule>;
@@ -149,12 +231,10 @@ struct sm120_blockwise_fp8_config_default {
 
 template <typename OutType>
 struct sm120_blockwise_fp8_config_pingpong {
-  // use 64x128x128 tile with Pingpong schedule
   using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   using TileShape = Shape<_64, _128, _128>;
   using ClusterShape = Shape<_1, _1, _1>;
-  // ScaleGranularity stays (1, 128, 128) to match actual quantization data
   using Gemm = cutlass_3x_gemm_fp8_blockwise<
       OutType, 1, 128, 128, TileShape, ClusterShape,
       EpilogueSchedule, KernelSchedule>;
@@ -162,7 +242,6 @@ struct sm120_blockwise_fp8_config_pingpong {
 
 template <typename OutType>
 struct sm120_blockwise_fp8_config_swapab {
-  // use 128x32x128 tile with Cooperative schedule
   using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedBlockwiseCooperativeSm120;
   using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
   using TileShape = Shape<_128, _32, _128>;
@@ -170,6 +249,31 @@ struct sm120_blockwise_fp8_config_swapab {
   using Gemm = cutlass_3x_gemm_fp8_blockwise<
       OutType, 128, 1, 128, TileShape, ClusterShape,
       EpilogueSchedule, KernelSchedule, true>;
+};
+
+// Small-M configs: M16 and M32 tiles with custom epilogue
+template <typename OutType>
+struct sm120_blockwise_fp8_config_M32 {
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileShape = Shape<_32, _128, _128>;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using EpilogueTile = Shape<_32, _128>;
+  using Gemm = cutlass_3x_gemm_fp8_blockwise_custom<
+      OutType, 1, 128, 128, TileShape, ClusterShape,
+      EpilogueSchedule, KernelSchedule, EpilogueTile>;
+};
+
+template <typename OutType>
+struct sm120_blockwise_fp8_config_M16 {
+  using KernelSchedule = cutlass::gemm::KernelTmaWarpSpecializedBlockwisePingpongSm120;
+  using EpilogueSchedule = cutlass::epilogue::collective::EpilogueScheduleAuto;
+  using TileShape = Shape<_16, _128, _128>;
+  using ClusterShape = Shape<_1, _1, _1>;
+  using EpilogueTile = Shape<_16, _128>;
+  using Gemm = cutlass_3x_gemm_fp8_blockwise_custom<
+      OutType, 1, 128, 128, TileShape, ClusterShape,
+      EpilogueSchedule, KernelSchedule, EpilogueTile>;
 };
 
 template <typename Gemm>
@@ -249,26 +353,31 @@ void cutlass_gemm_blockwise_sm120_fp8_dispatch(torch::stable::Tensor& out,
                                                torch::stable::Tensor const& a_scales,
                                                torch::stable::Tensor const& b_scales) {
   int M = a.size(0);
-  // more heuristic tuning can be done here by checking N/K dimensions as well
-  bool swap_ab = (M <= 64) || (M % 4 != 0);
 
-  if (!swap_ab) {
-    if (M <= 256) {
-      using Gemm = typename sm120_blockwise_fp8_config_pingpong<OutType>::Gemm;
-      return cutlass_gemm_caller_blockwise<Gemm>(
-          out, a, b, a_scales, b_scales);
-    }
-    // M > 256: use default 128x128x128 config with Cooperative (Auto) schedule
-    using Gemm = typename sm120_blockwise_fp8_config_default<OutType>::Gemm;
+  if (M <= 16) {
+    using Gemm = typename sm120_blockwise_fp8_config_M16<OutType>::Gemm;
     return cutlass_gemm_caller_blockwise<Gemm>(
         out, a, b, a_scales, b_scales);
-  } else {
-    // Swap A/B for small M to improve performance
-    // Use TILE_N=32 as the minimum compatible tile size.
+  }
+  if (M <= 32) {
+    using Gemm = typename sm120_blockwise_fp8_config_M32<OutType>::Gemm;
+    return cutlass_gemm_caller_blockwise<Gemm>(
+        out, a, b, a_scales, b_scales);
+  }
+  if (M <= 64 || (M % 4 != 0)) {
     using Gemm = typename sm120_blockwise_fp8_config_swapab<OutType>::Gemm;
     return cutlass_gemm_caller_blockwise<Gemm>(
         out, a, b, a_scales, b_scales);
   }
+  if (M <= 256) {
+    using Gemm = typename sm120_blockwise_fp8_config_pingpong<OutType>::Gemm;
+    return cutlass_gemm_caller_blockwise<Gemm>(
+        out, a, b, a_scales, b_scales);
+  }
+  // M > 256: use default 128x128x128 config with Cooperative (Auto) schedule
+  using Gemm = typename sm120_blockwise_fp8_config_default<OutType>::Gemm;
+  return cutlass_gemm_caller_blockwise<Gemm>(
+      out, a, b, a_scales, b_scales);
 }
 
 }  // namespace vllm
