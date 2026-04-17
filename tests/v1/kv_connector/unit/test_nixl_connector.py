@@ -39,9 +39,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlHandshakePayload,
     NixlKVConnectorStats,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (
-    DenseModelBlockTransferPolicy,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     compute_nixl_compatibility_hash,
 )
@@ -475,7 +472,6 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             is_mamba=False,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
-            policy=DenseModelBlockTransferPolicy(kv_cache_config),
             tensor_shape=test_shape,
         )
 
@@ -2439,7 +2435,6 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
         is_mamba=False,
         total_num_kv_heads=decode_worker.model_config.get_total_num_kv_heads(),
         attn_backends=[backend],
-        policy=DenseModelBlockTransferPolicy(decode_worker.kv_cache_config),
         tensor_shape=test_shape,
     )
 

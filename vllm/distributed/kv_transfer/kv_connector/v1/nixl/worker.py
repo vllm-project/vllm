@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (
+    MambaModelBlockTransferPolicy,
     ModelBlockTransferPolicy,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -161,7 +162,7 @@ class NixlConnectorWorker:
             local_tp = vllm_config.parallel_config.tensor_parallel_size
             self._conv_decomp = derive_mamba_conv_split(mamba_spec, local_tp)
 
-        self.block_transfer_policy = ModelBlockTransferPolicy.create(
+        self.transfer_policy = ModelBlockTransferPolicy.create(
             kv_cache_config=kv_cache_config,
             tp_size=vllm_config.parallel_config.tensor_parallel_size,
         )
@@ -660,7 +661,6 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
-            policy=self.block_transfer_policy,
             # SSM States come in tuples (ssm, conv)
             tensor_shape=next(iter(kv_caches.values())).shape
             if not self._has_mamba
@@ -921,6 +921,7 @@ class NixlConnectorWorker:
         )
         # TODO (ZhanqiuHu): unify with register_remote_blocks when Mamba-HMA
         # hetero-TP logic stabilizes.
+        assert isinstance(self.transfer_policy, MambaModelBlockTransferPolicy)
         mamba_info = transfer_topo.get_engine_info(remote_engine_id)
         assert isinstance(mamba_info, MambaEngineTransferInfo)
         tp_ratio = transfer_topo.tp_ratio(mamba_info.remote_tp_size)
@@ -936,8 +937,13 @@ class NixlConnectorWorker:
             if tp_ratio < 0 and not self.use_mla:
                 local_block_len = local_block_len // mamba_info.remote_num_fa_reads
 
-            rank_offset = transfer_topo.fa_rank_offset(
-                remote_engine_id, remote_kv_block_len
+            rank_offset = self.transfer_policy.fa_rank_offset(
+                mamba_info,
+                remote_kv_block_len,
+                tp_rank=transfer_topo.tp_rank,
+                tp_size=transfer_topo.tp_size,
+                is_mla=transfer_topo.is_mla,
+                total_num_kv_heads=transfer_topo.total_num_kv_heads,
             )
 
             num_blocks = nixl_agent_meta.num_blocks
@@ -1176,14 +1182,21 @@ class NixlConnectorWorker:
             if self._has_mamba
             else 1
         )
-        transfer_topo.register_remote_engine(
-            remote_engine_id=engine_id,
+        transfer_info = self.transfer_policy.build_engine_transfer_info(
+            # Local facts (from TransferTopology).
+            tp_rank=transfer_topo.tp_rank,
+            tp_size=transfer_topo.tp_size,
+            is_mla=transfer_topo.is_mla,
+            total_num_kv_heads=transfer_topo.total_num_kv_heads,
+            is_kv_layout_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+            local_block_len=self.block_len_per_layer[0],
+            # Remote facts (from NixlAgentMetadata handshake).
             remote_tp_size=remote_tp_size,
             remote_block_size=nixl_agent_meta.block_size,
             remote_block_len=nixl_agent_meta.block_lens[0],
             remote_physical_blocks_per_logical=physical_blocks_per_logical,
-            local_block_len=self.block_len_per_layer[0],
         )
+        transfer_topo.register_remote_engine(engine_id, transfer_info)
         if self._has_mamba and engine_id not in self._physical_blocks_per_logical:
             self._physical_blocks_per_logical[engine_id] = physical_blocks_per_logical
 
@@ -1240,10 +1253,21 @@ class NixlConnectorWorker:
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
             if self._has_mamba:
-                if transfer_topo.needs_split_handles(engine_id):
+                assert isinstance(self.transfer_policy, MambaModelBlockTransferPolicy)
+                mamba_info = transfer_topo.get_engine_info(engine_id)
+                assert isinstance(mamba_info, MambaEngineTransferInfo)
+                if self.transfer_policy.needs_split_handles(
+                    mamba_info,
+                    tp_size=transfer_topo.tp_size,
+                    is_mla=transfer_topo.is_mla,
+                ):
                     # Mamba-HMA: FA and Mamba use different split factors.
-                    for handle_data in transfer_topo.compute_split_handle_data(
-                        engine_id, self.src_blocks_data, self.num_descs, abs_tp
+                    for handle_data in self.transfer_policy.compute_split_handle_data(
+                        mamba_info,
+                        self.src_blocks_data,
+                        self.num_descs,
+                        abs_tp,
+                        total_num_kv_heads=transfer_topo.total_num_kv_heads,
                     ):
                         descs = self.nixl_wrapper.get_xfer_descs(
                             handle_data, self.nixl_memory_type
@@ -1958,12 +1982,13 @@ class NixlConnectorWorker:
             remote_ids: BlockIds = meta.remote.block_ids
             if self._has_mamba:
                 # Mamba-HMA: zero out FA groups for P ranks outside fa_read_targets.
-                local_ids, remote_ids = self.transfer_topo.filter_block_ids_for_rank(
-                    engine_id,
+                assert isinstance(self.transfer_policy, MambaModelBlockTransferPolicy)
+                assert isinstance(remote_info, MambaEngineTransferInfo)
+                local_ids, remote_ids = self.transfer_policy.filter_block_ids_for_rank(
+                    remote_info,
                     remote_rank,
                     local_ids,
                     remote_ids,
-                    self._is_mamba_group,
                 )
 
             self._read_blocks(
