@@ -442,7 +442,14 @@ class FusedMoE(PluggableLayer):
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
         self.scoring_func = scoring_func
-        self.routed_scaling_factor = routed_scaling_factor
+        # When apply_routed_scale_to_output is True, we set the scaling factor
+        # to 1.0 so it ends up being a nop. Applying the scale will be handled
+        # by the runner in this case.
+        # The member variable must be set in the same way as the router since
+        # some quantization methods can access it.
+        self.routed_scaling_factor = (
+            routed_scaling_factor if not apply_routed_scale_to_output else 1.0
+        )
         self.e_score_correction_bias = e_score_correction_bias
         # TODO(bnell): end attributes
 
@@ -461,13 +468,7 @@ class FusedMoE(PluggableLayer):
             topk_group=topk_group,
             custom_routing_function=custom_routing_function,
             scoring_func=scoring_func,
-            # When apply_routed_scale_to_output is True, we set
-            # the scaling factor to 1.0 so it ends up being a nop.
-            # Applying the scale will be handled by the runner
-            # in this case.
-            routed_scaling_factor=routed_scaling_factor
-            if not apply_routed_scale_to_output
-            else 1.0,
+            routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=e_score_correction_bias,
             num_fused_shared_experts=self.num_fused_shared_experts,
             enable_eplb=enable_eplb,

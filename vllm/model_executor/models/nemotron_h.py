@@ -230,9 +230,7 @@ class NemotronHMoE(nn.Module):
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
             routed_input_transform=self.fc1_latent_proj,
-            routed_output_transform=self.fc2_latent_proj
-            if self.use_latent_moe
-            else None,
+            routed_output_transform=self.fc2_latent_proj,
             routed_scaling_factor=self.routed_scaling_factor,
             apply_routed_scale_to_output=True,
             router_logits_dtype=self.gate.out_dtype,

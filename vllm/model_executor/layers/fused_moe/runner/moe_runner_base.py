@@ -572,9 +572,6 @@ class MoERunnerBase(MoERunner):
         # Extract outputs from result
         shared_output, fused_output = _unpack(result)
 
-        # Apply output transform (e.g. latent -> full dim)
-        fused_output = self.apply_routed_output_transform(fused_output)
-
         # If combine kernel already reduced fused, reduce shared to match.
         # See note above re: the two all-reduce points.
         shared_output = self._maybe_reduce_shared_expert_output(shared_output)
@@ -582,6 +579,9 @@ class MoERunnerBase(MoERunner):
         shared_output, fused_output = self._maybe_apply_routed_scale_to_output(
             shared_output, fused_output
         )
+
+        # Apply output transform (e.g. latent -> full dim)
+        fused_output = self.apply_routed_output_transform(fused_output)
 
         if shared_output is not None:
             result = shared_output + fused_output
