@@ -221,6 +221,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "ibm-ai-platform/Bamba-9B-v1",
         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"},
     ),
+    "BitNetForCausalLM": _HfExamplesInfo(
+        "microsoft/bitnet-b1.58-2B-4T-bf16",
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=2048,
+    ),
     "BloomForCausalLM": _HfExamplesInfo(
         "bigscience/bloom-560m", {"1b": "bigscience/bloomz-1b1"}
     ),
