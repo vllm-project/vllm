@@ -22,6 +22,8 @@ class SpecDecodeMetadata:
     bonus_logits_indices: torch.Tensor
     # [num_tokens + batch_size]
     logits_indices: torch.Tensor
+    # [num_tokens]
+    parents: torch.Tensor | None = None
 
     def __post_init__(self):
         self.max_spec_len = max(self.num_draft_tokens)
@@ -55,6 +57,13 @@ class SpecDecodeMetadata:
         logits_indices = torch.zeros(
             num_tokens + batch_size, dtype=torch.int32, device=device
         )
+
+        parents_np = np.arange(num_tokens, dtype=np.int32) - 1
+        if num_tokens > 0:
+            cu_starts = np.cumsum([0] + num_draft_tokens[:-1], dtype=np.int32)
+            parents_np[cu_starts] = -1
+        parents_tensor = torch.from_numpy(parents_np).to(device)
+
         return cls(
             draft_token_ids=draft_token_ids_tensor,
             num_draft_tokens=num_draft_tokens,
@@ -63,4 +72,5 @@ class SpecDecodeMetadata:
             target_logits_indices=target_logits_indices,
             bonus_logits_indices=bonus_logits_indices,
             logits_indices=logits_indices,
+            parents=parents_tensor,
         )
