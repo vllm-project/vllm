@@ -1362,6 +1362,7 @@ class Scheduler(SchedulerInterface):
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )
+            previous_all_token_ids = list(request.all_token_ids)
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
@@ -1406,22 +1407,35 @@ class Scheduler(SchedulerInterface):
                 request.status = RequestStatus.FINISHED_STOPPED
                 stopped = True
 
-            if new_token_ids and self.structured_output_manager.should_advance(request):
+            if new_token_ids:
+                manager = self.structured_output_manager
+                should_advance = manager.should_advance(request)
                 struct_output_request = request.structured_output_request
-                assert struct_output_request is not None
-                assert struct_output_request.grammar is not None
-                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids
-                ):
-                    logger.error(
-                        "Unexpected: grammar rejected tokens %s for request %s. "
-                        "Terminating request.",
+                transition_content_ids: list[int] = []
+                if not should_advance and request.use_structured_output:
+                    transition_content_ids = manager.content_delta_after_reasoning_end(
+                        request,
+                        previous_all_token_ids,
                         new_token_ids,
-                        req_id,
                     )
-                    request.status = RequestStatus.FINISHED_ERROR
-                    request.resumable = False
-                    stopped = True
+
+                if should_advance or transition_content_ids:
+                    assert struct_output_request is not None
+                    assert struct_output_request.grammar is not None
+                    tokens_to_accept = (
+                        new_token_ids if should_advance else transition_content_ids
+                    )
+                    if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                        req_id, new_token_ids
+                    ):
+                        logger.warning(
+                            "Unexpected: grammar rejected tokens %s for request %s.",
+                            tokens_to_accept,
+                            req_id,
+                        )
+                        request.status = RequestStatus.FINISHED_ERROR
+                        request.resumable = False
+                        stopped = True
 
             routed_experts = None
             finish_reason = None
@@ -1698,9 +1712,16 @@ class Scheduler(SchedulerInterface):
                     )
                 )
                 if spec_token_end_index != -1:
-                    # The reasoning-end marker is emitted as the bonus token on the
-                    # next pass, so keep only pure reasoning draft tokens here.
-                    spec_token_ids = spec_token_ids[:spec_token_end_index]
+                    metadata = request.structured_output_request
+                    assert metadata is not None and metadata.grammar is not None
+                    suffix_start = spec_token_end_index + 1
+                    validated_suffix = metadata.grammar.validate_tokens(
+                        spec_token_ids[suffix_start:]
+                    )
+                    spec_token_ids = [
+                        *spec_token_ids[:suffix_start],
+                        *validated_suffix,
+                    ]
             request.spec_token_ids = spec_token_ids
 
     def update_draft_token_ids_in_output(
@@ -1738,10 +1759,16 @@ class Scheduler(SchedulerInterface):
                     )
                 )
                 if spec_token_end_index != -1:
-                    spec_token_ids = spec_token_ids[:spec_token_end_index]
-            # Persist the real draft prefix for the next scheduling step before
-            # padding this step-local view with placeholder tokens.
-            request.spec_token_ids = spec_token_ids.copy()
+                    metadata = request.structured_output_request
+                    assert metadata is not None and metadata.grammar is not None
+                    suffix_start = spec_token_end_index + 1
+                    validated_suffix = metadata.grammar.validate_tokens(
+                        spec_token_ids[suffix_start:]
+                    )
+                    spec_token_ids = [
+                        *spec_token_ids[:suffix_start],
+                        *validated_suffix,
+                    ]
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:

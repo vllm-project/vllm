@@ -74,3 +74,27 @@ def test_identity_reasoning_parser_basic(tokenizer):
         delta_token_ids=[],
     )
     assert result_none is None
+    assert parser.reasoning_end_index(input_ids) == -1
+    assert parser.reasoning_end_delta_index(input_ids, input_ids) == -1
+
+
+def test_deepseek_v3_reasoning_end_indices_delegate(tokenizer):
+    parser = DeepSeekV3ReasoningParser(
+        tokenizer, chat_template_kwargs={"thinking": True}
+    )
+    previous_text = "<think>This is reasoning"
+    delta_text = "</think>This is the answer"
+
+    previous_ids = tokenizer.encode(previous_text, add_special_tokens=False)
+    delta_ids = tokenizer.encode(delta_text, add_special_tokens=False)
+    combined_ids = previous_ids + delta_ids
+
+    end_token_ids = tokenizer.encode("</think>", add_special_tokens=False)
+    expected_end_index = combined_ids.index(end_token_ids[-1])
+    expected_delta_index = delta_ids.index(end_token_ids[-1])
+
+    assert parser.reasoning_end_index(combined_ids) == expected_end_index
+    assert (
+        parser.reasoning_end_delta_index(previous_ids, delta_ids)
+        == expected_delta_index
+    )

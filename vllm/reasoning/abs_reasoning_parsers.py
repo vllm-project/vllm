@@ -39,52 +39,6 @@ class ReasoningParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    @property
-    def reasoning_start_str(self) -> str | None:
-        """Set `reasoning_start_str` to the strings that delimit
-        the reasoning block (e.g. `""<seed:think>""` and `"<think>"`).
-        """
-        return None
-
-    @property
-    def reasoning_end_str(self) -> str | None:
-        """Set `reasoning_end_str` to the strings that delimit
-        the reasoning block (e.g. `""</seed:think>""` and `"</think>"`).
-        """
-        return None
-
-    def reasoning_end_index(self, input_ids: Sequence[int]) -> int:
-        """
-        Find the reasoning-end marker in a complete token sequence.
-
-        Returns the index of the last token in the reasoning-end marker, or
-        ``-1`` if no reasoning-end marker is present.
-        """
-        return -1
-
-    def reasoning_end_delta_index(
-        self,
-        previous_input_ids: Sequence[int],
-        delta_ids: Sequence[int],
-    ) -> int:
-        """
-        Find where reasoning ends within ``delta_ids``.
-
-        ``previous_input_ids`` must contain the tokens before ``delta_ids``.
-        Returns the index of the last token in the reasoning-end marker
-        relative to ``delta_ids``, or ``-1`` if reasoning does not end in
-        this delta.
-        """
-        if not delta_ids:
-            return -1
-
-        current_input_ids = list(previous_input_ids)
-        current_input_ids.extend(delta_ids)
-        end_index = self.reasoning_end_index(current_input_ids)
-        if end_index < len(previous_input_ids):
-            return -1
-        return end_index - len(previous_input_ids)
-
     @abstractmethod
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
@@ -126,6 +80,38 @@ class ReasoningParser:
             decode step.
         """
         return self.is_reasoning_end(input_ids)
+
+    def reasoning_end_index(self, input_ids: Sequence[int]) -> int:
+        """
+        Find the reasoning-end marker in a complete token sequence.
+
+        Returns the index of the last token in the reasoning-end marker, or
+        ``-1`` if no reasoning-end marker is present.
+        """
+        return -1
+
+    def reasoning_end_delta_index(
+        self,
+        previous_input_ids: Sequence[int],
+        delta_ids: Sequence[int],
+    ) -> int:
+        """
+        Find where reasoning ends within ``delta_ids``.
+
+        ``previous_input_ids`` must contain the tokens before ``delta_ids``.
+        Returns the index of the last token in the reasoning-end marker
+        relative to ``delta_ids``, or ``-1`` if reasoning does not end in
+        this delta.
+        """
+        if not delta_ids:
+            return -1
+
+        current_input_ids = list(previous_input_ids)
+        current_input_ids.extend(delta_ids)
+        end_index = self.reasoning_end_index(current_input_ids)
+        if end_index < len(previous_input_ids):
+            return -1
+        return end_index - len(previous_input_ids)
 
     @abstractmethod
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:

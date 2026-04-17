@@ -101,7 +101,7 @@ class GptOssReasoningParser(ReasoningParser):
                 # messages of the conversation.
                 return -1
             if input_ids[i : i + len(end_token_ids_prefix)] == end_token_ids_prefix:
-                # We have found the prefix, now we look for the suffix after it.
+                # We have found the prefix, now we look for the suffix after the prefix.
                 suffix_start = i + len(end_token_ids_prefix)
                 for j in range(
                     suffix_start, len(input_ids) - len(end_token_ids_suffix) + 1
@@ -133,6 +133,7 @@ class GptOssReasoningParser(ReasoningParser):
         prefix_tail = previous_input_ids[-lookbehind:] if lookbehind > 0 else ()
         window = list(prefix_tail)
         delta_start = len(window)
+
         window.extend(delta_ids)
 
         idx = self.reasoning_end_index(window)

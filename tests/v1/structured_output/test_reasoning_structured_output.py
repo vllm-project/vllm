@@ -6,6 +6,7 @@
 from unittest.mock import Mock
 
 import pytest
+import torch
 
 from vllm.config import ModelConfig, SchedulerConfig, VllmConfig
 from vllm.reasoning import ReasoningParser
@@ -55,8 +56,6 @@ class TestReasoningStructuredOutput:
         """Create a mock ReasoningParser."""
         parser = Mock(spec=ReasoningParser)
         parser.is_reasoning_end = Mock(return_value=False)
-        parser.is_reasoning_end_streaming = Mock(return_value=False)
-        parser.reasoning_end_delta_index = Mock(return_value=-1)
         return parser
 
     @pytest.fixture
@@ -158,7 +157,7 @@ class TestReasoningStructuredOutput:
         (
             mock_request_with_structured_output.structured_output_request
         ).reasoning_ended = False
-        mock_reasoning_parser.is_reasoning_end_streaming.return_value = False
+        mock_reasoning_parser.is_reasoning_end.return_value = False
 
         result = manager.should_advance(mock_request_with_structured_output)
 
@@ -179,7 +178,7 @@ class TestReasoningStructuredOutput:
         (
             mock_request_with_structured_output.structured_output_request
         ).reasoning_ended = False
-        mock_reasoning_parser.is_reasoning_end_streaming.return_value = True
+        mock_reasoning_parser.is_reasoning_end.return_value = True
 
         result = manager.should_advance(mock_request_with_structured_output)
 
@@ -210,7 +209,7 @@ class TestReasoningStructuredOutput:
         # Should return True since reasoning has ended
         assert result is True
 
-    def test_should_advance_uses_streaming_reasoning_end_detection(
+    def test_grammar_bitmask_starts_constraining_after_transition(
         self,
         mock_vllm_config,
         mock_request_with_structured_output,
@@ -218,38 +217,31 @@ class TestReasoningStructuredOutput:
     ):
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner = mock_reasoning_parser
+        manager._grammar_bitmask = torch.zeros((8, 1), dtype=torch.int32)
 
-        (
-            mock_request_with_structured_output.structured_output_request
-        ).reasoning_ended = False
-        mock_reasoning_parser.is_reasoning_end_streaming.return_value = True
-
-        result = manager.should_advance(mock_request_with_structured_output)
-
-        assert (
-            mock_request_with_structured_output.structured_output_request.reasoning_ended
-            is True
+        request = mock_request_with_structured_output
+        request.request_id = "req_0"
+        request.structured_output_request.grammar.accept_tokens = Mock(
+            return_value=True
         )
-        assert result is False
+        request.structured_output_request.grammar.rollback = Mock()
+        request.structured_output_request.grammar.fill_bitmask = Mock()
 
-    def test_spec_token_reasoning_end_index_returns_minus_one(
-        self,
-        mock_vllm_config,
-        mock_request_with_structured_output,
-        mock_reasoning_parser,
-    ):
-        mock_vllm_config.structured_outputs_config.enable_in_reasoning = True
-        manager = StructuredOutputManager(mock_vllm_config)
-        manager.reasoner = mock_reasoning_parser
+        manager.should_fill_bitmask = Mock(return_value=False)
+        manager.spec_token_reasoning_end_index = Mock(return_value=1)
 
-        result = manager.spec_token_reasoning_end_index(
-            mock_request_with_structured_output, [10, 11]
+        manager.grammar_bitmask(
+            {"req_0": request},
+            ["req_0"],
+            {"req_0": [10, 11, 30, -1]},
         )
 
-        assert result == -1
-        mock_reasoning_parser.reasoning_end_delta_index.assert_not_called()
+        request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
+            "req_0", [30]
+        )
+        request.structured_output_request.grammar.rollback.assert_called_once_with(1)
 
-    def test_spec_token_reasoning_end_index_delegates_to_reasoner(
+    def test_reasoning_end_delta_index_is_cached_per_request(
         self,
         mock_vllm_config,
         mock_request_with_structured_output,
@@ -257,10 +249,25 @@ class TestReasoningStructuredOutput:
     ):
         manager = StructuredOutputManager(mock_vllm_config)
         manager.reasoner = mock_reasoning_parser
-        mock_reasoning_parser.reasoning_end_delta_index.return_value = 2
+        mock_reasoning_parser.reasoning_end_delta_index = Mock(return_value=1)
 
-        result = manager.spec_token_reasoning_end_index(
-            mock_request_with_structured_output, [10, 11, 12]
+        request = mock_request_with_structured_output
+        request.all_token_ids = [1, 2, 3]
+        request.structured_output_request.reasoning_end_delta_cache.previous_len = None
+        request.structured_output_request.reasoning_end_delta_cache.delta_ids = None
+        request.structured_output_request.reasoning_end_delta_cache.delta_index = None
+
+        first = manager.spec_token_reasoning_end_index(request, [10, 11, 12])
+        second = manager.spec_token_reasoning_end_index(request, [10, 11, 12])
+
+        structured_output_request = request.structured_output_request
+        reasoning_end_delta_cache = structured_output_request.reasoning_end_delta_cache
+
+        assert first == 1
+        assert second == 1
+        assert reasoning_end_delta_cache.previous_len == 3
+        assert reasoning_end_delta_cache.delta_ids == (10, 11, 12)
+        assert reasoning_end_delta_cache.delta_index == 1
+        mock_reasoning_parser.reasoning_end_delta_index.assert_called_once_with(
+            [1, 2, 3], (10, 11, 12)
         )
-
-        assert result == 2

@@ -16,10 +16,20 @@ from vllm.v1.structured_output.backend_types import (
 
 
 @dataclasses.dataclass
+class ReasoningEndDeltaCache:
+    previous_len: int | None = None
+    delta_ids: tuple[int, ...] | None = None
+    delta_index: int | None = None
+
+
+@dataclasses.dataclass
 class StructuredOutputRequest:
     params: StructuredOutputsParams
     _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
     reasoning_ended: bool | None = None
+    reasoning_end_delta_cache: ReasoningEndDeltaCache = dataclasses.field(
+        default_factory=ReasoningEndDeltaCache
+    )
 
     @staticmethod
     def from_sampling_params(

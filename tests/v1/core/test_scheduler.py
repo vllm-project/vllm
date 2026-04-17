@@ -504,43 +504,6 @@ def test_stop_via_update_from_output():
     assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
 
 
-def test_update_draft_token_ids_in_output():
-    scheduler = create_scheduler(skip_tokenizer_init=True, num_speculative_tokens=4)
-    request = create_requests(num_requests=1, req_ids=["req_0"])[0]
-    request.structured_output_request = Mock()
-    request.structured_output_request.grammar = Mock()
-    scheduler.requests[request.request_id] = request
-
-    scheduler.structured_output_manager.should_advance = Mock(return_value=False)
-    scheduler.structured_output_manager.spec_token_reasoning_end_index = Mock(
-        return_value=2
-    )
-
-    scheduler_output = SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens={request.request_id: 1},
-        total_num_scheduled_tokens=1,
-        scheduled_spec_decode_tokens={request.request_id: [-1, -1, -1, -1]},
-        scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
-        finished_req_ids=set(),
-        free_encoder_mm_hashes=[],
-    )
-    draft_token_ids = DraftTokenIds([request.request_id], [[10, 11, 12, 13, 14]])
-
-    scheduler.update_draft_token_ids_in_output(draft_token_ids, scheduler_output)
-
-    assert request.spec_token_ids == [10, 11]
-    assert scheduler_output.scheduled_spec_decode_tokens[request.request_id] == [
-        10,
-        11,
-        -1,
-        -1,
-    ]
-    assert scheduler_output.num_invalid_spec_tokens == {request.request_id: 2}
-
-
 def test_check_stop_min_tokens():
     """Test that requests don't stop when min_tokens requirement isn't met."""
     from vllm.v1.core.sched.utils import check_stop
@@ -1074,6 +1037,142 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert output.num_scheduled_tokens[req.request_id] == 4
     assert req.request_id in output.scheduled_spec_decode_tokens
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
+
+
+@pytest.mark.parametrize(
+    ("validated_suffix", "expected_spec_tokens", "expected_invalid_count"),
+    [
+        ([], [10, 11, -1, -1, -1], 3),
+        ([20], [10, 11, 20, -1, -1], 2),
+        ([20, 21], [10, 11, 20, 21, -1], 1),
+        ([20, 21, 22], [10, 11, 20, 21, 22], 0),
+    ],
+)
+def test_update_draft_token_ids_in_output_validates_suffix_after_transition(
+    validated_suffix: list[int],
+    expected_spec_tokens: list[int],
+    expected_invalid_count: int,
+):
+    scheduler = create_scheduler(skip_tokenizer_init=True, num_speculative_tokens=4)
+    request = create_requests(num_requests=1, req_ids=["req_0"])[0]
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock()
+    request.structured_output_request.grammar.validate_tokens = Mock(
+        return_value=validated_suffix
+    )
+    scheduler.requests[request.request_id] = request
+
+    scheduler.structured_output_manager.should_advance = Mock(return_value=False)
+    scheduler.structured_output_manager.spec_token_reasoning_end_index = Mock(
+        return_value=1
+    )
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={request.request_id: [-1, -1, -1, -1, -1]},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    draft_token_ids = DraftTokenIds([request.request_id], [[10, 11, 20, 21, 22]])
+
+    scheduler.update_draft_token_ids_in_output(draft_token_ids, scheduler_output)
+
+    request.structured_output_request.grammar.validate_tokens.assert_called_once_with(
+        [20, 21, 22]
+    )
+    assert (
+        scheduler_output.scheduled_spec_decode_tokens[request.request_id]
+        == expected_spec_tokens
+    )
+    if expected_invalid_count > 0:
+        assert scheduler_output.num_invalid_spec_tokens == {
+            request.request_id: expected_invalid_count
+        }
+    else:
+        assert scheduler_output.num_invalid_spec_tokens == {}
+
+
+@pytest.mark.parametrize(
+    ("validated_suffix", "expected_spec_tokens"),
+    [
+        ([], [10, 11]),
+        ([20], [10, 11, 20]),
+        ([20, 21], [10, 11, 20, 21]),
+        ([20, 21, 22], [10, 11, 20, 21, 22]),
+    ],
+)
+def test_update_draft_token_ids_validates_suffix_after_transition(
+    validated_suffix: list[int],
+    expected_spec_tokens: list[int],
+):
+    scheduler = create_scheduler(skip_tokenizer_init=True, num_speculative_tokens=4)
+    request = create_requests(num_requests=1, req_ids=["req_0"])[0]
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock()
+    request.structured_output_request.grammar.validate_tokens = Mock(
+        return_value=validated_suffix
+    )
+    scheduler.requests[request.request_id] = request
+
+    scheduler.structured_output_manager.should_advance = Mock(return_value=False)
+    scheduler.structured_output_manager.spec_token_reasoning_end_index = Mock(
+        return_value=1
+    )
+
+    draft_token_ids = DraftTokenIds([request.request_id], [[10, 11, 20, 21, 22]])
+
+    scheduler.update_draft_token_ids(draft_token_ids)
+
+    request.structured_output_request.grammar.validate_tokens.assert_called_once_with(
+        [20, 21, 22]
+    )
+    assert request.spec_token_ids == expected_spec_tokens
+
+
+def test_update_from_output_advances_grammar_with_transition_suffix():
+    scheduler = create_scheduler(skip_tokenizer_init=True)
+    request = create_requests(num_requests=1, req_ids=["req_0"])[0]
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock()
+    request.structured_output_request.grammar.accept_tokens = Mock(return_value=True)
+    scheduler.requests[request.request_id] = request
+
+    scheduler.structured_output_manager.should_advance = Mock(return_value=False)
+    scheduler.structured_output_manager.content_delta_after_reasoning_end = Mock(
+        return_value=[30, 31]
+    )
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[30, 31]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    scheduler.structured_output_manager.content_delta_after_reasoning_end.assert_called_once()
+    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
+        request.request_id, [30, 31]
+    )
 
 
 def _assert_right_scheduler_output(

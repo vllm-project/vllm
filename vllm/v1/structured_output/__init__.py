@@ -256,10 +256,25 @@ class StructuredOutputManager:
                     assert structured_output_request.grammar is not None
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
+                transition_start = -1
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                if not apply_bitmask and request.use_structured_output:
+                    non_padding_tokens = list(
+                        itertools.takewhile(lambda token: token != -1, req_tokens)
+                    )
+                    transition_end = self.spec_token_reasoning_end_index(
+                        request, non_padding_tokens
+                    )
+                    if transition_end != -1:
+                        transition_start = transition_end + 1
+
+                for token_index, token in enumerate(itertools.chain(req_tokens, (-1,))):
+                    if transition_start != -1 and token_index >= transition_start:
+                        apply_bitmask = True
+                        transition_start = -1
+
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
@@ -331,7 +346,7 @@ class StructuredOutputManager:
         if self.reasoner.is_reasoning_end_streaming(
             all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
-            # Reasoning just ended, so we shouldn't advance till
+            # Reasoning just ended, so we shouldn't advance til
             # next pass
             structured_req.reasoning_ended = True
 
@@ -344,9 +359,54 @@ class StructuredOutputManager:
     ) -> int:
         if self.reasoner is None or self.enable_in_reasoning or not spec_token_ids:
             return -1
-        return self.reasoner.reasoning_end_delta_index(
-            request.all_token_ids, spec_token_ids
+        return self._reasoning_end_delta_index_cached(
+            request, request.all_token_ids, spec_token_ids
         )
+
+    def content_delta_after_reasoning_end(
+        self,
+        request: "Request",
+        previous_input_ids: Sequence[int],
+        delta_ids: Sequence[int],
+    ) -> list[int]:
+        if self.reasoner is None or self.enable_in_reasoning or not delta_ids:
+            return []
+        end_index = self._reasoning_end_delta_index_cached(
+            request, previous_input_ids, delta_ids
+        )
+        if end_index == -1:
+            return []
+        return list(delta_ids[end_index + 1 :])
+
+    def _reasoning_end_delta_index_cached(
+        self,
+        request: "Request",
+        previous_input_ids: Sequence[int],
+        delta_ids: Sequence[int],
+    ) -> int:
+        if self.reasoner is None or self.enable_in_reasoning or not delta_ids:
+            return -1
+
+        structured_req = request.structured_output_request
+        assert structured_req is not None
+        cache = structured_req.reasoning_end_delta_cache
+
+        previous_len = len(previous_input_ids)
+        delta_ids_tuple = tuple(delta_ids)
+        if (
+            cache.previous_len == previous_len
+            and cache.delta_ids == delta_ids_tuple
+            and cache.delta_index is not None
+        ):
+            return cache.delta_index
+
+        end_index = self.reasoner.reasoning_end_delta_index(
+            previous_input_ids, delta_ids_tuple
+        )
+        cache.previous_len = previous_len
+        cache.delta_ids = delta_ids_tuple
+        cache.delta_index = end_index
+        return end_index
 
     def clear_backend(self) -> None:
         if self.backend is not None:

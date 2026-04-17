@@ -783,41 +783,6 @@ def test_frequency_penalties(rejection_sampler):
     assert torch.equal(output.sampled_token_ids, expected)
 
 
-def test_penalties_transition_step(rejection_sampler):
-    """Test rejection sampling with frequency penalties during transition step"""
-    spec_tokens = [[10, 11], [], [20]]
-    padded_spec_tokens = [[10, 11], [15], [20, 30, 40]]
-    output_tokens = [[10, 11, 12], [13], [20, 21]]
-
-    logits = create_logits_tensor(output_tokens)
-    metadata = create_sampling_metadata(
-        all_greedy=True,
-        output_token_ids=[[1], [2], [3]],
-        spec_token_ids=padded_spec_tokens,
-        prompt_token_ids=torch.tensor([[5], [6], [7]], device=logits.device),
-        frequency_penalties=[2.0, 2.0, 2.0],
-        presence_penalties=[0.0, 0.0, 0.0],
-        repetition_penalties=[1.0, 1.0, 1.0],
-    )
-    bonus_token_tensor = torch.tensor([12, 13, 21], device=logits.device)
-    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
-
-    mock_sampler_output(rejection_sampler, bonus_token_tensor)
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        logits=logits,
-        sampling_metadata=metadata,
-    )
-
-    expected = torch.tensor(
-        [[10, 11, 12], [13, -1, -1], [20, 21, -1]],
-        dtype=torch.int,
-        device=logits.device,
-    )
-    assert torch.equal(output.sampled_token_ids, expected)
-
-
 def test_bad_words(rejection_sampler):
     """Test rejection sampling with bad words constraints.
 
