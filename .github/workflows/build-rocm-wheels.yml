@@ -51,6 +51,15 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # Install torch from the nightly ROCm index first, so that
+          # the requirements file's torch==2.11.0 pin (which would
+          # resolve to the CUDA build from PyPI) is already satisfied
+          # by the ROCm nightly wheel.
+          uv pip install --system \
+            torch torchvision torchaudio \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --extra-index-url https://pypi.org/simple/ \
+            --index-strategy unsafe-first-match
           uv pip install --system -r requirements/build/rocm.txt \
             --index-url ${{ env.PYTORCH_INDEX_URL }} \
             --extra-index-url https://pypi.org/simple/ \
@@ -141,7 +150,13 @@ jobs:
 
       - name: Install wheel and test dependencies
         run: |
-          # PyTorch is pre-installed in the container image; install remaining deps.
+          # Pin torch from the nightly ROCm index before installing the wheel,
+          # so the wheel's torch dependency doesn't pull in the CUDA build.
+          uv pip install --system \
+            torch \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --extra-index-url https://pypi.org/simple/ \
+            --index-strategy unsafe-first-match
           uv pip install --system dist/*.whl \
             pytest pytest-timeout numpy \
             tblib transformers huggingface_hub sentencepiece pillow \
