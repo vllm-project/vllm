@@ -805,6 +805,12 @@ def get_model_params(config):
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
         hidden_size = config.thinker_config.text_config.hidden_size
+    elif architecture == "Gemma4ForConditionalGeneration":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.top_k_experts
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
     elif architecture == "PixtralForConditionalGeneration":
         # Pixtral can contain different LLM architectures,
         # recurse to get their parameters
