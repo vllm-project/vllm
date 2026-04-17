@@ -17,6 +17,7 @@ wait_for_server() {
 }
 
 MODEL="QWen/Qwen3-30B-A3B-FP8"
+BACK="allgather_reducescatter"
 
 cleanup() {
   if [[ -n "${SERVER_PID:-}" ]] && kill -0 "${SERVER_PID}" 2>/dev/null; then
@@ -36,7 +37,7 @@ vllm serve "$MODEL" \
 --data-parallel-size 4 \
 --enable-expert-parallel \
 --enable-eplb \
---all2all-backend allgather_reducescatter \
+--all2all-backend "$BACK" \
 --eplb-config '{"window_size":20, "step_interval":100, "use_async":true}' \
 --trust-remote-code \
 --max-model-len 2048 \
@@ -44,7 +45,6 @@ vllm serve "$MODEL" \
 SERVER_PID=$!
 wait_for_server "$PORT"
 
-BACK="allgather_reducescatter"
 TAG=$(echo "$MODEL" | tr '/: \\n' '_____')
 OUT="${OUT_DIR}/${TAG}_${BACK}.json"
 python3 tests/evals/gsm8k/gsm8k_eval.py --host http://127.0.0.1 --port "$PORT" --num-questions "${NUM_Q}" --save-results "${OUT}"
