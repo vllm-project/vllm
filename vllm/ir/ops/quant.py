@@ -14,34 +14,6 @@ def _get_fp8_min_max(fp8_dtype: torch.dtype) -> tuple[float, float]:
     return torch.finfo(fp8_dtype).min, torch.finfo(fp8_dtype).max
 
 
-def _group_broadcast(t: Tensor, shape) -> Tensor:
-    # Follows the implementation in
-    # vllm/vllm/model_executor/layers/quantization/utils/quant_utils.py
-    for i, s in enumerate(shape):
-        t_dim_size = t.shape[i] if i < t.ndim else 1
-        if t_dim_size != s and t_dim_size != 1:
-            assert s % t_dim_size == 0
-            t = (
-                t.unsqueeze(i + 1)
-                .expand(*t.shape[: i + 1], s // t_dim_size, *t.shape[i + 1 :])
-                .flatten(i, i + 1)
-            )
-    return t
-
-
-def _prep_static_scale(scale: Tensor, x: Tensor) -> Tensor:
-    """Normalize a static scale to 2D for group broadcasting.
-    Matches the logic of prep_scale_for_group_broadcast.
-    """
-    if scale.numel() == 1:
-        return scale.reshape(1, 1)
-    if scale.ndim == 1:
-        if scale.shape[0] == x.shape[-1]:
-            return scale.unsqueeze(-2)  # per-channel/per-group: [K] -> [1, K]
-        return scale.unsqueeze(-1)  # per-token: [M] -> [M, 1]
-    return scale
-
-
 def _pad_token_dim(out: Tensor, num_token_padding: int | None) -> Tensor:
     # This currently generates an extra Triton kernel in compilation.
     # Fortunately, we don't use padding if compiling.
@@ -62,16 +34,9 @@ def static_quant_fp8(
     num_token_padding: int | None = None,
 ) -> Tensor:
     fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
-    scale = _prep_static_scale(scale, x)
-    out = (
-        (
-            x.to(torch.float32)
-            * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
-        )
-        .clamp(fp8_min, fp8_max)
-        .to(fp8_dtype)
-    )
-    return _pad_token_dim(out, num_token_padding)
+    out = x.to(torch.float32) * scale.to(torch.float32).reciprocal()
+    out_clamped = out.clamp(fp8_min, fp8_max).to(fp8_dtype)
+    return _pad_token_dim(out_clamped, num_token_padding)
 
 
 @register_op
@@ -82,12 +47,25 @@ def static_group_quant_fp8(
     num_token_padding: int | None = None,
 ) -> Tensor:
     fp8_min, fp8_max = _get_fp8_min_max(fp8_dtype)
-    scale = _prep_static_scale(scale, x)
+
+    # Normalize scale to 2D: [num_groups] -> [1, num_groups]
+    # Example: [1, 2] shape (2,) -> [[1, 2]] shape (1, 2)
+    if scale.ndim == 1:
+        scale = scale.unsqueeze(-2)
+
+    # Group broadcast: repeat each group scale across group_size elements
+    # Example: x shape (M, 4), scale [[1, 2]] shape (1, 2) ->
+    # [[1, 1, 2, 2]] shape (1, 4) for group_size=2
+
+    target_cols = x.shape[-1]
+    scale_cols = scale.shape[-1]
+
+    assert target_cols % scale_cols == 0
+    repeat_factor = target_cols // scale_cols
+    scale = scale.repeat_interleave(repeat_factor, dim=-1)
+
     out = (
-        (
-            x.to(torch.float32)
-            * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
-        )
+        (x.to(torch.float32) * scale.to(torch.float32).reciprocal())
         .clamp(fp8_min, fp8_max)
         .to(fp8_dtype)
     )
@@ -114,10 +92,7 @@ def dynamic_quant_fp8(
 
     scale = (x_max / fp8_max).clamp(min=fp8_min_scaling_factor)
     out = (
-        (
-            x.to(torch.float32)
-            * _group_broadcast(scale.to(torch.float32), x.shape[-2:]).reciprocal()
-        )
+        (x.to(torch.float32) * scale.to(torch.float32).reciprocal())
         .clamp(fp8_min, fp8_max)
         .to(fp8_dtype)
     )
