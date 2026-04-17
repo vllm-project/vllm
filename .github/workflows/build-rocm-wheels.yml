@@ -51,18 +51,14 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          # Install torch/torchvision/torchaudio from the nightly ROCm
-          # index, then the remaining build deps from the requirements
-          # file (with torch lines stripped so uv doesn't replace the
-          # ROCm wheel with the CUDA build from PyPI).
+          # 1) Install torch from the nightly ROCm index *only* (no
+          #    PyPI fallback) so we always get the ROCm wheel.
           uv pip install --system --upgrade \
             torch torchvision torchaudio \
-            --index-url ${{ env.PYTORCH_INDEX_URL }} \
-            --extra-index-url https://pypi.org/simple/ \
-            --index-strategy unsafe-first-match
-          # Strip torch pins and the stable ROCm index from the
-          # requirements file.  Write to a temp file in the same
-          # directory so the relative `-r ../common.txt` resolves.
+            --index-url ${{ env.PYTORCH_INDEX_URL }}
+          # 2) Install the remaining build deps from the requirements
+          #    file with torch/torchvision/torchaudio lines and the
+          #    stable ROCm index stripped out.
           grep -v -E '^(torch|torchvision|torchaudio)==' requirements/build/rocm.txt \
             | grep -v 'download.pytorch.org' \
             > requirements/build/rocm-ci.txt
@@ -156,13 +152,11 @@ jobs:
 
       - name: Install wheel and test dependencies
         run: |
-          # Pin torch from the nightly ROCm index before installing the wheel,
-          # so the wheel's torch dependency doesn't pull in the CUDA build.
-          uv pip install --system \
+          # Pin torch from the nightly ROCm index *only* (no PyPI
+          # fallback) so we always get the ROCm wheel.
+          uv pip install --system --upgrade \
             torch \
-            --index-url ${{ env.PYTORCH_INDEX_URL }} \
-            --extra-index-url https://pypi.org/simple/ \
-            --index-strategy unsafe-first-match
+            --index-url ${{ env.PYTORCH_INDEX_URL }}
           uv pip install --system dist/*.whl \
             pytest pytest-timeout numpy \
             tblib transformers huggingface_hub sentencepiece pillow \
