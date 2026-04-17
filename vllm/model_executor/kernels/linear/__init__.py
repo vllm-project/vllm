@@ -186,12 +186,13 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
 
 # in priority/performance order (when available)
 _POSSIBLE_FP8_BLOCK_KERNELS: dict[
-    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel]]
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
 ] = {
     PlatformEnum.CUDA: [
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
+        MarlinFP8ScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.ROCM: [
@@ -390,6 +391,18 @@ def init_fp8_linear_kernel(
                 kernel_type.__name__,
                 module_name,
                 scope="global",
+            )
+
+        # TODO: unify block_scaled_mm and scaled_mm in same base.
+        if kernel_type is MarlinFP8ScaledMMLinearKernel:
+            return kernel_type(
+                scaled_mm_linear_kernel_config,
+                layer_param_names=[
+                    "weight",
+                    "weight_scale",
+                    "input_scale",
+                    "input_scale_ub",
+                ],
             )
 
         return kernel_type(
