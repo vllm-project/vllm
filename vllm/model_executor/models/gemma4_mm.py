@@ -1254,9 +1254,10 @@ class Gemma4ForConditionalGeneration(
             # computation (using token_type_ids == 0 as text_mask).
             # Replicate this: map image token positions to token 0.
             if is_multimodal is not None:
-                is_multimodal = is_multimodal.to(input_ids.device)
                 ple_input_ids = torch.where(
-                    is_multimodal, torch.zeros_like(input_ids), input_ids
+                    is_multimodal.to(input_ids.device, non_blocking=True),
+                    torch.zeros_like(input_ids),
+                    input_ids,
                 )
             else:
                 ple_input_ids = input_ids
