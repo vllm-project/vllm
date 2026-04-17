@@ -1063,6 +1063,7 @@ def get_hf_text_config(config: PretrainedConfig):
     return text_config
 
 
+@cache
 def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
