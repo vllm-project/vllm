@@ -347,6 +347,24 @@ def supports_trtllm_attention() -> bool:
     )
 
 
+@functools.cache
+def supports_fmha_v2_sm120_attention() -> bool:
+    """
+    SM120 (consumer Blackwell) supports attention via flashinfer's fmha_v2
+    HMMA kernels. These are JIT-compiled (no prebuilt cubins needed), so no
+    artifactory access is required. Supports attention sinks for prefill.
+    Sliding window is NOT supported by fmha_v2 SM120 kernels today — the
+    kernel explicitly rejects window_left != -1 with "Sliding window
+    attention is not yet supported for FMHAv2 on SM120 (Blackwell)".
+    Callers must disqualify this path via
+    ``use_trtllm_attention(..., has_sliding_window=True)`` when any layer
+    sets a sliding window.
+    """
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
+    return current_platform.is_device_capability_family(120)
+
+
 def force_use_trtllm_attention() -> bool | None:
     """
     This function should only be called during initialization stage when vllm config
@@ -362,10 +380,14 @@ def force_use_trtllm_attention() -> bool | None:
 
 
 def can_use_trtllm_attention(num_qo_heads: int, num_kv_heads: int) -> bool:
-    """Check if the current configuration supports TRTLLM attention."""
+    """Check if the current configuration supports TRTLLM attention.
+
+    Includes SM120 fmha_v2 HMMA path which provides equivalent functionality
+    (sinks, sliding window) without requiring trtllm-gen cubins.
+    """
     if force_use_trtllm_attention() is False:
         return False
-    has_trtllm = supports_trtllm_attention()
+    has_trtllm = supports_trtllm_attention() or supports_fmha_v2_sm120_attention()
     return has_trtllm and (num_qo_heads % num_kv_heads == 0)
 
 
@@ -382,6 +404,7 @@ def use_trtllm_attention(
     force_use_trtllm: bool | None = None,
     has_sinks: bool = False,
     has_spec: bool = False,
+    has_sliding_window: bool = False,
 ) -> bool:
     """Return `True` if TRTLLM attention is used."""
 
@@ -397,8 +420,22 @@ def use_trtllm_attention(
         )
         return False
 
+    # SM120 fmha_v2 does not support sliding window; disqualify when the
+    # only available trtllm-family path is fmha_v2 and any layer has one.
+    if (
+        has_sliding_window
+        and supports_fmha_v2_sm120_attention()
+        and not supports_trtllm_attention()
+    ):
+        if force_use_trtllm:
+            logger.warning_once(
+                "SM120 fmha_v2 does not support sliding window; falling "
+                "back to the standard flashinfer wrapper path."
+            )
+        return False
+
     # The platform is not supported
-    if not supports_trtllm_attention():
+    if not supports_trtllm_attention() and not supports_fmha_v2_sm120_attention():
         if force_use_trtllm:
             logger.warning_once(
                 "TRTLLM attention is not supported on this platform, "
