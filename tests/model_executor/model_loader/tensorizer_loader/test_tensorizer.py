@@ -178,7 +178,7 @@ def test_load_without_tensorizer_load_format(vllm_runner, capfd, model_ref):
     finally:
         del model
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
 
 def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd, model_ref):
@@ -200,10 +200,10 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner, capfd, model_ref)
     finally:
         del model
         gc.collect()
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Requires 2 GPUs")
 def test_tensorizer_with_tp_path_without_template(vllm_runner, capfd):
     try:
         model_ref = "EleutherAI/pythia-1.4b"
@@ -231,7 +231,7 @@ def test_tensorizer_with_tp_path_without_template(vllm_runner, capfd):
         ) in combined_output
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires 2 GPUs")
+@pytest.mark.skipif(torch.accelerator.device_count() < 2, reason="Requires 2 GPUs")
 def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
     vllm_runner, tmp_path
 ):
@@ -283,7 +283,7 @@ def test_vllm_tensorized_model_has_same_outputs(
     model_ref, vllm_runner, tmp_path, model_path
 ):
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     config = TensorizerConfig(tensorizer_uri=str(model_path))
     args = EngineArgs(model=model_ref)
 

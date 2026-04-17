@@ -14,8 +14,9 @@ from vllm.multimodal.audio import (
     AudioSpec,
     ChannelReduction,
     normalize_audio,
-    resample_audio_librosa,
+    resample_audio_pyav,
     resample_audio_scipy,
+    split_audio,
 )
 
 
@@ -24,14 +25,14 @@ def dummy_audio():
     return np.array([0.0, 0.1, 0.2, 0.3, 0.4], dtype=float)
 
 
-def test_resample_audio_librosa(dummy_audio):
-    with patch("vllm.multimodal.audio.librosa.resample") as mock_resample:
-        mock_resample.return_value = dummy_audio * 2
-        out = resample_audio_librosa(dummy_audio, orig_sr=44100, target_sr=22050)
-        mock_resample.assert_called_once_with(
-            dummy_audio, orig_sr=44100, target_sr=22050
-        )
-        assert np.all(out == dummy_audio * 2)
+def test_resample_audio_pyav(dummy_audio):
+    out_down = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=2)
+    out_up = resample_audio_pyav(dummy_audio, orig_sr=2, target_sr=4)
+    out_same = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=4)
+
+    assert len(out_down) == 3
+    assert len(out_up) == 10
+    assert np.all(out_same == dummy_audio)
 
 
 def test_resample_audio_scipy(dummy_audio):
@@ -55,9 +56,9 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     assert np.isfinite(out).all()
 
 
-def test_audio_resampler_librosa_calls_resample(dummy_audio):
-    resampler = AudioResampler(target_sr=22050, method="librosa")
-    with patch("vllm.multimodal.audio.resample_audio_librosa") as mock_resample:
+def test_audio_resampler_pyav_calls_resample(dummy_audio):
+    resampler = AudioResampler(target_sr=22050, method="pyav")
+    with patch("vllm.multimodal.audio.resample_audio_pyav") as mock_resample:
         mock_resample.return_value = dummy_audio
         out = resampler.resample(dummy_audio, orig_sr=44100)
         mock_resample.assert_called_once_with(
@@ -422,13 +423,13 @@ class TestAudioPipelineE2E:
         # Verify channel averaging: mean of [0.5, -0.5] = 0.0
         np.testing.assert_array_almost_equal(audio_output, np.zeros(16000), decimal=5)
 
-    def test_librosa_mono_passthrough_e2e(self):
-        """Full pipeline: librosa mono format → preserved as mono."""
+    def test_pyav_mono_passthrough_e2e(self):
+        """Full pipeline: pyav mono format → preserved as mono."""
         from vllm.multimodal.parse import MultiModalDataParser
 
-        # Simulate librosa output: already mono (time,) format
-        mono_librosa = np.random.randn(16000).astype(np.float32)
-        assert mono_librosa.shape == (16000,)
+        # Simulate pyav output: already mono (time,) format
+        mono_pyav = np.random.randn(16000).astype(np.float32)
+        assert mono_pyav.shape == (16000,)
 
         # Create parser with mono normalization
         parser = MultiModalDataParser(
@@ -437,7 +438,7 @@ class TestAudioPipelineE2E:
         )
 
         # Process audio through the parser
-        result = parser._parse_audio_data((mono_librosa, 16000))
+        result = parser._parse_audio_data((mono_pyav, 16000))
         audio_output = result.get(0)
 
         # Verify output is still mono 1D
@@ -445,7 +446,7 @@ class TestAudioPipelineE2E:
         assert audio_output.shape == (16000,)
 
         # Verify audio content is preserved
-        np.testing.assert_array_almost_equal(audio_output, mono_librosa)
+        np.testing.assert_array_almost_equal(audio_output, mono_pyav)
 
     def test_multichannel_5_1_surround_to_mono_e2e(self):
         """Full pipeline: 5.1 surround (6 channels) → mono output."""
@@ -584,3 +585,186 @@ class TestAudioPipelineE2E:
         assert audio_output.ndim == 1
         assert audio_output.shape == (10,)
         np.testing.assert_array_almost_equal(audio_output, np.zeros(10))
+
+
+# ============================================================
+# Tests for Audio Chunking Utilities
+# ============================================================
+
+
+class TestAudioChunking:
+    """Tests for split_audio and find_split_point utilities in vllm.multimodal.audio."""
+
+    def test_split_audio_short_clip(self):
+        """Audio shorter than max_clip_duration_s should not be split."""
+
+        # 10 seconds of audio at 16kHz
+        audio = np.linspace(-1.0, 1.0, 160000, dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert len(chunks) == 1
+        np.testing.assert_array_equal(chunks[0], audio)
+
+    def test_split_audio_exact_length(self):
+        """Audio exactly at max_clip_duration_s should not be split."""
+
+        # Exactly 30 seconds at 16kHz
+        audio = np.linspace(-1.0, 1.0, 480000, dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert len(chunks) == 1
+        np.testing.assert_array_equal(chunks[0], audio)
+
+    def test_split_audio_long_clip(self):
+        """Long audio should be split into multiple chunks."""
+
+        # 65 seconds of audio at 16kHz
+        audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert len(chunks) > 1
+        # First sample preserved
+        assert chunks[0][0] == audio[0]
+        # Last sample preserved
+        assert chunks[-1][-1] == audio[-1]
+
+    def test_split_audio_chunks_have_correct_length(self):
+        """Each chunk (except last) should be approximately max_clip_duration_s."""
+
+        # 65 seconds of audio at 16kHz
+        audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        max_samples = int(30.0 * 16000)
+        overlap_samples = int(1.0 * 16000)
+
+        for chunk in chunks[:-1]:
+            assert chunk.shape[0] >= max_samples - overlap_samples
+            assert chunk.shape[0] <= max_samples
+
+    def test_find_split_point_finds_quiet_region(self):
+        """find_split_point should identify low-energy regions."""
+        from vllm.multimodal.audio import find_split_point
+
+        # Create audio with a quiet section in the middle
+        segment = np.ones(32000, dtype=np.float32)
+        # Insert quiet region at sample 16000-17600 (100ms)
+        segment[16000:17600] = 0.01
+
+        split_idx = find_split_point(
+            wav=segment,
+            start_idx=0,
+            end_idx=32000,
+            min_energy_window=1600,
+        )
+
+        # Split should be in or near the quiet region
+        assert 16000 <= split_idx <= 17600
+
+    def test_find_split_point_handles_uniform_audio(self):
+        """find_split_point should handle uniform energy audio gracefully."""
+        from vllm.multimodal.audio import find_split_point
+
+        segment = np.ones(32000, dtype=np.float32) * 0.5
+
+        split_idx = find_split_point(
+            wav=segment,
+            start_idx=0,
+            end_idx=32000,
+            min_energy_window=1600,
+        )
+
+        assert 0 <= split_idx <= 32000
+
+    def test_find_split_point_silence(self):
+        """find_split_point should prefer the quietest scanned window."""
+        from vllm.multimodal.audio import find_split_point
+
+        # Deterministic signal: constant energy everywhere except silence.
+        segment = np.ones(32000, dtype=np.float32)
+        # Complete silence at 20000-21600.
+        segment[20000:21600] = 0.0
+
+        split_idx = find_split_point(
+            wav=segment,
+            start_idx=16000,
+            end_idx=28000,
+            min_energy_window=1600,
+        )
+
+        # Current implementation evaluates non-overlapping 1600-sample windows
+        # from start_idx, so the quietest scanned window starts at 19200.
+        assert split_idx == 19200
+
+    def test_split_audio_preserves_boundaries(self):
+        """Verify first and last samples are preserved when chunking."""
+
+        audio = np.arange(1120000, dtype=np.float32)  # 70s at 16kHz
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert chunks[0][0] == audio[0]
+        assert chunks[-1][-1] == audio[-1]
+
+    def test_split_audio_with_different_sample_rates(self):
+        """Test chunking works with different sample rates."""
+
+        # 40 seconds at 8kHz
+        audio_8k = np.linspace(-1.0, 1.0, 320000, dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=audio_8k,
+            sample_rate=8000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=800,
+        )
+
+        assert len(chunks) >= 2
+
+        # 40 seconds at 48kHz
+        audio_48k = np.linspace(-1.0, 1.0, 1920000, dtype=np.float32)
+
+        chunks_48k = split_audio(
+            audio_data=audio_48k,
+            sample_rate=48000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=4800,
+        )
+
+        assert len(chunks_48k) >= 2

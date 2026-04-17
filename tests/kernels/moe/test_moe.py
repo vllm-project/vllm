@@ -18,13 +18,18 @@ from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
-from tests.kernels.moe.utils import fused_moe, make_dummy_moe_config
+from tests.kernels.moe.utils import (
+    fused_moe,
+    make_dummy_moe_config,
+    modular_triton_fused_moe,
+)
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
+    MoEActivation,
     fused_topk,
 )
 from vllm.model_executor.layers.fused_moe.config import (
@@ -35,9 +40,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     batched_fused_marlin_moe,
     fused_marlin_moe,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    modular_triton_fused_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_permute_bias,
@@ -57,6 +59,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_w
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -147,6 +150,12 @@ MOE_MARLIN_QUANT_TEST_CONFIGS = [
     {
         "a_type": [scalar_types.bfloat16],
         "b_type": scalar_types.float4_e2m1f,
+        "group_blocks": [2],
+    },
+    # MXFP8
+    {
+        "a_type": [scalar_types.bfloat16],
+        "b_type": scalar_types.float8_e4m3fn,
         "group_blocks": [2],
     },
     # AWQ-INT4 with INT8 activation
@@ -270,9 +279,9 @@ def run_moe_test(
                 global_num_experts=global_num_experts,
                 expert_map=expert_map,
             )
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         graph.replay()
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
     torch.testing.assert_close(test_output, baseline_output, atol=atol, rtol=rtol)
 
@@ -285,7 +294,6 @@ def run_moe_test(
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize("chunk_size", [8192])
 def test_fused_moe(
     m: int,
     n: int,
@@ -295,13 +303,10 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
-    chunk_size: int,
     monkeypatch,
     workspace_init,
 ):
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
     #
     # Setup test data
@@ -344,14 +349,16 @@ def test_fused_moe(
         expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
-        return m_fused_moe_fn(
+        return m_fused_moe_fn.apply(
             a,
             w1,
             w2,
             topk_weights,
             topk_ids,
+            activation=MoEActivation.SILU,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            apply_router_weight_on_input=False,
         )
 
     fused_moe_fn = functools.partial(fused_moe, renormalize=False)
@@ -394,12 +401,57 @@ def test_fused_moe(
         )
 
 
+def test_fused_moe_int64_overflow(workspace_init):
+    """Regression test for int32 overflow in stride*offset products.
+
+    With large M, stride_cm * offs_token can exceed int32 max. Verifies
+    the offs_token int64 cast (fix for #34413) prevents overflow and
+    produces correct results.
+
+    Reproduces the scenario from PR #34279.
+    """
+    # ~12 GB GPU memory needed for intermediate caches
+    free_mem = torch.cuda.mem_get_info()[0]
+    if free_mem < 12 * 1024**3:
+        pytest.skip("Insufficient GPU memory for overflow test")
+
+    set_random_seed(7)
+
+    m, n, k, e, topk = 100000, 2048, 1024, 8, 6
+    dtype = torch.bfloat16
+
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    # Verify the test exercises the overflow condition:
+    # C has shape (M, topk, N) where N = w1.size(1) = 2*n
+    # stride_cm = C.stride(1) = N, max offs_token = M * topk
+    # Product must exceed int32 max for this test to be meaningful
+    N = w1.size(1)
+    assert N * m * topk > 2**31 - 1, "Test params don't trigger int32 overflow"
+
+    fused_moe_fn = functools.partial(fused_moe, renormalize=False)
+
+    with set_current_vllm_config(vllm_config):
+        run_moe_test(
+            torch_moe,
+            fused_moe_fn,
+            a=a,
+            w1=w1,
+            w2=w2,
+            score=score,
+            topk=topk,
+            global_num_experts=e,
+        )
+
+
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)
 @pytest.mark.parametrize("e", NUM_EXPERTS_LARGE)
 @pytest.mark.parametrize("topk", TOP_KS_SMALL)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
-@pytest.mark.parametrize("chunk_size", [8192])
 def test_naive_block_assignment_moe(
     m: int,
     n: int,
@@ -408,13 +460,10 @@ def test_naive_block_assignment_moe(
     topk: int,
     dtype: torch.dtype,
     padding: bool,
-    chunk_size: int,
     monkeypatch,
     workspace_init,
 ):
     set_random_seed(7)
-
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
 
     #
     # Setup test data
@@ -449,14 +498,16 @@ def test_naive_block_assignment_moe(
         expert_map: torch.Tensor | None = None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
-        return m_fused_moe_fn(
+        return m_fused_moe_fn.apply(
             a,
             w1,
             w2,
             topk_weights,
             topk_ids,
+            activation=MoEActivation.SILU,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
+            apply_router_weight_on_input=False,
         )
 
     fused_moe_fn = functools.partial(fused_moe, renormalize=False)
@@ -661,7 +712,7 @@ def test_mixtral_moe(
     monkeypatch.setenv("MASTER_ADDR", "localhost")
     monkeypatch.setenv("MASTER_PORT", "12345")
     init_distributed_environment()
-    init_workspace_manager(torch.cuda.current_device())
+    init_workspace_manager(torch.accelerator.current_device_index())
 
     # Instantiate our and huggingface's MoE blocks
     vllm_config.compilation_config.static_forward_context = dict()
@@ -713,8 +764,8 @@ def test_mixtral_moe(
                 F.pad(vllm_moe.experts.w2_weight, (0, 128), "constant", 0)[..., 0:-128],
                 requires_grad=False,
             )
-            torch.cuda.synchronize()
-            torch.cuda.empty_cache()
+            torch.accelerator.synchronize()
+            torch.accelerator.empty_cache()
 
         # FIXME (zyongye) fix this after we move self.kernel
         # assignment in FusedMoE.__init__
@@ -981,7 +1032,7 @@ def test_fused_marlin_moe(
     act_order: bool,
     is_k_full: bool,
 ):
-    torch.cuda.manual_seed(1)
+    set_random_seed(1)
     group_size = group_blocks if group_blocks <= 0 else group_blocks * 16
 
     if c_type == scalar_types.float16:
@@ -1081,7 +1132,7 @@ def test_fused_marlin_moe(
 @pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 @pytest.mark.parametrize("m", [1, 256])
 def test_fused_marlin_moe_with_bias(m):
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     e, topk = 32, 4
     n, k = 2048, 2048
@@ -1154,13 +1205,16 @@ def test_fused_marlin_moe_with_bias(m):
 @pytest.mark.parametrize("m", [1, 64, 256])
 @pytest.mark.parametrize("n,k", [(1024, 1024), (2048, 2048)])
 @pytest.mark.parametrize("e,topk", [(8, 2), (64, 4)])
-def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
+@pytest.mark.parametrize("activation", [MoEActivation.RELU2_NO_MUL])
+def test_fused_marlin_moe_non_gated(
+    m: int, n: int, k: int, e: int, topk: int, activation: MoEActivation
+):
     """Test Marlin MoE with non-gated activation (relu2_no_mul).
 
     Non-gated activations like relu2 don't have the gate-up projection pattern,
     so w1 has shape (e, n, k) instead of (e, 2*n, k).
     """
-    torch.cuda.manual_seed(42)
+    set_random_seed(42)
 
     group_size = 16  # NVFP4 group size
     is_k_full = True
@@ -1197,7 +1251,7 @@ def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
             w2_data.w_ref,
             score,
             topk,
-            activation="relu2",
+            activation=activation,
         )
 
     marlin_output = fused_marlin_moe(
@@ -1222,7 +1276,7 @@ def test_fused_marlin_moe_non_gated(m: int, n: int, k: int, e: int, topk: int):
         w2_zeros=w2_data.zeros,
         quant_type_id=quant_type.id,
         is_k_full=is_k_full,
-        activation="relu2_no_mul",
+        activation=activation,
     )
 
     torch.testing.assert_close(marlin_output, torch_output, atol=1e-1, rtol=0)
@@ -1329,13 +1383,22 @@ def test_moe_sum(m: int, topk: int, k: int, dtype: torch.dtype):
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("with_bias", [False, True])
-@pytest.mark.parametrize("activation", ["silu"])
+@pytest.mark.parametrize("activation", [MoEActivation.SILU])
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only test")
-def test_cpu_fused_moe_basic(m, n, k, e, topk, dtype, with_bias, activation):
+def test_cpu_fused_moe_basic(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    with_bias: bool,
+    activation: MoEActivation,
+):
     from vllm.model_executor.layers.fused_moe.cpu_fused_moe import CPUFusedMOE
 
     device = "cpu"
-    torch.manual_seed(7)
+    set_random_seed(7)
 
     a = torch.randn((m, k), device=device, dtype=dtype) / 10
     w13 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10
@@ -1407,7 +1470,7 @@ def test_batched_fused_marlin_moe(
         f"topk={topk}, "
         f"max_tokens_per_batch={max_tokens_per_batch}"
     )
-    torch.cuda.manual_seed(0)
+    set_random_seed(0)
 
     dtype = torch.bfloat16
     quant_dtype = scalar_types.float4_e2m1f
@@ -1557,3 +1620,116 @@ def test_batched_fused_marlin_moe(
     marlin_output = br.run(a, kwargs)
 
     torch.testing.assert_close(marlin_output, ref_marlin_output, atol=1e-3, rtol=0)
+
+
+@pytest.mark.parametrize("m,n,k", [(32, 1024, 1024)])
+@pytest.mark.parametrize("e,topk", [(8, 2)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="TRTLLM backend test only runs on Blackwell GPUs (SM10x).",
+)
+def test_unquantized_bf16_flashinfer_trtllm_backend(
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    dtype: torch.dtype,
+    monkeypatch,
+    workspace_init,
+):
+    """
+    Test BF16 unquantized MoE with FlashInfer TRTLLM backend.
+    """
+    set_random_seed(7)
+
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
+
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+    )
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+
+    # Setup test data
+    a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device="cuda", dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device="cuda", dtype=dtype) / 10
+    router_logits = torch.randn((m, e), device="cuda", dtype=dtype)
+
+    moe_config = FusedMoEConfig(
+        num_experts=e,
+        experts_per_token=topk,
+        hidden_dim=k,
+        intermediate_size_per_partition=n,
+        num_local_experts=e,
+        num_logical_experts=e,
+        activation=MoEActivation.SILU,
+        device="cuda",
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        in_dtype=dtype,
+        is_act_and_mul=True,
+        routing_method=RoutingMethodType.Renormalize,
+        max_num_tokens=next_power_of_2(m),
+    )
+
+    with set_current_vllm_config(vllm_config):
+        quant_method = UnquantizedFusedMoEMethod(moe_config)
+
+        # Verify TRTLLM backend was selected
+        assert (
+            quant_method.unquantized_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
+        ), f"Expected FLASHINFER_TRTLLM backend, got {quant_method.unquantized_backend}"
+
+        # Verify it's using monolithic path
+        assert quant_method.is_monolithic, (
+            "FLASHINFER_TRTLLM backend should use monolithic forward"
+        )
+        layer = torch.nn.Module()
+        layer.w13_weight = Parameter(w1.clone(), requires_grad=False)
+        layer.w2_weight = Parameter(w2.clone(), requires_grad=False)
+        layer.global_num_experts = e
+        layer.local_num_experts = e
+        layer.top_k = topk
+        layer.num_expert_group = 1
+        layer.topk_group = 1
+        layer.intermediate_size_per_partition = n
+        layer.ep_rank = 0
+        layer.activation = MoEActivation.SILU
+        layer.e_score_correction_bias = None
+        layer.routing_method_type = RoutingMethodType.Renormalize
+        layer.expert_map = None
+        layer.apply_router_weight_on_input = False
+        layer.routed_scaling_factor = None
+        layer.shared_experts = None
+        layer._maybe_init_expert_routing_tables = lambda: None
+
+        quant_method.process_weights_after_loading(layer)
+
+        assert quant_method.moe_kernel is not None, (
+            "moe_kernel should be set after process_weights_after_loading"
+        )
+        assert quant_method.supports_internal_mk, (
+            "supports_internal_mk should be True after setup"
+        )
+
+        trtllm_output = quant_method.apply_monolithic(
+            layer=layer,
+            x=a,
+            router_logits=router_logits,
+        )
+
+        # Compute torch baseline
+        w1_original = w1.clone()
+        w2_original = w2.clone()
+        baseline_output = torch_moe(a, w1_original, w2_original, router_logits, topk)
+
+    close = torch.isclose(trtllm_output, baseline_output, atol=1e-1, rtol=0.85)
+    assert close.float().mean() > 0.925

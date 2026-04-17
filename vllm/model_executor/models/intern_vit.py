@@ -15,6 +15,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -215,7 +219,7 @@ class InternParallelAttention(nn.Module):
             self.num_heads_per_partition,
             self.head_dim,
             self.scale,
-            prefix=prefix,
+            prefix=f"{prefix}.attn",
         )
 
     def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
@@ -280,6 +284,11 @@ class InternMLP(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={"hidden_states": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class InternVisionEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -364,8 +373,8 @@ class InternVisionEncoder(nn.Module):
         self.layers = nn.ModuleList(
             [
                 self.layer_cls(
-                    config,
-                    quant_config,
+                    config=config,
+                    quant_config=quant_config,
                     num_dummy_heads=num_dummy_heads,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )

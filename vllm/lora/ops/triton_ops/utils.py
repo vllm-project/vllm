@@ -11,12 +11,11 @@ import torch
 
 from vllm import envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
-is_batch_invariant = vllm_is_batch_invariant()
+is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 
 _LORA_A_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
 _LORA_B_PTR_DICT: dict[tuple[int, ...], tuple[torch.tensor, ...]] = {}
@@ -251,8 +250,8 @@ def get_lora_op_configs(
     else:
         default = {
             "block_m": 64,
-            "block_n": max(64, next_power_of_2(128 // num_slices)),
-            "block_k": 16,
+            "block_n": 64 if num_slices > 1 else 128,
+            "block_k": 32,
             "num_warps": 4,
             "num_ctas": 1,
             "num_stages": 2,
@@ -316,3 +315,9 @@ def supports_pdl(device: torch.device | None = None) -> bool:
         and current_platform.has_device_capability(90)
         and not envs.VLLM_LORA_DISABLE_PDL
     )
+
+
+@lru_cache
+def supports_tma(device: torch.device | None = None) -> bool:
+    # TMA requires compute capability SM90 or above
+    return current_platform.is_cuda() and current_platform.has_device_capability(90)

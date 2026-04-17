@@ -19,7 +19,9 @@ NUM_HEADS = [17]  # Arbitrary values for testing
 BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 USE_KEY = [True, False]
 
 
@@ -94,12 +96,9 @@ def test_rotary_embedding(
 
     positions = torch.randint(0, max_position, (batch_size, seq_len))
     query_shape = tensor_shape_fn(batch_size, seq_len, num_heads, head_size)
-    query = torch.randn(query_shape, dtype=dtype)
-    key = torch.randn_like(query) if use_key else None
-
     # slice tensor if required, noop otherwise
-    query = query[..., :head_size]
-    key = key[..., :head_size] if use_key else None
+    query = torch.randn(query_shape, dtype=dtype)[..., :head_size]
+    key = torch.randn_like(query)[..., :head_size] if use_key else None
 
     # NOTE(woosuk): The reference implementation should be executed first
     # because the custom kernel is in-place.

@@ -103,7 +103,7 @@ vllm serve "$MODEL_NAME" \
   --tensor-parallel-size "$GPU_COUNT" \
   --enforce-eager \
   --pooler-config "$POOLER_CONFIG" \
-  --served-model-name ${MODEL_CODE} \
+  --served-model-name "${MODEL_CODE}" \
   --api-key "$API_KEY" \
   --trust-remote-code \
   --port "$PORT" \

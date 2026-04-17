@@ -29,6 +29,7 @@ document = (
     "as the dog offers its paw in a heartwarming display of companionship and trust."
 )
 image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+video_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
 documents = [
     {
         "type": "text",
@@ -41,6 +42,10 @@ documents = [
     {
         "type": "image_url",
         "image_url": {"url": encode_image_url(fetch_image(image_url))},
+    },
+    {
+        "type": "video_url",
+        "video_url": {"url": video_url},
     },
 ]
 
@@ -88,6 +93,53 @@ def main(args):
         "model": model,
         "queries": query,
         "documents": {"content": [documents[2]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: video url")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": {"content": [documents[3]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: text + image url")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": {"content": [documents[0], documents[1]]},
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: string & Document: list")
+    prompt = {
+        "model": model,
+        "queries": query,
+        "documents": [
+            document,
+            {"content": [documents[0]]},
+            {"content": [documents[1]]},
+            {"content": [documents[0], documents[1]]},
+        ],
+    }
+    response = requests.post(score_url, json=prompt)
+    pprint.pprint(response.json())
+
+    print("Query: list & Document: list")
+    data = [
+        document,
+        {"content": [documents[0]]},
+        {"content": [documents[1]]},
+        {"content": [documents[0], documents[1]]},
+    ]
+    prompt = {
+        "model": model,
+        "queries": data,
+        "documents": data,
     }
     response = requests.post(score_url, json=prompt)
     pprint.pprint(response.json())
