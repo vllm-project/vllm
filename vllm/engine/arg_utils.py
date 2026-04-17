@@ -1673,11 +1673,11 @@ class EngineArgs:
                 and global_head_dim is not None
                 and global_head_dim > max_fmha_head_dim
             ):
+                merged_set = set(merged)
                 for idx, lt in enumerate(layer_types):
                     if lt == "full_attention":
-                        merged_set = set(merged)
                         merged_set.add(str(idx))
-                        merged = sorted(merged_set, key=lambda x: int(x))
+                merged = sorted(merged_set, key=lambda x: int(x))
                 logger.info(
                     "TQ: also skipping global attention layers with "
                     "head_dim=%d > %d (FMHA limit)",
