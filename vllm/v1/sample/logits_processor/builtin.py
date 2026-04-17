@@ -551,6 +551,79 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
         return logits
 
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        """Spec-decode version of apply().
+        We evaluate if the draft tokens hit the thinking budget. If they do,
+        force the end-thinking token on the relevant logits rows.
+        """
+        if not self.is_enabled or not self._state:
+            return logits
+
+        num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
+        cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
+
+        rows_to_mask: list[np.ndarray] = []
+        force_tokens: list[np.ndarray] = []
+
+        for req_idx, state in self._state.items():
+            nd = num_draft_arr[req_idx]
+            if nd == 0:
+                continue
+
+            if state.get("in_end"):
+                # Already in end mode - force end tokens on all draft positions
+                end_count = state.get("end_count", 0)
+                n_mask = nd
+                offset = cumsum[req_idx]
+                rows_to_mask.append(
+                    np.arange(offset, offset + n_mask, dtype=np.int64)
+                )
+                end_token_ids = []
+                for i in range(n_mask):
+                    idx = min(end_count + i,
+                              len(self.reasoning_end_token_ids) - 1)
+                    end_token_ids.append(self.reasoning_end_token_ids[idx])
+                force_tokens.append(
+                    np.array(end_token_ids, dtype=np.int64)
+                )
+            elif state.get("in_think"):
+                # In thinking mode - check if budget will be exceeded
+                remaining = max(
+                    0, state["thinking_token_budget"] - state["think_count"]
+                )
+                n_mask = int(min(max(nd - remaining, 0), nd))
+                if n_mask > 0:
+                    start_offset = cumsum[req_idx] + (nd - n_mask)
+                    rows_to_mask.append(
+                        np.arange(start_offset, start_offset + n_mask,
+                                  dtype=np.int64)
+                    )
+                    end_token_ids = []
+                    for i in range(n_mask):
+                        idx = min(i, len(self.reasoning_end_token_ids) - 1)
+                        end_token_ids.append(self.reasoning_end_token_ids[idx])
+                    force_tokens.append(
+                        np.array(end_token_ids, dtype=np.int64)
+                    )
+
+        if rows_to_mask:
+            rows_arr = np.concatenate(rows_to_mask)
+            toks_arr = np.concatenate(force_tokens)
+            logits_slice = (
+                torch.from_numpy(rows_arr).to(self.device, non_blocking=True),
+                torch.from_numpy(toks_arr).to(self.device, non_blocking=True),
+            )
+            logits.index_put_(
+                logits_slice,
+                torch.tensor(1e9, dtype=logits.dtype, device=self.device),
+            )
+
+        return logits
+
 
 def process_dict_updates(
     req_entries: dict[int, T],

@@ -294,7 +294,7 @@ class RejectionSampler(nn.Module):
             )
 
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            if isinstance(processor, MinTokensLogitsProcessor):
+            if hasattr(processor, "apply_with_spec_decode"):
                 logits = processor.apply_with_spec_decode(
                     logits, metadata.num_draft_tokens
                 )
