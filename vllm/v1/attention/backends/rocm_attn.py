@@ -69,6 +69,10 @@ class RocmAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
 
+    # Whether attention among query tokens is causal (decoder) or bidirectional.
+    # DFlash drafting sets this to False via CommonAttentionMetadata.
+    causal: bool = True
+
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
@@ -154,6 +158,7 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             prefix_kv_lens=prefix_kv_lens,
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
+            causal=common_attn_metadata.causal,
         )
         return attn_metadata
 
@@ -199,6 +204,12 @@ class RocmAttentionBackend(AttentionBackend):
         # Callink this backend with sinks will cause it to fall back to the Triton
         # kernel, which is less efficient than the proper triton backends.
         return False
+
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        # Bidirectional attention among draft query tokens (e.g. DFlash) is
+        # implemented when RocmAttentionMetadata.causal is False.
+        return True
 
     forward_includes_kv_cache_update: bool = False
 
@@ -438,6 +449,7 @@ class RocmAttentionImpl(AttentionImpl):
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,
+            causal=getattr(attn_metadata, "causal", True),
         )
 
         return output
