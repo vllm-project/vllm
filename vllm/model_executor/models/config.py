@@ -69,6 +69,24 @@ class AnyModelConfig(VerifyAndUpdateConfig):
                     model_config.runner_type = "generate"
                     model_config.convert_type = "none"
 
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Delegate VllmConfig-level tuning to the base architecture's hook."""
+        base_arch = getattr(
+            vllm_config.model_config.hf_config, "base_architecture", None
+        )
+        if not base_arch:
+            return
+        base_cls = MODELS_CONFIG_MAP.get(base_arch)
+        if base_cls is None or base_cls is AnyModelConfig:
+            return
+        if (
+            base_cls.verify_and_update_config
+            is VerifyAndUpdateConfig.verify_and_update_config
+        ):
+            return
+        base_cls.verify_and_update_config(vllm_config)
+
 
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod

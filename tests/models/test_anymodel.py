@@ -336,12 +336,27 @@ class TestApplyNoOps:
         _apply_no_ops(layer, _block(attn_no_op=True), info)
         assert isinstance(layer.attn, NoOpAttention)
 
-    def test_nemotronh_attn_noop_uses_mixer(self):
+    def test_nemotronh_shared_mixer_only_replaced_when_both_noop(self):
+        # NemotronH's attn and ffn share `mixer` (and `norm`), so replacing
+        # the shared module on a single-sided no-op would break active
+        # Mamba/MoE/Attention layers. `_apply_no_ops` must only replace
+        # when BOTH sides are no-op.
         info = _ARCH_REGISTRY["NemotronHForCausalLM"]
+
+        # Single-sided no-op must leave the shared mixer/norm intact.
         layer = MagicMock(spec=nn.Module)
         layer.mixer = MagicMock(spec=nn.Module)
         layer.norm = MagicMock(spec=nn.Module)
-        _apply_no_ops(layer, _block(attn_no_op=True), info)
+        orig_mixer, orig_norm = layer.mixer, layer.norm
+        _apply_no_ops(layer, _block(attn_no_op=True, ffn_no_op=False), info)
+        assert layer.mixer is orig_mixer
+        assert layer.norm is orig_norm
+
+        # Both-sided no-op replaces the shared module and norm.
+        layer = MagicMock(spec=nn.Module)
+        layer.mixer = MagicMock(spec=nn.Module)
+        layer.norm = MagicMock(spec=nn.Module)
+        _apply_no_ops(layer, _block(attn_no_op=True, ffn_no_op=True), info)
         assert isinstance(layer.mixer, NoOpAttention)
         assert isinstance(layer.norm, NoOpNorm)
 

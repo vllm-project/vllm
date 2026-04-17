@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -209,9 +210,17 @@ def _kv_cache_stub(self, vllm_config):
     kv_cache_configs = get_kv_cache_configs(
         vllm_config,
         kv_cache_specs,
-        [10 * GiB_bytes],
+        [10 * GiB_bytes] * len(kv_cache_specs),
     )
-    return 1, 0, generate_scheduler_kv_cache_config(kv_cache_configs)
+    scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
+    vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
+    kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
+    if kv_cache_groups:
+        vllm_config.cache_config.block_size = min(
+            g.kv_cache_spec.block_size for g in kv_cache_groups
+        )
+    self.model_executor.initialize_from_config(kv_cache_configs)
+    return scheduler_kv_cache_config
 
 
 def _get_model(llm: LLM):
@@ -286,6 +295,155 @@ def _run_anymodel_parity():
 
 def test_anymodel_weight_loading_parity():
     _run_anymodel_parity()
+
+
+def _find_decoder_layers(model) -> list:
+    """Walk common paths to the decoder ModuleList (layers / model.layers /
+    language_model.model.layers)."""
+    for path in ("model.layers", "language_model.model.layers", "layers"):
+        obj = model
+        try:
+            for part in path.split("."):
+                obj = getattr(obj, part)
+        except AttributeError:
+            continue
+        if hasattr(obj, "__iter__") and hasattr(obj, "__len__"):
+            return list(obj)
+    raise AssertionError("Could not locate decoder layers on model")
+
+
+def _capture_layer_outputs(model) -> tuple[list, list]:
+    """Register forward hooks capturing each decoder layer's hidden_states output.
+
+    Returns (hidden_states_per_layer, hook_handles). Hooks should be removed
+    after the forward pass. Layers are captured by index in model.layers order.
+    """
+    layers = _find_decoder_layers(model)
+    captured: list[torch.Tensor | None] = [None] * len(layers)
+    handles = []
+
+    def _make_hook(idx):
+        def _hook(module, args, output):
+            # Decoder layers typically return hidden_states (sometimes a tuple
+            # (hidden_states, residual)). Grab the first tensor and detach to cpu.
+            if isinstance(output, tuple):
+                hs = next((o for o in output if isinstance(o, torch.Tensor)), None)
+            else:
+                hs = output if isinstance(output, torch.Tensor) else None
+            if hs is not None:
+                captured[idx] = hs.detach().to("cpu")
+
+        return _hook
+
+    for i, layer in enumerate(layers):
+        handles.append(layer.register_forward_hook(_make_hook(i)))
+    return captured, handles
+
+
+@create_new_process_for_each_test()
+def _run_anymodel_layer_parity():
+    """Assert per-decoder-layer hidden states match exactly between plain and
+    identity-wrapped AnyModel. With identical weights and no block overrides,
+    every layer's output tensor should be bitwise equal; any drift would
+    indicate the wrapper is perturbing the forward path."""
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    sampling = SamplingParams(temperature=0, max_tokens=8)
+    prompt = "The capital of France is"
+    common = dict(enforce_eager=True, gpu_memory_utilization=0.4)
+
+    base_llm = LLM(_PARITY_MODEL, **common)
+    base_captured, base_handles = _capture_layer_outputs(_get_model(base_llm))
+    base_out = base_llm.generate([prompt], sampling)[0]
+    for h in base_handles:
+        h.remove()
+    base_ids = tuple(base_out.outputs[0].token_ids)
+    base_layers = [t for t in base_captured if t is not None]
+    assert len(base_layers) > 0, "No layer outputs captured for base model"
+    del base_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    any_llm = LLM(
+        _PARITY_MODEL,
+        hf_overrides=_identity_anymodel_overrides,
+        **common,
+    )
+    any_captured, any_handles = _capture_layer_outputs(_get_model(any_llm))
+    any_out = any_llm.generate([prompt], sampling)[0]
+    for h in any_handles:
+        h.remove()
+    any_ids = tuple(any_out.outputs[0].token_ids)
+    any_layers = [t for t in any_captured if t is not None]
+
+    assert base_ids == any_ids, (
+        f"Token-id parity mismatch:\n  base:     {base_ids}\n  anymodel: {any_ids}"
+    )
+    assert len(base_layers) == len(any_layers), (
+        f"Layer count mismatch: base={len(base_layers)} vs anymodel={len(any_layers)}"
+    )
+    for i, (b, a) in enumerate(zip(base_layers, any_layers)):
+        assert b.shape == a.shape, f"Layer {i} shape mismatch: {b.shape} vs {a.shape}"
+        # With identical weights, identical input, and no overrides, every
+        # kernel path is the same — assert bitwise equality.
+        assert torch.equal(b, a), (
+            f"Layer {i} hidden-state divergence "
+            f"(max_abs_diff={(b - a).abs().max().item():.3e})"
+        )
+
+
+def test_anymodel_layer_parity():
+    """Per-layer hidden-state equality for identity-wrapped AnyModel."""
+    _run_anymodel_layer_parity()
+
+
+@create_new_process_for_each_test()
+def _run_anymodel_throughput_parity():
+    """Assert identity-wrapped AnyModel throughput is not materially worse than
+    plain. Regressions here catch issues like the pooling-runner misclassification
+    that silently halved max_cudagraph_capture_size."""
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    sampling = SamplingParams(temperature=0, max_tokens=64, seed=0)
+    # Enough prompts to amortize startup / warmup cost.
+    prompts = [f"Explain in one sentence what number {i} means." for i in range(32)]
+    common = dict(enforce_eager=False, gpu_memory_utilization=0.4)
+
+    def _time_generate(llm):
+        # Warm-up to trigger any lazy compile/capture work outside the timed run.
+        llm.generate(prompts[:4], sampling)
+        start = time.perf_counter()
+        outs = llm.generate(prompts, sampling)
+        elapsed = time.perf_counter() - start
+        n_out_tokens = sum(len(o.outputs[0].token_ids) for o in outs)
+        return elapsed, n_out_tokens, [tuple(o.outputs[0].token_ids) for o in outs]
+
+    base_llm = LLM(_PARITY_MODEL, **common)
+    base_time, base_tokens, base_ids = _time_generate(base_llm)
+    del base_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+    any_llm = LLM(_PARITY_MODEL, hf_overrides=_identity_anymodel_overrides, **common)
+    any_time, any_tokens, any_ids = _time_generate(any_llm)
+
+    assert base_ids == any_ids, (
+        "Generated token parity mismatch between base and AnyModel"
+    )
+    assert base_tokens == any_tokens
+
+    base_tps = base_tokens / base_time
+    any_tps = any_tokens / any_time
+    # AnyModel is allowed a narrow overhead band. The broken state (pooling
+    # misclassification) was ~-36%; anything within 10% is fine noise-wise.
+    ratio = any_tps / base_tps
+    assert ratio > 0.90, (
+        f"AnyModel throughput regressed >10%: "
+        f"base={base_tps:.1f} tok/s vs anymodel={any_tps:.1f} tok/s (ratio={ratio:.2f})"
+    )
+
+
+def test_anymodel_throughput_parity():
+    """AnyModel (identity wrap) throughput must stay within ~10% of plain."""
+    _run_anymodel_throughput_parity()
 
 
 _REDUCTION_MODEL = "meta-llama/Llama-3.2-1B-Instruct"
