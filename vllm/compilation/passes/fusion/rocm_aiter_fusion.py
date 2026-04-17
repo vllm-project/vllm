@@ -50,11 +50,8 @@ class AiterRMSNormQuantPattern:
 class AiterRMSNormDynamicQuantPattern(AiterRMSNormQuantPattern):
     """AITER RMSNorm + Dynamic Quantization pattern.
 
-    TODO(Badr): This class matches the same graph pattern as RMSNormDynamicQuantPattern
-    in rms_quant_fusion.py, differing only in the replacement (AITER op vs vllm_c op).
-    Once RMSNormDynamicQuantPattern is refactored to use VllmFusionPatternMatcherPass,
-    this should be replaced by a subclass of RMSNormDynamicQuantPattern that overrides
-    only the replacement.
+    TODO: Introduce vLLM IR ops for fused operations to unify AITER and vllm_c
+    fusion passes into a single pass.
     """
 
     FUSED_OP = rocm_aiter_ops.get_rmsnorm_fused_dynamic_quant_op()
@@ -167,11 +164,8 @@ class AiterRMSFp8GroupQuantPattern(AiterRMSNormQuantPattern):
     This pattern fuses aiter rms_norm & group fp8 quant custom
     ops into an aiter rms_norm_group_fp8_quant op.
 
-    TODO(Badr): This class matches the same graph pattern as RMSNormGroupQuantPattern
-    in rms_quant_fusion.py, differing only in the replacement (AITER op vs vllm_c op).
-    Once RMSNormGroupQuantPattern is refactored to use VllmFusionPatternMatcherPass,
-    this should be replaced by a subclass of RMSNormGroupQuantPattern that overrides
-    only the replacement.
+    TODO: Introduce vLLM IR ops for fused operations to unify AITER and vllm_c
+    fusion passes into a single pass.
     """
 
     FUSED_OP = rocm_aiter_ops.get_rmsnorm_group_fused_quant_op()
