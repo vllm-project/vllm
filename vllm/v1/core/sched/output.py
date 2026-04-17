@@ -247,6 +247,9 @@ class SchedulerOutput:
 
     req_id_to_cp_size: dict[str, list[int]] | None = None
 
+    # req_ids will be processed in this cp rank
+    cp_rank_to_req_id: list[str] | None = None
+
     none_tokens_in_peer_sched: bool = False
 
     @classmethod

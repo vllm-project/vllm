@@ -507,7 +507,16 @@ class EngineCore:
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
-            model_output = future.result()
+            model_outputs = None
+            if any([so.total_num_scheduled_tokens == 0 for so in scheduler_outputs]) and \
+                any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs]):
+                future_results = future.result()
+                exec_model_fut_results = exec_model_fut.result()
+                model_outputs = [exec_model_fut_results[idx] if exec_model_fut_results[idx] is not None
+                                 else future_results[idx] for idx in range(len(future_results))]
+            else:
+                model_outputs = future.result()
+
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -1291,7 +1300,7 @@ class EngineCoreProc(EngineCore):
                         self.vllm_config, sched_out, self.scheduler.make_stats()
                     )
             raise err
-    
+
     def _log_domain_error_callback(self, scheduler_outputs: list[SchedulerOutput]):
         """Log error details of a future that's not expected to return a result."""
 
@@ -1302,9 +1311,9 @@ class EngineCoreProc(EngineCore):
             return result
 
         return callback
-    
+
     def step_domain_with_batch_queue(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
-        
+
         # If paused, don't schedule any work.
         if self._scheduler_paused:
             return {}, False
@@ -1321,7 +1330,7 @@ class EngineCoreProc(EngineCore):
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_outputs = self.scheduler.schedule()
-        
+
             exec_future = self.model_executor.execute_model(
                 scheduler_outputs, non_block=True
             )
@@ -1358,13 +1367,13 @@ class EngineCoreProc(EngineCore):
                     # Don't block on next worker response unless the queue is full
                     # or there are no more requests to schedule.
                     return None, True
-        
+
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
-        
+
         # Block until the next result is available.
         future, scheduler_outputs, exec_model_fut = batch_queue.pop()
         with (
@@ -1412,15 +1421,17 @@ class EngineCoreProc(EngineCore):
             self.log_domain_error_detail(scheduler_outputs),
             self.log_domain_iteration_details(scheduler_outputs),
         ):
-            model_outputs = future.result()
-            if None in model_outputs:
-                model_outputs = self.model_executor.sample_tokens(grammar_output)
+            model_outputs_execute_model = future.result()
+            if None in model_outputs_execute_model:
+                model_outputs_sample_tokens = self.model_executor.sample_tokens(grammar_output)
+            model_outputs = [model_outputs_execute_model[idx] if model_outputs_execute_model[idx] is not None
+                             else model_outputs_sample_tokens[idx] for idx in range(len(model_outputs_execute_model))]
 
         self._process_aborts_queue()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_outputs, model_outputs
         )
-        
+
         model_executed = any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs])
         return engine_core_outputs, model_executed
 
@@ -1483,7 +1494,7 @@ class EngineCoreProc(EngineCore):
                     "Setting kv_transfer_config.engine_id to %s",
                     vllm_config.kv_transfer_config.engine_id,
                 )
-            
+
             parallel_config.data_parallel_index = domain_rank
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
@@ -1505,9 +1516,9 @@ class EngineCoreProc(EngineCore):
             engine_core.step_fn = (
                 engine_core.step_domain_with_batch_queue if scheduler_config.async_scheduling else engine_core.step_domain
             )
-            
+
             engine_core.run_busy_loop()
-        
+
         except SystemExit:
             logger.debug("EngineCore exiting.")
             raise
@@ -2512,7 +2523,7 @@ class DomainEngineCoreProc(DPEngineCoreProc):
         assert domain_count > 1
         assert local_domain_rank is not None
         assert 0 <= local_domain_rank <= domain_rank < domain_count
-        
+
         self.domain_rank = domain_rank
         logger.info(f"Domain rank: {self.domain_rank} start to init statelss domain group")
         self.domain_group = vllm_config.parallel_config.stateless_init_domain_group()

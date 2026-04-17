@@ -620,6 +620,7 @@ class EngineArgs:
     dp_per_domain: int = ParallelConfig.dp_per_domain
     # num_cp_seqs: number of requests to be processed in a single iteration for cp.
     num_cp_seqs: int = SchedulerConfig.num_cp_seqs
+    long_request_threshold: int = SchedulerConfig.long_request_threshold
 
     def __post_init__(self):
         # support `EngineArgs(compilation_config={...})`
@@ -1234,6 +1235,11 @@ class EngineArgs:
 
         scheduler_group.add_argument(
             "--num-cp-seqs", **scheduler_kwargs["num_cp_seqs"]
+        )
+
+        scheduler_group.add_argument(
+            "--long-request-threshold",
+            **scheduler_kwargs["long_request_threshold"]
         )
 
         # Compilation arguments

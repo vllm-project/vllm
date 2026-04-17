@@ -150,6 +150,11 @@ class SchedulerConfig:
     """The number of sequences to be processed in a single iteration for cp.
     """
 
+    long_request_threshold: int = Field(default=1024, ge=1)
+    """The token threshold for determining long requests in dynamic CP scheduling.
+    Requests with tokens exceeding this threshold will be treated as long requests
+    and distributed across all CP ranks."""
+
     @staticmethod
     def default_factory(**kwargs):
         """
