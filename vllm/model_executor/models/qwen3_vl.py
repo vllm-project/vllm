@@ -425,6 +425,7 @@ class Qwen3_VisionMLP(nn.Module):
         "cu_seqlens": 0,
         "rotary_pos_emb_cos": 0,
         "rotary_pos_emb_sin": 0,
+        "sequence_lengths": 0,
     },
     enable_if=should_torch_compile_mm_encoder,
     is_encoder=True,
