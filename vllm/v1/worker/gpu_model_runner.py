@@ -3414,6 +3414,13 @@ class GPUModelRunner(
         invalid_req_indices = []
         logprobs_lists = None
         if not self.use_async_scheduling:
+            # Issue routed experts D2H before _to_list so that the
+            # event.synchronize() inside _to_list covers this copy too.
+            if self.routed_experts_initialized:
+                buf = self.routed_experts_capturer.get_device_buffer()
+                total = scheduler_output.total_num_scheduled_tokens
+                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
+
             # Get the valid generated tokens.
             max_gen_len = sampled_token_ids.shape[-1]
             if max_gen_len == 1:
@@ -4359,10 +4366,9 @@ class GPUModelRunner(
 
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
-                buf = self.routed_experts_capturer.get_device_buffer()
+                # D2H was already issued in _bookkeeping_sync and
+                # synchronized by _to_list's event.synchronize().
                 total = scheduler_output.total_num_scheduled_tokens
-                self.routed_experts_cpu[:total].copy_(buf[:total], non_blocking=True)
-                torch.cuda.current_stream().synchronize()
                 output.routed_experts = (
                     self.routed_experts_cpu[:total].numpy(),
                     self.routed_experts_slot_mapping.numpy(),

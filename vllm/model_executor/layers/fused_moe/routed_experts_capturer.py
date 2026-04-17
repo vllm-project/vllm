@@ -144,12 +144,9 @@ class RoutedExpertsManager:
     ) -> None:
         # Find the attention group for block/slot mapping.
         self.attn_gid = next(
-            (
-                gid
-                for gid, g in enumerate(kv_cache_config.kv_cache_groups)
-                if isinstance(g.kv_cache_spec, AttentionSpec)
-            ),
-            0,
+            gid
+            for gid, g in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(g.kv_cache_spec, AttentionSpec)
         )
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
@@ -184,7 +181,10 @@ class RoutedExpertsManager:
 
         Args:
             block_ids: Block IDs from the attention KV-cache group.
-            num_tokens: Number of generated tokens (excluding the last).
+            num_tokens: Number of tokens that have gone through a forward
+                pass and therefore have routing data written to their slots
+                (i.e. ``request.num_computed_tokens``). Slots beyond this
+                count are zero-initialized and must not be read.
 
         Returns:
             Array of shape (num_tokens, num_layers, num_experts_per_tok).

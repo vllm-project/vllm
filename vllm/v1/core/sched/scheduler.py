@@ -256,7 +256,11 @@ class Scheduler(SchedulerInterface):
         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
             self.perf_metrics = ModelMetrics(vllm_config)
 
-        if self.vllm_config.model_config.enable_return_routed_experts:
+        self.enable_return_routed_experts = (
+            vllm_config.model_config.enable_return_routed_experts
+        )
+
+        if self.enable_return_routed_experts:
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
                 "enable_return_routed_experts does not support context parallelism "
                 "(dcp_world_size > 1 or pcp_world_size > 1)"
@@ -267,10 +271,10 @@ class Scheduler(SchedulerInterface):
                 kv_cache_config=kv_cache_config,
             )
 
-        self._pause_state: PauseState = PauseState.UNPAUSED
+            # Routed experts captured for aborted requests (before blocks freed).
+            self.aborted_routed_experts: dict[str, np.ndarray] = {}
 
-        # Routed experts captured for aborted requests (before blocks freed).
-        self._aborted_routed_experts: dict[str, np.ndarray] = {}
+        self._pause_state: PauseState = PauseState.UNPAUSED
 
     def _mamba_block_aligned_split(
         self,
@@ -946,22 +950,21 @@ class Scheduler(SchedulerInterface):
         )
         # Capture routed experts BEFORE freeing blocks so that a subsequent
         # abort can still return valid routing data.
-        if self.vllm_config.model_config.enable_return_routed_experts:
+        if self.enable_return_routed_experts:
             re = self._get_routed_experts(request)
-            if re is not None:
-                existing = self._aborted_routed_experts.get(request.request_id)
-                # Only overwrite if new data is at least as complete as
-                # the existing cache (guards against chunked-prefill
-                # producing shorter routing after a prior full preemption).
-                if existing is None or re.shape[0] >= existing.shape[0]:
-                    self._aborted_routed_experts[request.request_id] = re
-                    logger.info(
-                        "Cached routed_experts before preemption: "
-                        "req_id=%s, num_tokens=%d, shape=%s",
-                        request.request_id,
-                        request.num_tokens,
-                        re.shape,
-                    )
+            existing = self.aborted_routed_experts.get(request.request_id)
+            # Only overwrite if new data is at least as complete as
+            # the existing cache (guards against chunked-prefill
+            # producing shorter routing after a prior full preemption).
+            if existing is None or re.shape[0] >= existing.shape[0]:
+                self.aborted_routed_experts[request.request_id] = re
+                logger.info(
+                    "Cached routed_experts before preemption: "
+                    "req_id=%s, num_tokens=%d, shape=%s",
+                    request.request_id,
+                    request.num_tokens,
+                    re.shape,
+                )
 
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
@@ -1428,10 +1431,11 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             finish_reason = None
             if stopped:
-                routed_experts = self._get_routed_experts(request)
-                # Request completed normally; clean up any stale
-                # preemption cache now that blocks have full routing.
-                self._aborted_routed_experts.pop(req_id, None)
+                if self.enable_return_routed_experts:
+                    routed_experts = self._get_routed_experts(request)
+                    # Request completed normally; clean up any stale
+                    # preemption cache now that blocks have full routing.
+                    self.aborted_routed_experts.pop(req_id, None)
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
@@ -1614,15 +1618,19 @@ class Scheduler(SchedulerInterface):
         return all_block_ids[self.routed_experts_mgr.attn_gid]
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
-        if not self.vllm_config.model_config.enable_return_routed_experts:
-            return None
+        # Use num_computed_tokens, not num_tokens - 1: only tokens that have
+        # gone through the forward pass have routing data written to their
+        # slots. num_computed_tokens reflects this precisely (including spec
+        # decoding rejections and chunked prefill), while num_tokens - 1 can
+        # over-read zero-initialized slots when a request is aborted mid-
+        # prefill or preempted.
+        num_tokens = request.num_computed_tokens
         block_ids = self._get_routed_experts_block_ids(request)
-        num_tokens = request.num_tokens - 1
         return self.routed_experts_mgr.get(block_ids, num_tokens)
 
     def pop_aborted_routed_experts(self, req_id: str) -> np.ndarray | None:
         """Pop cached routed experts for an aborted request."""
-        return self._aborted_routed_experts.pop(req_id, None)
+        return self.aborted_routed_experts.pop(req_id, None)
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]
@@ -1802,15 +1810,15 @@ class Scheduler(SchedulerInterface):
 
         # Second pass: capture routed experts, set status and free requests
         for request in valid_requests:
-            # Capture routed experts BEFORE freeing blocks.
-            re = self._get_routed_experts(request)
-            if re is not None:
-                existing = self._aborted_routed_experts.get(request.request_id)
+            if self.enable_return_routed_experts:
+                # Capture routed experts BEFORE freeing blocks.
+                re = self._get_routed_experts(request)
+                existing = self.aborted_routed_experts.get(request.request_id)
                 # Only overwrite if new data is at least as complete
                 # (e.g. a RUNNING request aborted during chunked re-prefill
                 # may have fewer routing entries than the prior preemption).
                 if existing is None or re.shape[0] >= existing.shape[0]:
-                    self._aborted_routed_experts[request.request_id] = re
+                    self.aborted_routed_experts[request.request_id] = re
 
             delay_free_blocks = False
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
