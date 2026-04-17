@@ -2160,6 +2160,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             self._run_prefill_context_chunk = self._run_prefill_context_chunk_cudnn
             self._run_prefill_new_tokens = self._run_prefill_new_tokens_cudnn
             self._pad_v = False
+        elif use_triton_prefill():
+            logger.info_once("Using Triton prefill for MLA", scope="local")
+            self._run_prefill_context_chunk = self._run_prefill_context_chunk_triton
+            self._run_prefill_new_tokens = self._run_prefill_new_tokens_triton
+            self._pad_v = False
         else:  # Use FlashAttention
             if flash_attn_varlen_func is None:
                 raise RuntimeError(
@@ -2203,16 +2208,6 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
-        if use_triton_prefill():
-            logger.info_once("Using Triton prefill for MLA", scope="local")
-            from vllm.v1.attention.ops.triton_flash_attn_varlen import (
-                flash_attn_varlen_triton,
-            )
-
-            self.flash_attn_varlen_func = flash_attn_varlen_triton
-            # Triton kernel natively supports different D_QK and D_V;
-            # disable V padding to avoid wasting bandwidth and registers.
-            self._pad_v = False
 
     def _flash_attn_varlen_diff_headdims(
         self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
@@ -2284,6 +2279,26 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             return ret[0], ret[1].transpose(0, 1).contiguous()
         return ret
 
+    def _run_prefill_new_tokens_triton(
+        self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
+    ):
+        from vllm.v1.attention.ops.triton_flash_attn_varlen import (
+            flash_attn_varlen_triton,
+        )
+
+        return flash_attn_varlen_triton(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill.query_start_loc,
+            cu_seqlens_k=prefill.query_start_loc,
+            max_seqlen_q=prefill.max_query_len,
+            max_seqlen_k=prefill.max_query_len,
+            softmax_scale=self.scale,
+            causal=True,
+            return_softmax_lse=return_softmax_lse,
+        )
+
     def _run_prefill_new_tokens_cudnn(
         self, prefill: MLACommonPrefillMetadata, q, k, v, return_softmax_lse
     ):
@@ -2342,6 +2357,27 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         # Convert from (q_len, num_heads) to (num_heads, q_len)
         return attn_out, lse.transpose(0, 1).contiguous()
+
+    def _run_prefill_context_chunk_triton(
+        self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
+    ):
+        from vllm.v1.attention.ops.triton_flash_attn_varlen import (
+            flash_attn_varlen_triton,
+        )
+
+        assert prefill.chunked_context is not None
+        return flash_attn_varlen_triton(
+            q=q,
+            k=k,
+            v=v,
+            cu_seqlens_q=prefill.query_start_loc,
+            cu_seqlens_k=prefill.chunked_context.cu_seq_lens[chunk_idx],
+            max_seqlen_q=prefill.max_query_len,
+            max_seqlen_k=prefill.chunked_context.max_seq_lens[chunk_idx],
+            softmax_scale=self.scale,
+            causal=False,
+            return_softmax_lse=True,
+        )
 
     def _run_prefill_context_chunk_cudnn(
         self, prefill: MLACommonPrefillMetadata, chunk_idx: int, q, k, v
