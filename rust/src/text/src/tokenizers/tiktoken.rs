@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use base64::Engine as _;
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::Deserialize;
 use thiserror_ext::AsReport as _;
 use tiktoken_rs::CoreBPE;
 use tracing::{info, warn};
@@ -14,12 +15,10 @@ use crate::error::Result;
 /// Default regex pattern used when loading tiktoken from a BPE file. This is the same
 /// `cl100k_base` pattern that HuggingFace transformers uses as its default in
 /// `TikTokenConverter`.
-///
-/// The `.tiktoken` file format does not include a regex pattern — each model's pattern is
-/// defined in its Python tokenizer source (e.g. `tokenization_kimi.py`). Some models use a
-/// different regex (e.g. Kimi K2 adds `\p{Han}` for CJK grouping), which can affect token
-/// boundaries but not encode/decode correctness.
 const CL100K_BASE_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// Kimi BPE pattern from `moonshotai/Kimi-K2-Instruct/tokenization_kimi.py`.
+const KIMI_PATTERN: &str = r"[\p{Han}]+|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 /// Fallback number of reserved special-token slots to assume when the model's `config.json`
 /// is not available (so we cannot read `vocab_size` directly).
@@ -31,6 +30,7 @@ const CL100K_BASE_PATTERN: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N
 const FALLBACK_NUM_RESERVED_SPECIAL_TOKENS: u32 = 256;
 
 /// Parsed entry from `tokenizer_config.json`'s `added_tokens_decoder`.
+#[derive(Debug, Clone, Deserialize)]
 struct AddedToken {
     content: String,
     /// HuggingFace `added_tokens_decoder` entries can be marked `"special": true|false`.
@@ -38,7 +38,46 @@ struct AddedToken {
     /// `skip_special_tokens = true`. Defaults to `false` when the field is omitted, matching
     /// HuggingFace's `AddedToken` default — so only tokens explicitly marked special are
     /// stripped during normal decode (where `skip_special_tokens` itself defaults to true).
+    #[serde(default)]
     special: bool,
+}
+
+/// Minimal subset of `tokenizer_config.json` needed by the tiktoken loader.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct TiktokenTokenizerConfig {
+    /// Format:
+    /// `{ "added_tokens_decoder": { "163584": { "content": "[BOS]", "special": true }, ... } }`
+    #[serde(default)]
+    added_tokens_decoder: FxHashMap<u32, AddedToken>,
+}
+
+/// Minimal subset of model `config.json` needed by the tiktoken loader.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct TiktokenModelConfig {
+    model_type: Option<String>,
+    vocab_size: Option<u32>,
+    text_config: Option<Box<TiktokenModelConfig>>,
+}
+
+impl TiktokenModelConfig {
+    /// Read `model_type` from a model `config.json` value, falling back to a single-level nested
+    /// `text_config.model_type` for composite (e.g. multimodal) configs that keep text metadata
+    /// under a `text_config` object.
+    fn effective_model_type(&self) -> Option<&str> {
+        self.model_type
+            .as_deref()
+            .or_else(|| self.text_config.as_deref()?.effective_model_type())
+    }
+
+    /// Read `vocab_size` from a model `config.json` value, falling back to a single-level nested
+    /// `text_config.vocab_size` for composite (e.g. multimodal) configs that keep text metadata
+    /// under a `text_config` object — matching the same shape `ModelConfig` parses.
+    fn effective_vocab_size(&self) -> Option<u32> {
+        self.vocab_size
+            .or_else(|| self.text_config.as_deref()?.effective_vocab_size())
+    }
 }
 
 /// Tiktoken tokenizer from `tiktoken.model` or `*.tiktoken` BPE files.
@@ -121,26 +160,26 @@ impl TiktokenTokenizer {
 
         // Read added/special tokens (id → {name, special}) from tokenizer_config.json in the
         // same dir.
-        let added_tokens_by_id: FxHashMap<u32, AddedToken> = parent_dir
+        let added_tokens_by_id = parent_dir
             .map(|dir| dir.join("tokenizer_config.json"))
             .filter(|p| p.exists())
             .and_then(|config_path| {
-                let config_content = std::fs::read_to_string(&config_path).ok()?;
-                let config: serde_json::Value = serde_json::from_str(&config_content).ok()?;
-                parse_added_tokens_from_config(&config)
+                let content = std::fs::read_to_string(&config_path).ok()?;
+                serde_json::from_str(&content).ok()
             })
+            .map(|config: TiktokenTokenizerConfig| config.added_tokens_decoder)
             .unwrap_or_default();
 
-        // Read `vocab_size` from the model's config.json (top-level or nested `text_config`)
-        // if available.
-        let vocab_size_from_config: Option<u32> = parent_dir
+        // Read `config.json` once so both `vocab_size` and model-specific tokenizer behavior can
+        // be derived from the same source of truth.
+        let model_config: Option<TiktokenModelConfig> = parent_dir
             .map(|dir| dir.join("config.json"))
             .filter(|p| p.exists())
             .and_then(|config_path| {
                 let content = std::fs::read_to_string(&config_path).ok()?;
-                let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-                read_vocab_size(&value)
+                serde_json::from_str(&content).ok()
             });
+        let vocab_size_from_config = model_config.as_ref().and_then(|c| c.effective_vocab_size());
 
         // Build the full special-tokens encoder by populating the reserved range that follows
         // the BPE vocabulary. The Python reference does this in `tokenization_kimi.py`:
@@ -191,15 +230,16 @@ impl TiktokenTokenizer {
             special_tokens_encoder.insert(name, id);
         }
 
+        let pattern = model_config
+            .as_ref()
+            .map_or(CL100K_BASE_PATTERN, detect_bpe_pattern);
         let special_token_ids_by_text = special_tokens_encoder.clone();
-        let bpe = CoreBPE::new(encoder, special_tokens_encoder, CL100K_BASE_PATTERN).map_err(
-            |error| {
-                Error::Tokenizer(format!(
-                    "failed to create tiktoken tokenizer from {}: {error}",
-                    path.display()
-                ))
-            },
-        )?;
+        let bpe = CoreBPE::new(encoder, special_tokens_encoder, pattern).map_err(|error| {
+            Error::Tokenizer(format!(
+                "failed to create tiktoken tokenizer from {}: {error}",
+                path.display()
+            ))
+        })?;
 
         Ok(Self {
             inner: bpe,
@@ -297,50 +337,18 @@ impl Tokenizer for TiktokenTokenizer {
     }
 }
 
-/// Read `vocab_size` from a model `config.json` value, falling back to a single-level nested
-/// `text_config.vocab_size` for composite (e.g. multimodal) configs that keep text metadata
-/// under a `text_config` object — matching the same shape `ModelConfig` parses.
-fn read_vocab_size(config: &serde_json::Value) -> Option<u32> {
-    let direct = config.get("vocab_size").and_then(|v| v.as_u64());
-    let nested = config
-        .get("text_config")
-        .and_then(|tc| tc.get("vocab_size"))
-        .and_then(|v| v.as_u64());
-    direct.or(nested).and_then(|n| u32::try_from(n).ok())
-}
+/// Select the BPE regex pattern for a tiktoken model based on `config.json`.
+///
+/// Most tiktoken models use the `cl100k_base` regex. Kimi models ship a custom regex in their
+/// Python tokenizer implementation; we mirror the explicit `model_type` switch used by Dynamo
+/// instead of heuristically parsing Python source files.
+fn detect_bpe_pattern(config: &TiktokenModelConfig) -> &'static str {
+    let model_type = config.effective_model_type();
 
-/// Parse `added_tokens_decoder` from `tokenizer_config.json` into an id → `AddedToken` map.
-///
-/// Format: `{ "added_tokens_decoder": { "163584": { "content": "[BOS]", "special": true }, ... } }`
-///
-/// The `"special"` flag is honoured by `decode` when `skip_special_tokens = true`. Entries that
-/// omit the flag default to `special = false`, matching HuggingFace's `AddedToken` default.
-fn parse_added_tokens_from_config(
-    config: &serde_json::Value,
-) -> Option<FxHashMap<u32, AddedToken>> {
-    let added = config
-        .get("added_tokens_decoder")
-        .and_then(|v| v.as_object())?;
-    let mut tokens = FxHashMap::default();
-    for (id_str, token_info) in added {
-        if let (Ok(id), Some(content)) = (
-            id_str.parse::<u32>(),
-            token_info.get("content").and_then(|v| v.as_str()),
-        ) {
-            let special = token_info
-                .get("special")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            tokens.insert(
-                id,
-                AddedToken {
-                    content: content.to_string(),
-                    special,
-                },
-            );
-        }
+    match model_type {
+        Some("kimi" | "kimi_k2" | "kimi_k25" | "deepseek_v3") => KIMI_PATTERN,
+        _ => CL100K_BASE_PATTERN,
     }
-    Some(tokens)
 }
 
 #[cfg(test)]
@@ -351,9 +359,18 @@ mod tests {
     use base64::Engine as _;
     use tempfile::TempDir;
 
-    use super::TiktokenTokenizer;
+    use super::{
+        CL100K_BASE_PATTERN, KIMI_PATTERN, TiktokenModelConfig, TiktokenTokenizer,
+        TiktokenTokenizerConfig, detect_bpe_pattern,
+    };
     use crate::backends::hf::{ResolvedModelFiles, TokenizerSource};
     use crate::tokenizers::Tokenizer;
+
+    macro_rules! config_json {
+        ($($json:tt)+) => {
+            serde_json::from_value::<TiktokenModelConfig>(serde_json::json!($($json)+)).unwrap()
+        };
+    }
 
     /// Write a minimal `*.tiktoken` BPE file (one token per byte 0..=255) into `dir` and
     /// return its path. The single-byte vocab is enough to exercise the multi-byte / streaming
@@ -541,6 +558,72 @@ mod tests {
         assert_eq!(backend.decode(&[270], false).unwrap(), "");
     }
 
+    #[test]
+    fn tiktoken_detects_kimi_pattern_from_model_type() {
+        let kimi = config_json!({ "model_type": "kimi_k25" });
+        let baseten_kimi = config_json!({ "model_type": "deepseek_v3" });
+        let nested_kimi = config_json!({
+            "model_type": "composite_wrapper",
+            "text_config": { "model_type": "kimi_k2" }
+        });
+        let generic = config_json!({ "model_type": "gpt2" });
+        let nested_generic = config_json!({
+            "model_type": "composite_wrapper",
+            "text_config": { "model_type": "gpt2" }
+        });
+        let missing = config_json!({ "text_config": {} });
+
+        assert_eq!(detect_bpe_pattern(&kimi), KIMI_PATTERN);
+        assert_eq!(detect_bpe_pattern(&baseten_kimi), KIMI_PATTERN);
+        assert_eq!(detect_bpe_pattern(&nested_kimi), CL100K_BASE_PATTERN);
+        assert_eq!(detect_bpe_pattern(&generic), CL100K_BASE_PATTERN);
+        assert_eq!(detect_bpe_pattern(&nested_generic), CL100K_BASE_PATTERN);
+        assert_eq!(detect_bpe_pattern(&missing), CL100K_BASE_PATTERN);
+    }
+
+    #[test]
+    fn tiktoken_reads_model_type_from_text_config_when_top_level_missing() {
+        let nested_only = config_json!({
+            "text_config": { "model_type": "kimi_k2" }
+        });
+        let direct_and_nested = config_json!({
+            "model_type": "kimi_k25",
+            "text_config": { "model_type": "kimi_k2" }
+        });
+        let missing = config_json!({
+            "text_config": {}
+        });
+
+        assert_eq!(nested_only.effective_model_type(), Some("kimi_k2"));
+        assert_eq!(direct_and_nested.effective_model_type(), Some("kimi_k25"));
+        assert_eq!(missing.effective_model_type(), None);
+    }
+
+    #[test]
+    fn tiktoken_tokenizer_config_models_added_tokens_decoder() {
+        let config: TiktokenTokenizerConfig = serde_json::from_value(serde_json::json!({
+            "added_tokens_decoder": {
+                "257": { "content": "<think>" },
+                "258": { "content": "</think>", "special": true }
+            }
+        }))
+        .unwrap();
+
+        let added_tokens = config.added_tokens_decoder;
+        assert_eq!(added_tokens.len(), 2);
+        assert_eq!(
+            added_tokens.get(&257).map(|t| t.content.as_str()),
+            Some("<think>")
+        );
+        assert_eq!(added_tokens.get(&257).map(|t| t.special), Some(false));
+        assert_eq!(
+            added_tokens
+                .get(&258)
+                .map(|t| (t.content.as_str(), t.special)),
+            Some(("</think>", true))
+        );
+    }
+
     /// Reserved token ids in `[num_base_tokens, num_base_tokens + 256)` must decode to their
     /// placeholder name (matching `tokenization_kimi.py`'s `<|reserved_token_{i}|>` format),
     /// even when the source `tokenizer_config.json` does not list them in `added_tokens_decoder`.
@@ -685,6 +768,9 @@ mod tests {
         let tool_section_id = backend
             .token_to_id("<|tool_calls_section_begin|>")
             .expect("resolve tool call section marker");
+        let contraction_heavy_text =
+            "I'm sure it's fine, but I can't say I'd trust that it's what we'd ship.";
+        let contraction_heavy_ids = backend.encode(contraction_heavy_text, false).unwrap();
 
         assert_eq!(
             (think_id, end_think_id, tool_section_id),
@@ -695,6 +781,21 @@ mod tests {
         assert_eq!(
             backend.decode(&[tool_section_id], true).unwrap(),
             "<|tool_calls_section_begin|>"
+        );
+
+        // This demonstrates that we're using Kimi's custom BPE pattern.
+        // With CL100K this will be 23 tokens instead.
+        assert_eq!(
+            contraction_heavy_ids,
+            vec![
+                17172, 3287, 4643, 8201, 11, 996, 374, 8971, 3637, 20020, 8173, 473, 4643, 1573,
+                56229, 13922, 13,
+            ]
+        );
+        assert_eq!(contraction_heavy_ids.len(), 17);
+        assert_eq!(
+            backend.decode(&contraction_heavy_ids, false).unwrap(),
+            contraction_heavy_text
         );
 
         // Special-looking text that is not actually registered should fail gracefully.
