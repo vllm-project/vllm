@@ -101,8 +101,6 @@ class CacheConfig:
     kv_cache_dtype_skip_layers: list[str] = field(default_factory=list)
     """Layer patterns to skip KV cache quantization. Accepts layer indices
     (e.g., '0', '2', '4') or attention type names (e.g., 'sliding_window')."""
-    cpu_kvcache_space_bytes: int | None = None
-    """(CPU backend only) CPU key-value cache space."""
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
@@ -183,7 +181,6 @@ class CacheConfig:
             "num_gpu_blocks_override",
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
-            "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
