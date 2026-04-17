@@ -194,11 +194,15 @@ class ParserManager:
         model_name: str | None = None,
     ) -> type[ToolParser] | None:
         """Get the tool parser based on the name."""
-        from vllm.tool_parsers import ToolParserManager
-
         parser: type[ToolParser] | None = None
         if not enable_auto_tools or tool_parser_name is None:
             return parser
+        # [startup] Defer this heavy import until we know we need it.
+        # Without --enable-auto-tool-choice we skip ~5 s of transitive
+        # imports (tool_parsers pulls responses.protocol, openai.types, etc.)
+        # on the common basic-chat path.
+        from vllm.tool_parsers import ToolParserManager
+
         logger.info_once('"auto" tool choice has been enabled.')
 
         try:
@@ -225,11 +229,13 @@ class ParserManager:
         reasoning_parser_name: str | None,
     ) -> type[ReasoningParser] | None:
         """Get the reasoning parser based on the name."""
-        from vllm.reasoning import ReasoningParserManager
-
         parser: type[ReasoningParser] | None = None
         if not reasoning_parser_name:
             return None
+        # [startup] Defer: without an explicit reasoning_parser the import is
+        # never needed. vllm.reasoning transitively loads ~1-2 s of deps.
+        from vllm.reasoning import ReasoningParserManager
+
         try:
             parser = ReasoningParserManager.get_reasoning_parser(reasoning_parser_name)
             assert parser is not None
@@ -262,10 +268,11 @@ class ParserManager:
         Returns:
             A Parser class, or None if neither parser is specified.
         """
-        from vllm.parser.abstract_parser import _WrappedParser
-
         if not tool_parser_name and not reasoning_parser_name:
             return None
+
+        # [startup] Defer; same rationale as the sibling get_* methods.
+        from vllm.parser.abstract_parser import _WrappedParser
 
         # Strategy 1: If both names match, check for a unified parser with that name
         if tool_parser_name and tool_parser_name == reasoning_parser_name:
