@@ -30,6 +30,21 @@ else()
     list(APPEND CXX_COMPILE_FLAGS
         "-fopenmp"
         "-DVLLM_CPU_EXTENSION")
+
+    # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
+    # and create a local shim dir with it
+    vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
+
+    find_library(OPEN_MP
+        NAMES gomp
+        PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
+        NO_DEFAULT_PATH
+        REQUIRED
+    )
+    # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
+    if (OPEN_MP)
+        set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+    endif()
 endif()
 
 if (NOT MACOSX_FOUND)
@@ -174,20 +189,6 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         ProcessorCount(NPROC)
         if(NOT NPROC)
             set(NPROC 4)
-        endif()
-        # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
-        # and create a local shim dir with it
-        vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
-
-        find_library(OPEN_MP
-            NAMES gomp
-            PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
-            NO_DEFAULT_PATH
-            REQUIRED
-        )
-        # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
-        if (OPEN_MP)
-            set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
         endif()
 
         # Fetch and populate ACL
@@ -360,6 +361,7 @@ set(VLLM_EXT_SRC
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
+        "csrc/cpu/activation_lut_bf16.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
