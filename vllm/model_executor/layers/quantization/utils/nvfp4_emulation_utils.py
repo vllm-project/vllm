@@ -183,7 +183,7 @@ def _triton_nvfp4_quant_dequant(
     x: torch.Tensor,
     global_scale: torch.Tensor,
     block_size: int,
-) -> tuple[torch.Tensor, None]:
+) -> torch.Tensor:
     """Triton-accelerated NVFP4 quantize-dequantize."""
     x_m, x_k = x.shape
     output_dtype = x.dtype
@@ -205,7 +205,7 @@ def _triton_nvfp4_quant_dequant(
         tile_blocks,
     )
 
-    return output, None
+    return output
 
 
 def _triton_dequantize_nvfp4(
@@ -394,7 +394,7 @@ def ref_nvfp4_quant(x, global_scale, block_size):
 
 def ref_nvfp4_quant_dequant(
     x: torch.Tensor, global_scale: torch.Tensor, block_size: int
-) -> tuple[torch.Tensor, None]:
+) -> torch.Tensor:
     """
     NVFP4 quantize-dequantize operation.
 
@@ -414,7 +414,7 @@ def ref_nvfp4_quant_dequant(
     x_blockscale = x_blockscale.unsqueeze(-1) / global_scale
     x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
 
-    return x_dq, None
+    return x_dq
 
 
 def run_nvfp4_emulations(
@@ -430,7 +430,7 @@ def run_nvfp4_emulations(
     x_m, x_k = x.shape
     output_dtype = x.dtype
 
-    x_dq, _ = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=group_size)
+    x_dq = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=group_size)
 
     # dequantize weight
     w_fp4 = weight.data.view(torch.uint8)

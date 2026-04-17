@@ -342,7 +342,7 @@ def test_triton_nvfp4_quant_dequant(
     global_scale = torch.tensor(global_scale_value, dtype=torch.float32, device="cuda")
 
     # Triton path
-    triton_result, _ = ref_nvfp4_quant_dequant(x, global_scale, block_size)
+    triton_result = ref_nvfp4_quant_dequant(x, global_scale, block_size)
 
     # CPU reference path
     with monkeypatch.context() as mp:
@@ -351,7 +351,7 @@ def test_triton_nvfp4_quant_dequant(
             "is_cuda_alike",
             lambda: False,
         )
-        reference, _ = ref_nvfp4_quant_dequant(x.cpu(), global_scale.cpu(), block_size)
+        reference = ref_nvfp4_quant_dequant(x.cpu(), global_scale.cpu(), block_size)
 
     torch.testing.assert_close(triton_result.cpu(), reference, atol=0, rtol=0)
 
