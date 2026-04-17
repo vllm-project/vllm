@@ -230,8 +230,9 @@ def _reduced_vocabulary(tokenizer: TokenizerLike) -> dict[bytes, list[int]]:
 
     vocabulary: dict[bytes, list[int]] = {}
     empty_token_ids: list[int] = []
+    special_tokens = set(tokenizer.all_special_tokens)
     for token, token_idx in tokenizer.get_vocab().items():
-        if token in tokenizer.all_special_tokens:
+        if token in special_tokens:
             continue
 
         token_str = convert_token_to_string(token)
