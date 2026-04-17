@@ -347,7 +347,7 @@ class MoERunnerBase(MoERunner):
         here. Skipped when sequence-parallel is active (SP handles its
         own reduction) or when the early path already reduced both outputs.
         """
-        result = states[..., :trunc_size].contiguous()
+        result = states[..., :trunc_size]
 
         # We don't need to reduce the final output if:
         # - We are not running with TP or DP
@@ -357,7 +357,7 @@ class MoERunnerBase(MoERunner):
             and (self.moe_config.tp_size > 1 or self.moe_config.ep_size > 1)
             and not self._fused_output_is_reduced
         ):
-            result = tensor_model_parallel_all_reduce(result)
+            result = tensor_model_parallel_all_reduce(result.contiguous())
 
         return result
 
