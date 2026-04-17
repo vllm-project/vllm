@@ -80,6 +80,104 @@ def test_intern_s1_reasoning_parser_keeps_deepseek_r1_behavior_without_action():
     assert content == "Visible answer."
 
 
+@pytest.mark.parametrize(
+    "thinking_disabled_request",
+    [
+        ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            chat_template_kwargs={"enable_thinking": False},
+        ),
+        ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            enable_thinking=False,
+        ),
+    ],
+)
+def test_intern_s1_reasoning_parser_returns_raw_output_when_thinking_disabled_without_end_token(  # noqa: E501
+    thinking_disabled_request,
+):
+    tokenizer = _build_tokenizer()
+    parser = ReasoningParserManager.get_reasoning_parser("intern-s1")(tokenizer)
+
+    reasoning, content = parser.extract_reasoning(
+        "plain output without end token",
+        thinking_disabled_request,
+    )
+
+    assert reasoning is None
+    assert content == "plain output without end token"
+
+
+@pytest.mark.parametrize(
+    "thinking_disabled_request",
+    [
+        ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            chat_template_kwargs={"enable_thinking": False},
+        ),
+        ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            enable_thinking=False,
+        ),
+    ],
+)
+def test_intern_s1_reasoning_parser_splits_reasoning_and_content_when_thinking_disabled_without_action(  # noqa: E501
+    thinking_disabled_request,
+):
+    tokenizer = _build_tokenizer()
+    parser = ReasoningParserManager.get_reasoning_parser("intern-s1")(tokenizer)
+
+    reasoning, content = parser.extract_reasoning(
+        "hidden reasoning</think>visible content",
+        thinking_disabled_request,
+    )
+
+    assert reasoning == "hidden reasoning"
+    assert content == "visible content"
+
+
+@pytest.mark.parametrize(
+    "thinking_disabled_request",
+    [
+        ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            chat_template_kwargs={"enable_thinking": False},
+        ),
+        ChatCompletionRequest(
+            messages=[],
+            model="test-model",
+            enable_thinking=False,
+        ),
+    ],
+)
+def test_intern_s1_reasoning_parser_hoists_only_action_when_thinking_disabled(
+    thinking_disabled_request,
+):
+    tokenizer = _build_tokenizer()
+    parser = ReasoningParserManager.get_reasoning_parser("intern-s1")(tokenizer)
+
+    reasoning, content = parser.extract_reasoning(
+        "hidden reasoning\n"
+        '<|action_start|> <|plugin|>\n{"name": "get_weather", '
+        '"parameters": {"city": "Tokyo"}}\n<|action_end|>\n'
+        "then more reasoning</think>",
+        thinking_disabled_request,
+    )
+
+    assert reasoning is not None
+    assert "hidden reasoning" in reasoning
+    assert "then more reasoning" in reasoning
+    assert "<|action_start|>" not in reasoning
+    assert content is not None
+    assert content.startswith("<|action_start|> <|plugin|>")
+    assert content.endswith("<|action_end|>")
+
+
 def test_intern_s1_reasoning_and_tool_parser_work_together():
     tokenizer = _build_tokenizer()
     tools = _build_tools()
