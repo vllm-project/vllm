@@ -88,10 +88,11 @@ def dynamic_quant_fp8(
     if per_token:
         x_max, _ = x.abs().max(dim=-1)
         x_max = x_max.unsqueeze(-1).to(torch.float32)
-        if scale_ub is not None:
-            x_max = x_max.clamp(max=scale_ub)
     else:
         x_max = x.abs().max().unsqueeze(-1).to(torch.float32)
+
+    if scale_ub is not None:
+        x_max = x_max.clamp(max=scale_ub)
 
     scale = (x_max / fp8_max).clamp(min=fp8_min_scaling_factor)
     out = (
@@ -125,7 +126,7 @@ def dynamic_group_quant_fp8(
         x = F.pad(x, (0, padding), mode="constant", value=0.0)
 
     x_grouped = x.view(-1, num_groups, group_size)
-    absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].float()
+    absmax = x_grouped.abs().max(dim=-1, keepdim=True)[0].to(torch.float32)
     scales_raw = absmax / fp8_max
     if use_ue8m0:
         scales_raw = torch.exp2(torch.ceil(torch.log2(scales_raw)))
