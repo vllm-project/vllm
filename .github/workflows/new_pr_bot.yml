@@ -98,5 +98,5 @@ jobs:
                 ].join('\n'),
               });
             } else {
-              console.log(`Skipping comment for ${prAuthor} - found (${mergedPRCount} merged PRs)`);
+              console.log(`Skipping comment for ${prAuthor} - not a first-time contributor (${mergedPRCount} merged PRs)`);
             }
