@@ -197,7 +197,6 @@ jobs:
             tests/kernels/moe/test_exllama_moe.py \
             tests/kernels/quantization/test_awq_gemv_moe.py \
             tests/kernels/quantization/test_hip_w4a16.py \
-            tests/kernels/quantization/test_hip_w4a16_skinny.py \
             tests/kernels/quantization/test_hybrid_w4a16_triton.py \
             tests/kernels/quantization/test_rocm_compressed_tensors_w4a16.py \
             tests/kernels/quantization/test_rocm_skinny_gemms.py \

@@ -2546,46 +2546,6 @@ def wvSplitK_int8_sweep(
     )
 
 
-def wvSplitK_int4(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    scale: torch.Tensor,
-    cu_count: int,
-    bias: torch.Tensor = None,
-) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK_int4(a, b, scale, bias, cu_count)
-
-
-if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4"):
-
-    @register_fake("_rocm_C::wvSplitK_int4")
-    def _wvSplitK_int4_fake(
-        in_a: torch.Tensor,
-        in_b: torch.Tensor,
-        in_scale: torch.Tensor,
-        in_bias: torch.Tensor | None,
-        CuCount: int,
-    ) -> torch.Tensor:
-        N = in_b.size(0)
-        M = in_a.size(0)
-        return torch.empty((N, M), dtype=in_b.dtype, device=in_b.device)
-
-
-def wvSplitK_int4_sweep(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    scale: torch.Tensor,
-    cu_count: int,
-    ytile: int,
-    unrl: int,
-    achunk: int,
-    wvprgrp: int,
-) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitK_int4_sweep(
-        a, b, scale, None, cu_count, ytile, unrl, achunk, wvprgrp
-    )
-
-
 def wvSplitK_int4_g(
     a: torch.Tensor,
     b: torch.Tensor,

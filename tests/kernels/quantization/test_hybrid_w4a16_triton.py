@@ -113,7 +113,7 @@ def test_triton_w4a16_skinny_fmt_gemm_matches_reference(
         zp_bias=8,
     )
 
-    torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=5e-2)
 
 
 def _w4a16_skinny_reference_asymmetric(

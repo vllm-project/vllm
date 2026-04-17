@@ -4,7 +4,7 @@
 Hybrid W4A16 kernel: Triton for prefill, HIP skinny for decode.
 
 Routes based on batch size M:
-  M <= MAX_SKINNY_BATCH_SIZE: HIP skinny GEMM (wvSplitK_int4/int4_g)
+  M <= MAX_SKINNY_BATCH_SIZE: HIP skinny GEMM (wvSplitK_int4_g)
   M > MAX_SKINNY_BATCH_SIZE:  Triton W4A16 fused dequant GEMM
 
 Stores weights ONCE in skinny layout [N, K//8] int32 (ExLlama shuffle).

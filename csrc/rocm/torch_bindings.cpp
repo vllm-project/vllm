@@ -40,13 +40,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor? in_bias, int CuCount) -> Tensor");
   rocm_ops.impl("wvSplitK_int8", torch::kCUDA, &wvSplitK_int8);
 
-  // W4A16 skinny GEMM: packed int4 weights, fp16/bf16 activations, per-channel
-  // scale
-  rocm_ops.def(
-      "wvSplitK_int4(Tensor in_a, Tensor in_b, Tensor in_scale, "
-      "Tensor? in_bias, int CuCount) -> Tensor");
-  rocm_ops.impl("wvSplitK_int4", torch::kCUDA, &wvSplitK_int4);
-
   // W4A16 grouped skinny GEMM: packed int4 weights, per-group scales,
   // optional zero points for asymmetric quantization
   rocm_ops.def(
@@ -61,12 +54,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "Tensor? in_bias, int CuCount, int ytile, int unrl, int achunk, "
       "int wvprgrp) -> Tensor");
   rocm_ops.impl("wvSplitK_int8_sweep", torch::kCUDA, &wvSplitK_int8_sweep);
-
-  rocm_ops.def(
-      "wvSplitK_int4_sweep(Tensor in_a, Tensor in_b, Tensor in_scale, "
-      "Tensor? in_bias, int CuCount, int ytile, int unrl, int achunk, "
-      "int wvprgrp) -> Tensor");
-  rocm_ops.impl("wvSplitK_int4_sweep", torch::kCUDA, &wvSplitK_int4_sweep);
 
   rocm_ops.def(
       "wvSplitK_int4g_sweep(Tensor in_a, Tensor in_b, Tensor in_scale, "
