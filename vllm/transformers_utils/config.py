@@ -1063,6 +1063,7 @@ def get_hf_text_config(config: PretrainedConfig):
     return text_config
 
 
+@cache
 def try_get_generation_config(
     model: str,
     trust_remote_code: bool,
@@ -1070,6 +1071,14 @@ def try_get_generation_config(
     config_format: str | ConfigFormat = "auto",
     hf_token: bool | str | None = None,
 ) -> GenerationConfig | None:
+    # [startup] @cache: this function is invoked once per serving-class
+    # constructor during init_app_state (OpenAIServingRender, chat_completion,
+    # completion, responses, speech_to_text, ...), always with the same args
+    # for a given (model, revision, trust_remote_code) tuple. The underlying
+    # GenerationConfig.from_pretrained is deterministic and its return value
+    # is only consumed via .to_diff_dict() downstream, which does not mutate
+    # the cached object. Safe, non-behavioral memoization.
+    #
     # GGUF files don't have generation_config.json - their config is embedded
     # in the file header. Skip all filesystem lookups to avoid re-reading the
     # memory-mapped file, which can hang in multi-process scenarios when the
