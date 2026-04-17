@@ -1028,12 +1028,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.layer_name,
         )
 
-        # Prefill path: kv_b_proj GEMM on full batch (CUDA-graph-safe)
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+        # We need to hint compiler for unbacked sym int, num_decode_tokens.
+        D = num_decode_tokens
+        B_kv = kv_c_normed.size(0)
+        B_k = k_pe.size(0)
+        torch._check(B_kv >= D)
+        torch._check(B_k >= D)
+        # narrow(dim, start, length) - returns view, compile-friendly
+        prefill_kv_c = kv_c_normed.narrow(0, D, B_kv - D)
+        prefill_k_pe = k_pe.narrow(0, D, B_k - D)
+
+        # Prefill path: kv_b_proj GEMM on prefill tokens only (OPTIMIZED)
+        kv_nope = self.kv_b_proj(prefill_kv_c)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k = self._concat_k_nope_k_pe(k_nope, k_pe)
+        k = self._concat_k_nope_k_pe(k_nope, prefill_k_pe)
         # Prefill attention (cudagraph_unsafe): slices to prefill portion
         prefill_result = torch.ops.vllm.mla_attention_prefill_with_output(
             q,
@@ -2935,19 +2945,18 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         Returns:
             Tensor of shape [..., nope_dim + pe_dim]
         """
-        k = torch.empty(
-            (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
-            dtype=k_nope.dtype,
-            device=k_nope.device,
-        )
-
         if self._use_flashinfer_concat_mla_k:
+            k = torch.empty(
+                (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
+                dtype=k_nope.dtype,
+                device=k_nope.device,
+            )
             torch.ops.vllm.flashinfer_concat_mla_k(k, k_nope, k_pe)
+            return k
         else:
-            # Fallback: Direct copies with efficient broadcasting
-            k[..., : k_nope.shape[-1]] = k_nope
-            k[..., k_nope.shape[-1] :] = k_pe
-        return k
+            # Compile-friendly concatenation with broadcasting
+            k_pe_expanded = k_pe.expand(*k_nope.shape[:-1], k_pe.shape[-1])
+            return torch.cat([k_nope, k_pe_expanded], dim=-1)
 
     def _compute_prefill_context(
         self,
