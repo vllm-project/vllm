@@ -372,6 +372,15 @@ class Gemma4Attention(nn.Module):
                         f"{kv_shared_layer_index}.self_attn.attn"
                     )
 
+        # KV-shared layers don't apply k_norm in forward() and their
+        # checkpoints omit k_norm weights.  Replace the learnable k_norm
+        # created above with a weightless version so the parameter count
+        # matches the checkpoint.
+        if self.is_kv_shared_layer:
+            self.k_norm = RMSNorm(
+                self.head_dim, eps=config.rms_norm_eps, has_weight=False
+            )
+
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=max_position_embeddings,
