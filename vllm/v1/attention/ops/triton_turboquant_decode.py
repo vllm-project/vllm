@@ -143,12 +143,12 @@ def _tq_decode_stage1(
             Block_table_ptr + bt_base + page_idx,
             mask=kv_mask,
             other=0,
-        )
+        ).to(tl.int64)
 
         slot_bases = (
             block_nums * stride_cache_block
-            + page_off * stride_cache_pos
-            + kv_head * stride_cache_head
+            + page_off.to(tl.int64) * stride_cache_pos
+            + tl.cast(kv_head, tl.int64) * stride_cache_head
         )
 
         # ============================================================
@@ -356,11 +356,11 @@ def _tq_full_dequant_kv(
 
     page_idx = pos // BLOCK_SIZE
     page_off = pos % BLOCK_SIZE
-    block_num = tl.load(Block_table_ptr + bid * stride_bt_b + page_idx)
+    block_num = tl.load(Block_table_ptr + bid * stride_bt_b + page_idx).to(tl.int64)
     slot_base = (
         block_num * stride_cache_block
-        + page_off * stride_cache_pos
-        + hid * stride_cache_head
+        + tl.cast(page_off, tl.int64) * stride_cache_pos
+        + tl.cast(hid, tl.int64) * stride_cache_head
     )
 
     d_offs = tl.arange(0, BLOCK_D)
