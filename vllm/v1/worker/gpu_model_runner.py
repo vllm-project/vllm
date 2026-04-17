@@ -6868,8 +6868,9 @@ class GPUModelRunner(
 
     def _get_attention_kv_cache_gid(self) -> int:
         """Find the KV cache group index for attention layers."""
+        from vllm.v1.kv_cache_interface import FullAttentionSpec
         for gid, group in enumerate(self.kv_cache_config.kv_cache_groups):
-            if isinstance(group.kv_cache_spec, AttentionSpec):
+            if isinstance(group.kv_cache_spec, FullAttentionSpec):
                 return gid
         return 0
 

@@ -13,7 +13,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,7 @@ class RoutedExpertsManager:
         self.attn_gid = next(
             gid
             for gid, g in enumerate(kv_cache_config.kv_cache_groups)
-            if isinstance(g.kv_cache_spec, AttentionSpec)
+            if isinstance(g.kv_cache_spec, FullAttentionSpec)
         )
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
