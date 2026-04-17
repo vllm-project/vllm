@@ -21,6 +21,7 @@ vLLM currently supports the following reasoning models:
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
+| [Intern-S1](https://huggingface.co/internlm/Intern-S1) / [Intern-S1-mini](https://huggingface.co/internlm/Intern-S1-mini) | `intern-s1` | ❌ | ✅ |
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
@@ -74,6 +75,15 @@ Next, make a request to the model that should return the reasoning content in th
     ```
 
 The `reasoning` field contains the reasoning steps that led to the final conclusion, while the `content` field contains the final conclusion.
+
+For Intern-S1 models that use both reasoning and tool calling, start the
+server with both parsers enabled:
+
+```bash
+vllm serve internlm/Intern-S1 \
+    --tool-call-parser intern-s1 \
+    --reasoning-parser intern-s1
+```
 
 ## Streaming chat completions
 

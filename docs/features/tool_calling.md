@@ -276,6 +276,25 @@ Known issues:
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
 
+### Intern-S1 Models (`intern-s1`)
+
+Supported models:
+
+* `internlm/Intern-S1`
+* `internlm/Intern-S1-mini`
+
+Recommended flags: `--tool-call-parser intern-s1 --reasoning-parser intern-s1`
+
+Notes:
+
+* Intern-S1 tool calls can appear inside `<think>...</think>`, so the
+  dedicated `intern-s1` reasoning parser should be used together with the
+  `intern-s1` tool parser for non-streaming tool calling.
+* Use the model's default chat template instead of
+  `examples/tool_chat_template_internlm2_tool.jinja`.
+* This keeps Intern-S1 handling separate from the existing `internlm` parser
+  and avoids changing tool-calling behavior for other InternLM-family models.
+
 ### Jamba Models (`jamba`)
 
 AI21's Jamba-1.5 models are supported.
