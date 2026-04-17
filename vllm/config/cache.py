@@ -94,6 +94,13 @@ class CacheConfig:
       security risk tolerance against the performance benefits before turning this on.
     - "xxhash_cbor" combines canonical CBOR serialization with xxHash for
       reproducible hashing. Requires the optional ``xxhash`` package."""
+    deterministic_prefix_caching: bool = False
+    """When enabled alongside prefix caching, forces cache-miss prefills to
+    split at block boundaries so the suffix GEMM shape is identical to the
+    cache-hit path. This eliminates bf16 non-determinism caused by different
+    kernel tilings selecting different fp32 accumulation orders, at the cost
+    of one extra scheduling step per cache-miss prefill. Only has effect when
+    enable_prefix_caching is also True."""
     calculate_kv_scales: bool = False
     """Deprecated: This option is deprecated and will be removed in v0.19.
     It enables dynamic calculation of `k_scale` and `v_scale` when
@@ -191,6 +198,7 @@ class CacheConfig:
             "num_cpu_blocks",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            "deterministic_prefix_caching",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -205,6 +213,16 @@ class CacheConfig:
 
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
+
+    @model_validator(mode="after")
+    def _validate_deterministic_prefix_caching(self) -> "CacheConfig":
+        if self.deterministic_prefix_caching and not self.enable_prefix_caching:
+            logger.warning(
+                "--deterministic-prefix-caching has no effect without "
+                "--enable-prefix-caching; ignoring."
+            )
+            object.__setattr__(self, "deterministic_prefix_caching", False)
+        return self
 
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":
