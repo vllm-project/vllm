@@ -1684,7 +1684,8 @@ class BlockHashListWithBlockSize:
     def _get_value_at(self, idx: int) -> BlockHash:
         base = idx * self.scale_factor
         end = base + self.scale_factor
-        merged_hash: bytes = b''.join(self.block_hashes[base:end])
+        merged_hash: bytes = b''.join(
+            self.block_hashes[i] for i in range(base, end))
         return BlockHash(merged_hash)
 
 
