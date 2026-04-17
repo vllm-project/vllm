@@ -541,8 +541,8 @@ class Qwen2_5OmniThinkerMultiModalProcessor(
 
         tokenizer = self.info.get_tokenizer()
         processor = self.info.get_hf_processor()
-        audio_token_id = tokenizer.get_vocab()[processor.audio_token]
-        video_token_id = tokenizer.get_vocab()[processor.video_token]
+        audio_token_id, video_token_id = tokenizer.convert_tokens_to_ids(
+            [processor.audio_token, processor.video_token])
 
         result_placeholders = dict(placeholders)
         audio_placeholders = []

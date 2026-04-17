@@ -1601,13 +1601,12 @@ class Qwen3OmniMoeThinkerMultiModalProcessor(
         use_audio_in_video: bool = False,
     ) -> list[int]:
         tokenizer = self.info.get_tokenizer()
-        vision_bos_token = tokenizer.encode(tokenizer.vision_bos_token)[0]
-        vision_eos_token = tokenizer.encode(tokenizer.vision_eos_token)[0]
-        audio_bos_token = tokenizer.encode(tokenizer.audio_bos_token)[0]
-        audio_eos_token = tokenizer.encode(tokenizer.audio_eos_token)[0]
-        audio_token = tokenizer.encode("<|audio_pad|>")[0]
-        image_token = tokenizer.encode("<|image_pad|>")[0]
-        video_token = tokenizer.encode("<|video_pad|>")[0]
+        (vision_bos_token, vision_eos_token, audio_bos_token, audio_eos_token,
+         audio_token, image_token, video_token) = tokenizer.convert_tokens_to_ids([
+             tokenizer.vision_bos_token, tokenizer.vision_eos_token,
+             tokenizer.audio_bos_token, tokenizer.audio_eos_token,
+             "<|audio_pad|>", "<|image_pad|>", "<|video_pad|>"
+         ])
 
         result = token_ids[:]
         if use_audio_in_video:

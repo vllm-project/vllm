@@ -526,8 +526,7 @@ def load_weights_using_from_2_way_softmax(
         trust_remote_code=model_config.trust_remote_code,
     )
 
-    false_id = tokenizer.convert_tokens_to_ids(tokens[0])
-    true_id = tokenizer.convert_tokens_to_ids(tokens[1])
+    false_id, true_id = tokenizer.convert_tokens_to_ids(tokens)
     lm_head_weight = language_model.lm_head.weight
     score_weight = lm_head_weight.data[[true_id]].to(
         torch.float32
@@ -599,7 +598,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         trust_remote_code=model_config.trust_remote_code,
     )
 
-    token_ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
+    token_ids = tokenizer.convert_tokens_to_ids(tokens)
     score_weight = language_model.lm_head.weight.data[token_ids]
 
     score_layer = language_model.score if using_vlm_head else model.score
