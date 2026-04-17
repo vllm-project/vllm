@@ -134,6 +134,16 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+        self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
+
+        # Strix Halo (gfx1151): 32 segments often shows performance
+        # gains for MQA models or large head size
+        if (
+            current_platform.is_rocm()
+            and current_platform.is_gfx1151()
+            and (self.num_heads_kv == 1 or self.headdim >= 224)
+        ):
+            self.num_par_softmax_segments = 32
 
         # Check if CUDA Graphs are enabled for decode
         self.decode_cudagraph_enabled = (
@@ -166,7 +176,6 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
 
-        self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
