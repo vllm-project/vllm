@@ -162,9 +162,9 @@ class Gemma3Attention(nn.Module):
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
         self.is_sliding = layer_type == "sliding_attention"
-        self.is_block_local = layer_type == "linear_attention"
-        self.block_local_lookback = 1 if self.is_block_local else -1
-        is_local = self.is_sliding or self.is_block_local
+        self.is_chunked = layer_type == "chunked_attention"
+        self.chunk_lookback = 1 if self.is_chunked else -1
+        is_local = self.is_sliding or self.is_chunked
         sliding_window = config.sliding_window if is_local else None
 
         # Initialize the rotary embedding.
@@ -181,7 +181,7 @@ class Gemma3Attention(nn.Module):
             # Global attention. Use the values in config.json.
             rope_parameters = config.rope_parameters
             # Local attention. Override the values in config.json.
-            if self.is_sliding or self.is_block_local:
+            if self.is_sliding or self.is_chunked:
                 if rope_local_type not in ("yarn",):
                     # Default: use a simple rope with local base freq.
                     # When rope_local_type == "yarn", keep the global
@@ -219,7 +219,7 @@ class Gemma3Attention(nn.Module):
             attn_type=attn_type,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
-            block_local_lookback=self.block_local_lookback,
+            chunk_lookback=self.chunk_lookback,
             prefix=f"{prefix}.attn",
         )
 

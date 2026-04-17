@@ -334,9 +334,9 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             cache_config.enable_prefix_caching = False
 
-        if extra_impl_args.get("block_local_lookback", -1) > -1:
+        if extra_impl_args.get("chunk_lookback", -1) > -1:
             assert self.attn_backend.get_name() == "TRITON_ATTN", (
-                f"Block-local attention requires the Triton backend, "
+                f"Chunked attention with lookback requires the Triton backend, "
                 f"but got {self.attn_backend.get_name()}."
             )
 

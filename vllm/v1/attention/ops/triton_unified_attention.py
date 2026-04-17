@@ -177,8 +177,8 @@ def kernel_unified_attention_2d(
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
-    BLOCK_LOCAL_LOOKBACK: tl.constexpr = -1,
-    BLOCK_LOCAL_BLOCK_SIZE: tl.constexpr = -1,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -296,10 +296,10 @@ def kernel_unified_attention_2d(
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
         q_abs = context_len + qpos_lo
-        if BLOCK_LOCAL_LOOKBACK > -1:
+        if CHUNK_LOOKBACK > -1:
             first_allowed_key = (
-                (q_abs // BLOCK_LOCAL_BLOCK_SIZE) - BLOCK_LOCAL_LOOKBACK
-            ) * BLOCK_LOCAL_BLOCK_SIZE
+                (q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK
+            ) * CHUNK_SIZE
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
@@ -378,17 +378,17 @@ def kernel_unified_attention_2d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # Apply sliding window / block-local to base mask BEFORE
-        # mm_prefix OR.
+        # Apply sliding window / chunked attention to base mask
+        # BEFORE mm_prefix OR.
         # Order must match FlexAttention:
         #   (causal AND sliding_window) OR mm_prefix
-        if BLOCK_LOCAL_LOOKBACK > -1:
+        if CHUNK_LOOKBACK > -1:
             seq_mask = seq_mask & (
                 (
-                    (context_len + query_pos[:, None]) // BLOCK_LOCAL_BLOCK_SIZE
-                    - (seq_offset[None, :] // BLOCK_LOCAL_BLOCK_SIZE)
+                    (context_len + query_pos[:, None]) // CHUNK_SIZE
+                    - (seq_offset[None, :] // CHUNK_SIZE)
                 )
-                <= BLOCK_LOCAL_LOOKBACK
+                <= CHUNK_LOOKBACK
             )
         elif SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
@@ -577,8 +577,8 @@ def kernel_unified_attention_3d(
     stride_vs_blk=0,
     stride_vs_slot=0,
     stride_vs_head=0,
-    BLOCK_LOCAL_LOOKBACK: tl.constexpr = -1,
-    BLOCK_LOCAL_BLOCK_SIZE: tl.constexpr = -1,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
 ):
     q_block_global_idx = tl.program_id(0)
     kv_head_idx = tl.program_id(1)
@@ -702,10 +702,10 @@ def kernel_unified_attention_3d(
         # The union of allowed key positions for this Q-block is:
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
         q_abs = context_len + qpos_lo
-        if BLOCK_LOCAL_LOOKBACK > -1:
+        if CHUNK_LOOKBACK > -1:
             first_allowed_key = (
-                (q_abs // BLOCK_LOCAL_BLOCK_SIZE) - BLOCK_LOCAL_LOOKBACK
-            ) * BLOCK_LOCAL_BLOCK_SIZE
+                (q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK
+            ) * CHUNK_SIZE
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
@@ -787,17 +787,17 @@ def kernel_unified_attention_3d(
         query_abs_pos = context_len + query_pos[:, None]
         seq_mask = seq_offset[None, :] <= query_abs_pos
 
-        # Apply sliding window / block-local to base mask BEFORE
-        # mm_prefix OR.
+        # Apply sliding window / chunked attention to base mask
+        # BEFORE mm_prefix OR.
         # Order must match FlexAttention:
         #   (causal AND sliding_window) OR mm_prefix
-        if BLOCK_LOCAL_LOOKBACK > -1:
+        if CHUNK_LOOKBACK > -1:
             seq_mask = seq_mask & (
                 (
-                    (context_len + query_pos[:, None]) // BLOCK_LOCAL_BLOCK_SIZE
-                    - (seq_offset[None, :] // BLOCK_LOCAL_BLOCK_SIZE)
+                    (context_len + query_pos[:, None]) // CHUNK_SIZE
+                    - (seq_offset[None, :] // CHUNK_SIZE)
                 )
-                <= BLOCK_LOCAL_LOOKBACK
+                <= CHUNK_LOOKBACK
             )
         elif SLIDING_WINDOW > 0:
             seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
@@ -1082,8 +1082,8 @@ def unified_attention(
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
-    # Block-local attention: restrict attention to aligned blocks.
-    block_local_lookback=-1,
+    # Chunked attention: restrict attention to aligned blocks with lookback.
+    chunk_lookback=-1,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -1132,13 +1132,13 @@ def unified_attention(
     # Note: tile size must be at least 32 for fp8 (element_size == 1).
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
 
-    # Compute block-local block size from sliding window if needed.
-    block_local_block_size = -1
-    if sliding_window_val > 0 and block_local_lookback > -1:
-        block_local_block_size = sliding_window_val // (block_local_lookback + 1)
-        assert block_local_block_size > 0, "sliding_window must be > block_local_lookback+1"
+    # Compute chunked block size from sliding window if needed.
+    chunk_size = -1
+    if sliding_window_val > 0 and chunk_lookback > -1:
+        chunk_size = sliding_window_val // (chunk_lookback + 1)
+        assert chunk_size > 0, "sliding_window must be > chunk_lookback+1"
     elif sliding_window_val <= 0:
-        block_local_lookback = -1
+        chunk_lookback = -1
 
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size,
@@ -1231,8 +1231,8 @@ def unified_attention(
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
-            BLOCK_LOCAL_LOOKBACK=block_local_lookback,
-            BLOCK_LOCAL_BLOCK_SIZE=block_local_block_size,
+            CHUNK_LOOKBACK=chunk_lookback,
+            CHUNK_SIZE=chunk_size,
         )
     else:
         kernel_unified_attention_3d[
@@ -1294,8 +1294,8 @@ def unified_attention(
             stride_vs_blk=v_scale_cache.stride(0) if v_scale_cache is not None else 0,
             stride_vs_slot=v_scale_cache.stride(1) if v_scale_cache is not None else 0,
             stride_vs_head=v_scale_cache.stride(2) if v_scale_cache is not None else 0,
-            BLOCK_LOCAL_LOOKBACK=block_local_lookback,
-            BLOCK_LOCAL_BLOCK_SIZE=block_local_block_size,
+            CHUNK_LOOKBACK=chunk_lookback,
+            CHUNK_SIZE=chunk_size,
         )
         reduce_segments[(q.shape[0], num_query_heads)](
             output_ptr=out,
