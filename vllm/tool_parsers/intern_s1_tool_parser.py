@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-import re
 from collections.abc import Sequence
 
 import partial_json_parser
+import regex as re
+from openai.types.responses import FunctionTool
 from partial_json_parser.core.options import Allow
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
@@ -201,7 +202,10 @@ class InternS1ToolParser(Internlm2ToolParser):
             )
 
         configured_tools = self.tools or list(request.tools or [])
-        allowed_tools = {tool.function.name for tool in configured_tools}
+        allowed_tools = {
+            tool.name if isinstance(tool, FunctionTool) else tool.function.name
+            for tool in configured_tools
+        }
         if not allowed_tools:
             return ExtractedToolCallInformation(
                 tools_called=False,
@@ -285,8 +289,8 @@ class InternS1ToolParser(Internlm2ToolParser):
             )
 
         content_parts.append(model_output[cursor:])
-        remaining_content = "".join(content_parts)
-        if remaining_content.strip() == "":
+        remaining_content: str | None = "".join(content_parts)
+        if remaining_content is not None and remaining_content.strip() == "":
             remaining_content = None
 
         return ExtractedToolCallInformation(

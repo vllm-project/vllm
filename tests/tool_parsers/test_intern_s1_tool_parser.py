@@ -11,7 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionDefinition
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage, FunctionDefinition
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.intern_s1_tool_parser import _build_initial_arguments_delta
@@ -132,3 +132,39 @@ def test_build_initial_arguments_delta_falls_back_to_full_arguments():
     assert (
         _build_initial_arguments_delta(arguments_json, "<|plugin|>") == arguments_json
     )
+
+
+def test_streaming_continues_emitting_arguments_after_tool_name(
+    tool_parser,
+    chat_request,
+):
+    first_chunk = '<|action_start|><|plugin|>{"name":"get_weather"'
+    second_delta = ', "parameters": {"city": "Tokyo"}}<|action_end|>'
+    second_chunk = first_chunk + second_delta
+
+    first_message = tool_parser.extract_tool_calls_streaming(
+        previous_text="",
+        current_text=first_chunk,
+        delta_text=first_chunk,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=chat_request,
+    )
+    assert isinstance(first_message, DeltaMessage)
+    assert first_message.tool_calls is not None
+    assert first_message.tool_calls[0].function.name == "get_weather"
+    assert first_message.tool_calls[0].index == 0
+
+    second_message = tool_parser.extract_tool_calls_streaming(
+        previous_text=first_chunk,
+        current_text=second_chunk,
+        delta_text=second_delta,
+        previous_token_ids=[],
+        current_token_ids=[],
+        delta_token_ids=[],
+        request=chat_request,
+    )
+    assert isinstance(second_message, DeltaMessage)
+    assert second_message.tool_calls is not None
+    assert second_message.tool_calls[0].function.arguments == '{"city": "Tokyo"}'
