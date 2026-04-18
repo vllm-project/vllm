@@ -7,12 +7,12 @@ import os
 import socket
 import threading
 import uuid
+from urllib.parse import urlparse
 
 import aiohttp
 import msgpack
 import zmq
 from quart import Quart, Request, make_response, request
-
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConstants,
 )
@@ -334,6 +334,68 @@ async def handle_request(api: str, request: Request):
                 500,
             )
         )
+
+
+async def send_profile_cmd(req_data: dict, profiler_cmd: str):
+    assert profiler_cmd in {"start", "stop"}
+
+    if not prefill_instances and not decode_instances:
+        raise RuntimeError(
+            "Service Unavailable: No prefill or decode instances are registered."
+        )
+
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+    }
+
+    tasks = []
+
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=60)
+    ) as session:
+        for instances in (prefill_instances, decode_instances):
+            for inst in instances:
+                _p = urlparse(inst["request_address"])
+                url = f"http://{_p.hostname}:{_p.port}/{profiler_cmd}_profile"
+
+                tasks.append(
+                    session.post(
+                        url,
+                        json=req_data,
+                        headers=headers,
+                    )
+                )
+
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+
+        for r in responses:
+            if isinstance(r, Exception):
+                raise r
+            if r.status >= 400:
+                msg = await r.text()
+                raise RuntimeError(f"{profiler_cmd}_profile failed: {r.status}, {msg}")
+
+        return await responses[0].json()
+
+
+@app.post("/start_profile")
+async def start_profile():
+    try:
+        req_data = await request.get_json()
+        return await send_profile_cmd(req_data, "start")
+    except Exception as e:
+        logger.exception("start_profile failed: %s", e)
+        return await make_response((str(e), 500))
+
+
+@app.post("/stop_profile")
+async def stop_profile():
+    try:
+        req_data = await request.get_json()
+        return await send_profile_cmd(req_data, "stop")
+    except Exception as e:
+        logger.exception("stop_profile failed: %s", e)
+        return await make_response((str(e), 500))
 
 
 if __name__ == "__main__":
