@@ -69,6 +69,77 @@ logger = init_logger("vllm.entrypoints.openai.api_server")
 _FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
 
 
+def _startup_prefetch_weights(vllm_config: "VllmConfig") -> None:
+    """Kick off reading model weight shards into OS page cache from the
+    parent APIServer. EngineCore will read the same files a few seconds
+    later from the child; by then the kernel already has them ready.
+
+    Best-effort: any failure (unknown model location, permission, etc.) is
+    swallowed — vLLM's existing in-child prefetch then runs normally.
+    """
+    import glob
+    import os
+    import threading
+
+    model_ref = vllm_config.model_config.model
+    candidate_dir: str | None = None
+
+    # 1. Local path?
+    if os.path.isdir(model_ref):
+        candidate_dir = model_ref
+    else:
+        # 2. HF repo id — try to resolve to the local cache snapshot dir.
+        try:
+            from huggingface_hub import snapshot_download
+
+            candidate_dir = snapshot_download(
+                repo_id=model_ref,
+                allow_patterns=["*.safetensors", "*.bin"],
+                local_files_only=True,
+            )
+        except Exception:
+            return  # not cached yet or not an HF repo id
+
+    if not candidate_dir or not os.path.isdir(candidate_dir):
+        return
+
+    shard_paths = sorted(
+        glob.glob(os.path.join(candidate_dir, "*.safetensors"))
+        + glob.glob(os.path.join(candidate_dir, "*.bin"))
+    )
+    if not shard_paths:
+        return
+
+    def _read_into_page_cache() -> None:
+        # Match vLLM's in-child prefetch block size + thread count.
+        block_size = 16 * 1024 * 1024  # 16 MB
+        # Read shards in parallel across 8 worker threads (bounded) to
+        # saturate multi-spindle / multi-queue storage without thrashing.
+        from concurrent.futures import ThreadPoolExecutor
+
+        def read_one(p: str) -> None:
+            try:
+                with open(p, "rb") as f:
+                    while f.read(block_size):
+                        pass
+            except Exception:
+                pass
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(read_one, shard_paths))
+
+    threading.Thread(
+        target=_read_into_page_cache,
+        daemon=True,
+        name="vllm-parent-weight-prefetch",
+    ).start()
+    logger.debug(
+        "Parent-side weight prefetch started for %d shards in %s",
+        len(shard_paths),
+        candidate_dir,
+    )
+
+
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
@@ -119,6 +190,23 @@ async def build_async_engine_client_from_engine_args(
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    # [startup] Start prefetching model weight shards into the OS page cache
+    # in a background thread from the PARENT APIServer process. EngineCore
+    # will page-fault on these same files ~10-15 s later (after fork + CUDA
+    # context + distributed init + model init). For a 70 B weights case,
+    # these files are tens of GB — reading them from cold disk there serially
+    # stalls startup; getting a 10 s head start here significantly shrinks
+    # that wait.
+    #
+    # vLLM already does an in-child prefetch right before weight load, but
+    # that gets only a tiny head start against the actual load. Moving the
+    # kick-off to parent makes it a real overlap.
+    #
+    # Best-effort: if the model is a local path, glob for safetensors; if
+    # it's a repo-id, try to resolve via HF hub's local cache. Any failure
+    # silently falls through to the existing in-child prefetch path.
+    _startup_prefetch_weights(vllm_config)
 
     from vllm.v1.engine.async_llm import AsyncLLM
 
