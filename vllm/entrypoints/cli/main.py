@@ -8,6 +8,26 @@ to avoid certain eager import breakage."""
 import importlib.metadata
 import sys
 
+# [startup] Kick off torch's .so loading in a background thread before
+# we touch vllm.logger (which pulls vllm/__init__.py -> vllm.env_override
+# -> `import torch` on the main thread). Python import lock serializes the
+# same-module import across threads, but the .so dlopen inside torch's
+# init releases the GIL during file I/O. Main thread's non-torch imports
+# (vllm.envs submodules, stdlib, fastapi, etc.) can make progress on the
+# CPU while the background thread pays the ~2 s of cuda .so loading.
+def _bg_preload_torch() -> None:
+    try:
+        import torch  # noqa: F401
+    except Exception:
+        pass
+
+
+import threading as _threading
+
+_threading.Thread(
+    target=_bg_preload_torch, daemon=True, name="vllm-torch-preload"
+).start()
+
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
