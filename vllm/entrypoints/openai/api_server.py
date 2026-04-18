@@ -153,7 +153,12 @@ async def build_async_engine_client(
         import multiprocessing.forkserver as forkserver
 
         logger.debug("Setup forkserver with pre-imports")
-        multiprocessing.set_start_method("forkserver")
+        # May already have been set by the CLI entry's async prewarm
+        # (vllm/entrypoints/cli/main.py); tolerate re-call.
+        try:
+            multiprocessing.set_start_method("forkserver", force=False)
+        except RuntimeError:
+            pass
         multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
         forkserver.ensure_running()
         logger.debug("Forkserver setup complete!")

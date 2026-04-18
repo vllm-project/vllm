@@ -6,7 +6,10 @@ Note that all future modules must be lazily loaded within main
 to avoid certain eager import breakage."""
 
 import importlib.metadata
+import os
 import sys
+import threading as _threading
+
 
 # [startup] Kick off torch's .so loading in a background thread before
 # we touch vllm.logger (which pulls vllm/__init__.py -> vllm.env_override
@@ -22,11 +25,47 @@ def _bg_preload_torch() -> None:
         pass
 
 
-import threading as _threading
-
 _threading.Thread(
     target=_bg_preload_torch, daemon=True, name="vllm-torch-preload"
 ).start()
+
+
+# [startup] Pre-spawn EngineCore via forkserver preload, in a background
+# thread. Only fires for `vllm serve` (the only subcommand that spawns a
+# long-running EngineCore). The forkserver process is forked once and
+# preloaded with vllm.v1.engine.async_llm (~3-5 s of imports). When
+# AsyncLLM.from_vllm_config later runs, Process.start() forks from the
+# already-warm forkserver instead of paying spawn() cost (~5 s in child
+# for fresh Python + imports).
+#
+# Kicking the preload in a BG thread lets the ~3-5 s ensure_running cost
+# overlap with APIServer's argparse + config resolution (~5-10 s on cold
+# disk). Default cli_env_setup sets spawn; we override to forkserver
+# before that runs so the path is consistent.
+def _bg_prewarm_forkserver() -> None:
+    try:
+        import multiprocessing
+        import multiprocessing.forkserver as forkserver
+
+        # set_start_method MUST be called before ensure_running. It also
+        # can only be called once per process; any later override by
+        # vllm's build_async_engine_client will just see the existing
+        # setting.
+        multiprocessing.set_start_method("forkserver", force=False)
+        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
+        forkserver.ensure_running()
+    except Exception:
+        pass
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "serve":
+    os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "forkserver")
+    _threading.Thread(
+        target=_bg_prewarm_forkserver,
+        daemon=False,  # must survive so spawn can use it
+        name="vllm-forkserver-prewarm",
+    ).start()
+
 
 from vllm.logger import init_logger
 
