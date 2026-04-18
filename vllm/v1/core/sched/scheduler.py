@@ -273,7 +273,16 @@ class Scheduler(SchedulerInterface):
                 kv_cache_config=kv_cache_config,
             )
 
-            # Routed experts captured for aborted requests (before blocks freed).
+            # Cache of routed experts data keyed by request_id, populated
+            # when blocks are about to be freed so the routing survives
+            # the free. Consumed by:
+            #   - Scheduler.update_from_output (normal stop): popped and
+            #     merged with the fresh read; cached copy wins if more
+            #     complete (handles async-scheduling preempt-then-finish).
+            #   - EngineCoreProc._send_abort_outputs_to_client: popped
+            #     for abort outputs.
+            # Invariant: entries are only written from live Requests
+            # (preempt / finish_requests); once popped + sent, removed.
             self.aborted_routed_experts: dict[str, np.ndarray] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
@@ -937,17 +946,20 @@ class Scheduler(SchedulerInterface):
         assert request.status == RequestStatus.RUNNING, (
             "Only running requests can be preempted"
         )
-        # Capture routed experts BEFORE freeing blocks so that a subsequent
-        # abort can still return valid routing data.
+        # Capture routed experts BEFORE freeing blocks so a subsequent
+        # abort (e.g. client cancels after preemption) can still return
+        # valid routing data for this request. Once ``kv_cache_manager.free``
+        # runs, the block IDs are gone and the slot buffer rows will be
+        # reused by other requests.
         if self.enable_return_routed_experts:
             re = self._get_routed_experts(request)
             existing = self.aborted_routed_experts.get(request.request_id)
-            # Only overwrite if new data is at least as complete as
-            # the existing cache (guards against chunked-prefill
-            # producing shorter routing after a prior full preemption).
+            # Keep the longer snapshot: a chunked-prefill re-entry after
+            # a prior full preemption may produce a shorter routing;
+            # overwriting would lose the more complete record.
             if existing is None or re.shape[0] > existing.shape[0]:
                 self.aborted_routed_experts[request.request_id] = re
-                logger.info(
+                logger.debug(
                     "Cached routed_experts before preemption: "
                     "req_id=%s, num_tokens=%d, shape=%s",
                     request.request_id,
@@ -1322,7 +1334,11 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
-        # Store routed experts into slot buffer (one batch write).
+        # Persist per-step routed experts into the scheduler-side slot
+        # buffer (CPU->CPU fancy-index assign; ~few MB per step).
+        # MUST precede the _get_routed_experts calls below: stopped
+        # requests may terminate on tokens generated in this very step,
+        # whose routing was just D2H'd into model_runner_output.
         if model_runner_output.routed_experts is not None:
             re = model_runner_output.routed_experts
             self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
@@ -1422,9 +1438,20 @@ class Scheduler(SchedulerInterface):
             if stopped:
                 if self.enable_return_routed_experts:
                     routed_experts = self._get_routed_experts(request)
-                    # Request completed normally; clean up any stale
-                    # preemption cache now that blocks have full routing.
-                    self.aborted_routed_experts.pop(req_id, None)
+                    # In async-scheduling (batch_queue_size > 1), a later
+                    # scheduler step may preempt this request -- freeing its
+                    # blocks and zeroing ``num_computed_tokens`` -- before we
+                    # process the model output that actually finished it. The
+                    # reread above then sees an empty block list and returns
+                    # a zero-length array, while ``_preempt_request`` has
+                    # cached the pre-free routing. Prefer the cached copy
+                    # when it is more complete; otherwise drop it as stale.
+                    cached = self.aborted_routed_experts.pop(req_id, None)
+                    if cached is not None and (
+                        routed_experts is None
+                        or cached.shape[0] > routed_experts.shape[0]
+                    ):
+                        routed_experts = cached
 
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
@@ -1601,33 +1628,37 @@ class Scheduler(SchedulerInterface):
         return False
 
     def _get_routed_experts_block_ids(self, request: Request) -> list[int]:
-        """Get block IDs for the attention KV-cache group."""
+        """Return physical block IDs for the attention KV-cache group.
+
+        These IDs are what :meth:`RoutedExpertsManager.get` converts into
+        slot indices via ``slot = block_id * block_size + offset``.
+        """
         kv_blocks = self.kv_cache_manager.get_blocks(request.request_id)
         all_block_ids = kv_blocks.get_block_ids()
         return all_block_ids[self.routed_experts_mgr.attn_gid]
 
     def _get_routed_experts(self, request: Request) -> np.ndarray | None:
-        # Two upper bounds on how many slot entries are safe to read:
-        #   - num_tokens - 1: the shape downstream expects (prompt + output
-        #     minus the last sampled token not yet forwarded).
-        #   - num_computed_tokens - num_output_placeholders: slots physically
-        #     written and confirmed. Excludes:
-        #       * async-scheduled but not-yet-appended tokens (placeholders);
-        #       * rejected spec-decode drafts (both counters are decremented);
-        #       * un-forwarded slots during chunked prefill or post-preempt
-        #         re-prefill (num_computed is still small).
-        # Taking the min keeps the returned shape aligned with downstream
-        # expectations whenever possible, while never over-reading into
-        # stale/unwritten slots.
-        num_tokens = min(
-            request.num_tokens - 1,
-            request.num_computed_tokens - request.num_output_placeholders,
-        )
+        # Use ``num_tokens - 1`` as the read length: prompt + generated
+        # outputs minus the last sampled token, which has not yet been
+        # forwarded and therefore has no routing data written to its slot.
+        #
+        # Slots beyond what the forward pass has actually written are
+        # zero-initialized in ``routed_experts_by_slot``, so reading them
+        # yields zeros rather than stale data. The shape is fixed at
+        # ``num_tokens - 1`` regardless of how far forward progressed --
+        # callers rely on this invariant for downstream concatenation.
+        num_tokens = request.num_tokens - 1
         block_ids = self._get_routed_experts_block_ids(request)
         return self.routed_experts_mgr.get(block_ids, num_tokens)
 
     def pop_aborted_routed_experts(self, req_id: str) -> np.ndarray | None:
-        """Pop cached routed experts for an aborted request."""
+        """Pop cached routed experts for a request about to be aborted.
+
+        Returns ``None`` if nothing was cached (e.g. the request was
+        aborted before any forward pass, or routed experts capture is
+        disabled). Called from
+        :meth:`EngineCoreProc._send_abort_outputs_to_client`.
+        """
         return self.aborted_routed_experts.pop(req_id, None)
 
     def _update_request_with_output(
@@ -1811,12 +1842,14 @@ class Scheduler(SchedulerInterface):
         # Second pass: capture routed experts, set status and free requests
         for request in valid_requests:
             if self.enable_return_routed_experts:
-                # Capture routed experts BEFORE freeing blocks.
+                # Capture routed experts BEFORE freeing blocks -- once
+                # _free_request runs below, block IDs are gone and the
+                # slot buffer rows will be reused by other requests.
                 re = self._get_routed_experts(request)
                 existing = self.aborted_routed_experts.get(request.request_id)
-                # Only overwrite if new data is at least as complete
-                # (e.g. a RUNNING request aborted during chunked re-prefill
-                # may have fewer routing entries than the prior preemption).
+                # Keep the longer snapshot: a RUNNING request aborted
+                # during chunked re-prefill may yield fewer routing
+                # entries than a prior preemption's cached snapshot.
                 if existing is None or re.shape[0] > existing.shape[0]:
                     self.aborted_routed_experts[request.request_id] = re
 

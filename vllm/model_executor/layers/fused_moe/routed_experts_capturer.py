@@ -37,6 +37,13 @@ def _get_num_experts_per_tok(hf_config) -> int:
 
 
 def get_num_experts(hf_config) -> int:
+    """Resolve ``num_experts`` across HuggingFace config naming conventions.
+
+    Different MoE model families expose this under different keys:
+      - ``num_experts``: Mixtral, Qwen2-MoE, Qwen3-MoE
+      - ``n_routed_experts``: DeepSeek-V2/V3
+      - ``num_local_experts``: Mixtral (older exports)
+    """
     for key in ("num_experts", "n_routed_experts", "num_local_experts"):
         val = getattr(hf_config, key, None)
         if val is not None:
@@ -48,13 +55,34 @@ def get_num_experts(hf_config) -> int:
     )
 
 
-class RoutedExpertsCapturer:
-    """
-    Capturer for routed experts with device buffer.
+def _expert_id_dtype(num_experts: int, *, numpy: bool = False):
+    """Pick the smallest unsigned int type that fits all expert IDs.
 
-    This class captures expert routing decisions during model forward passes
-    and stores them in a device buffer for later extraction via
-    ModelRunnerOutput.
+    Expert IDs are 0..num_experts-1; uint8 fits 256 distinct values
+    (0..255), so the boundary is ``<= 256`` (NOT ``< 256``).
+    """
+    if numpy:
+        return np.uint8 if num_experts <= 256 else np.uint16
+    return torch.uint8 if num_experts <= 256 else torch.uint16
+
+
+class RoutedExpertsCapturer:
+    """Worker-side capturer for routed experts, lives on GPU.
+
+    Layer-level hooks call :meth:`capture` from inside the forward pass
+    with the per-layer ``topk_ids`` tensor. The tensor is sliced to the
+    tokens owned by this DP rank and written into a preallocated device
+    buffer. At the end of the step, :class:`GPUModelRunner` reads the
+    device buffer, issues a D2H copy into a pinned CPU buffer, and hands
+    the result to the scheduler via :class:`RoutedExpertsLists`.
+
+    Invariants:
+        - One instance per worker; shape is fixed at init and covers the
+          worst-case step (``max_num_batched_tokens`` tokens).
+        - :meth:`clear_buffer` is called at the start of every step, so
+          unused slots stay zero.
+        - ``device_buffer.dtype`` is picked by ``num_experts``; callers
+          should not assume int32.
     """
 
     def __init__(
@@ -65,21 +93,28 @@ class RoutedExpertsCapturer:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts = get_num_experts(hf_config)
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
-        dtype = torch.uint8 if num_experts <= 256 else torch.uint16
         self.device_buffer = torch.zeros(
             (
                 max_num_batched_tokens,
                 hf_config.num_hidden_layers,
                 num_experts_per_tok,
             ),
-            dtype=dtype,
+            dtype=_expert_id_dtype(num_experts),
             device=current_platform.device_type,
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
-        """
-        Capture expert routing decisions for a specific layer.
+        """Capture expert routing decisions for a specific layer.
+
+        Under data parallelism, ``topk_ids`` may have two different batch
+        layouts depending on where the DP combine happens:
+          - ``n == total`` (naive dispatch): all DP ranks' tokens are
+            concatenated before routing; we slice out this rank's span
+            using the cumulative per-rank counts.
+          - ``n == token_num_per_dp`` (modular-kernel path): DP combine
+            happens inside ``quant_method.apply``; ``select_experts`` only
+            ever sees this rank's tokens, so we take the whole tensor.
 
         Args:
             layer_id: The layer index.
@@ -99,14 +134,15 @@ class RoutedExpertsCapturer:
 
             if n == total:
                 # Naive dispatch: all DP ranks' tokens concatenated
-                # before routing.
+                # before routing. This rank owns tokens
+                # [end_loc - token_num_per_dp, end_loc).
                 cumsum = torch.cumsum(num_tokens_dp, dim=0)
                 end_loc = int(cumsum[self.dp_rank].item())
                 start_loc = end_loc - token_num_per_dp
             elif n == token_num_per_dp:
                 # Modular-kernel path: DP combine happens inside
                 # quant_method.apply; select_experts only sees this
-                # rank's tokens.
+                # rank's tokens, take the whole tensor.
                 start_loc = 0
                 end_loc = token_num_per_dp
             else:
@@ -116,6 +152,8 @@ class RoutedExpertsCapturer:
                     f"for dp_rank={self.dp_rank})"
                 )
 
+        # Defensive: model may expose more layers than the capture buffer
+        # was sized for (unusual, but guards against mis-config).
         if layer_id >= self.device_buffer.shape[1]:
             return
 
@@ -124,20 +162,44 @@ class RoutedExpertsCapturer:
         ]
 
     def clear_buffer(self) -> None:
-        """Clear the device buffer."""
+        """Zero the device buffer. Called at the start of every step so
+        slots belonging to finished / preempted tokens don't leak into
+        the next step.
+        """
         self.device_buffer.zero_()
 
     def get_device_buffer(self) -> torch.Tensor:
-        """Get the device buffer for external extraction."""
+        """Return the underlying device buffer so the model runner can
+        issue the D2H copy. The tensor is shared; callers must either
+        clone or fully drain it before the next forward pass runs
+        :meth:`clear_buffer`.
+        """
         return self.device_buffer
 
 
 class RoutedExpertsManager:
-    """Slot-indexed buffer that stores and retrieves routed experts data.
+    """Scheduler-side slot-indexed buffer for routed experts.
 
-    Each slot corresponds to block_id * block_size + offset_in_block, so
-    data is tied to physical KV-cache blocks and survives preemption for
-    prefix-cached blocks.
+    Lives on CPU in the scheduler process. Each slot corresponds to
+    ``block_id * block_size + offset_in_block`` where ``block_id`` is
+    drawn from the physical KV-cache block pool, so routing data is
+    tied to physical blocks and naturally survives preemption for
+    prefix-cached blocks (prefix hits re-expose the same slots).
+
+    Data flow per step:
+      1. Worker D2Hs its device capture buffer into
+         :class:`RoutedExpertsLists` and returns it via
+         :class:`ModelRunnerOutput`.
+      2. Scheduler calls :meth:`store_batch` with that step's
+         ``(routing_data, slot_mapping)`` — a single CPU->CPU
+         fancy-index assign, ~few MB per step.
+      3. On request completion / abort / preemption, the scheduler
+         calls :meth:`get` with the request's block IDs to recover
+         the full per-token routing.
+
+    Memory: ``routed_experts_by_slot`` is sized for the whole block
+    pool (``num_blocks * block_size`` slots). For large block pools
+    this can reach multiple GB; see the init log for the exact size.
     """
 
     def __init__(
@@ -145,7 +207,12 @@ class RoutedExpertsManager:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ) -> None:
-        # Find the attention group for block/slot mapping.
+        # Pick the attention group for block/slot mapping. We require
+        # a FullAttentionSpec group rather than any AttentionSpec to
+        # stay consistent with the worker-side lookup in
+        # ``GPUModelRunner._get_attention_kv_cache_gid``; hybrid models
+        # (Mamba / linear attention) also have other AttentionSpec
+        # groups whose slot layout differs.
         self.attn_gid = next(
             gid
             for gid, g in enumerate(kv_cache_config.kv_cache_groups)
@@ -154,14 +221,13 @@ class RoutedExpertsManager:
         attn_group = kv_cache_config.kv_cache_groups[self.attn_gid]
         self.block_size = attn_group.kv_cache_spec.block_size
 
-        # Routed experts indexed by KV-cache slot.
+        # All kv_cache_groups share the same physical block pool, so
+        # block IDs span [0, num_blocks) regardless of how many groups
+        # exist. Sizing to the full pool avoids index-out-of-range
+        # when different groups happen to land on the same block.
         hf_config = vllm_config.model_config.hf_text_config
         num_experts = get_num_experts(hf_config)
         num_experts_per_tok = _get_num_experts_per_tok(hf_config)
-        dtype = np.uint8 if num_experts <= 256 else np.uint16
-        # Use the full block pool size: block IDs span [0, num_blocks)
-        # regardless of how many kv_cache_groups exist, because all groups
-        # share the same physical block pool.
         max_num_slots = kv_cache_config.num_blocks * self.block_size
         self.routed_experts_by_slot = np.zeros(
             (
@@ -169,26 +235,43 @@ class RoutedExpertsManager:
                 hf_config.num_hidden_layers,
                 num_experts_per_tok,
             ),
-            dtype=dtype,
+            dtype=_expert_id_dtype(num_experts, numpy=True),
+        )
+        logger.info(
+            "RoutedExpertsManager CPU buffer: %.2f GB "
+            "(slots=%d, layers=%d, top_k=%d, dtype=%s)",
+            self.routed_experts_by_slot.nbytes / 1e9,
+            max_num_slots,
+            hf_config.num_hidden_layers,
+            hf_config.num_experts_per_tok,
+            self.routed_experts_by_slot.dtype.name,
         )
 
     def store_batch(self, data: np.ndarray, slot_mapping: np.ndarray) -> None:
-        """Store a whole batch of routed experts using pre-computed slot mapping.
+        """Persist one step's routed experts into the slot buffer.
 
-        Equivalent to the old shared-memory write:
-            shared_memory[slot_mapping] = data
+        Equivalent to ``slot_buffer[slot_mapping] = data``; numpy fancy
+        indexing handles repeated / out-of-order indices. Called once
+        per scheduler step in ``update_from_output``.
         """
         self.routed_experts_by_slot[slot_mapping] = data
 
     def get(self, block_ids: list[int], num_tokens: int) -> np.ndarray:
-        """Read routed experts data for a completed request.
+        """Read routed experts data for a completed / preempted request.
+
+        Reconstructs a per-token slot_mapping from the request's block
+        IDs and returns the routing slice. Because numpy fancy indexing
+        returns a **copy** (not a view), the returned ndarray is safe
+        to hold across subsequent :meth:`store_batch` calls — do not
+        replace the fancy index with a slice without re-verifying.
 
         Args:
             block_ids: Block IDs from the attention KV-cache group.
             num_tokens: Number of tokens that have gone through a forward
-                pass and therefore have routing data written to their slots
-                (i.e. ``request.num_computed_tokens``). Slots beyond this
-                count are zero-initialized and must not be read.
+                pass and therefore have routing data written to their
+                slots (typically ``request.num_tokens - 1``; the last
+                sampled token has not been forwarded yet). Slots beyond
+                ``request.num_computed_tokens`` are zero-initialized.
 
         Returns:
             Array of shape (num_tokens, num_layers, num_experts_per_tok).
@@ -196,6 +279,8 @@ class RoutedExpertsManager:
         bs = self.block_size
         block_ids_array = np.array(block_ids, dtype=np.int32)
         block_offsets = np.arange(bs)
+        # slot = block_id * block_size + offset_in_block; flatten the
+        # (num_blocks, block_size) grid and trim to num_tokens.
         slot_mapping = (
             block_ids_array.reshape(-1, 1) * bs + block_offsets.reshape(1, -1)
         ).flatten()[:num_tokens]

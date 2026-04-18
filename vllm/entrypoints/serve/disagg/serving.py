@@ -258,6 +258,12 @@ class ServingTokens(OpenAIServing):
             else:
                 logprobs = None
 
+            # Encode routed_experts for transport. JSON can't carry raw
+            # bytes, so we write the ndarray as a ``.npy`` byte stream
+            # and base64-encode it. ``pybase64`` is ~3x faster than the
+            # stdlib ``base64`` on large payloads thanks to SIMD.
+            # This is the only base64 hop in the pipeline -- the
+            # engine<->API-server link is binary msgpack + zmq.
             routed_experts_b64 = None
             if output.routed_experts is not None:
                 buf = io.BytesIO()
