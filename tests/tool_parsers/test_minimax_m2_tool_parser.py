@@ -4,6 +4,7 @@
 import json
 
 import pytest
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
@@ -597,3 +598,38 @@ class TestAnyOfNullableParam:
         parsed = json.loads(tc[0]["arguments"])
         assert parsed["config"] == {"theme": "dark", "fontSize": 14}
         assert isinstance(parsed["config"], dict)
+
+
+class TestResponsesFunctionToolSupport:
+    """Regression: Responses FunctionTool schemas are used for type coercion."""
+
+    def test_function_tool_properties_drive_type_conversion(self):
+        tools = [
+            FunctionTool(
+                type="function",
+                name="get_weather",
+                description="Get weather data",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "days": {"type": "integer"},
+                    },
+                },
+            )
+        ]
+        parser = MinimaxM2ToolParser(FakeTokenizer(), tools=tools)
+
+        results = _feed(
+            parser,
+            [
+                '<minimax:tool_call><invoke name="get_weather">'
+                '<parameter name="days">5</parameter>'
+                "</invoke></minimax:tool_call>",
+            ],
+        )
+
+        tc = _collect_tool_calls(results)
+        assert len(tc) == 1
+        parsed = json.loads(tc[0]["arguments"])
+        assert parsed["days"] == 5
+        assert isinstance(parsed["days"], int)

@@ -25,7 +25,10 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
-from vllm.tool_parsers.utils import extract_intermediate_diff
+from vllm.tool_parsers.utils import (
+    extract_intermediate_diff,
+    find_tool_properties,
+)
 
 logger = init_logger(__name__)
 
@@ -257,18 +260,7 @@ class MinimaxM2ToolParser(ToolParser):
         function_name = self._extract_name(name_match.group(1))
 
         # Get parameter configuration
-        param_config = {}
-        if tools:
-            for tool in tools:
-                if (
-                    hasattr(tool, "function")
-                    and tool.function.name == function_name
-                    and hasattr(tool.function, "parameters")
-                ):
-                    params = tool.function.parameters
-                    if isinstance(params, dict) and "properties" in params:
-                        param_config = params["properties"]
-                    break
+        param_config = find_tool_properties(tools, function_name)
 
         # Extract parameters
         param_dict = {}
@@ -311,21 +303,7 @@ class MinimaxM2ToolParser(ToolParser):
             self._tool_name_sent.append(False)
 
     def _get_param_config(self, function_name: str) -> dict[str, Any]:
-        if not self.tools:
-            return {}
-
-        for tool in self.tools:
-            if (
-                hasattr(tool, "function")
-                and tool.function.name == function_name
-                and hasattr(tool.function, "parameters")
-            ):
-                params = tool.function.parameters
-                if isinstance(params, dict):
-                    return params.get("properties", {})
-                break
-
-        return {}
+        return find_tool_properties(self.tools, function_name)
 
     def _serialize_partial_param_value(
         self,
