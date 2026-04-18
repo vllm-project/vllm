@@ -182,6 +182,50 @@ def wipe_cold_caches() -> None:
             shutil.rmtree(p, ignore_errors=True)
 
 
+def drop_model_page_cache(model: str) -> None:
+    """Hint the kernel to drop OS page cache for this model's weight shards
+    (.safetensors / .bin) so the next read goes to disk, not RAM. Uses
+    posix_fadvise(POSIX_FADV_DONTNEED) which requires no root privileges.
+
+    Without this, 'cold' samples on a box that has previously loaded the
+    weights read at RAM speed (4+ GB/s), hiding all disk-I/O effects.
+
+    Best-effort: silently skips files that can't be resolved or opened.
+    """
+    import glob
+
+    candidate_dir: str | None = None
+    if os.path.isdir(model):
+        candidate_dir = model
+    else:
+        try:
+            from huggingface_hub import snapshot_download
+
+            candidate_dir = snapshot_download(
+                repo_id=model,
+                allow_patterns=["*.safetensors", "*.bin"],
+                local_files_only=True,
+            )
+        except Exception:
+            return
+    if not candidate_dir or not os.path.isdir(candidate_dir):
+        return
+
+    shards = sorted(
+        glob.glob(os.path.join(candidate_dir, "*.safetensors"))
+        + glob.glob(os.path.join(candidate_dir, "*.bin"))
+    )
+    for shard in shards:
+        try:
+            fd = os.open(shard, os.O_RDONLY)
+            try:
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+            finally:
+                os.close(fd)
+        except Exception:
+            pass
+
+
 def port_is_free(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -283,6 +327,7 @@ def run_single_sample(
 
     if kind == "cold":
         wipe_cold_caches()
+        drop_model_page_cache(model)
     TORCHINDUCTOR_CACHE.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
