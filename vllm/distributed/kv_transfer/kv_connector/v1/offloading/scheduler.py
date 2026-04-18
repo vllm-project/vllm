@@ -134,7 +134,7 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
-        self._reqs_to_load: dict[int, TransferJob] = {}
+        self._load_jobs: dict[int, TransferJob] = {}
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
         self._blocks_being_loaded: set[OffloadKey] | None = (
@@ -278,7 +278,7 @@ class OffloadingConnectorScheduler:
         )
 
         load_job_id = self._generate_job_id()
-        self._reqs_to_load[load_job_id] = TransferJob(
+        self._load_jobs[load_job_id] = TransferJob(
             req_id=request.request_id,
             transfer_spec=(src_spec, dst_spec),
         )
@@ -292,14 +292,14 @@ class OffloadingConnectorScheduler:
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(offload_keys)
 
-    def _get_reqs_to_store(
+    def _build_store_jobs(
         self, scheduler_output: SchedulerOutput
     ) -> dict[int, TransferJob]:
         # Below assertion will be removed once this function supports HMA
         assert len(self.config.kv_group_configs) == 1
         group_config = self.config.kv_group_configs[0]
 
-        reqs_to_store: dict[int, TransferJob] = {}
+        store_jobs: dict[int, TransferJob] = {}
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
             req_status = self._req_status[req_id]
@@ -369,7 +369,7 @@ class OffloadingConnectorScheduler:
                 pending_count=self.config.num_workers,
             )
 
-            reqs_to_store[job_id] = TransferJob(
+            store_jobs[job_id] = TransferJob(
                 req_id=req_id, transfer_spec=(src_spec, dst_spec)
             )
 
@@ -381,7 +381,7 @@ class OffloadingConnectorScheduler:
                 job_id,
             )
 
-        return reqs_to_store
+        return store_jobs
 
     def _cleanup_store_jobs_for_req(self, req_id: ReqId) -> None:
         """Remove per-job tracking state for a given request."""
@@ -396,11 +396,11 @@ class OffloadingConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         meta = OffloadingConnectorMetadata(
-            reqs_to_load=self._reqs_to_load,
-            reqs_to_store=self._get_reqs_to_store(scheduler_output),
-            reqs_to_flush=scheduler_output.preempted_req_ids,
+            load_jobs=self._load_jobs,
+            store_jobs=self._build_store_jobs(scheduler_output),
+            jobs_to_flush=scheduler_output.preempted_req_ids,
         )
-        self._reqs_to_load = {}
+        self._load_jobs = {}
 
         # NOTE (orozery): we should move this logic to update_connector_output
         # once KVConnectorOutput allows us to report completed transfers

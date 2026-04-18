@@ -332,7 +332,7 @@ class OffloadingConnectorWorker:
             assert success
         self._stores.unsubmitted.clear()
 
-        for req_id in kv_connector_metadata.reqs_to_flush or ():
+        for req_id in kv_connector_metadata.jobs_to_flush or ():
             job_ids = self._stores.by_req.get(req_id)
             if job_ids:
                 self.worker.wait(job_ids)
@@ -343,13 +343,13 @@ class OffloadingConnectorWorker:
             assert success
         self._stores.unsubmitted.clear()
 
-        for job_id, entry in metadata.reqs_to_load.items():
+        for job_id, entry in metadata.load_jobs.items():
             self._loads.add(job_id, entry.req_id)
             success = self.worker.transfer_async(job_id, entry.transfer_spec)
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
-        for job_id, entry in metadata.reqs_to_store.items():
+        for job_id, entry in metadata.store_jobs.items():
             # NOTE(orozery): defer the store to the beginning of the next
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.
