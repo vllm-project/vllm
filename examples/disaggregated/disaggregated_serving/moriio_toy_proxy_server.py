@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import argparse
 import asyncio
 import copy
 import logging
@@ -399,10 +400,14 @@ async def stop_profile():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=10001)
+    args = parser.parse_args()
+
     t = start_service_discovery("0.0.0.0", 36367)
     app.debug = True
     app.config["BODY_TIMEOUT"] = 360000
     app.config["RESPONSE_TIMEOUT"] = 360000
 
-    app.run(host="0.0.0.0", port=10001)
+    app.run(host="0.0.0.0", port=args.port)
     t.join()
