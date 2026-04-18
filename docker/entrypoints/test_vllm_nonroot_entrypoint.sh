@@ -183,24 +183,51 @@ grep -q "^ARGV=serve --model \\./relpath\$" "$out" \
 echo "PASS: case8 (writable cwd preserved; relative argv still resolves from caller's cwd)"
 
 # -----------------------------------------------------------------------------
-# Case 9: unwritable CWD is overridden — wrapper falls back to HOME so vllm's
-# cwd-relative path probe doesn't crash under arbitrary UIDs landing on a
-# readonly WORKDIR. Skipped as root (DAC override).
+# Case 9: read-only cwd is ALSO preserved. A caller who mounts a read-only
+# model directory at the container's cwd (e.g. `docker run -w /models` with
+# /models bind-mounted ro) expects relative argv like `--model ./foo.gguf`
+# to resolve against /models. An earlier version of this wrapper rewrote
+# read-only cwd to $HOME and broke that workflow; this case guards against
+# the regression returning.
+# -----------------------------------------------------------------------------
+case9_home="$WORKDIR/case9-home"
+mkdir -p "$case9_home"
+case9_ro="$WORKDIR/case9-ro"
+mkdir -p "$case9_ro"
+chmod 0555 "$case9_ro"
+out="$WORKDIR/case9.out"
+(cd "$case9_ro" && run_wrapper "$out" "HOME=$case9_home" "USER=alice" "LOGNAME=alice" -- --model ./foo)
+grep -q "^PWD=$case9_ro\$" "$out" \
+    || fail "$out" "case9: read-only cwd was rewritten (got $(grep '^PWD=' "$out"))"
+grep -q "^ARGV=serve --model \\./foo\$" "$out" \
+    || fail "$out" "case9: relative argv not preserved"
+chmod 0700 "$case9_ro"
+echo "PASS: case9 (read-only cwd preserved; relative argv still resolves from caller's cwd)"
+
+# -----------------------------------------------------------------------------
+# Case 10: truly inaccessible cwd (no search bit) DOES fall back to $HOME.
+# Skipped as root because DAC override lets root cd into 0000 directories.
 # -----------------------------------------------------------------------------
 if [ "$(id -u)" = "0" ]; then
-    echo "SKIP: case9 (running as root; DAC override makes unwritable cwd meaningless)"
+    echo "SKIP: case10 (running as root; DAC override makes inaccessible cwd untestable)"
 else
-    case9_home="$WORKDIR/case9-home"
-    mkdir -p "$case9_home"
-    case9_ro="$WORKDIR/case9-ro"
-    mkdir -p "$case9_ro"
-    chmod 0555 "$case9_ro"
-    out="$WORKDIR/case9.out"
-    (cd "$case9_ro" && run_wrapper "$out" "HOME=$case9_home" "USER=alice" "LOGNAME=alice" -- --model foo)
-    grep -q "^PWD=$case9_home\$" "$out" \
-        || fail "$out" "case9: unwritable cwd not overridden to HOME (got $(grep '^PWD=' "$out"))"
-    chmod 0700 "$case9_ro"
-    echo "PASS: case9 (unwritable cwd falls back to \$HOME)"
+    case10_home="$WORKDIR/case10-home"
+    mkdir -p "$case10_home"
+    case10_cwd="$WORKDIR/case10-cwd"
+    mkdir -p "$case10_cwd"
+    out="$WORKDIR/case10.out"
+    # Make cwd genuinely inaccessible (mode 0000 = no search bit -> cd .
+    # fails with EACCES). Use absolute paths for chmod so our own test
+    # cleanup still works without needing search perm on the dir.
+    (
+        cd "$case10_cwd"
+        chmod 0000 "$case10_cwd"
+        run_wrapper "$out" "HOME=$case10_home" "USER=alice" "LOGNAME=alice" -- --model foo
+    )
+    chmod 0700 "$case10_cwd"
+    grep -q "^PWD=$case10_home\$" "$out" \
+        || fail "$out" "case10: inaccessible cwd not overridden to HOME (got $(grep '^PWD=' "$out"))"
+    echo "PASS: case10 (inaccessible cwd falls back to \$HOME)"
 fi
 
 echo ""

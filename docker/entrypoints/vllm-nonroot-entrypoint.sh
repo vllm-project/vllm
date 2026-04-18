@@ -34,17 +34,18 @@ if [ -z "${HOME:-}" ] || [ ! -w "${HOME}" ]; then
     fi
 fi
 
-# If the current working directory is not writable (e.g. an arbitrary UID in
-# a non-0 GID landing on the image's WORKDIR=/home/vllm, or a misconfigured
-# `-w /readonly/path`), chdir into $HOME so vllm's cwd-relative path probe
-# (e.g. "is this model arg a local path?") doesn't crash with a confusing
-# PermissionError.
+# Preserve the caller's cwd whenever it's still usable. A read-only mount
+# (e.g. `docker run -w /models ... --model ./llama.gguf` where /models is
+# the user's model share) is a legitimate, usable cwd — vllm only needs to
+# *read* relative paths from there. We only fall back to $HOME when the
+# cwd itself is truly inaccessible (no search bit, deleted inode, mount
+# gone, etc.), which is when `cd .` actually fails.
 #
-# We *only* chdir when the CWD is actually unusable. This preserves
-# caller-provided CWDs for the common case of `docker run -w /models ...`
-# plus relative argv like `--model ./llama.gguf`, `--chat-template
-# ./t.jinja`, relative TLS cert paths, etc.
-if [ ! -w . ]; then
+# This is the accessibility check, not a writability check; the latter
+# would silently rewrite cwd for any read-only workflow and break relative
+# argv like `--model ./llama.gguf`, `--chat-template ./t.jinja`, relative
+# TLS cert paths, etc.
+if ! cd . 2>/dev/null; then
     cd "$HOME"
 fi
 
