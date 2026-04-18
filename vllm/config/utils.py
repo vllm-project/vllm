@@ -35,7 +35,6 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
-ReplaceT = TypeVar("ReplaceT")
 CompileFactors = dict[str, object]
 
 
@@ -119,15 +118,15 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
     return get_field(cls, name).init
 
 
-def replace(dataclass_instance: ReplaceT, /, **kwargs: Any) -> ReplaceT:
+def replace(dataclass_instance: ConfigT, /, **kwargs: Any) -> ConfigT:
     """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
     but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
     of `dataclasses.field`"""
-    cls = cast(ConfigType, type(dataclass_instance))
+    cls = cls = type(dataclass_instance)
     dataclass_dict = dataclass_instance.__dict__
     dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
     dataclass_dict.update(kwargs)
-    return cast(ReplaceT, cls(**dataclass_dict))
+    return cls(**dataclass_dict)
 
 
 def getattr_iter(

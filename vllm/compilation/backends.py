@@ -12,6 +12,7 @@ from collections import defaultdict
 from collections.abc import Callable, Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -1096,33 +1097,25 @@ class VllmBackend:
 
         # Persist and log only hash-relevant factors together.
         try:
-            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
-            with open(meta_path, "w") as f:
-                json.dump(
-                    {
-                        "env": env_factors,  # raw factors used for env_hash
-                        "config": config_factors,
-                        "config_hash": config_hash,
-                        "compiler": compiler_factors,
-                        "compiler_hash": compiler_hash,
-                        "code_hash": code_hash,
-                        "code": code_factors,
-                    },
-                    f,
-                    indent=2,
-                    sort_keys=True,
-                )
             logger.debug(
-                (
-                    "Persisted compile cache factors to %s "
-                    "(env_keys=%d config_keys=%d compiler_keys=%d code_entries=%d)"
-                ),
-                meta_path,
-                len(env_factors),
-                len(config_factors),
-                len(compiler_factors),
-                len(code_factors),
+                "Compile env factors (raw):\n%s\nVllm config hash: %s",
+                lazy(partial(pprint.pformat, env_factors, width=120)),
+                config_hash,
             )
+            meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
+            if not os.path.exists(meta_path):
+                with open(meta_path, "w") as f:
+                    json.dump(
+                        {
+                            "env": env_factors,  # raw factors used for env_hash
+                            "config_hash": config_hash,
+                            "code_hash": code_hash,
+                            "compiler_hash": compiler_hash,
+                        },
+                        f,
+                        indent=2,
+                        sort_keys=True,
+                    )
         except Exception:
             # Best-effort only; metadata write failures are non-fatal.
             logger.warning(
