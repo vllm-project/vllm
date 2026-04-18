@@ -152,13 +152,35 @@ class Glm4MoeModelToolParser(ToolParser):
         arg_name: str,
         tools: list[Tool] | None,
     ) -> bool:
+        """Whether *arg_name* should be streamed as a JSON string value.
+
+        Returns True when the argument's schema declares a string type,
+        including nullable (``Optional[str]``) forms and nested
+        ``anyOf`` / ``oneOf`` branches.
+
+        Also returns True when the tool is known but the argument is
+        not declared in its schema (or the tool has no schema at all).
+        This matches the default used by the ``minimax_m2`` and
+        ``qwen3xml`` parsers — streaming treats undeclared arguments as
+        strings (wraps them in quotes) so the partial and complete
+        rendering paths stay prefix-consistent and the
+        ``_compute_args_diff`` guard does not stall valid tool calls.
+        Callers whose tools emit non-string undeclared args should
+        declare those args in the schema.
+
+        Returns False only when: ``tools`` is None, the arg IS declared
+        with a non-string type, or the tool is not in the tools list at
+        all.
+        """
         if tools is None:
             return False
         for tool in tools:
             if tool.function.name != tool_name:
                 continue
             if tool.function.parameters is None:
-                return False
+                # Tool exists but declares no schema — treat any emitted
+                # arg as string (default) so streaming can complete.
+                return True
             params = tool.function.parameters
             # Prefer the proper JSON Schema form ({"properties": {...}});
             # fall back to a flat {arg: schema} mapping for clients that
@@ -172,7 +194,10 @@ class Glm4MoeModelToolParser(ToolParser):
             if prop is None:
                 prop = params.get(arg_name)
             if not isinstance(prop, dict):
-                return False
+                # Tool schema is present but does not declare this
+                # argument.  Default to string-type (see docstring for
+                # the peer-parser precedent and rationale).
+                return True
             # Direct form: {"type": "string"} or {"type": ["string", "null"]}
             direct_type = prop.get("type")
             if direct_type == "string":
@@ -196,6 +221,7 @@ class Glm4MoeModelToolParser(ToolParser):
                         return True
                     if isinstance(branch_type, list) and "string" in branch_type:
                         return True
+            # Arg is declared but not as a string type — respect that.
             return False
         logger.debug("No tool named '%s'.", tool_name)
         return False

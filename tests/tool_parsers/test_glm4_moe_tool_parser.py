@@ -1530,3 +1530,62 @@ def test_extract_tool_calls_optional_string_preserves_literal(
     assert args == {"label": "true"}, (
         "Optional[str] value must remain a string, not be coerced to bool"
     )
+
+
+@pytest.mark.parametrize("stream_interval", [1, 2, 3, 5, 8])
+def test_streaming_undeclared_arg_defaults_to_string(
+    glm4_moe_tokenizer, stream_interval
+):
+    """A tool whose schema declares some args but not others must still
+    stream the undeclared args correctly.  Reproduces the production
+    divergence-guard warning seen when GLM-5.1 emits text fields
+    (e.g. edit-tool ``new_text``) that the tool schema did not list.
+
+    Pre-fix: ``_is_string_type`` returns False for the undeclared arg,
+    the non-string partial path emits bare text, the complete path
+    wraps with ``json.dumps``, the prefix-divergence guard fires, and
+    the client never receives the trailing ``"`` / ``}`` — leading to
+    ``json.loads`` failure on the concatenated deltas.
+
+    Post-fix: undeclared args default to string-type (matching
+    minimax_m2 / qwen3xml parsers), partial and complete renderings
+    stay prefix-consistent, client gets valid JSON.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            function=FunctionDefinition(
+                name="edit_memory",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "action": {"type": "string"},
+                        "target": {"type": "string"},
+                        # new_text intentionally undeclared
+                    },
+                },
+            ),
+        ),
+    ]
+    parser = Glm4MoeModelToolParser(glm4_moe_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    text = (
+        "<tool_call>edit_memory\n"
+        "<arg_key>action</arg_key><arg_value>replace</arg_value>"
+        "<arg_key>target</arg_key><arg_value>memory</arg_value>"
+        "<arg_key>new_text</arg_key>"
+        "<arg_value>A long body of replacement text.</arg_value>"
+        "</tool_call>"
+    )
+
+    deltas = _simulate_streaming(
+        glm4_moe_tokenizer, parser, request, text, stream_interval
+    )
+    _, tools_found = _collect_from_deltas(deltas)
+    assert 0 in tools_found
+    args = json.loads("".join(tools_found[0]["args_fragments"]))
+    assert args == {
+        "action": "replace",
+        "target": "memory",
+        "new_text": "A long body of replacement text.",
+    }
