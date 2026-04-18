@@ -8,14 +8,14 @@ import pytest
 import torch
 from utils import (
     BACKENDS,
+    TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
     is_device_capability_below_90,
-    resolve_model_name,
     skip_unsupported,
 )
 
-import vllm.model_executor.layers.batch_invariant as batch_invariant
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
 
 IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
@@ -36,10 +36,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     using the high-level v1 LLM() API only (no manual batching).
 
     Strategy:
-    - Create two LLM engines with identical config except max_num_seqs: 1 vs N.
-    - Compute a baseline output for the needle prompt with the bs=1 engine.
-    - For many trials, generate a batch (size N) where the needle appears at a
-      random position among random filler prompts using the bs=N engine.
+    - Create a single LLM engine configured for the larger batch limit (N).
+    - Compute a baseline output for the needle prompt when it is run alone.
+    - For many trials, generate a mixed batch (size N) where the needle appears
+      at a random position among random filler prompts using the same engine.
     - Track how many trials match vs mismatch, and report totals at the end.
       The test fails if any mismatches occur, but we still dump pass/fail
       counts.
@@ -57,7 +57,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     attention_config = {"backend": backend}
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
-    model = resolve_model_name(backend)
+    model = TEST_MODEL
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
@@ -83,11 +83,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
     needle_prompt = "There once was a "
 
-    llm_bs1 = None
-    llm_bsN = None
+    llm = None
     try:
-        # Engine with bs=1 behavior
-        llm_bs1 = LLM_with_max_seqs(
+        llm = LLM_with_max_seqs(
             model=model,
             max_num_seqs=max_batch_size,
             gpu_memory_utilization=gpu_mem_util,
@@ -96,19 +94,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
         )
 
         # Baseline generation for the needle prompt alone.
-        baseline_out = llm_bs1.generate([needle_prompt], sampling)
+        baseline_out = llm.generate([needle_prompt], sampling)
         assert len(baseline_out) == 1
         assert len(baseline_out[0].outputs) >= 1
         baseline_text = baseline_out[0].outputs[0].text
-
-        # Engine with larger batch limit (e.g., 64)
-        llm_bsN = LLM_with_max_seqs(
-            model=model,
-            max_num_seqs=max_batch_size,
-            gpu_memory_utilization=gpu_mem_util,
-            max_model_len=max_model_len,
-            attention_config=attention_config,
-        )
 
         mismatches = 0
 
@@ -124,8 +113,8 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
                 else:
                     prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
 
-            # Generate with the larger-batch engine
-            outputs = llm_bsN.generate(prompts, sampling)
+            # Generate with the same engine but in a larger batch.
+            outputs = llm.generate(prompts, sampling)
             # Find the needle output by position
             needle_output = outputs[needle_pos]
             assert needle_output.prompt == needle_prompt
@@ -151,12 +140,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
     finally:
         # Ensure engines are shutdown to free GPU/VRAM across test sessions
-        if llm_bs1 is not None:
+        if llm is not None:
             with contextlib.suppress(Exception):
-                llm_bs1.shutdown()
-        if llm_bsN is not None:
-            with contextlib.suppress(Exception):
-                llm_bsN.shutdown()
+                llm.shutdown()
 
 
 @skip_unsupported
@@ -169,16 +155,13 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
 ):
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -186,11 +169,11 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
         max_num_seqs=128,
         max_model_len=8192,
-        dtype="bfloat16",  # not everything is supported
+        dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
@@ -395,7 +378,7 @@ def test_simple_generation(backend):
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
-    model = resolve_model_name(backend)
+    model = TEST_MODEL
 
     llm = LLM(
         model=model,
@@ -403,7 +386,7 @@ def test_simple_generation(backend):
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         gpu_memory_utilization=0.9,
         max_model_len=2048,
-        dtype="bfloat16",
+        dtype="auto",
         enable_prefix_caching=False,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
@@ -455,10 +438,9 @@ def test_logprobs_without_batch_invariance_should_fail(
     """
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
-    monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     print(f"\n{'=' * 80}")
@@ -466,11 +448,11 @@ def test_logprobs_without_batch_invariance_should_fail(
     print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
         max_num_seqs=32,
         max_model_len=8192,
-        dtype="bfloat16",
+        dtype="auto",
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
@@ -674,14 +656,11 @@ def test_decode_logprobs_match_prefill_logprobs(
     """
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -689,11 +668,11 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
         max_num_seqs=32,
         max_model_len=8192,
-        dtype="bfloat16",
+        dtype="auto",
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
         attention_config={"backend": backend},
     )
@@ -938,7 +917,7 @@ def LLM_with_max_seqs(
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
-        dtype="bfloat16",
+        dtype="auto",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
         enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,

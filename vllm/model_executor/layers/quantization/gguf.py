@@ -3,7 +3,10 @@
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization import QuantizationMethods
 
 import gguf
 import torch
@@ -12,6 +15,10 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
@@ -77,6 +84,16 @@ class GGUFConfig(QuantizationConfig):
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "GGUFConfig":
         return cls()
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg: dict[str, Any], user_quant: str | None, hf_config=None
+    ) -> "QuantizationMethods | None":
+        # When user explicitly specifies --quantization gguf, override
+        # whatever quantization method is in the HF model config (e.g. fp8).
+        if user_quant == "gguf":
+            return "gguf"
+        return None
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -249,16 +266,13 @@ def _fused_moe_gguf(
     qweight_type2: int,
     activation: str,
 ) -> torch.Tensor:
+    activation_enum = MoEActivation.from_str(activation)
+
     def act(x: torch.Tensor):
         d = x.shape[-1] // 2
         output_shape = x.shape[:-1] + (d,)
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        if activation == "silu":
-            torch.ops._C.silu_and_mul(out, x)
-        elif activation == "gelu":
-            torch.ops._C.gelu_and_mul(out, x)
-        else:
-            raise ValueError(f"Unsupported activation: {activation}")
+        apply_moe_activation(activation_enum, out, x)
         return out
 
     # lazy import to avoid triggering triton import in CPU backend
@@ -638,8 +652,8 @@ class GGUFMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert layer.activation == "silu", "Only SiLU activation is supported."
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor:
         if layer.apply_router_weight_on_input:
             raise NotImplementedError(
                 "Apply router weight on input is not supported for"
@@ -654,7 +668,7 @@ class GGUFMoEMethod(FusedMoEMethodBase):
             topk_ids,
             layer.w13_qweight_type.weight_type,
             layer.w2_qweight_type.weight_type,
-            layer.activation,
+            layer.activation.value,
         )
 
 

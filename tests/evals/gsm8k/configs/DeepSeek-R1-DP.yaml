@@ -8,4 +8,4 @@ server_args: >-
   --max-model-len 4096
   --data-parallel-size 8
   --enable-expert-parallel
-  --speculative-config '{"method":"mtp","num_speculative_tokens":1}'
+  --speculative-config '{"method":"mtp","num_speculative_tokens":3}'

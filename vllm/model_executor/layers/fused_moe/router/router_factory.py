@@ -6,6 +6,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.router.custom_routing_router import (
     CustomRoutingRouter,
 )
@@ -23,6 +24,9 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 )
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter,
+)
+from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+    ZeroExpertRouter,
 )
 
 EMPTY_EPLB_STATE: EplbLayerState = EplbLayerState()
@@ -43,11 +47,14 @@ def create_fused_moe_router(
     # grouped topk + fused topk bias parameters
     routed_scaling_factor: float = 1.0,
     e_score_correction_bias: torch.Tensor | None = None,
-    # custom routing paramaters
+    # custom routing parameters
     custom_routing_function: Callable | None = None,
     # eplb parameters
     enable_eplb: bool = False,
     eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+    # zero expert parameters
+    zero_expert_type: str | None = None,
+    num_logical_experts: int | None = None,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -55,10 +62,11 @@ def create_fused_moe_router(
 
     The selection logic follows this priority order:
     1. RoutingSimulatorRouter - if VLLM_MOE_ROUTING_SIMULATION_STRATEGY env var is set
-    2. GroupedTopKRouter - if use_grouped_topk is True
-    3. CustomRoutingRouter - if custom_routing_function is not None
-    4. FusedTopKBiasRouter - if e_score_correction_bias is not None
-    5. FusedTopKRouter - default fallback
+    2. ZeroExpertRouter - if zero_expert_type is not None
+    3. GroupedTopKRouter - if use_grouped_topk is True
+    4. CustomRoutingRouter - if custom_routing_function is not None
+    5. FusedTopKBiasRouter - if e_score_correction_bias is not None
+    6. FusedTopKRouter - default fallback
 
     Common arguments:
         top_k: Number of experts to select per token
@@ -85,6 +93,12 @@ def create_fused_moe_router(
         enable_eplb: Whether EPLB is enabled
         eplb_state: EPLB (Expert Parallelism Load Balancing) state
 
+    Zero expert arguments:
+        zero_expert_type: Type of zero expert (e.g. identity). If not None,
+            creates a ZeroExpertRouter.
+        num_logical_experts: Number of real (non-zero) experts. Required when
+            zero_expert_type is not None.
+
     Returns:
         An instance of the appropriate FusedMoERouter subclass
     """
@@ -99,6 +113,27 @@ def create_fused_moe_router(
             indices_type_getter=indices_type_getter,
         )
 
+    if zero_expert_type is not None:
+        assert num_logical_experts is not None, (
+            "num_logical_experts is required when zero_expert_type is set"
+        )
+        assert e_score_correction_bias is not None, (
+            "e_score_correction_bias is required when zero_expert_type is set"
+        )
+        return ZeroExpertRouter(
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
+            e_score_correction_bias=e_score_correction_bias,
+            num_logical_experts=num_logical_experts,
+            zero_expert_type=zero_expert_type,
+            scoring_func=scoring_func,
+            renormalize=renormalize,
+            routed_scaling_factor=routed_scaling_factor,
+            enable_eplb=enable_eplb,
+            indices_type_getter=indices_type_getter,
+        )
+
     if use_grouped_topk:
         assert custom_routing_function is None
         if num_expert_group is None or topk_group is None:
@@ -106,7 +141,7 @@ def create_fused_moe_router(
                 "num_expert_group and topk_group must be provided when "
                 "use_grouped_topk is True"
             )
-        return GroupedTopKRouter(
+        grouped_topk_router = GroupedTopKRouter(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
@@ -120,6 +155,18 @@ def create_fused_moe_router(
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
+        if (
+            grouped_topk_router.routing_method_type != RoutingMethodType.Unspecified
+            or num_expert_group > 1
+            or topk_group > 1
+        ):
+            return grouped_topk_router
+
+        # If routing_method for GroupedTopKRouter is Unspecified and there is only
+        # one group, fallback to standard top-k routing
+        use_grouped_topk = False
+        num_expert_group = None
+        topk_group = None
 
     if custom_routing_function is not None:
         return CustomRoutingRouter(

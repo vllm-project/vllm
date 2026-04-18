@@ -10,14 +10,15 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 
 class TopKWeightAndReduceDelegate(mk.TopKWeightAndReduce):
     """
-    Useful in the case when some FusedMoEPermuteExpertsUnpermute
+    Useful in the case when some FusedMoEExpertsModular
     implementation does not perform weight application and reduction
     but cannot address the needs of all the compatible PrepareAndFinalize
     implementations.
-    For example, BatchedTritonExperts is compatible with both
-    PplxPrepareAndFinalize and BatchedPrepareAndFinalize. PplxPrepareAndFinalize
-    does the weight-application + reduction as part of the pplx combine kernel.
-    But the BatchedPrepareAndFinalize needs an implementation. To facilitate
+    For example, BatchedTritonExperts is compatible with both batched
+    PrepareAndFinalize implementations like DeepEPLLPrepareAndFinalize and
+    BatchedPrepareAndFinalize. Some PrepareAndFinalize implementations do
+    the weight-application + reduction as part of the combine kernel, while
+    BatchedPrepareAndFinalize needs an explicit implementation. To facilitate
     this case, the BatchedTritonExperts could use TopKWeightAndReduceDelegate
     so the PrepareAndFinalize implementations could choose how to
     weight + reduce.
@@ -61,7 +62,7 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         if output is None:
             return fused_expert_output
 
-        # MoEPrepareAndFinalizeNoEP needs the output to be in the `output`
+        # MoEPrepareAndFinalizeNoDPEPModular needs the output to be in the `output`
         # tensor.
         assert output.size() == fused_expert_output.size(), (
             "output shape is expected to match the fused_expert_output shape. "

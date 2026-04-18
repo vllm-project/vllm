@@ -34,7 +34,10 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.encoder_only_attention import (
+    Attention,
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -45,7 +48,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import SupportsEagle, SupportsEagle3, SupportsLoRA, SupportsPP
 from .qwen2 import Qwen2MLP as Qwen3MLP
 from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, extract_layer_index, maybe_prefix
@@ -115,7 +118,12 @@ class Qwen3Attention(nn.Module):
             rope_parameters=rope_parameters,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        self.attn = Attention(
+        attn_cls = (
+            EncoderOnlyAttention
+            if attn_type == AttentionType.ENCODER_ONLY
+            else Attention
+        )
+        self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
             self.scaling,
@@ -250,7 +258,9 @@ class Qwen3Model(Qwen2Model):
         )
 
 
-class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
+class Qwen3ForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -263,6 +273,11 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         ],
     }
 
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -270,6 +285,7 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
 
         self.config = config
 
+        self.vllm_config = vllm_config
         self.quant_config = quant_config
         self.model = Qwen3Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
@@ -293,13 +309,6 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle3):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

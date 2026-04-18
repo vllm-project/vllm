@@ -30,13 +30,15 @@
   }()
 
 namespace {
-enum class FusedMOEAct { SiluAndMul, SwigluOAIAndMul };
+enum class FusedMOEAct { SiluAndMul, SwigluOAIAndMul, GeluAndMul };
 
 FusedMOEAct get_act_type(const std::string& act) {
   if (act == "silu") {
     return FusedMOEAct::SiluAndMul;
   } else if (act == "swigluoai") {
     return FusedMOEAct::SwigluOAIAndMul;
+  } else if (act == "gelu") {
+    return FusedMOEAct::GeluAndMul;
   } else {
     TORCH_CHECK(false, "Invalid act type: " + act);
   }
@@ -105,6 +107,43 @@ void silu_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
 }
 
 template <typename scalar_t>
+void gelu_and_mul(float* __restrict__ input, scalar_t* __restrict__ output,
+                  const int32_t m_size, const int32_t n_size,
+                  const int32_t input_stride, const int32_t output_stride) {
+  using scalar_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
+  const int32_t dim = n_size / 2;
+  float* __restrict__ gate = input;
+  float* __restrict__ up = input + dim;
+  vec_op::FP32Vec16 one_vec(1.0);
+  vec_op::FP32Vec16 w1_vec(M_SQRT1_2);
+  vec_op::FP32Vec16 w2_vec(0.5);
+  alignas(64) float temp[16];
+
+  DEFINE_FAST_EXP
+
+  for (int32_t m = 0; m < m_size; ++m) {
+    for (int32_t n = 0; n < dim; n += 16) {
+      vec_op::FP32Vec16 gate_vec(gate + n);
+      vec_op::FP32Vec16 up_vec(up + n);
+      auto er_input_vec = gate_vec * w1_vec;
+
+      er_input_vec.save(temp);
+      for (int32_t i = 0; i < 16; ++i) {
+        temp[i] = std::erf(temp[i]);
+      }
+      vec_op::FP32Vec16 er_vec(temp);
+      auto gelu = gate_vec * w2_vec * (one_vec + er_vec);
+      auto gated_output_fp32 = up_vec * gelu;
+      scalar_vec_t gated_output = scalar_vec_t(gated_output_fp32);
+      gated_output.save(output + n);
+    }
+    gate += input_stride;
+    up += input_stride;
+    output += output_stride;
+  }
+}
+
+template <typename scalar_t>
 FORCE_INLINE void apply_gated_act(const FusedMOEAct act,
                                   float* __restrict__ input,
                                   scalar_t* __restrict__ output,
@@ -117,6 +156,9 @@ FORCE_INLINE void apply_gated_act(const FusedMOEAct act,
       return;
     case FusedMOEAct::SiluAndMul:
       silu_and_mul(input, output, m, n, input_stride, output_stride);
+      return;
+    case FusedMOEAct::GeluAndMul:
+      gelu_and_mul(input, output, m, n, input_stride, output_stride);
       return;
     default:
       TORCH_CHECK(false, "Unsupported act type.");
@@ -147,7 +189,7 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
                     const int32_t token_num, const int32_t expert_num,
                     const int32_t topk_num, const int32_t input_size_13,
                     const int32_t output_size_13, const int32_t input_size_2,
-                    const int32_t output_size_2) {
+                    const int32_t output_size_2, const bool skip_weighted) {
   using scalar_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
   constexpr int32_t gemm_n_tile_size = gemm_t::NSize;
   constexpr int32_t gemm_m_tile_size = gemm_t::MaxMSize;
@@ -582,6 +624,11 @@ void fused_moe_impl(scalar_t* __restrict__ output, scalar_t* __restrict__ input,
         scalar_t* __restrict__ curr_output_buffer =
             output + token_id * output_size_2;
 
+        if (skip_weighted) {
+          // Only for topk_num == 1
+          *curr_weight = 1.0f;
+        }
+
         if (topk_num > 1) {
           {
             int32_t w2_output_idx = curr_expand_token_id_index_buffer[0];
@@ -699,7 +746,7 @@ void cpu_fused_moe(
     const std::optional<torch::Tensor>& w2_bias,  // [expert_num, output_size_2]
     const torch::Tensor& topk_weights,            // [token_num, k], float32
     const torch::Tensor& topk_id,                 // [token_num, k], int32
-    const std::string& act, const std::string& isa) {
+    const bool skip_weighted, const std::string& act, const std::string& isa) {
   const int32_t token_num = input.size(0);
   const int32_t input_size_13 = input.size(1);
   const int64_t input_stride = input.stride(0);
@@ -711,6 +758,8 @@ void cpu_fused_moe(
   const int32_t topk_num = topk_id.size(1);
   const FusedMOEAct act_type = get_act_type(act);
   cpu_utils::ISA isa_type = cpu_utils::get_isa(isa);
+  TORCH_CHECK(!skip_weighted || topk_num == 1,
+              "skip_weighted is only supported for topk=1 on CPU");
 
   VLLM_DISPATCH_FLOATING_TYPES(w13.scalar_type(), "cpu_fused_moe", [&]() {
     CPU_ISA_DISPATCH_IMPL(isa_type, [&]() {
@@ -721,7 +770,7 @@ void cpu_fused_moe(
           w2_bias.has_value() ? w2_bias->data_ptr<scalar_t>() : nullptr,
           topk_weights.data_ptr<float>(), topk_id.data_ptr<int32_t>(), act_type,
           token_num, expert_num, topk_num, input_size_13, output_size_13,
-          input_size_2, output_size_2);
+          input_size_2, output_size_2, skip_weighted);
     });
   });
 }

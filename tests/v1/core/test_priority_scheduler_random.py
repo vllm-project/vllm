@@ -48,10 +48,9 @@ def _create_random_request(
 
     request_id = uuid.uuid4().hex
 
-    sampling_params = SamplingParams(
-        ignore_eos=False,
-        max_tokens=max_tokens,
-    )
+    sampling_params = SamplingParams(ignore_eos=False, max_tokens=max_tokens)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
     mm_features = []
     for j, position in enumerate(mm_positions):
         identifier = f"{request_id}_hash_{j}"
@@ -79,7 +78,6 @@ def _create_random_request(
         sampling_params=sampling_params,
         pooling_params=None,
         mm_features=mm_features if mm_features else None,
-        eos_token_id=EOS_TOKEN_ID,
         arrival_time=arrival_time,
         priority=priority,
         block_hasher=block_hasher,
@@ -142,7 +140,7 @@ def _mock_draft_token_ids(
     return DraftTokenIds(req_ids=request_ids, draft_token_ids=sampled_token_ids)
 
 
-def _chech_valid_scheduler_output(
+def _check_valid_scheduler_output(
     scheduler_output: SchedulerOutput,
     seen_request_ids: set[str],
     seen_mm_hashes: set[str],
@@ -244,7 +242,7 @@ def test_priority_scheduling_blast(
                 )
                 scheduler.add_request(req)
         scheduler_output = scheduler.schedule()
-        _chech_valid_scheduler_output(
+        _check_valid_scheduler_output(
             scheduler_output, seen_request_ids, seen_mm_hashes
         )
         model_output = _mock_execute_model(

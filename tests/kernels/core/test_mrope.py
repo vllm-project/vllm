@@ -4,8 +4,6 @@ from typing import NamedTuple
 
 import pytest
 import torch
-from packaging.version import Version
-from transformers import __version__ as TRANSFORMERS_VERSION
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
@@ -46,31 +44,13 @@ class MRoPETestInfo(NamedTuple):
     marks: list[pytest.MarkDecorator] = []
 
 
-TRANSFORMERS_BASE_VERSION = Version(TRANSFORMERS_VERSION).base_version
-
 MODELS_TO_TEST = [
     MRoPETestInfo(model_name="zai-org/GLM-4.1V-9B-Thinking"),
     MRoPETestInfo(model_name="Qwen/Qwen2-VL-7B-Instruct"),
     MRoPETestInfo(model_name="Qwen/Qwen2-VL-72B-Instruct"),
     MRoPETestInfo(model_name="Qwen/Qwen2.5-VL-72B-Instruct"),
-    MRoPETestInfo(
-        model_name="Qwen/Qwen3-VL-4B-Instruct",
-        marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_BASE_VERSION) < Version("4.57.0"),
-                reason="Qwen3-VL only available after Transformers v4.57",
-            )
-        ],
-    ),
-    MRoPETestInfo(
-        model_name="Qwen/Qwen3-VL-30B-A3B-Instruct",
-        marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_BASE_VERSION) < Version("4.57.0"),
-                reason="Qwen3-VL only available after Transformers v4.57",
-            )
-        ],
-    ),
+    MRoPETestInfo(model_name="Qwen/Qwen3-VL-4B-Instruct"),
+    MRoPETestInfo(model_name="Qwen/Qwen3-VL-30B-A3B-Instruct"),
 ]
 
 num_tokens_list = [11, 8192]
