@@ -124,6 +124,29 @@ class Glm4MoeModelToolParser(ToolParser):
         return json.dumps(s, ensure_ascii=False)[1:-1]
 
     @staticmethod
+    def _format_nonstring_value(raw: str) -> str:
+        """Render a non-string arg value as JSON text.
+
+        Prefers the model's raw rendering when it already parses as JSON,
+        so the partial-streaming path (which emits raw ``partial_content``)
+        is byte-identical to the completed-pair path.  That keeps the
+        prefix invariant of ``_compute_args_diff`` intact when the tag
+        closes and we re-render the same value.
+
+        Falls back to ``_deserialize`` + ``json.dumps`` only when the raw
+        text is not valid JSON (e.g. Python literals like ``True``), which
+        would have diverged anyway and is caught by the prefix guard.
+        """
+        try:
+            json.loads(raw)
+            return raw
+        except json.JSONDecodeError:
+            return json.dumps(
+                Glm4MoeModelToolParser._deserialize(raw.strip()),
+                ensure_ascii=False,
+            )
+
+    @staticmethod
     def _is_string_type(
         tool_name: str,
         arg_name: str,
@@ -136,12 +159,44 @@ class Glm4MoeModelToolParser(ToolParser):
                 continue
             if tool.function.parameters is None:
                 return False
-            arg_type = (
-                tool.function.parameters.get("properties", {})
-                .get(arg_name, {})
-                .get("type", None)
-            )
-            return arg_type == "string"
+            params = tool.function.parameters
+            # Prefer the proper JSON Schema form ({"properties": {...}});
+            # fall back to a flat {arg: schema} mapping for clients that
+            # send simplified (non-spec) schemas.  Without this fallback,
+            # such clients' string args are misclassified as non-string and
+            # trigger the prefix-divergence guard on every streamed delta.
+            properties = params.get("properties")
+            prop = None
+            if isinstance(properties, dict):
+                prop = properties.get(arg_name)
+            if prop is None:
+                prop = params.get(arg_name)
+            if not isinstance(prop, dict):
+                return False
+            # Direct form: {"type": "string"} or {"type": ["string", "null"]}
+            direct_type = prop.get("type")
+            if direct_type == "string":
+                return True
+            if isinstance(direct_type, list) and "string" in direct_type:
+                return True
+            # Nullable / union form: {"anyOf": [{"type": "string"}, ...]}
+            # or {"oneOf": [...]}. Pydantic renders Optional[str] this way,
+            # and a naive .get("type") misses it, causing string values to
+            # be treated as non-string (no quote re-wrapping on the partial
+            # streaming path, resulting in corrupted JSON).
+            for branch_key in ("anyOf", "oneOf"):
+                branches = prop.get(branch_key)
+                if not isinstance(branches, list):
+                    continue
+                for branch in branches:
+                    if not isinstance(branch, dict):
+                        continue
+                    branch_type = branch.get("type")
+                    if branch_type == "string":
+                        return True
+                    if isinstance(branch_type, list) and "string" in branch_type:
+                        return True
+            return False
         logger.debug("No tool named '%s'.", tool_name)
         return False
 
@@ -356,9 +411,7 @@ class Glm4MoeModelToolParser(ToolParser):
                 # and must match the partial-value path for diffing.
                 val_json = json.dumps(value, ensure_ascii=False)
             else:
-                val_json = json.dumps(
-                    self._deserialize(value.strip()), ensure_ascii=False
-                )
+                val_json = self._format_nonstring_value(value)
             parts.append(f"{key_json}: {val_json}")
 
         # Check for a partial (incomplete) arg value
@@ -394,17 +447,22 @@ class Glm4MoeModelToolParser(ToolParser):
                     if self._is_string_type(tool_name, partial_key, self.tools):
                         val_json = json.dumps(partial_content, ensure_ascii=False)
                     else:
-                        val_json = json.dumps(
-                            self._deserialize(partial_content.strip()),
-                            ensure_ascii=False,
-                        )
+                        val_json = self._format_nonstring_value(partial_content)
                     parts.append(f"{key_json}: {val_json}")
                 elif self._is_string_type(tool_name, partial_key, self.tools):
                     escaped = self._json_escape_string_content(partial_content)
                     # Open quote but no close — more content may arrive
                     parts.append(f'{key_json}: "{escaped}')
                 else:
-                    # Non-string partial: include raw content, no wrapping
+                    # Non-string partial: emit raw content verbatim.  When
+                    # the value completes, `_format_nonstring_value` prefers
+                    # the same raw text (not json.dumps re-normalized), so
+                    # the complete rendering extends this partial as a
+                    # strict prefix — streaming stays consistent for large
+                    # JSON objects/arrays without the whitespace-divergence
+                    # corruption previously reported for `companies`-style
+                    # args.  Malformed JSON falls back to re-serialization
+                    # and is caught by the prefix guard in _compute_args_diff.
                     parts.append(f"{key_json}: {partial_content}")
 
         if not parts:
@@ -417,11 +475,25 @@ class Glm4MoeModelToolParser(ToolParser):
 
     def _compute_args_diff(self, index: int, args_so_far: str) -> str | None:
         """Return new argument text not yet sent for tool *index*, or None."""
-        if not args_so_far or len(args_so_far) <= len(
-            self.streamed_args_for_tool[index]
-        ):
+        streamed = self.streamed_args_for_tool[index]
+        if not args_so_far or len(args_so_far) <= len(streamed):
             return None
-        diff = args_so_far[len(self.streamed_args_for_tool[index]) :]
+        # If the new rendering is not an extension of what we've already
+        # streamed, the partial-path and complete-path renderings have
+        # diverged (e.g. whitespace normalization from json.dumps, or a
+        # type misdetection).  Slicing by length would emit garbage like
+        # `{"x": Smithh"}` (missing opening quote, last char duplicated).
+        # Skip emission this tick rather than stream invalid JSON.
+        if not args_so_far.startswith(streamed):
+            logger.warning(
+                "GLM tool parser: streaming args divergence for tool %d; "
+                "previously sent %r, new render %r; skipping delta.",
+                index,
+                streamed,
+                args_so_far,
+            )
+            return None
+        diff = args_so_far[len(streamed) :]
         self.streamed_args_for_tool[index] = args_so_far
         self.prev_tool_call_arr[index]["arguments"] = args_so_far
         return diff
