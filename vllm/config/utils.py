@@ -12,6 +12,7 @@ import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, field, fields, is_dataclass
+from dataclasses import dataclass as py_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
@@ -34,6 +35,8 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+ReplaceT = TypeVar("ReplaceT")
+CompileFactors = dict[str, object]
 
 
 @overload
@@ -116,15 +119,15 @@ def is_init_field(cls: ConfigType, name: str) -> bool:
     return get_field(cls, name).init
 
 
-def replace(dataclass_instance: ConfigT, /, **kwargs) -> ConfigT:
+def replace(dataclass_instance: ReplaceT, /, **kwargs: Any) -> ReplaceT:
     """Like [`dataclasses.replace`](https://docs.python.org/3/library/dataclasses.html#dataclasses.replace),
     but compatible with Pydantic dataclasses which use `pydantic.fields.Field` instead
     of `dataclasses.field`"""
-    cls = type(dataclass_instance)
+    cls = cast(ConfigType, type(dataclass_instance))
     dataclass_dict = dataclass_instance.__dict__
     dataclass_dict = {k: v for k, v in dataclass_dict.items() if is_init_field(cls, k)}
     dataclass_dict.update(kwargs)
-    return cls(**dataclass_dict)
+    return cast(ReplaceT, cls(**dataclass_dict))
 
 
 def getattr_iter(
@@ -199,8 +202,8 @@ def get_attr_docs(cls: type[Any]) -> dict[str, str]:
 
 
 @runtime_checkable
-class SupportsHash(Protocol):
-    def compute_hash(self) -> str: ...
+class SupportsCompileFactors(Protocol):
+    def compile_factors(self) -> CompileFactors: ...
 
 
 class SupportsMetricsInfo(Protocol):
@@ -321,22 +324,35 @@ def normalize_value(x):
     )
 
 
-def get_hash_factors(config: ConfigT, ignored_factors: set[str]) -> dict[str, object]:
+def get_compile_factors(config: ConfigT, ignored_factors: set[str]) -> CompileFactors:
     """Gets the factors used for hashing a config class.
     - Includes all dataclass fields not in `ignored_factors`.
+    - Uses .compile_factors() for nested dataclasses that support it
     - Errors on non-normalizable values.
     """
+    dataclass_fields = getattr(config, "__dataclass_fields__", {})
+    field_names = {f.name for f in fields(config)} | set(dataclass_fields)
+    unknown_ignored = ignored_factors - field_names
+    if unknown_ignored:
+        raise ValueError(
+            f"get_compile_factors: ignored_factors contain unknown fields "
+            f"{sorted(unknown_ignored)} for {type(config).__name__}"
+        )
     factors: dict[str, object] = {}
     for dc_field in fields(config):
         factor = dc_field.name
         if factor in ignored_factors:
             continue
         value = getattr(config, factor, None)
+        # Nested configs expose factors via compile_factors; unwrap first.
+        if isinstance(value, SupportsCompileFactors):
+            factors[factor] = value.compile_factors()
+            continue
         try:
             factors[factor] = normalize_value(value)
         except TypeError as e:
             raise TypeError(
-                f"get_hash_factors: unsupported type for key '{factor}' "
+                f"get_compile_factors: unsupported type for key '{factor}' "
                 f"({type(value).__name__})"
             ) from e
     return factors
@@ -347,7 +363,7 @@ def hash_factors(items: dict[str, object]) -> str:
     return hashlib.sha256(json.dumps(items, sort_keys=True).encode()).hexdigest()
 
 
-@dataclass
+@py_dataclass
 class Range:
     """
     A range of numbers.

@@ -17,6 +17,7 @@ from vllm.config import (
     CompilationMode,
     set_current_vllm_config,
 )
+from vllm.config.utils import hash_factors
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
@@ -248,7 +249,8 @@ class ElasticEPScalingExecutor:
         model_config = self.worker.model_runner.model_config
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        model_hash = hash_factors(model_config.compile_factors())
+        eplb_model_state = eplb_state.model_states[model_hash]
         physical_to_logical = eplb_model_state.physical_to_logical_map
         num_physical_experts = physical_to_logical.shape[1]
         num_local_physical_experts = num_physical_experts // get_ep_group().world_size
@@ -348,7 +350,8 @@ class ElasticEPScalingExecutor:
         eplb_state = self.worker.model_runner.eplb_state
         assert eplb_state is not None
         model_config = self.worker.model_runner.model_config
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        model_hash = hash_factors(model_config.compile_factors())
+        eplb_model_state = eplb_state.model_states[model_hash]
 
         num_physical_experts = num_local_experts * new_ep_size
         num_logical_experts = eplb_model_state.logical_replica_count.shape[1]
@@ -464,7 +467,8 @@ class ElasticEPScalingExecutor:
         assert eplb_state is not None
 
         model_config = self.worker.model_runner.model_config
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        model_hash = hash_factors(model_config.compile_factors())
+        eplb_model_state = eplb_state.model_states[model_hash]
         is_async_enabled = eplb_state.is_async
         eplb_state.is_async = False
         if rank_mapping is None:

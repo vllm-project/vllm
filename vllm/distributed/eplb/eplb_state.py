@@ -35,6 +35,7 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.config.utils import hash_factors
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_eplb_group,
@@ -513,7 +514,9 @@ class EplbState:
             communicator=communicator,
             new_physical_to_logical_map=None,
         )
-        self.model_states[model_config.compute_hash()] = model_state
+        model_factors = model_config.compile_factors()
+        model_hash = hash_factors(model_factors)
+        self.model_states[model_hash] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
 
     def step(
@@ -1044,7 +1047,9 @@ class EplbState:
             model_config=model_config,
         )
         eplb_state.num_valid_physical_experts = num_valid_physical_experts
-        eplb_model_state = eplb_state.model_states[model_config.compute_hash()]
+        model_factors = model_config.compile_factors()
+        model_hash = hash_factors(model_factors)
+        eplb_model_state = eplb_state.model_states[model_hash]
         eplb_model_state.physical_to_logical_map.copy_(expanded_physical_to_logical)
 
         (logical_to_physical_map_cpu, logical_replica_count_cpu) = compute_logical_maps(
