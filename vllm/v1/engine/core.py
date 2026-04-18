@@ -507,7 +507,7 @@ class EngineCore:
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
-            model_outputs = future.result()
+            model_output = future.result()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
