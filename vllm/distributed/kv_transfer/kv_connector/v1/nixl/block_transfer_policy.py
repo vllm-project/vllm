@@ -35,7 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.v1.kv_cache_interface import MambaSpec
-from vllm.v1.worker.block_table import BlockTable
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -62,10 +61,10 @@ class ReadSpec:
 class ModelBlockTransferPolicy(ABC):
     """Abstract base for model-specific block transfer logic.
 
-    Concrete subclasses encapsulate:
-    - Model identity (is_mamba, per-group flags)
-    - Mamba state sizes and conv decomposition
-    - Per-engine transfer info computation (``build_engine_transfer_info``)
+    Encapsulates genuinely model-specific algorithms: descriptor building,
+    transfer info computation, split handles, read spec filtering, and
+    orchestration.  Simple per-layer branches (``isinstance(MambaSpec)``)
+    and block-ID mapping remain on ``worker.py``.
     """
 
     def __init__(
@@ -77,36 +76,6 @@ class ModelBlockTransferPolicy(ABC):
         self._physical_blocks_per_logical = physical_blocks_per_logical
 
     # ------------------------------------------------------------------
-    # Model identity
-    # ------------------------------------------------------------------
-
-    @property
-    @abstractmethod
-    def is_mamba(self) -> bool:
-        """Whether this policy handles a hybrid Mamba+Attention model."""
-
-    @property
-    @abstractmethod
-    def mamba_group_flags(self) -> list[bool]:
-        """Per-group flag: True if the group is a Mamba (SSM) group."""
-
-    def is_mamba_group(self, group_idx: int) -> bool:
-        return self.mamba_group_flags[group_idx]
-
-    @property
-    @abstractmethod
-    def ssm_sizes(self) -> tuple[int, int]:
-        """(conv_state_bytes, ssm_state_bytes) per logical block.
-
-        Returns (0, 0) for dense models.
-        """
-
-    @property
-    @abstractmethod
-    def conv_decomp(self) -> MambaConvSplitInfo | None:
-        """Conv-state sub-projection decomposition, or None for dense."""
-
-    # ------------------------------------------------------------------
     # Per-engine transfer info (data operations)
     # ------------------------------------------------------------------
 
@@ -115,14 +84,12 @@ class ModelBlockTransferPolicy(ABC):
     def build_engine_transfer_info(
         self,
         *,
-        # Local facts (from TransferTopology).
         tp_rank: int,
         tp_size: int,
         is_mla: bool,
         total_num_kv_heads: int,
         is_kv_layout_blocks_first: bool,
         local_block_len: int,
-        # Remote facts (from NixlAgentMetadata handshake).
         remote_tp_size: int,
         remote_block_size: int,
         remote_block_len: int,
@@ -135,47 +102,9 @@ class ModelBlockTransferPolicy(ABC):
         """
 
     # ------------------------------------------------------------------
-    # Registration helpers
+    # Block length helper (used by descriptor building)
     # ------------------------------------------------------------------
 
-    @abstractmethod
-    def compute_page_size(
-        self,
-        layer_spec: KVCacheSpec,
-        physical_ratio: int,
-    ) -> int:
-        """Physical page size in bytes for one layer."""
-        ...
-
-    @abstractmethod
-    def get_num_blocks(
-        self,
-        layer_spec: KVCacheSpec,
-        num_blocks: int,
-        logical_num_blocks: int,
-    ) -> int:
-        """Number of blocks to register for this layer spec."""
-        ...
-
-    @abstractmethod
-    def compute_layer_block_bytes(
-        self,
-        layer_spec: KVCacheSpec,
-        physical_page_size: int,
-        physical_ratio: int,
-    ) -> int:
-        """Block byte size for one layer (entry for ``block_len_per_layer``)."""
-        ...
-
-    @abstractmethod
-    def get_tensor_shape(
-        self,
-        kv_caches: dict[str, torch.Tensor],
-    ) -> torch.Size | None:
-        """Tensor shape for ``TpKVTopology`` (None for Mamba)."""
-        ...
-
-    @abstractmethod
     def get_block_len(
         self,
         layer_idx: int,
@@ -184,11 +113,13 @@ class ModelBlockTransferPolicy(ABC):
         is_blocks_first: bool,
         mamba_view: bool = False,
     ) -> int:
-        """Block length for one K/V (or conv/ssm) element."""
-        ...
+        """Block length for one K/V element.  Mamba overrides for SSM view."""
+        if is_blocks_first:
+            return block_len_per_layer[layer_idx] // 2
+        return block_len_per_layer[layer_idx]
 
     # ------------------------------------------------------------------
-    # Descriptor ID computation + block ID mapping
+    # Descriptor ID computation (abstract — genuinely different per model)
     # ------------------------------------------------------------------
 
     @abstractmethod
@@ -204,28 +135,10 @@ class ModelBlockTransferPolicy(ABC):
         """Compute NIXL descriptor IDs for a set of block IDs."""
         ...
 
-    @abstractmethod
-    def logical_to_kernel_block_ids(
-        self,
-        block_ids: BlockIds,
-    ) -> BlockIds:
-        """Convert logical block IDs to kernel physical block IDs."""
-        ...
-
-    @abstractmethod
-    def logical_to_remote_kernel_block_ids(
-        self,
-        block_ids: BlockIds,
-        remote_ratio: int,
-    ) -> BlockIds:
-        """Map logical block IDs to physical kernel block IDs on remote."""
-        ...
-
     # ------------------------------------------------------------------
-    # Local descriptor building
+    # Local descriptor building (concrete default = FA-only)
     # ------------------------------------------------------------------
 
-    @abstractmethod
     def build_local_descs(
         self,
         base_addresses: list[int],
@@ -236,8 +149,19 @@ class ModelBlockTransferPolicy(ABC):
         device_id: int,
         is_blocks_first: bool,
     ) -> list[tuple[int, int, int]]:
-        """Build local (src) descriptor tuples for NIXL registration."""
-        ...
+        """Build local (src) descriptor tuples for NIXL registration.
+
+        Default builds FA descriptors only.  Mamba overrides to extend
+        with SSM (conv + temporal state) descriptors.
+        """
+        return self._build_fa_local_descs(
+            base_addresses,
+            block_len_per_layer,
+            num_blocks,
+            block_size_ratio,
+            device_id,
+            is_blocks_first,
+        )
 
     def _build_fa_local_descs(
         self,
@@ -298,7 +222,7 @@ class ModelBlockTransferPolicy(ABC):
         return result
 
     # ------------------------------------------------------------------
-    # Remote descriptor building
+    # Remote descriptor building (abstract — genuinely different)
     # ------------------------------------------------------------------
 
     @abstractmethod
@@ -334,12 +258,15 @@ class ModelBlockTransferPolicy(ABC):
         """Build split handle data for P_TP > D_TP scenario."""
         ...
 
+    # ------------------------------------------------------------------
+    # Read spec computation (concrete default = one spec per rank)
+    # ------------------------------------------------------------------
+
     def compute_read_specs(
         self,
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
         remote_ranks: list[int],
-        physical_blocks_per_logical: int = 1,
         transfer_config: Any | None = None,
     ) -> list[ReadSpec]:
         """Compute the full set of read operations needed for a request.
@@ -347,8 +274,12 @@ class ModelBlockTransferPolicy(ABC):
         Returns one ``ReadSpec`` per remote rank that requires a read.
         The worker iterates the result without model-specific branching.
         MLA trimming (keeping only the first spec) is handled by the worker.
+
+        Block ID expansion (logical→kernel) is done by the worker before
+        calling this method.  Mamba overrides to additionally filter
+        block IDs per rank via ``filter_block_ids_for_rank``.
         """
-        _ = (physical_blocks_per_logical, transfer_config)
+        _ = transfer_config
         return [
             ReadSpec(
                 remote_rank=rank,
@@ -370,14 +301,13 @@ class ModelBlockTransferPolicy(ABC):
         tp_size: int,
     ) -> ModelBlockTransferPolicy:
         """Create the appropriate policy based on model architecture."""
-        is_mamba_group = [
+        has_mamba = any(
             isinstance(group.kv_cache_spec, MambaSpec)
             for group in kv_cache_config.kv_cache_groups
-        ]
-        if any(is_mamba_group):
+        )
+        if has_mamba:
             return MambaModelBlockTransferPolicy(
                 kv_cache_config=kv_cache_config,
-                is_mamba_group=is_mamba_group,
                 tp_size=tp_size,
                 layer_specs=layer_specs,
                 physical_blocks_per_logical=physical_blocks_per_logical,
@@ -394,53 +324,21 @@ class ModelBlockTransferPolicy(ABC):
 
 
 class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
+    """Policy for pure-attention (dense) models.
+
+    Inherits all registration helpers, block ID mapping,
+    ``compute_read_specs``, ``build_local_descs``, ``get_block_len``
+    from the ABC.  Only overrides genuinely different methods:
+    ``get_block_descs_ids``, ``build_remote_descs``,
+    ``build_src_split_handles``, and ``build_engine_transfer_info``.
+    """
+
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
         physical_blocks_per_logical: int,
     ):
         super().__init__(kv_cache_config, physical_blocks_per_logical)
-        self._num_groups = len(kv_cache_config.kv_cache_groups)
-
-    @property
-    def is_mamba(self) -> bool:
-        return False
-
-    @property
-    def mamba_group_flags(self) -> list[bool]:
-        return [False] * self._num_groups
-
-    @property
-    def ssm_sizes(self) -> tuple[int, int]:
-        return (0, 0)
-
-    @property
-    def conv_decomp(self) -> MambaConvSplitInfo | None:
-        return None
-
-    def compute_page_size(self, layer_spec, physical_ratio):
-        return layer_spec.page_size_bytes // physical_ratio
-
-    def get_num_blocks(self, layer_spec, num_blocks, logical_num_blocks):
-        return num_blocks
-
-    def compute_layer_block_bytes(self, layer_spec, physical_page_size, physical_ratio):
-        return physical_page_size
-
-    def get_tensor_shape(self, kv_caches):
-        return next(iter(kv_caches.values())).shape
-
-    def get_block_len(
-        self,
-        layer_idx,
-        first_split,
-        block_len_per_layer,
-        is_blocks_first,
-        mamba_view=False,
-    ):
-        if is_blocks_first:
-            return block_len_per_layer[layer_idx] // 2
-        return block_len_per_layer[layer_idx]
 
     def get_block_descs_ids(
         self,
@@ -457,77 +355,6 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         region_ids = np.arange(num_regions)[:, None]
         block_ids_arr = np.concatenate(block_ids)[None, :]
         return (region_ids * num_blocks + block_ids_arr).flatten()
-
-    def logical_to_kernel_block_ids(self, block_ids):
-        if self._physical_blocks_per_logical == 1:
-            return block_ids
-        block_arange = np.arange(
-            0,
-            self._physical_blocks_per_logical,
-        ).reshape(1, -1)
-        return [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                self._physical_blocks_per_logical,
-                block_arange,
-            ).tolist()
-            for group in block_ids
-        ]
-
-    def logical_to_remote_kernel_block_ids(
-        self,
-        block_ids,
-        remote_ratio,
-    ):
-        if remote_ratio == 1:
-            return block_ids
-        local_arange = np.arange(
-            self._physical_blocks_per_logical,
-        ).reshape(1, -1)
-        return [
-            (np.array(group).reshape(-1, 1) * remote_ratio + local_arange)
-            .flatten()
-            .tolist()
-            for group in block_ids
-        ]
-
-    def compute_read_specs(
-        self,
-        local_block_ids,
-        remote_block_ids,
-        remote_ranks,
-        physical_blocks_per_logical=1,
-        transfer_config=None,
-    ):
-        _ = (physical_blocks_per_logical, transfer_config)
-        expanded = self.logical_to_kernel_block_ids(remote_block_ids)
-        return [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=local_block_ids,
-                remote_block_ids=expanded,
-            )
-            for rank in remote_ranks
-        ]
-
-    def build_local_descs(
-        self,
-        base_addresses,
-        block_len_per_layer,
-        num_blocks,
-        logical_num_blocks,
-        block_size_ratio,
-        device_id,
-        is_blocks_first,
-    ):
-        return self._build_fa_local_descs(
-            base_addresses,
-            block_len_per_layer,
-            num_blocks,
-            block_size_ratio,
-            device_id,
-            is_blocks_first,
-        )
 
     def build_remote_descs(
         self,
@@ -646,16 +473,26 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
 
 class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
+    """Policy for hybrid Mamba+Attention (SSM) models.
+
+    Stores Mamba-specific state (SSM sizes, conv decomposition,
+    per-group flags) and overrides methods that differ from the
+    FA-only base: descriptor building, split handles, read specs,
+    registration helpers for MambaSpec layers, and orchestration.
+    """
+
     def __init__(
         self,
         kv_cache_config: KVCacheConfig,
-        is_mamba_group: list[bool],
         tp_size: int,
         layer_specs: dict[str, KVCacheSpec],
         physical_blocks_per_logical: int,
     ):
         super().__init__(kv_cache_config, physical_blocks_per_logical)
-        self._is_mamba_group = is_mamba_group
+        self._is_mamba_group = [
+            isinstance(group.kv_cache_spec, MambaSpec)
+            for group in kv_cache_config.kv_cache_groups
+        ]
 
         mamba_spec = next(
             spec for spec in layer_specs.values() if isinstance(spec, MambaSpec)
@@ -682,38 +519,14 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         self._conv_decomp = derive_mamba_conv_split(mamba_spec, tp_size)
 
     @property
-    def is_mamba(self) -> bool:
-        return True
-
-    @property
-    def mamba_group_flags(self) -> list[bool]:
-        return self._is_mamba_group
-
-    @property
     def ssm_sizes(self) -> tuple[int, int]:
+        """(conv_state_bytes, ssm_state_bytes) per logical block."""
         return self._ssm_sizes
 
     @property
-    def conv_decomp(self) -> MambaConvSplitInfo | None:
+    def conv_decomp(self) -> MambaConvSplitInfo:
+        """Conv-state sub-projection decomposition."""
         return self._conv_decomp
-
-    def compute_page_size(self, layer_spec, physical_ratio):
-        if isinstance(layer_spec, MambaSpec):
-            return layer_spec.page_size_bytes
-        return layer_spec.page_size_bytes // physical_ratio
-
-    def get_num_blocks(self, layer_spec, num_blocks, logical_num_blocks):
-        if isinstance(layer_spec, MambaSpec):
-            return logical_num_blocks
-        return num_blocks
-
-    def compute_layer_block_bytes(self, layer_spec, physical_page_size, physical_ratio):
-        if isinstance(layer_spec, MambaSpec):
-            return physical_page_size // physical_ratio
-        return physical_page_size
-
-    def get_tensor_shape(self, kv_caches):
-        return None
 
     def get_block_len(
         self,
@@ -723,14 +536,13 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         is_blocks_first,
         mamba_view=False,
     ):
-        # For indexing only half (either just the K or V part).
-        if is_blocks_first:
-            if mamba_view:
-                # NOTE (NickLucche) Mamba Opt: this is already skipping the
-                # padding so we're only transferring the minimum required bytes.
-                return self._ssm_sizes[not first_split]
-            return block_len_per_layer[layer_idx] // 2
-        return block_len_per_layer[layer_idx]
+        if mamba_view and is_blocks_first:
+            # NOTE (NickLucche) Mamba Opt: this is already skipping the
+            # padding so we're only transferring the minimum required bytes.
+            return self._ssm_sizes[not first_split]
+        return super().get_block_len(
+            layer_idx, first_split, block_len_per_layer, is_blocks_first
+        )
 
     def get_block_descs_ids(
         self,
@@ -782,52 +594,6 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
             else:
                 all_descs.append((region_ids * num_blocks + group_arr).flatten())
         return np.concatenate(all_descs)
-
-    def logical_to_kernel_block_ids(self, block_ids):
-        if self._physical_blocks_per_logical == 1:
-            return block_ids
-        block_arange = np.arange(
-            0,
-            self._physical_blocks_per_logical,
-        ).reshape(1, -1)
-        group_specs = self._kv_cache_config.kv_cache_groups
-        return [
-            BlockTable.map_to_kernel_blocks(
-                np.array(group),
-                self._physical_blocks_per_logical,
-                block_arange,
-            ).tolist()
-            if not isinstance(
-                group_specs[i].kv_cache_spec,
-                MambaSpec,
-            )
-            else group
-            for i, group in enumerate(block_ids)
-        ]
-
-    def logical_to_remote_kernel_block_ids(
-        self,
-        block_ids,
-        remote_ratio,
-    ):
-        if remote_ratio == 1:
-            return block_ids
-        local_arange = np.arange(
-            self._physical_blocks_per_logical,
-        ).reshape(1, -1)
-        group_specs = self._kv_cache_config.kv_cache_groups
-        result: list[list[int]] = []
-        for i, group in enumerate(block_ids):
-            if not isinstance(
-                group_specs[i].kv_cache_spec,
-                MambaSpec,
-            ):
-                arr = np.array(group).reshape(-1, 1)
-                expanded = (arr * remote_ratio + local_arange).flatten()
-                result.append(expanded.tolist())
-            else:
-                result.append(group)
-        return result
 
     def build_local_descs(
         self,
@@ -1139,13 +905,8 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         local_block_ids,
         remote_block_ids,
         remote_ranks,
-        physical_blocks_per_logical=1,
         transfer_config=None,
     ):
-        expanded = self.logical_to_remote_kernel_block_ids(
-            remote_block_ids,
-            physical_blocks_per_logical,
-        )
         info = cast(MambaEngineTransferInfo, transfer_config)
         assert transfer_config is not None
         specs: list[ReadSpec] = []
@@ -1154,7 +915,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                 info,
                 rank,
                 local_block_ids,
-                expanded,
+                remote_block_ids,
             )
             specs.append(
                 ReadSpec(
