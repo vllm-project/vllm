@@ -647,6 +647,13 @@ class Step3p5Model(nn.Module):
             (".moe.experts.w13_weight", ".moe.gate_proj.weight", "w1"),
             (".moe.experts.w13_weight", ".moe.up_proj.weight", "w3"),
             (".moe.experts.w2_weight", ".moe.down_proj.weight", "w2"),
+            # Required due to the Step3p5 HF model's packed expert format:
+            # input scales are stored as moe.{gate,up,down}_proj.input_scale
+            # rather than the standard per-expert format handled generically
+            # by make_expert_params_mapping.
+            (".moe.experts.w13_input_scale", ".moe.gate_proj.input_scale", "w1"),
+            (".moe.experts.w13_input_scale", ".moe.up_proj.input_scale", "w3"),
+            (".moe.experts.w2_input_scale", ".moe.down_proj.input_scale", "w2"),
         ]
 
         # New per-expert format: .moe.experts.E.gate_proj.weight_packed [out, in]
@@ -766,7 +773,11 @@ class Step3p5Model(nn.Module):
                     # Per-tensor global scales (e.g. weight_global_scale)
                     # have shape [1] in compressed-tensors NVFP4 checkpoints.
                     # Expand to per-expert before the iteration loop.
-                    if (
+                    if loaded_weight.ndim == 0:
+                        loaded_weight = loaded_weight.unsqueeze(0).expand(
+                            moe_expert_num
+                        )
+                    elif (
                         loaded_weight.shape[0] == 1
                         and loaded_weight.shape[0] != moe_expert_num
                     ):
