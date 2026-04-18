@@ -422,12 +422,9 @@ void silu_and_mul_mxfp4_experts_quant(
       });
 }
 
-// Registered here (rather than in csrc/libtorch_stable/torch_bindings.cpp) so
-// the TORCH_BOX symbol references only exist in the SM100 build (this .cu is
-// gated by FP4_ARCHS in CMakeLists.txt). Host .cpp files do not see
-// ENABLE_NVFP4_SM100 because VLLM_GPU_FLAGS is applied with a
-// COMPILE_LANGUAGE:CUDA generator expression, so a preprocessor guard in
-// torch_bindings.cpp cannot distinguish SM100 from non-SM100 builds.
+// Registered here (not torch_bindings.cpp) because VLLM_GPU_FLAGS is applied
+// only under COMPILE_LANGUAGE:CUDA, so ENABLE_NVFP4_SM100 is invisible to
+// .cpp files and cannot gate the registration from there.
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("mxfp4_experts_quant", TORCH_BOX(&mxfp4_experts_quant));
   m.impl("silu_and_mul_mxfp4_experts_quant",
