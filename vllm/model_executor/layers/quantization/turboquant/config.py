@@ -73,6 +73,7 @@ class TurboQuantConfig:
     head_dim: int = 128
     key_quant_bits: int = 3  # 3-4 = MSE keys, 8 = FP8 keys
     value_quant_bits: int = 4  # 3-4 = uniform quantized values
+    seed: int = 42  # kept for backward compatibility; no longer used internally
     norm_correction: bool = False
 
     @property
