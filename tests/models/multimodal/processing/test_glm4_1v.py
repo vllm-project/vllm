@@ -6,7 +6,7 @@ import pytest
 from vllm.assets.video import VideoAsset
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import batched_tensors_equal
-from vllm.multimodal.video import OpenCVDynamicVideoBackend, OpenCVVideoBackend
+from vllm.multimodal.video import DynamicVideoBackend, VideoBackend
 
 from ...utils import build_model_context
 
@@ -93,9 +93,11 @@ def test_video_loader_consistency(
     with open(video_path, "rb") as f:
         video_bytes = f.read()
 
-    static_video, static_metadata = OpenCVVideoBackend.load_bytes(video_bytes)
-    dynamic_video, dynamic_metadata = OpenCVDynamicVideoBackend.load_bytes(
-        video_bytes, fps=fps
+    static_video, static_metadata = VideoBackend.load_bytes(
+        video_bytes, backend="opencv"
+    )
+    dynamic_video, dynamic_metadata = DynamicVideoBackend.load_bytes(
+        video_bytes, fps=fps, backend="opencv"
     )
 
     # pre-sampled loader shouldn't read all frames
