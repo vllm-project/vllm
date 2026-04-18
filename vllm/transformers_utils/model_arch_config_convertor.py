@@ -77,6 +77,8 @@ class ModelArchConfigConvertorBase:
             "num_key_value_heads",
             # For ChatGLM:
             "multi_query_group_num",
+            # For Step3p5:
+            "num_attention_groups",
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
@@ -448,6 +450,16 @@ class LongCatFlashMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 1)
 
 
+class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def get_head_size(self) -> int:
+        # Gemma4 uses dual head dimensions: head_dim (sliding attention)
+        # and global_head_dim (full attention).  Return the largest so
+        # that attention backends allocate buffers large enough for both.
+        head_dim = getattr(self.hf_text_config, "head_dim", 0)
+        global_head_dim = getattr(self.hf_text_config, "global_head_dim", 0)
+        return max(head_dim, global_head_dim) or super().get_head_size()
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
@@ -459,6 +471,8 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mpt": MPTModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
+    "gemma4": Gemma4ModelArchConfigConvertor,
+    "gemma4_text": Gemma4ModelArchConfigConvertor,
     "RefinedWeb": FalconModelArchConfigConvertor,
     "RefinedWebModel": FalconModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,

@@ -1988,7 +1988,7 @@ class CohereASRMultiModalProcessor(EncDecMultiModalProcessor[CohereASRProcessing
     info=CohereASRProcessingInfo,
     dummy_inputs=CohereASRDummyInputsBuilder,
 )
-class CohereASRForConditionalGeneration(
+class CohereAsrForConditionalGeneration(
     nn.Module, SupportsTranscription, SupportsMultiModal
 ):
     packed_modules_mapping = {
@@ -2007,6 +2007,7 @@ class CohereASRForConditionalGeneration(
     supports_transcription_only = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
     skip_warmup_audio_preprocessing = True
+    no_space_languages = {"ja", "zh"}
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
