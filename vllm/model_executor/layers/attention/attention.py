@@ -286,6 +286,17 @@ class Attention(nn.Module, AttentionLayerBase):
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
+        from vllm.distributed.parallel_state import (  # noqa: E402
+            _TPA_SIZE,
+            get_dcp_group,
+        )
+
+        if _TPA_SIZE > 1 and get_dcp_group().world_size > 1:
+            # TPA GQA: output has TP-sized heads after DCP combine.
+            self.num_output_heads = num_heads // get_dcp_group().world_size
+        else:
+            self.num_output_heads = num_heads
+
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
@@ -501,17 +512,17 @@ class Attention(nn.Module, AttentionLayerBase):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if output_shape is None:
-            # Handle both 2D [num_tokens, hidden] and
-            # 3D [num_tokens, heads, head_dim] query
             num_tokens = query.shape[0]
-            output_shape = torch.Size((num_tokens, self.num_heads * self.head_size_v))
+            output_shape = torch.Size(
+                (num_tokens, self.num_output_heads * self.head_size_v)
+            )
         output = torch.empty(output_shape, dtype=output_dtype, device=query.device)
         hidden_size = output_shape[-1]
         # Reshape the query, key, and value tensors.
         # NOTE(woosuk): We do this outside the custom op to minimize the
         # CPU overheads from the non-CUDA-graph regions.
         query = query.view(-1, self.num_heads, self.head_size)
-        output = output.view(-1, self.num_heads, self.head_size_v)
+        output = output.view(-1, self.num_output_heads, self.head_size_v)
         if key is not None:
             key = key.view(-1, self.num_kv_heads, self.head_size)
         if value is not None:
