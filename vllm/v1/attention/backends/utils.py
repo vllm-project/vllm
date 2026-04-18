@@ -885,6 +885,12 @@ def reorder_batch_to_split_cp_and_normal(
         for idx, req_id in enumerate(req_ids)
         if scheduler_output.cp_rank_scheduled_tokens[req_id] <= 1
     ]
+    # Sort CP indices by req_id to ensure consistent ordering across
+    # all DyCP ranks (each rank may have different DP requests
+    # interleaved, but CP requests must be in the same order).
+    # Note: cannot use hash() because Python hash randomization makes
+    # it non-deterministic across processes.
+    cp_indices.sort(key=lambda idx: req_ids[idx])
     target_order = cp_indices + ncp_indices
 
     if target_order == list(range(num_reqs)):
