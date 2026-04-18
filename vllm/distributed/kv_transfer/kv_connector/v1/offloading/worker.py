@@ -67,9 +67,7 @@ class OffloadingConnectorWorker:
         self.kv_connector_stats = OffloadingConnectorStats()
         # job_id -> (req_id, is_store)
         self._jobs: dict[int, _JobInfo] = {}
-        # req_id -> (store_jobs, is_finished); only populated for reqs with stores
         self._req_state: dict[ReqId, _RequestState] = {}
-        # deferred store submissions, drained at the start of each engine step
         self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
