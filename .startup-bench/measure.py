@@ -44,6 +44,14 @@ CONFIGS = {
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
         "extra_args": [],
     },
+    "qwen-7b": {
+        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "extra_args": [],
+    },
+    "qwen-32b": {
+        "model": "Qwen/Qwen2.5-32B-Instruct",
+        "extra_args": [],
+    },
 }
 
 SAMPLE_TIMEOUT_S = 300.0
