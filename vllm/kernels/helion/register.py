@@ -53,14 +53,15 @@ if not has_helion():
     )
 
 import helion
-from helion._compat import requires_torch_version
 from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
 # vllm_helion_lib, direct_register_custom_op) once vLLM requires PyTorch >= 2.11.
-_HOP_AVAILABLE = requires_torch_version("2.11")
+# FIXME(gmagogsfm): Re-enable HOP path once performance regression is fixed.
+# _HOP_AVAILABLE = requires_torch_version("2.11")
+_HOP_AVAILABLE = False
 
 if _HOP_AVAILABLE:
     from helion._compat import supports_torch_compile_fusion
