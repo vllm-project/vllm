@@ -9,7 +9,7 @@ import torch.nn as nn
 import vllm.envs as envs
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import ForwardContext, get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.kv_transfer_utils import (
     maybe_transfer_kv_layer,
@@ -25,7 +25,9 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
+    LayerName,
     LayerNameType,
+    _USE_LAYERNAME,
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
@@ -48,6 +50,28 @@ if TYPE_CHECKING:
     from vllm.model_executor.layers.attention import MLAAttention
 
 logger = init_logger(__name__)
+
+
+def _get_kv_cache_layer_name(layer_name: str) -> "str | LayerName":
+    """Return the layer name to pass to KV cache update custom ops.
+
+    On torch >= 2.11 (with LayerName hoisting), returns a LayerName opaque
+    object that torch.compile deduplicates across layers automatically.
+
+    Otherwise, returns the sentinel string "from_forward_context" when the
+    fast_kv_cache_cold_start optimisation is active, allowing Inductor to
+    reuse piecewise CUDA graphs across all attention layers.  Falls back to
+    the plain string when the optimisation is disabled or no forward context
+    is available (e.g. unit-tests).
+    """
+    if _USE_LAYERNAME:
+        return LayerName(layer_name)
+    if (
+        is_forward_context_available()
+        and get_forward_context().all_kv_cache_update_layers is not None
+    ):
+        return "from_forward_context"
+    return layer_name
 
 
 def validate_kv_sharing_target(
@@ -363,6 +387,18 @@ class Attention(nn.Module, AttentionLayerBase):
         compilation_config.static_forward_context[prefix] = self
         self.attn_type = attn_type
 
+        # Register for fast_kv_cache_cold_start optimisation.
+        # A layer only calls unified_kv_cache_update when both:
+        #   1. it does not share a KV cache with an earlier layer, AND
+        #   2. its backend does not handle the KV cache update internally.
+        # The registration must match this condition exactly so the index stays
+        # aligned with the runtime call sequence.
+        if (
+            kv_sharing_target_layer_name is None
+            and not self.attn_backend.forward_includes_kv_cache_update
+        ):
+            compilation_config.static_all_kv_cache_update_layers.append(prefix)
+
         if kv_sharing_target_layer_name is not None:
             validate_kv_sharing_target(
                 prefix,
@@ -538,7 +574,10 @@ class Attention(nn.Module, AttentionLayerBase):
             )
         else:
             # Skip this if sharing KV cache with an earlier attention layer.
-            encoded = _encode_layer_name(self.layer_name)
+            # Use _get_kv_cache_layer_name so that torch.compile sees the same
+            # sentinel string ("from_forward_context") for every layer, enabling
+            # CUDA graph reuse across all attention layers.
+            encoded = _get_kv_cache_layer_name(self.layer_name)
             if (
                 not self.attn_backend.forward_includes_kv_cache_update
                 and self.kv_sharing_target_layer_name is None
@@ -720,6 +759,15 @@ def unified_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
+    forward_context: ForwardContext = get_forward_context()
+    if not _USE_LAYERNAME and layer_name == "from_forward_context":
+        all_layers = forward_context.all_kv_cache_update_layers
+        assert all_layers is not None, (
+            "unified_kv_cache_update received sentinel 'from_forward_context' "
+            "but ForwardContext.all_kv_cache_update_layers is None"
+        )
+        layer_name = all_layers[forward_context.kv_cache_update_index]
+        forward_context.kv_cache_update_index += 1
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (

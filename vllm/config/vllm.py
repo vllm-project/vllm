@@ -1021,6 +1021,15 @@ class VllmConfig:
                 self.speculative_config is None
             )
 
+        if HAS_OPAQUE_TYPE:
+            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
+            # fast_kv_cache_cold_start, so force it off.
+            self.compilation_config.fast_kv_cache_cold_start = False
+        elif self.compilation_config.fast_kv_cache_cold_start is None:
+            self.compilation_config.fast_kv_cache_cold_start = (
+                self.speculative_config is None
+            )
+
         self._set_max_num_scheduled_tokens()
 
         if current_platform.support_static_graph_mode():

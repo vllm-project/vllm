@@ -218,6 +218,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention.attention import (
+    _get_kv_cache_layer_name,
     _init_kv_cache_quant,
     get_attention_context,
     set_default_quant_scales,
@@ -241,6 +242,7 @@ from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import (
     LayerNameType,
+    _USE_LAYERNAME,
     _encode_layer_name,
     _resolve_layer_name,
     direct_register_custom_op,
@@ -418,6 +420,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+        compilation_config.static_all_kv_cache_update_layers.append(prefix)
 
         self.kv_cache = torch.tensor([])
 
@@ -513,7 +516,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return output
         else:
-            encoded = _encode_layer_name(self.layer_name)
+            # Use _get_kv_cache_layer_name so that torch.compile sees the same
+            # sentinel string ("from_forward_context") for every MLA layer,
+            # enabling CUDA graph reuse across all attention layers.
+            encoded = _get_kv_cache_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
@@ -919,6 +925,14 @@ def unified_mla_kv_cache_update(
     """
     layer_name = _resolve_layer_name(layer_name)
     forward_context = get_forward_context()
+    if not _USE_LAYERNAME and layer_name == "from_forward_context":
+        all_layers = forward_context.all_kv_cache_update_layers
+        assert all_layers is not None, (
+            "unified_mla_kv_cache_update received sentinel 'from_forward_context' "
+            "but ForwardContext.all_kv_cache_update_layers is None"
+        )
+        layer_name = all_layers[forward_context.kv_cache_update_index]
+        forward_context.kv_cache_update_index += 1
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
 

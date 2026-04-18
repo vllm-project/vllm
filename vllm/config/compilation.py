@@ -722,6 +722,25 @@ class CompilationConfig:
     """The names of all the MOE layers in the model
     """
 
+    fast_kv_cache_cold_start: bool | None = None
+    """Optimization for fast KV cache cold start, analogous to fast_moe_cold_start.
+
+    When enabled, the layer name string is removed from unified_kv_cache_update
+    and unified_mla_kv_cache_update custom ops, allowing torch.compile's Inductor
+    to reuse piecewise CUDA graphs across all attention layers instead of
+    compiling a separate graph per layer.
+
+    The options are:
+    - True: optimization is always on
+    - False: optimization is always off
+    - None: optimization is on unless speculative decoding is active
+    """
+
+    static_all_kv_cache_update_layers: list[str] = field(
+        default_factory=list, init=False
+    )
+    """The names of all attention layers that perform KV cache updates."""
+
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
