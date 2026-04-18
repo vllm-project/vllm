@@ -124,6 +124,9 @@ class MiMoVLInputSample:
     second_per_grid_ts: list[float] = field(default_factory=list)
     video_start_times: list[float] = field(default_factory=list)
     audio_token_lens: list[int] = field(default_factory=list)
+    va_audio_inputs: list[torch.Tensor] = field(default_factory=list)
+    video_audio_n_segs: list[int] = field(default_factory=list)
+    video_audio_seg_lens: list[int] = field(default_factory=list)
     position_ids: torch.Tensor | None = None
     rope_deltas: torch.Tensor | None = None
     extra: dict = field(default_factory=dict)
@@ -639,6 +642,9 @@ class MiMoVLProcessor:
         audio_token_lens: list[int] = []
         second_per_grid_ts: list[float] = []
         video_start_times: list[float] = []
+        va_audio_inputs: list[torch.Tensor] = []
+        video_audio_n_segs: list[int] = []
+        video_audio_seg_lens: list[int] = []
 
         # Pre-decode videos in parallel
         vid_info = [
@@ -697,6 +703,7 @@ class MiMoVLProcessor:
                     self.temporal_patch_size / meta["fps_sampled"]
                 )
                 video_start_times.append(float(ts[0]))
+                video_audio_n_segs.append(0)
 
                 stride = self.temporal_patch_size * self.temporal_compression_ratio
                 ts_texts = [_format_timestamp(float(x)) for x in ts[::stride]]
@@ -743,12 +750,14 @@ class MiMoVLProcessor:
                 vid_grids.append(thw)
 
                 if isinstance(processed_audio, tuple):
-                    is_audio_tokenized.append(False)
+                    # Mel spec (not pre-tokenized): store in va_audio_inputs separately
                     spec, total_atok = processed_audio
-                    audio_inputs.append(spec)
+                    va_audio_inputs.append(spec)
+                    _va_is_tokenized = False
                 else:
-                    is_audio_tokenized.append(True)
+                    # Pre-tokenized: not expected in vLLM, but handle defensively
                     total_atok = processed_audio.shape[0]
+                    _va_is_tokenized = True
 
                 n_per_grid = h * w // (self.merge_size ** 2)
                 stride = self.temporal_patch_size * self.temporal_compression_ratio
@@ -766,11 +775,7 @@ class MiMoVLProcessor:
                     )
                     seg_len = min(a_end, total_atok) - a_start
                     assert seg_len > 0, f"Zero-length audio segment at grid index {i}"
-                    seg = (
-                        processed_audio[a_start: a_start + seg_len]
-                        if is_audio_tokenized[-1]
-                        else None
-                    )
+                    seg = processed_audio[a_start: a_start + seg_len] if _va_is_tokenized else None
                     units.append((
                         float(grid_ts[i]), ts_texts[i], ts_ids_list[i],
                         n_per_grid, seg_len, seg,
@@ -793,6 +798,12 @@ class MiMoVLProcessor:
                     if cur:
                         groups.append(cur)
 
+                # Track n_segs (= num groups) and per-group audio token counts
+                video_audio_n_segs.append(len(groups))
+                for group in groups:
+                    group_seg_len = sum(u[4] for _, u in group)
+                    video_audio_seg_lens.append(group_seg_len)
+
                 _ids = [self.video_start_token_id]
                 for group in groups:
                     _ids += group[0][1][2]  # first-unit timestamp token ids
@@ -807,6 +818,7 @@ class MiMoVLProcessor:
                         )
                         _aud_tok += [self.audio_token_id] * seg_n
                         if seg_audio is not None:
+                            # Pre-tokenized per-frame segments (rare in vLLM)
                             audio_inputs.append(seg_audio)
                     _ids += (
                         _vid_tok
@@ -845,6 +857,9 @@ class MiMoVLProcessor:
             second_per_grid_ts=second_per_grid_ts,
             video_start_times=video_start_times,
             audio_token_lens=audio_token_lens,
+            va_audio_inputs=va_audio_inputs,
+            video_audio_n_segs=video_audio_n_segs,
+            video_audio_seg_lens=video_audio_seg_lens,
             position_ids=position_ids,
             rope_deltas=rope_deltas,
             extra=extra,
@@ -1070,6 +1085,7 @@ class MiMoOmniProcessor(ProcessorMixin):
         images: Any = None,
         videos: Any = None,
         audio: Any = None,
+        video_audio: Any = None,
         return_tensors: str | TensorType | None = None,
         **kwargs: Any,
     ) -> BatchFeature:
@@ -1103,6 +1119,7 @@ class MiMoOmniProcessor(ProcessorMixin):
         ) if images is not None else []
         vids: list = list(videos) if videos is not None else []
         auds: list = list(audio) if audio is not None else []
+        va_items: list = list(video_audio) if video_audio is not None else []
 
         # If audio exists but text has no audio placeholder, prepend one
         _aud_placeholder = "<|mimo_audio_start|><|audio_pad|><|mimo_audio_end|>"
@@ -1112,11 +1129,12 @@ class MiMoOmniProcessor(ProcessorMixin):
         # Build Content list
         contents: list[Content] = []
 
-        if text and (imgs or vids or auds):
+        if text and (imgs or vids or auds or va_items):
             parts = self._MM_RE.split(text)
             img_it = iter(imgs)
             vid_it = iter(vids)
             aud_it = iter(auds)
+            va_it = iter(va_items)
             for part in parts:
                 if self._MM_RE.fullmatch(part):
                     mod = self._modality(part)
@@ -1127,11 +1145,26 @@ class MiMoOmniProcessor(ProcessorMixin):
                                 content=ImageInput(image=next(img_it)),
                             ))
                     elif mod == "video":
+                        # Try regular video first, fall back to video_audio
+                        vid_item = None
+                        vid_type = "video"
                         with contextlib.suppress(StopIteration):
-                            contents.append(Content(
-                                type="video",
-                                content=VideoInput(video=next(vid_it)),
-                            ))
+                            vid_item = next(vid_it)
+                        if vid_item is None:
+                            with contextlib.suppress(StopIteration):
+                                vid_item = next(va_it)
+                                vid_type = "video_audio"
+                        if vid_item is not None:
+                            if vid_type == "video":
+                                contents.append(Content(
+                                    type="video",
+                                    content=VideoInput(video=vid_item),
+                                ))
+                            else:
+                                contents.append(Content(
+                                    type="video_audio",
+                                    content=vid_item,
+                                ))
                     elif mod == "audio":
                         with contextlib.suppress(StopIteration):
                             contents.append(Content(
@@ -1149,6 +1182,8 @@ class MiMoOmniProcessor(ProcessorMixin):
                 contents.append(Content(type="video", content=VideoInput(video=vid)))
             for aud in auds:
                 contents.append(Content(type="audio", content=AudioInput(audio=aud)))
+            for va_item in va_items:
+                contents.append(Content(type="video_audio", content=va_item))
 
         if not contents:
             ids = self.tokenizer(text or "", return_tensors=return_tensors)["input_ids"]
@@ -1174,6 +1209,28 @@ class MiMoOmniProcessor(ProcessorMixin):
                 data["video_start_times"] = torch.tensor(
                     sample.video_start_times, dtype=torch.float32
                 )
+            if sample.video_audio_n_segs:
+                data["video_audio_n_segs"] = torch.tensor(
+                    sample.video_audio_n_segs, dtype=torch.long
+                )
+            # video_audio_seg_lens: 2D padded tensor (num_videos, max_T).
+            # Row i has the per-group audio token lengths for video i
+            # (zeros for regular videos; valid values for video_audio videos).
+            n_segs_list = sample.video_audio_n_segs
+            max_segs = max(n_segs_list) if n_segs_list else 0
+            if max_segs > 0:
+                seg_lens_2d = torch.zeros(
+                    len(n_segs_list), max_segs, dtype=torch.long
+                )
+                flat_cursor = 0
+                for vi, n in enumerate(n_segs_list):
+                    if n > 0:
+                        seg_lens_2d[vi, :n] = torch.tensor(
+                            sample.video_audio_seg_lens[flat_cursor : flat_cursor + n],
+                            dtype=torch.long,
+                        )
+                        flat_cursor += n
+                data["video_audio_seg_lens"] = seg_lens_2d
 
         # audio_features is a list of variable-length mel-spec tensors; pop it
         # before BatchFeature conversion to avoid "batched tensors of the same
@@ -1191,4 +1248,7 @@ class MiMoOmniProcessor(ProcessorMixin):
         bf = BatchFeature(data=data, tensor_type=return_tensors)
         if audio_features is not None:
             bf["audio_features"] = audio_features
+        # va_audio_features: list of mel-spec tensors (one per video_audio item)
+        if sample.va_audio_inputs:
+            bf["va_audio_features"] = sample.va_audio_inputs
         return bf

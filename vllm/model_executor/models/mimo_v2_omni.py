@@ -44,6 +44,7 @@ from vllm.multimodal.processing import (
 )
 from vllm.transformers_utils.processors.mimo_omni import (
     MiMoOmniProcessor,
+    VideoAudioInput,
     _format_timestamp,
 )
 
@@ -905,13 +906,22 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         merge_size = self.info.get_hf_config().vision_config.spatial_merge_size
-        return dict(
+        fields: dict[str, MultiModalFieldConfig] = dict(
             **_create_qwen2vl_field_factory(merge_size)(hf_inputs),
             second_per_grid_ts=MultiModalFieldConfig.batched("video"),
             video_start_times=MultiModalFieldConfig.batched("video"),
             audio_features=MultiModalFieldConfig.batched("audio"),
             audio_token_lens=MultiModalFieldConfig.batched("audio"),
         )
+        # video_audio fields: only present when video_audio content was processed
+        if "video_audio_n_segs" in hf_inputs:
+            fields["video_audio_n_segs"] = MultiModalFieldConfig.batched("video")
+        # video_audio_seg_lens: list of per-video 1D tensors, batched("video")
+        if "video_audio_seg_lens" in hf_inputs:
+            fields["video_audio_seg_lens"] = MultiModalFieldConfig.batched("video")
+        if "va_audio_features" in hf_inputs:
+            fields["va_audio_features"] = MultiModalFieldConfig.batched("va_audio")
+        return fields
 
     def _call_hf_processor(
         self,
@@ -928,6 +938,44 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         if "audios" in mm_data:
             mm_data = {**mm_data, "audio": mm_data["audios"]}
             mm_data = {k: v for k, v in mm_data.items() if k != "audios"}
+
+        # Handle video_audio items: convert video part to (TCHW, timestamps) tuple
+        if "video_audio" in mm_data:
+            va_converted: list[VideoAudioInput] = []
+            for va_item in mm_data["video_audio"]:
+                if isinstance(va_item, VideoAudioInput):
+                    vid = va_item.video
+                else:
+                    # Expect (video_frames, audio_source) tuple
+                    vid, audio_src = va_item
+                    va_item = VideoAudioInput(video=vid, audio=audio_src)
+                    vid = vid
+                # Convert video frames to (TCHW, timestamps) if needed
+                if (
+                    isinstance(vid, tuple)
+                    and len(vid) == 2
+                    and isinstance(vid[0], torch.Tensor)
+                    and isinstance(vid[1], torch.Tensor)
+                ):
+                    va_converted.append(va_item)
+                else:
+                    if isinstance(vid, np.ndarray):
+                        frames = torch.from_numpy(vid)
+                    elif isinstance(vid, torch.Tensor):
+                        frames = vid
+                    else:
+                        frames = torch.tensor(np.array(vid))
+                    if frames.ndim == 4 and frames.shape[-1] in (1, 3, 4):
+                        frames = frames.permute(0, 3, 1, 2).float()
+                    else:
+                        frames = frames.float()
+                    T = frames.shape[0]
+                    timestamps = torch.arange(T, dtype=torch.float32) / self._INPUT_FPS
+                    va_converted.append(VideoAudioInput(
+                        video=(frames, timestamps),
+                        audio=va_item.audio,
+                    ))
+            mm_data = {**mm_data, "video_audio": va_converted}
 
         if "videos" in mm_data:
             converted: list[tuple[torch.Tensor, torch.Tensor]] = []
@@ -1021,22 +1069,58 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
             W = int(grid_thw[2])
             n_per_grid = H * W // (merge_size * merge_size)
 
+            # Check if this is a video_audio item
+            n_segs_field = out_item.get("video_audio_n_segs")
+            n_segs_val = int(n_segs_field.data) if n_segs_field is not None else 0
+            va_seg_lens: list[int] | None = None
+            if n_segs_val > 0:
+                seg_lens_field = out_item.get("video_audio_seg_lens")
+                if seg_lens_field is not None:
+                    va_seg_lens = seg_lens_field.data[:n_segs_val].tolist()
+
             full: list[int] = [video_start_id]
             is_embed_mask: list[bool] = [False]
 
-            for j in range(T):
-                ts_text = _format_timestamp(start + j * spt)
-                ts_ids = tokenizer.encode(
-                    ts_text, add_special_tokens=False
-                )
-                full.extend(ts_ids)
-                is_embed_mask.extend([False] * len(ts_ids))
-                full.append(vision_start_id)
-                is_embed_mask.append(False)
-                full.extend([video_pad_id] * n_per_grid)
-                is_embed_mask.extend([True] * n_per_grid)
-                full.append(vision_end_id)
-                is_embed_mask.append(False)
+            if va_seg_lens is None:
+                # Regular video: timestamp + vision tokens per grid
+                for j in range(T):
+                    ts_text = _format_timestamp(start + j * spt)
+                    ts_ids = tokenizer.encode(ts_text, add_special_tokens=False)
+                    full.extend(ts_ids)
+                    is_embed_mask.extend([False] * len(ts_ids))
+                    full.append(vision_start_id)
+                    is_embed_mask.append(False)
+                    full.extend([video_pad_id] * n_per_grid)
+                    is_embed_mask.extend([True] * n_per_grid)
+                    full.append(vision_end_id)
+                    is_embed_mask.append(False)
+            else:
+                # video_audio: interleaved vision+audio per group
+                n_groups = len(va_seg_lens)
+                frames_per_group = T // n_groups  # 1 for il=0, T for il=-1
+                for g in range(n_groups):
+                    # Timestamp for first frame of this group
+                    frame0 = g * frames_per_group
+                    ts_text = _format_timestamp(start + frame0 * spt)
+                    ts_ids = tokenizer.encode(ts_text, add_special_tokens=False)
+                    full.extend(ts_ids)
+                    is_embed_mask.extend([False] * len(ts_ids))
+                    # Vision tokens for all frames in this group
+                    for f in range(frames_per_group):
+                        full.append(vision_start_id)
+                        is_embed_mask.append(False)
+                        full.extend([video_pad_id] * n_per_grid)
+                        is_embed_mask.extend([True] * n_per_grid)
+                        full.append(vision_end_id)
+                        is_embed_mask.append(False)
+                    # Audio tokens for this group
+                    seg_len = va_seg_lens[g]
+                    full.append(audio_start_id)
+                    is_embed_mask.append(False)
+                    full.extend([audio_pad_id] * seg_len)
+                    is_embed_mask.extend([True] * seg_len)
+                    full.append(audio_end_id)
+                    is_embed_mask.append(False)
 
             full.append(video_end_id)
             is_embed_mask.append(False)
@@ -1347,28 +1431,77 @@ class MiMoV2OmniForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQ
         return tuple(audio_embeds.split(item_token_lens))
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        # Pop video_audio-specific fields before main mm parsing
+        video_audio_n_segs = kwargs.pop("video_audio_n_segs", None)
+        video_audio_seg_lens = kwargs.pop("video_audio_seg_lens", None)
+        va_audio_features = kwargs.pop("va_audio_features", None)
+
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
-        if not mm_input_by_modality:
+        if not mm_input_by_modality and va_audio_features is None:
             return []
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor corresponding to a multimodal data item (image, video, or audio).
-        multimodal_embeddings: tuple[torch.Tensor, ...] = ()
+        multimodal_embeddings: list[torch.Tensor] = []
 
-        # NOTE: It is important to iterate over the keys in this dictionary
-        # to preserve the order of the modalities.
+        # Pre-process va audio: one mel spec per va video → per-video audio embeddings
+        # keyed by va video index (0-based among va videos only)
+        va_audio_embs_list: list[tuple[torch.Tensor, ...]] = []
+        if va_audio_features is not None and self.audio_encoder is not None:
+            mel_list = (
+                list(va_audio_features)
+                if isinstance(va_audio_features, torch.Tensor)
+                else list(va_audio_features)
+            )
+            for mel_spec in mel_list:
+                embs, tok_lens = self.audio_encoder.get_audio_feature([mel_spec])
+                # tok_lens is a list/tensor with one entry (total tokens for this mel)
+                va_audio_embs_list.append(embs)  # shape (total_tok, hidden)
+
+        va_cursor = 0  # index into va_audio_embs_list
+
+        # NOTE: Iterate in dict insertion order to preserve token sequence order.
         for modality in mm_input_by_modality:
             multimodal_input = mm_input_by_modality[modality]
             if modality == "image":
-                image_embeddings = self._process_image_input(multimodal_input)
-                multimodal_embeddings += tuple(image_embeddings)
-            if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
-                multimodal_embeddings += tuple(video_embeddings)
-            if modality == "audio":
-                audio_embeddings = self._process_audio_input(multimodal_input)
-                multimodal_embeddings += audio_embeddings
-        return multimodal_embeddings
+                multimodal_embeddings.extend(
+                    self._process_image_input(multimodal_input)
+                )
+            elif modality == "video":
+                video_embs_tuple = self._process_video_input(multimodal_input)
+                if video_audio_n_segs is None:
+                    multimodal_embeddings.extend(video_embs_tuple)
+                else:
+                    grid_thw = multimodal_input["video_grid_thw"]
+                    for i, vid_embs in enumerate(video_embs_tuple):
+                        n_segs = int(video_audio_n_segs[i])
+                        if n_segs == 0 or not va_audio_embs_list:
+                            multimodal_embeddings.append(vid_embs)
+                        else:
+                            T = int(grid_thw[i][0])
+                            n_per_grid = vid_embs.shape[0] // T
+                            frames = list(vid_embs.split(n_per_grid, dim=0))
+                            frames_per_group = T // n_segs
+                            # Per-group audio token lengths for this va video
+                            # video_audio_seg_lens is (num_videos, max_T); row i
+                            # has valid values in [:n_segs], rest are zeros.
+                            seg_lens = video_audio_seg_lens[i][:n_segs].tolist()
+                            # Split full audio embs for this va video by group lengths
+                            full_va_embs = va_audio_embs_list[va_cursor]
+                            va_cursor += 1
+                            group_audio_embs = full_va_embs.split(seg_lens)
+                            # Interleave: all vid frames in group, then audio for group
+                            for g in range(n_segs):
+                                for f in range(frames_per_group):
+                                    multimodal_embeddings.append(
+                                        frames[g * frames_per_group + f]
+                                    )
+                                multimodal_embeddings.append(group_audio_embs[g])
+            elif modality == "audio":
+                multimodal_embeddings.extend(
+                    self._process_audio_input(multimodal_input)
+                )
+        return tuple(multimodal_embeddings)
 
     def forward(
         self,
