@@ -6,6 +6,34 @@ steps:
     timeout_in_minutes: 600
     commands:
     - if [[ "$BUILDKITE_BRANCH" == "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG $IMAGE_TAG_LATEST; else .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG; fi
+    # Non-root smoke 1: the default (root) image must still be importable
+    # under a non-root UID via `--user 2000:0`. Validates the `vllm` passwd
+    # entry + group-0-writable /home/vllm + uv path cleanup from #31959.
+    # Uses `import vllm` rather than `vllm serve --help` because the latter
+    # instantiates `VllmConfig` which requires a GPU attached to the
+    # container.
+    - docker run --rm --user 2000:0 --entrypoint python3 "$IMAGE_TAG" -c "import vllm; print(vllm.__version__)"
+    # Non-root smoke 2: assert the non-root enabling invariants are baked
+    # into the image. Runs as UID 2000:0 via a shell so we can verify
+    # filesystem perms + passwd/group file state + wrapper presence without
+    # triggering vLLM's GPU-requiring config-init path. The opt-in
+    # `vllm-openai-nonroot` target adds only `USER vllm`, `WORKDIR
+    # /home/vllm`, and an `ENTRYPOINT` override on top of these invariants;
+    # its build correctness is reviewed at the Dockerfile level. Wrapper
+    # logic is covered separately by the pre-commit hook
+    # `test-nonroot-entrypoint` (see .pre-commit-config.yaml).
+    - |
+      docker run --rm --user 2000:0 --entrypoint /bin/sh "$IMAGE_TAG" -c '
+        set -eu
+        getent passwd 2000 | grep -q "^vllm:" || { echo "FAIL: UID 2000 != vllm"; exit 1; }
+        [ "$(id -gn 2>/dev/null)" = "root" ] || { echo "FAIL: GID 0 not root group"; exit 1; }
+        touch /home/vllm/.smoke && rm /home/vllm/.smoke
+        touch /opt/uv/cache/.smoke && rm /opt/uv/cache/.smoke
+        test -x /usr/local/bin/vllm-nonroot-entrypoint.sh || { echo "FAIL: wrapper missing"; exit 1; }
+        test -w /etc/passwd || { echo "FAIL: /etc/passwd not group-writable"; exit 1; }
+        test -w /etc/group  || { echo "FAIL: /etc/group not group-writable"; exit 1; }
+        echo "non-root invariants OK"
+      '
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
