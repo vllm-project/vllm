@@ -70,9 +70,11 @@ def test_processor_override(
 
 @pytest.mark.parametrize("model_id", ["zai-org/GLM-4.1V-9B-Thinking"])
 @pytest.mark.parametrize("fps", [2])
+@pytest.mark.parametrize("backend", ["opencv", "pyav"])
 def test_video_loader_consistency(
     model_id: str,
     fps: int,
+    backend: str,
 ):
     """
     Ensure dynamic video loader (pre-sampled by loader) and normal video
@@ -94,10 +96,10 @@ def test_video_loader_consistency(
         video_bytes = f.read()
 
     static_video, static_metadata = VideoBackend.load_bytes(
-        video_bytes, backend="opencv"
+        video_bytes, backend=backend
     )
     dynamic_video, dynamic_metadata = DynamicVideoBackend.load_bytes(
-        video_bytes, fps=fps, backend="opencv"
+        video_bytes, fps=fps, backend=backend
     )
 
     # pre-sampled loader shouldn't read all frames
