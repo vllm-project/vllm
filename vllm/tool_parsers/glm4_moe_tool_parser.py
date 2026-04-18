@@ -485,9 +485,21 @@ class Glm4MoeModelToolParser(ToolParser):
         # `{"x": Smithh"}` (missing opening quote, last char duplicated).
         # Skip emission this tick rather than stream invalid JSON.
         if not args_so_far.startswith(streamed):
+            # Do not log the raw values at WARNING level: tool-call
+            # arguments routinely carry user input, credentials, or
+            # other sensitive content.  Length + index is enough to
+            # spot a misfiring guard in aggregate logs; enable DEBUG
+            # to see the full rendering when diagnosing.
             logger.warning(
-                "GLM tool parser: streaming args divergence for tool %d; "
-                "previously sent %r, new render %r; skipping delta.",
+                "GLM tool parser: streaming args divergence for tool %d "
+                "(prev_len=%d, new_len=%d); skipping delta.",
+                index,
+                len(streamed),
+                len(args_so_far),
+            )
+            logger.debug(
+                "GLM tool parser divergence detail for tool %d: "
+                "previously sent %r, new render %r.",
                 index,
                 streamed,
                 args_so_far,
