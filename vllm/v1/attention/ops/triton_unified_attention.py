@@ -297,9 +297,7 @@ def kernel_unified_attention_2d(
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
         q_abs = context_len + qpos_lo
         if CHUNK_LOOKBACK > -1:
-            first_allowed_key = (
-                (q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK
-            ) * CHUNK_SIZE
+            first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
@@ -703,9 +701,7 @@ def kernel_unified_attention_3d(
         # [context_len + qpos_lo - SLIDING_WINDOW + 1, context_len + qpos_hi]
         q_abs = context_len + qpos_lo
         if CHUNK_LOOKBACK > -1:
-            first_allowed_key = (
-                (q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK
-            ) * CHUNK_SIZE
+            first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
         else:
             first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
