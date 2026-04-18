@@ -454,18 +454,6 @@ class OffloadingConnectorScheduler:
             if req_status.is_idle():
                 self._req_status.pop(job_status.req_id, None)
 
-        # Handle request-level completion (for _free_blocks in scheduler).
-        for req_id in connector_output.finished_sending or []:
-            req_status = self._req_status.get(req_id)
-            if req_status is None:
-                continue
-            keys = set().union(*req_status.store_jobs.values())
-            if keys:
-                self.manager.complete_store(keys)
-            self._cleanup_store_jobs_for_req(req_id)
-            if req_status.is_idle():
-                self._req_status.pop(req_id, None)
-
     def request_finished(
         self,
         request: Request,
