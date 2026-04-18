@@ -16,6 +16,7 @@ import einops
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -142,6 +143,11 @@ def triton_attn_wrapper(
         sliding_window_q=None,
         sliding_window_k=None,
         softmax_scale=scale,
+        skip_softmax_threshold_scale=(
+            envs.VLLM_ATTENTION_SKIP_SOFTMAX_THRESHOLD_SCALE
+            if envs.VLLM_ATTENTION_SKIP_SOFTMAX
+            else None
+        ),
     )
 
     context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
