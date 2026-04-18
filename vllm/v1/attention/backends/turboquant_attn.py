@@ -531,8 +531,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         # max_query_len == max_seq_len means no request has prior cached KV.
         # Both are Python ints — no GPU sync.
         if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
-            output = torch.empty(N, Hq, D, device=query.device, dtype=query.dtype)
-            flash_attn_varlen_func(
+            return flash_attn_varlen_func(
                 q=query,
                 k=key,
                 v=value,
@@ -542,9 +541,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_seqlen_k=attn_metadata.max_query_len,
                 softmax_scale=self.scale,
                 causal=True,
-                out=output,
             )
-            return output
 
         # Continuation or no flash_attn: per-request attention.
         # For continuation chunks (seq_len > q_len), we must attend to
@@ -581,10 +578,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             if q_len == seq_len:
                 # First-chunk prefill: all K/V are in the current batch.
                 if _HAS_FLASH_ATTN:
-                    out = torch.empty_like(q_seq)
                     _cu_2[1] = q_len
                     cu = _cu_2
-                    flash_attn_varlen_func(
+                    out = flash_attn_varlen_func(
                         q=q_seq,
                         k=k_seq,
                         v=v_seq,
@@ -594,7 +590,6 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         max_seqlen_k=q_len,
                         softmax_scale=self.scale,
                         causal=True,
-                        out=out,
                     )
                 else:
                     q_t = q_seq.transpose(0, 1).contiguous()
@@ -757,10 +752,9 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         # Attention: q_len queries attending to seq_len K/V with causal mask
         if _HAS_FLASH_ATTN:
-            output = torch.empty(q_len, Hq, D, device=device, dtype=query.dtype)
             cu_seqlens_q = torch.tensor([0, q_len], device=device, dtype=torch.int32)
             cu_seqlens_k = torch.tensor([0, seq_len], device=device, dtype=torch.int32)
-            flash_attn_varlen_func(
+            return flash_attn_varlen_func(
                 q=query,
                 k=k_full,
                 v=v_full,
@@ -770,9 +764,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 max_seqlen_k=seq_len,
                 softmax_scale=self.scale,
                 causal=True,
-                out=output,
             )
-            return output
         else:
             # SDPA fallback: expand KV for GQA, build causal mask
             q_t = query.transpose(0, 1).unsqueeze(0)  # (1, Hq, q_len, D)
