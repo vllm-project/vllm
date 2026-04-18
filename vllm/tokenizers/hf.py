@@ -9,7 +9,7 @@ from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizer
 
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
-from vllm.transformers_utils.gguf_utils import extract_eos_token_id_from_gguf
+from vllm.transformers_utils.gguf_utils import maybe_patch_gguf_tokenizer
 
 from .protocol import TokenizerLike
 
@@ -129,23 +129,9 @@ class CachedHfTokenizer(TokenizerLike):
             }
             tokenizer.add_special_tokens(special_tokens_map)
 
-        # Patch EOS token ID from GGUF metadata if available
-        # GGUF files may have a different EOS token ID than HF tokenizer config
-        # (e.g., Gemma uses <end_of_turn> ID 106 as EOS, but HF reports <eos> ID 1)
-        # Note: gguf_file was saved above before
-        # AutoTokenizer.from_pretrained() popped it
-        if gguf_file:
-            gguf_path = Path(path_or_repo_id) / gguf_file
-            gguf_eos_id = extract_eos_token_id_from_gguf(str(gguf_path))
-            if gguf_eos_id is not None:
-                hf_eos_id = tokenizer.eos_token_id
-                if hf_eos_id != gguf_eos_id:
-                    logger.info(
-                        "Patching tokenizer eos_token_id from %d to %d "
-                        "(using GGUF metadata)",
-                        hf_eos_id,
-                        gguf_eos_id,
-                    )
-                    tokenizer.eos_token_id = gguf_eos_id
+        # Patch tokenizer EOS from GGUF metadata when applicable
+        # (gguf_file was saved above before AutoTokenizer.from_pretrained()
+        # popped it from kwargs).
+        maybe_patch_gguf_tokenizer(tokenizer, path_or_repo_id, gguf_file)
 
         return get_cached_tokenizer(tokenizer)
