@@ -32,12 +32,13 @@ ASSISTANT_CONTENT_START_SUFFIX = "<|message|>"
 ASSISTANT_CONTENT_START = (
     ASSISTANT_CONTENT_START_PREFIX + ASSISTANT_CONTENT_START_SUFFIX
 )
+ASSISTANT_CONTENT = "This is the rest"
 
 BASIC_CONTENT = {
     "output": REASONING_SECTION_START
     + "This is reasoning"
     + ASSISTANT_CONTENT_START
-    + "This is the rest",
+    + ASSISTANT_CONTENT,
     "is_reasoning_end": True,
 }
 
@@ -93,7 +94,7 @@ COMPLEX_CONTENT_1_WITH_CONTENT = {
     + ASSISTANT_CONTENT_START_PREFIX
     + "<|constrain|> JSON "
     + ASSISTANT_CONTENT_START_SUFFIX
-    + "This is the rest",
+    + ASSISTANT_CONTENT,
     "is_reasoning_end": True,
 }
 
@@ -103,7 +104,7 @@ COMPLEX_CONTENT_2 = {
     + ASSISTANT_CONTENT_START_PREFIX
     + "<|constrain|>ReplyAction "
     + ASSISTANT_CONTENT_START_SUFFIX
-    + "This is the rest",
+    + ASSISTANT_CONTENT,
     "is_reasoning_end": True,
 }
 
@@ -150,6 +151,63 @@ def test_gptoss_is_reasoning_end(
     output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(output)
     actual_is_reasoning_end = parser.is_reasoning_end(output_ids)
     assert is_reasoning_end == actual_is_reasoning_end
+
+
+@pytest.mark.parametrize(
+    "output, is_reasoning_end",
+    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
+)
+def test_gptoss_reasoning_end_index(
+    output,
+    is_reasoning_end,
+    gpt_oss_tokenizer,
+):
+    output_tokens = gpt_oss_tokenizer.tokenize(output)
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+
+    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(output_tokens)
+
+    output_ids_len = len(output_ids)
+    if ASSISTANT_CONTENT in output:
+        output_ids_len -= len(
+            gpt_oss_tokenizer.convert_tokens_to_ids(
+                gpt_oss_tokenizer.tokenize(ASSISTANT_CONTENT)
+            )
+        )
+
+    ans = -1 if not is_reasoning_end else output_ids_len - 1
+    assert parser.reasoning_end_index(output_ids) == ans
+
+
+@pytest.mark.parametrize(
+    "output, is_reasoning_end",
+    [(t["output"], t["is_reasoning_end"]) for t in TEST_CASES],
+)
+def test_gptoss_reasoning_end_delta_index(
+    output,
+    is_reasoning_end,
+    gpt_oss_tokenizer,
+):
+    output_tokens = gpt_oss_tokenizer.tokenize(output)
+    # Assume the last 10 tokes as delta tokens
+    delta_tokens = output_tokens[-10:]
+    output_tokens = output_tokens[:-10]
+
+    parser: ReasoningParser = GptOssReasoningParser(gpt_oss_tokenizer)
+
+    output_ids = gpt_oss_tokenizer.convert_tokens_to_ids(output_tokens)
+    delta_ids = gpt_oss_tokenizer.convert_tokens_to_ids(delta_tokens)
+
+    delta_ids_len = len(delta_tokens)
+    if ASSISTANT_CONTENT in output:
+        delta_ids_len -= len(
+            gpt_oss_tokenizer.convert_tokens_to_ids(
+                gpt_oss_tokenizer.tokenize(ASSISTANT_CONTENT)
+            )
+        )
+
+    ans = -1 if not is_reasoning_end else delta_ids_len - 1
+    assert parser.reasoning_end_delta_index(output_ids, delta_ids) == ans
 
 
 class TestGptOssStructuralTags:

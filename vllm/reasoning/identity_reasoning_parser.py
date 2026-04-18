@@ -37,6 +37,16 @@ class IdentityReasoningParser(ReasoningParser):
         # Always return True, since we never treat reasoning specially
         return True
 
+    def reasoning_end_index(self, input_ids: Sequence[int]) -> int:
+        return -1
+
+    def reasoning_end_delta_index(
+        self,
+        previous_input_ids: Sequence[int],
+        delta_ids: Sequence[int],
+    ) -> int:
+        return -1
+
     def is_reasoning_end_streaming(
         self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
