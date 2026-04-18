@@ -51,31 +51,7 @@ from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_stor
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
-    import inspect as _inspect
-
-    from vllm.v1.attention.backends.fa_utils import (
-        flash_attn_varlen_func as _flash_attn_varlen_func,
-    )
-
-    # Upstream flash-attn on ROCm lacks the `out=` kwarg; detect once.
-    try:
-        _FA_SUPPORTS_OUT = (
-            "out" in _inspect.signature(_flash_attn_varlen_func).parameters
-        )
-    except (TypeError, ValueError):
-        _FA_SUPPORTS_OUT = False
-
-    def flash_attn_varlen_func(*args, out=None, **kwargs):
-        kwargs.pop("out", None)
-        if _FA_SUPPORTS_OUT and out is not None:
-            kwargs["out"] = out
-            return _flash_attn_varlen_func(*args, **kwargs)
-        result = _flash_attn_varlen_func(*args, **kwargs)
-        if out is not None:
-            out.copy_(result)
-            return out
-        return result
-
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 
 # Continuation prefill: for small continuation chunks (q_len ≤ threshold),
 # use the TQ decode kernel directly instead of full-dequant + flash_attn.
