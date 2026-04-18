@@ -507,16 +507,7 @@ class EngineCore:
             self.log_error_detail(scheduler_output),
             self.log_iteration_details(scheduler_output),
         ):
-            model_outputs = None
-            if any([so.total_num_scheduled_tokens == 0 for so in scheduler_outputs]) and \
-                any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs]):
-                future_results = future.result()
-                exec_model_fut_results = exec_model_fut.result()
-                model_outputs = [exec_model_fut_results[idx] if exec_model_fut_results[idx] is not None
-                                 else future_results[idx] for idx in range(len(future_results))]
-            else:
-                model_outputs = future.result()
-
+            model_outputs = future.result()
             if model_output is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
@@ -1380,7 +1371,16 @@ class EngineCoreProc(EngineCore):
             self.log_domain_error_detail(scheduler_outputs),
             self.log_domain_iteration_details(scheduler_outputs),
         ):
-            model_outputs = future.result()
+            model_outputs = None
+            if any([so.total_num_scheduled_tokens == 0 for so in scheduler_outputs]) and \
+                any([so.total_num_scheduled_tokens > 0 for so in scheduler_outputs]):
+                future_results = future.result()
+                exec_model_fut_results = exec_model_fut.result()
+                model_outputs = [exec_model_fut_results[idx] if exec_model_fut_results[idx] is not None
+                                 else future_results[idx] for idx in range(len(future_results))]
+            else:
+                model_outputs = future.result()
+
             if model_outputs is None:
                 # None from sample_tokens() implies that the original execute_model()
                 # call failed - raise that exception.
