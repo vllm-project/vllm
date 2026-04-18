@@ -64,6 +64,7 @@ class Sampler(nn.Module):
         self.topk_topp_sampler = TopKTopPSampler(logprobs_mode)
         self.pin_memory = is_pin_memory_available()
         self.logprobs_mode = logprobs_mode
+        self.sampler_workspace = None
 
     def forward(
         self,
@@ -87,8 +88,12 @@ class Sampler(nn.Module):
                 else:
                     raw_logprobs = logits.to(torch.float32)
 
-        # Use float32 for the logits.
-        logits = logits.to(torch.float32)
+        # We gracefully exploit PyTorch's in-place casting via copy_() using our
+        # permanently pre-allocated 150MB Float32 workspace bounds to max_num_seqs.
+        # This natively eliminates the memory spike from dynamic floats.
+        logits_fp32 = self.sampler_workspace[: logits.size(0)]
+        logits_fp32.copy_(logits)
+        logits = logits_fp32
 
         logits = self.apply_logits_processors(
             logits, sampling_metadata, predict_bonus_token
