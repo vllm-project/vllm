@@ -255,6 +255,27 @@ class InductorStandaloneAdaptor(CompilerInterface):
     ) -> None:
         self.cache_dir = cache_dir
 
+    @staticmethod
+    def resolve_dynamic_shapes(compile_range: Range):
+        if compile_range.is_single_size():
+            return "from_example_inputs"
+        else:
+            return "from_graph"
+
+    @staticmethod
+    def use_aot() -> bool:
+        supports_aot = is_torch_equal_or_newer("2.10.0")
+
+        if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
+            logger.error(
+                "CRITICAL: VLLM_USE_MEGA_AOT_ARTIFACT "
+                "is enabled but PyTorch version does not support 'aot' "
+                "parameter in standalone_compile. This requires PyTorch "
+                "2.10.0+. Falling back to non-AOT mode."
+            )
+
+        return supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT
+
     def compile(
         self,
         graph: fx.GraphModule,
@@ -271,22 +292,10 @@ class InductorStandaloneAdaptor(CompilerInterface):
         set_inductor_config(current_config, compile_range)
         set_functorch_config()
 
-        if compile_range.is_single_size():
-            dynamic_shapes = "from_example_inputs"
-        else:
-            dynamic_shapes = "from_graph"
+        dynamic_shapes = self.resolve_dynamic_shapes(compile_range)
+        use_aot = self.use_aot()
 
         from torch._inductor import standalone_compile
-
-        supports_aot = is_torch_equal_or_newer("2.10.0")
-
-        if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
-            logger.error(
-                "CRITICAL: VLLM_USE_MEGA_AOT_ARTIFACT "
-                "is enabled but PyTorch version does not support 'aot' "
-                "parameter in standalone_compile. This requires PyTorch "
-                "2.10.0+. Falling back to non-AOT mode."
-            )
 
         compile_kwargs = {
             "dynamic_shapes": dynamic_shapes,
@@ -295,7 +304,6 @@ class InductorStandaloneAdaptor(CompilerInterface):
             },
         }
 
-        use_aot: bool = supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT
         # only add 'aot' parameter if both supported and enabled...
         # this will set bundled_autograd_cache
         # https://github.com/pytorch/pytorch/blob/9bbc5b2905c260adf41bc866a732f9c121a2828a/torch/_inductor/standalone_compile.py#L359 # noqa
