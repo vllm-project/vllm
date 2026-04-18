@@ -196,24 +196,6 @@ class SpeculativeConfig:
     positions equals this value. Only used when rejection_sample_method
     is 'synthetic'. Must be in [0, 1]."""
 
-    custom_proposer_backend: str | None = None
-    """Module path to a custom proposer class (e.g., 'my_module.MyCustomProposer').
-    If provided, this custom class will be used to generate draft tokens instead
-    of built-in proposers. The class must implement the interface:
-        class MyCustomProposer:
-            def __init__(self, vllm_config: VllmConfig):
-                ...
-
-            def propose(
-                self,
-                sampled_token_ids: list[list[int]],
-                num_tokens_no_spec: int,
-                token_ids_cpu: torch.Tensor,
-                slot_mappings: torch.Tensor | None = None,
-            ) -> list[list[int]]:
-                ...
-    The propose method must return a list of draft token sequences for each request."""
-
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -395,7 +377,14 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
-        if self.custom_proposer_backend is not None:
+        # Check if the model field contains a custom module path (e.g., 'pkg.Mod')
+        if (
+            self.model is not None
+            and "." in self.model
+            and not self.model.startswith(("http://", "https://", "file://"))
+            and "/" not in self.model  # not a HuggingFace repo (org/model)
+        ):
+            # Treat as a custom class path
             self.method = "custom_class"
         elif self.method is None:
             if self.model in ("ngram", "[ngram]"):
@@ -432,7 +421,13 @@ class SpeculativeConfig:
             elif self.method == "extract_hidden_states":
                 self.model = "extract_hidden_states"
             elif self.method == "custom_class":
-                self.model = "custom_class"
+                # method was set explicitly, but model should already contain the
+                # custom module path. If not, this is a configuration error.
+                if self.model is None:
+                    raise ValueError(
+                        "method='custom_class' requires 'model' to contain the "
+                        "custom proposer module path (e.g., 'my_module.MyProposer')."
+                    )
             else:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
@@ -479,6 +474,11 @@ class SpeculativeConfig:
         elif self.method == "custom_class":
             # Custom class proposer does not need a draft model.
             # It will dynamically load the user-provided class at runtime.
+            logger.warning_once(
+                "Using a custom class-based proposer backend. This is an "
+                "experimental feature and the proposer interface is subject to "
+                "breaking changes in future vLLM releases."
+            )
             self.prompt_lookup_max = 0
             self.prompt_lookup_min = 0
             self.draft_model_config = self.target_model_config

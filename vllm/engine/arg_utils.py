@@ -554,8 +554,6 @@ class EngineArgs:
 
     speculative_config: dict[str, Any] | None = None
 
-    custom_proposer_backend: str | None = None
-
     show_hidden_metrics_for_version: str | None = (
         ObservabilityConfig.show_hidden_metrics_for_version
     )
@@ -1356,17 +1354,6 @@ class EngineArgs:
             "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
-            "--custom-proposer-backend",
-            type=str,
-            default=None,
-            help="Module path to a custom proposer class for speculative "
-            "decoding (e.g., 'my_module.MyCustomProposer'). The class must "
-            "implement a propose() method that accepts sampled_token_ids, "
-            "num_tokens_no_spec, token_ids_cpu, and slot_mappings parameters "
-            "and returns a list of draft token sequences. "
-            "This option takes highest priority over --speculative-config.",
-        )
-        vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
@@ -1559,14 +1546,7 @@ class EngineArgs:
         `speculative_config`.
         """
         if self.speculative_config is None:
-            if self.custom_proposer_backend is None:
-                return None
-            self.speculative_config = {}
-
-        if self.custom_proposer_backend is not None:
-            self.speculative_config["custom_proposer_backend"] = (
-                self.custom_proposer_backend
-            )
+            return None
 
         # Note(Shangming): These parameters are not obtained from the cli arg
         # '--speculative-config' and must be passed in when creating the engine

@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Integration test for custom_proposer_backend in speculative decoding.
+"""Integration test for custom proposer class in speculative decoding.
 
 Usage:
     .venv/bin/python test_custom_proposer.py
 """
+
+import os
 
 import torch
 
@@ -55,6 +57,10 @@ class DummyDraftProposer:
         Returns:
             List of draft token sequences for each request.
         """
+        # Cross-process flag to prove this method was executed
+        with open("proposer_called.flag", "w") as f:
+            f.write("called")
+
         batch_size = len(sampled_token_ids)
         last_tokens = [seq[-1] for seq in sampled_token_ids]
         drafts = [[t] * self.num_speculative_tokens for t in last_tokens]
@@ -71,11 +77,15 @@ if __name__ == "__main__":
     print("Custom Proposer Backend Integration Test")
     print("=" * 60)
 
+    # Cleanup any leftover flag from previous failed runs
+    if os.path.exists("proposer_called.flag"):
+        os.remove("proposer_called.flag")
+
     llm = LLM(
         model=MODEL_ID,
         speculative_config={
+            "model": f"{__name__}.DummyDraftProposer",
             "num_speculative_tokens": NUM_SPEC_TOKENS,
-            "custom_proposer_backend": f"{__name__}.DummyDraftProposer",
         },
         gpu_memory_utilization=0.4,
         enforce_eager=True,
@@ -101,4 +111,11 @@ if __name__ == "__main__":
         print(f"Generated text:  {generated!r}")
         print("-" * 60)
 
+    # Verify the custom proposer's propose() was actually called across processes
+    assert os.path.exists("proposer_called.flag"), (
+        "The custom proposer's propose() method was never called!"
+    )
+    os.remove("proposer_called.flag")
+
+    print("✓ Custom proposer was actively used during generation!")
     print("Test completed successfully.")
