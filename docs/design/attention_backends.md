@@ -106,6 +106,7 @@ Priority is **1 = highest** (tried first).
 | 2 | `FLASH_ATTN` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
+| 5 | `TURBOQUANT` |
 
 **Ampere/Hopper (SM 8.x-9.x):**
 
@@ -115,6 +116,7 @@ Priority is **1 = highest** (tried first).
 | 2 | `FLASHINFER` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
+| 5 | `TURBOQUANT` |
 
 ### MLA Attention (DeepSeek-style)
 
