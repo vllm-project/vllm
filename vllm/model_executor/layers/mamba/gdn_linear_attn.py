@@ -360,7 +360,7 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         output_gate_type = getattr(config, "output_gate_type", "silu")
         if output_gate_type == "swish":
             output_gate_type = "silu"
-        assert output_gate_type in ["silu", "sigmoid"], (
+        assert output_gate_type in ["silu", "swish", "sigmoid"], (
             f"unsupported {output_gate_type=}"
         )
 

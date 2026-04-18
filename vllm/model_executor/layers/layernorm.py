@@ -478,7 +478,7 @@ class RMSNormGated(CustomOp):
         weight = self.weight.float()
         z = z.float() if z is not None else None
 
-        assert self.activation in ["silu", "sigmoid"]
+        assert self.activation in ["silu", "sigmoid", "swish"]
         act_fn = F.sigmoid if self.activation == "sigmoid" else F.silu
 
         # Apply gating before normalization if needed
