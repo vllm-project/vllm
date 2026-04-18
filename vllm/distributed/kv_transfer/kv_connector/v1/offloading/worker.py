@@ -415,13 +415,12 @@ class OffloadingConnectorWorker:
         """Return completed transfer job IDs since the last call."""
         if not self._stores.completed and not self._loads.completed:
             return None
-        meta = OffloadingWorkerMetadata(
-            completed_store_jobs=self._stores.completed,
-            completed_load_jobs=self._loads.completed,
-        )
+        # Job IDs are globally unique across loads and stores (single counter
+        # in the scheduler), so merging is collision-free.
+        completed_jobs = {**self._stores.completed, **self._loads.completed}
         self._stores.completed = {}
         self._loads.completed = {}
-        return meta
+        return OffloadingWorkerMetadata(completed_jobs=completed_jobs)
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """

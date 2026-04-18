@@ -36,29 +36,21 @@ class OffloadingConnectorMetadata(KVConnectorMetadata):
 class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
     """Worker -> Scheduler metadata for completed transfer jobs.
 
-    Each worker reports {job_id: 1} for newly completed load/store jobs.
-    aggregate() sums counts across workers within a step.
+    Each worker reports {job_id: 1} for newly completed transfer jobs
+    (load or store). aggregate() sums counts across workers within a step.
     The scheduler accumulates across steps and processes
     a transfer completion only when count reaches num_workers.
     """
 
-    completed_store_jobs: dict[int, int] = field(default_factory=dict)
-    completed_load_jobs: dict[int, int] = field(default_factory=dict)
+    completed_jobs: dict[int, int] = field(default_factory=dict)
 
     def aggregate(
         self, other: "KVConnectorWorkerMetadata"
     ) -> "KVConnectorWorkerMetadata":
         assert isinstance(other, OffloadingWorkerMetadata)
 
-        merged_store_jobs = dict(self.completed_store_jobs)
-        for k, v in other.completed_store_jobs.items():
-            merged_store_jobs[k] = merged_store_jobs.get(k, 0) + v
+        merged = dict(self.completed_jobs)
+        for k, v in other.completed_jobs.items():
+            merged[k] = merged.get(k, 0) + v
 
-        merged_load_jobs = dict(self.completed_load_jobs)
-        for k, v in other.completed_load_jobs.items():
-            merged_load_jobs[k] = merged_load_jobs.get(k, 0) + v
-
-        return OffloadingWorkerMetadata(
-            completed_store_jobs=merged_store_jobs,
-            completed_load_jobs=merged_load_jobs,
-        )
+        return OffloadingWorkerMetadata(completed_jobs=merged)

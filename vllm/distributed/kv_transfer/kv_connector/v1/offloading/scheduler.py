@@ -428,7 +428,7 @@ class OffloadingConnectorScheduler:
         meta = connector_output.kv_connector_worker_meta
         assert isinstance(meta, OffloadingWorkerMetadata)
 
-        for job_id, count in meta.completed_store_jobs.items():
+        for job_id, count in meta.completed_jobs.items():
             job_status = self._jobs.get(job_id)
             if job_status is None:
                 continue
@@ -436,37 +436,22 @@ class OffloadingConnectorScheduler:
             if job_status.pending_count > 0:
                 continue
 
-            # All TP workers reported — store is complete.
+            # All TP workers reported — job is complete.
             self._jobs.pop(job_id)
             req_status = self._req_status.get(job_status.req_id)
             if req_status is None:
                 continue
-            keys = req_status.store_jobs.pop(job_id, None)
-            if not keys:
-                continue
-            self.manager.complete_store(keys)
-            if req_status.is_idle():
-                self._req_status.pop(job_status.req_id, None)
 
-        for job_id, count in meta.completed_load_jobs.items():
-            job_status = self._jobs.get(job_id)
-            if job_status is None:
-                continue
-            job_status.pending_count -= count
-            if job_status.pending_count > 0:
-                continue
+            # Classify load vs store by presence in the request's per-type sets.
+            if job_id in req_status.store_jobs:
+                keys = req_status.store_jobs.pop(job_id)
+                self.manager.complete_store(keys)
+            elif job_id in req_status.load_jobs:
+                keys = req_status.load_jobs.pop(job_id)
+                self.manager.complete_load(keys)
+                if self._blocks_being_loaded:
+                    self._blocks_being_loaded.difference_update(keys)
 
-            # All TP workers reported — load is complete.
-            self._jobs.pop(job_id)
-            req_status = self._req_status.get(job_status.req_id)
-            assert req_status is not None
-            keys = req_status.load_jobs.pop(job_id, None)
-            assert keys is not None
-
-            self.manager.complete_load(keys)
-
-            if self._blocks_being_loaded:
-                self._blocks_being_loaded.difference_update(keys)
             if req_status.is_idle():
                 self._req_status.pop(job_status.req_id, None)
 
