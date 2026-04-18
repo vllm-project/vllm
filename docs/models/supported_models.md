@@ -682,6 +682,24 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 
+#### Realtime Transcription
+
+Speech models that support streaming transcription via the
+[`/v1/realtime`](../serving/openai_compatible_server.md#realtime-api)
+WebSocket endpoint.
+
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `VoxtralRealtimeGeneration` | Voxtral Realtime | `mistralai/Voxtral-Mini-4B-Realtime-2602` | | |
+| `Qwen3ASRRealtimeGeneration` | Qwen3-ASR Realtime | `Qwen/Qwen3-ASR-0.6B` | | |
+
+!!! note
+    `VoxtralRealtimeGeneration` requires `mistral-common[audio]` to be installed, and must be served with `--tokenizer-mode mistral`.
+
+    `Qwen3ASRRealtimeGeneration` is not auto-detected from `config.json`.
+    You must pass `--hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'`
+    when serving.
+
 ## Pooling Models
 
 See [this page](pooling_models/README.md) for more information on how to use pooling models.
