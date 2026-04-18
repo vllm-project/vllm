@@ -198,7 +198,7 @@ If these conditions are set, the fusion is enabled automatically for optimizatio
     optimization level.
 
 **What it fuses.** Fuses the MiniMax M2 Q/K normalization path that performs an all-reduce over the
-per-token Q/K variances before applying RMS normalization to Q and K. 
+per-token Q/K variances before applying RMS normalization to Q and K.
 
 This pass is distinct from [`enable_qk_norm_rope_fusion`](#qk-norm--rope-enable_qk_norm_rope_fusion):
 `fuse_minimax_qk_norm` targets MiniMax M2's tensor-parallel all-reduce + RMSNorm sequence, while
