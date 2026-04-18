@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 import torch
 
@@ -39,45 +39,22 @@ from vllm.v1.kv_offload.worker.worker import (
 logger = init_logger(__name__)
 
 
-class _LoadTracker:
-    """Tracks active load jobs on the worker."""
+@dataclass(slots=True)
+class _JobInfo:
+    """Per-job worker-side state."""
 
-    def __init__(self):
-        # job_id -> req_id
-        self.active: dict[int, ReqId] = {}
-
-    def add(self, job_id: int, req_id: ReqId) -> None:
-        self.active[job_id] = req_id
-
-    def pop(self, job_id: int) -> ReqId | None:
-        return self.active.pop(job_id, None)
+    req_id: ReqId
+    is_store: bool
 
 
-class _StoreTracker:
-    """Tracks active store jobs on the worker."""
+@dataclass(slots=True)
+class _RequestState:
+    """Per-request worker-side state. Created lazily for requests with stores."""
 
-    def __init__(self):
-        # job_id -> req_id
-        self.active: dict[int, ReqId] = {}
-        # req_id -> set of active job IDs
-        self.by_req: dict[ReqId, set[int]] = defaultdict(set)
-        # deferred submissions (job_id, transfer_spec)
-        self.unsubmitted: list[tuple[int, TransferSpec]] = []
-        # requests that finished generating but have pending stores
-        self.reqs_waiting: set[ReqId] = set()
-
-    def add(self, job_id: int, req_id: ReqId, transfer_spec: TransferSpec):
-        self.active[job_id] = req_id
-        self.by_req[req_id].add(job_id)
-        self.unsubmitted.append((job_id, transfer_spec))
-
-    def pop(self, job_id: int) -> ReqId | None:
-        req_id = self.active.pop(job_id, None)
-        if req_id is not None:
-            jobs = self.by_req.get(req_id)
-            if jobs is not None:
-                jobs.discard(job_id)
-        return req_id
+    store_jobs: set[int] = field(default_factory=set)
+    # True once the engine has signaled this request finished generating;
+    # finished_sending fires when the last in-flight store completes.
+    is_finished: bool = False
 
 
 class OffloadingConnectorWorker:
@@ -88,8 +65,12 @@ class OffloadingConnectorWorker:
         self.worker = OffloadingWorker()
 
         self.kv_connector_stats = OffloadingConnectorStats()
-        self._loads = _LoadTracker()
-        self._stores = _StoreTracker()
+        # job_id -> (req_id, is_store)
+        self._jobs: dict[int, _JobInfo] = {}
+        # req_id -> (store_jobs, is_finished); only populated for reqs with stores
+        self._req_state: dict[ReqId, _RequestState] = {}
+        # deferred store submissions, drained at the start of each engine step
+        self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
         self._connector_worker_meta = OffloadingWorkerMetadata()
 
     def _register_handlers(self, kv_caches: CanonicalKVCaches):
@@ -324,24 +305,24 @@ class OffloadingConnectorWorker:
         self._register_handlers(canonical_kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
-        for job_id, transfer_spec in self._stores.unsubmitted:
+        for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
-        self._stores.unsubmitted.clear()
+        self._unsubmitted_store_jobs.clear()
 
         for req_id in kv_connector_metadata.jobs_to_flush or ():
-            job_ids = self._stores.by_req.get(req_id)
-            if job_ids:
-                self.worker.wait(job_ids)
+            req_state = self._req_state.get(req_id)
+            if req_state and req_state.store_jobs:
+                self.worker.wait(req_state.store_jobs)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
-        for job_id, transfer_spec in self._stores.unsubmitted:
+        for job_id, transfer_spec in self._unsubmitted_store_jobs:
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
-        self._stores.unsubmitted.clear()
+        self._unsubmitted_store_jobs.clear()
 
         for job_id, entry in metadata.load_jobs.items():
-            self._loads.add(job_id, entry.req_id)
+            self._jobs[job_id] = _JobInfo(req_id=entry.req_id, is_store=False)
             success = self.worker.transfer_async(job_id, entry.transfer_spec)
             assert success
 
@@ -350,7 +331,10 @@ class OffloadingConnectorWorker:
             # NOTE(orozery): defer the store to the beginning of the next
             # engine step, so that offloading starts AFTER transfers related
             # to token sampling, thereby avoiding delays to token generation.
-            self._stores.add(job_id, entry.req_id, entry.transfer_spec)
+            self._jobs[job_id] = _JobInfo(req_id=entry.req_id, is_store=True)
+            req_state = self._req_state.setdefault(entry.req_id, _RequestState())
+            req_state.store_jobs.add(job_id)
+            self._unsubmitted_store_jobs.append((job_id, entry.transfer_spec))
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
@@ -379,32 +363,37 @@ class OffloadingConnectorWorker:
                     transfer_type=transfer_result.transfer_type,
                 )
 
-            # Check if this is a load or store.
-            req_id = self._loads.pop(job_id)
-            if req_id is not None:
-                self._connector_worker_meta.mark_completed(job_id)
-                finished_recving.add(req_id)
+            self._connector_worker_meta.mark_completed(job_id)
+            job_info = self._jobs.pop(job_id, None)
+            if job_info is None:
+                continue
+
+            if not job_info.is_store:
+                finished_recving.add(job_info.req_id)
                 continue
 
             # Store completed.
-            self._connector_worker_meta.mark_completed(job_id)
-            req_id = self._stores.pop(job_id)
-            if req_id is None:
+            req_state = self._req_state.get(job_info.req_id)
+            if req_state is None:
                 continue
-            if self._stores.by_req.get(req_id):
+            req_state.store_jobs.discard(job_id)
+            if req_state.store_jobs:
                 continue
-            if req_id in self._stores.reqs_waiting:
-                self._stores.reqs_waiting.remove(req_id)
-                finished_sending.add(req_id)
-                self._stores.by_req.pop(req_id, None)
+            # All in-flight stores done for this req — emit finished_sending
+            # only once the engine has signaled the request finished.
+            if req_state.is_finished:
+                finished_sending.add(job_info.req_id)
+                self._req_state.pop(job_info.req_id, None)
 
         for req_id in finished_req_ids:
-            jobs = self._stores.by_req.get(req_id)
-            if jobs:
-                self._stores.reqs_waiting.add(req_id)
-            elif jobs is not None:
+            req_state = self._req_state.get(req_id)
+            if req_state is None:
+                continue
+            if req_state.store_jobs:
+                req_state.is_finished = True
+            else:
                 finished_sending.add(req_id)
-                self._stores.by_req.pop(req_id, None)
+                self._req_state.pop(req_id, None)
 
         return finished_sending, finished_recving
 
@@ -429,10 +418,8 @@ class OffloadingConnectorWorker:
         return kv_connector_stats
 
     def shutdown(self) -> None:
-        self._stores.unsubmitted.clear()
-        self._stores.active.clear()
-        self._stores.by_req.clear()
-        self._stores.reqs_waiting.clear()
-        self._loads.active.clear()
+        self._unsubmitted_store_jobs.clear()
+        self._jobs.clear()
+        self._req_state.clear()
         self._connector_worker_meta = OffloadingWorkerMetadata()
         self.worker.shutdown()
