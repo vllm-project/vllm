@@ -134,7 +134,7 @@ class OffloadingConnectorScheduler:
         self.manager: OffloadingManager = spec.get_manager()
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
-        self._load_jobs: dict[int, TransferJob] = {}
+        self._current_batch_load_jobs: dict[int, TransferJob] = {}
         # if GPU prefix caching is enabled,
         # track loaded blocks to avoid redundant loads
         self._blocks_being_loaded: set[OffloadKey] | None = (
@@ -278,7 +278,7 @@ class OffloadingConnectorScheduler:
         )
 
         load_job_id = self._generate_job_id()
-        self._load_jobs[load_job_id] = TransferJob(
+        self._current_batch_load_jobs[load_job_id] = TransferJob(
             req_id=request.request_id,
             transfer_spec=(src_spec, dst_spec),
         )
@@ -396,11 +396,11 @@ class OffloadingConnectorScheduler:
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         meta = OffloadingConnectorMetadata(
-            load_jobs=self._load_jobs,
+            load_jobs=self._current_batch_load_jobs,
             store_jobs=self._build_store_jobs(scheduler_output),
             jobs_to_flush=scheduler_output.preempted_req_ids,
         )
-        self._load_jobs = {}
+        self._current_batch_load_jobs = {}
 
         # NOTE (orozery): we should move this logic to update_connector_output
         # once KVConnectorOutput allows us to report completed transfers
@@ -442,7 +442,6 @@ class OffloadingConnectorScheduler:
             if req_status is None:
                 continue
 
-            # Classify load vs store by presence in the request's per-type sets.
             if job_id in req_status.store_jobs:
                 keys = req_status.store_jobs.pop(job_id)
                 self.manager.complete_store(keys)
