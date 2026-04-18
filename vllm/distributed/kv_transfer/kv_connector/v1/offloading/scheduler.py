@@ -88,8 +88,8 @@ class RequestOffloadState:
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
-    load_jobs: dict[int, set[OffloadKey]] = field(default_factory=dict)
-    store_jobs: dict[int, set[OffloadKey]] = field(default_factory=dict)
+    load_job: int | None = None
+    store_jobs: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -123,7 +123,7 @@ class RequestOffloadState:
             group_state.block_ids.extend(new_blocks)
 
     def is_idle(self) -> bool:
-        return self.req.is_finished() and not self.load_jobs and not self.store_jobs
+        return self.req.is_finished() and self.load_job is None and not self.store_jobs
 
 
 class OffloadingConnectorScheduler:
@@ -144,6 +144,9 @@ class OffloadingConnectorScheduler:
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
         self._jobs: dict[int, TransferJobStatus] = {}
+        # Offload keys for each in-flight job. Populated at job creation
+        # and removed on completion, preemption.
+        self._job_keys: dict[int, set[OffloadKey]] = {}
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -282,7 +285,8 @@ class OffloadingConnectorScheduler:
             req_id=request.request_id,
             transfer_spec=(src_spec, dst_spec),
         )
-        req_status.load_jobs[load_job_id] = set(offload_keys)
+        req_status.load_job = load_job_id
+        self._job_keys[load_job_id] = set(offload_keys)
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
@@ -363,7 +367,8 @@ class OffloadingConnectorScheduler:
             )
 
             job_id = self._generate_job_id()
-            req_status.store_jobs[job_id] = set(keys_to_store)
+            req_status.store_jobs.add(job_id)
+            self._job_keys[job_id] = set(keys_to_store)
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
@@ -383,15 +388,6 @@ class OffloadingConnectorScheduler:
 
         return store_jobs
 
-    def _cleanup_store_jobs_for_req(self, req_id: ReqId) -> None:
-        """Remove per-job tracking state for a given request."""
-        req_status = self._req_status.get(req_id)
-        if req_status is None:
-            return
-        for jid in req_status.store_jobs:
-            self._jobs.pop(jid, None)
-        req_status.store_jobs.clear()
-
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
@@ -401,20 +397,6 @@ class OffloadingConnectorScheduler:
             jobs_to_flush=scheduler_output.preempted_req_ids,
         )
         self._current_batch_load_jobs = {}
-
-        # NOTE (orozery): we should move this logic to update_connector_output
-        # once KVConnectorOutput allows us to report completed transfers
-        for req_id in scheduler_output.preempted_req_ids or ():
-            req_status = self._req_status.get(req_id)
-            if req_status is None:
-                continue
-            keys = set().union(*req_status.store_jobs.values())
-            if keys:
-                self.manager.complete_store(keys)
-            self._cleanup_store_jobs_for_req(req_id)
-            if req_status.is_idle():
-                self._req_status.pop(req_id, None)
-
         return meta
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -438,15 +420,16 @@ class OffloadingConnectorScheduler:
 
             # All TP workers reported — job is complete.
             self._jobs.pop(job_id)
+            keys = self._job_keys.pop(job_id, None)
             req_status = self._req_status.get(job_status.req_id)
-            if req_status is None:
+            if req_status is None or keys is None:
                 continue
 
             if job_id in req_status.store_jobs:
-                keys = req_status.store_jobs.pop(job_id)
+                req_status.store_jobs.remove(job_id)
                 self.manager.complete_store(keys)
-            elif job_id in req_status.load_jobs:
-                keys = req_status.load_jobs.pop(job_id)
+            elif job_id == req_status.load_job:
+                req_status.load_job = None
                 self.manager.complete_load(keys)
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(keys)
