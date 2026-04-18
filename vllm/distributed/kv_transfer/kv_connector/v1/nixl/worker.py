@@ -1914,6 +1914,10 @@ class NixlConnectorWorker:
                 meta.remote.block_ids,
                 self._mamba_phys_ratio[meta.remote.engine_id],
             )
+        else:
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids
+            )
         # D may have to perform multiple reads from different remote ranks.
         for i, remote_rank in enumerate(remote_ranks):
             if self.use_mla and tp_ratio < 0 and i > 0:
