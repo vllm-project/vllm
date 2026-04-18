@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, TypeVar
 
@@ -26,7 +26,7 @@ class MediaWithBytes(Generic[_T]):
     """
 
     media: _T
-    original_bytes: bytes
+    original_bytes: bytes = field(repr=False)
 
     def __array__(self, *args, **kwargs) -> np.ndarray:
         """Allow np.array(obj) to return np.array(obj.media)."""
@@ -44,6 +44,28 @@ class MediaWithBytes(Generic[_T]):
 
 
 class MediaIO(ABC, Generic[_T]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
+    @classmethod
+    def merge_kwargs(
+        cls,
+        default_kwargs: dict[str, Any] | None,
+        runtime_kwargs: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Merge config-level kwargs and request-level kwargs.
+
+        By default this performs a shallow merge where runtime kwargs override
+        keys in default kwargs. Subclasses may override to apply modality-
+        specific behavior.
+        """
+        merged = dict(default_kwargs or {})
+        if runtime_kwargs:
+            merged.update(runtime_kwargs)
+        return merged
+
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError

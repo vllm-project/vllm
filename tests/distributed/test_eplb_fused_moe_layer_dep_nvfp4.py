@@ -253,7 +253,7 @@ def test_eplb_fml(
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", backend)
 
-    if torch.cuda.device_count() < world_size:
+    if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
     num_local_experts = num_experts // world_size

@@ -20,6 +20,7 @@ from tests.v1.sample.utils import (
 from vllm import SamplingParams
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
 
 from ...conftest import HfRunner, VllmRunner
 
@@ -30,6 +31,21 @@ NONE = BatchLogprobsComposition.NONE
 SAMPLE = BatchLogprobsComposition.SAMPLE
 PROMPT = BatchLogprobsComposition.PROMPT
 SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
+
+# On ROCm, floating-point reductions in attention and GEMM kernels are
+# non-associative and sensitive to batch geometry. The ref LLM (no spec
+# decode, default scheduling) and the spec-decode LLM (chunked prefill,
+# different effective batch sizes) follow different reduction orders,
+# producing numerically divergent logprobs that get misattributed to
+# spec-decode incorrectness.
+#
+# Force LLM instances into an identical, deterministic execution
+# mode so the test isolates spec-decode correctness only:
+ROCM_DETERMINISM_KWARGS: dict = (
+    dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
+    if current_platform.is_rocm()
+    else {}
+)
 
 
 @pytest.fixture(
@@ -52,7 +68,7 @@ def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
         # TODO: enable this once we support it for
         # prompt logprobs.
         enable_prefix_caching=request.param,
-        gpu_memory_utilization=0.4,  # up to 2 alive concurrently
+        gpu_memory_utilization=0.4,
     ) as vllm_model:
         yield vllm_model
 
@@ -311,7 +327,8 @@ def test_get_logprobs_and_prompt_logprobs(
       temperature: "temperature" sampling parameter
       example_prompts: example prompt fixture
     """
-    do_apc = vllm_model.llm.llm_engine.cache_config.enable_prefix_caching
+    vllm_config = vllm_model.llm.llm_engine.vllm_config
+    do_apc = vllm_config.cache_config.enable_prefix_caching
     if do_apc and (temperature < 2.0 or batch_logprobs_composition != SAMPLE_PROMPT):
         # Skip some test-cases to save time.
         pytest.skip()
@@ -365,21 +382,20 @@ def test_max_logprobs():
     Should also fail for `prompt_logprobs > max_logprobs`
     APC should not matter as this test checks basic request validation.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=1,
         enable_prefix_caching=False,
-        # 2 other llms alive during whole session
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
-    vllm_sampling_params = SamplingParams(logprobs=1)
-    # should pass
-    runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
+    ) as runner:
+        vllm_sampling_params = SamplingParams(logprobs=1)
+        # should pass
+        runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
-    bad_sampling_params = SamplingParams(logprobs=2)
-    with pytest.raises(ValueError):
-        runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+        bad_sampling_params = SamplingParams(logprobs=2)
+        with pytest.raises(ValueError):
+            runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
 
 def test_none_logprobs(vllm_model, example_prompts):
@@ -448,33 +464,31 @@ def test_all_logprobs(example_prompts):
     Args:
       example_prompts: list of example prompts (test fixture)
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=-1,
         enable_prefix_caching=False,
-        # 2 other llms alive during whole session
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        sampling_params_logprobs_all = SamplingParams(
+            max_tokens=5, logprobs=-1, prompt_logprobs=-1
+        )
+        results_logprobs_all = runner.llm.generate(
+            example_prompts, sampling_params=sampling_params_logprobs_all
+        )
+        vocab_size = runner.llm.llm_engine.model_config.get_vocab_size()
 
-    sampling_params_logprobs_all = SamplingParams(
-        max_tokens=5, logprobs=-1, prompt_logprobs=-1
-    )
-    results_logprobs_all = runner.llm.generate(
-        example_prompts, sampling_params=sampling_params_logprobs_all
-    )
-    vocab_size = runner.llm.llm_engine.model_config.get_vocab_size()
-
-    for i in range(len(results_logprobs_all)):
-        logprobs = results_logprobs_all[i].outputs[0].logprobs
-        prompt_logprobs = results_logprobs_all[i].prompt_logprobs
-        assert logprobs is not None
-        for logprob in logprobs:
-            assert len(logprob) == vocab_size
-        assert prompt_logprobs is not None
-        assert prompt_logprobs[0] is None
-        for prompt_logprob in prompt_logprobs[1:]:
-            assert len(prompt_logprob) == vocab_size
+        for i in range(len(results_logprobs_all)):
+            logprobs = results_logprobs_all[i].outputs[0].logprobs
+            prompt_logprobs = results_logprobs_all[i].prompt_logprobs
+            assert logprobs is not None
+            for logprob in logprobs:
+                assert len(logprob) == vocab_size
+            assert prompt_logprobs is not None
+            assert prompt_logprobs[0] is None
+            for prompt_logprob in prompt_logprobs[1:]:
+                assert len(prompt_logprob) == vocab_size
 
 
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
@@ -494,24 +508,28 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         max_model_len=16,
         logprobs_mode=logprobs_mode,
     )
-    vllm_sampling_params = SamplingParams(logprobs=1)
-    results = llm.generate(["Hello world"], sampling_params=vllm_sampling_params)
+    try:
+        vllm_sampling_params = SamplingParams(logprobs=1)
+        results = llm.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
-    total_token_with_logprobs = 0
-    positive_values = 0
-    for output in results[0].outputs:
-        for logprobs in output.logprobs:
-            for token_id in logprobs:
-                logprob = logprobs[token_id]
-                if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
-                    assert logprob.logprob <= 0
-                if logprob.logprob > 0:
-                    positive_values = positive_values + 1
-                total_token_with_logprobs = total_token_with_logprobs + 1
-    assert total_token_with_logprobs >= len(results[0].outputs)
-    if logprobs_mode in ("raw_logits", "processed_logits"):
-        assert positive_values > 0
-    del llm
+        total_token_with_logprobs = 0
+        positive_values = 0
+        for output in results[0].outputs:
+            for logprobs in output.logprobs:
+                for token_id in logprobs:
+                    logprob = logprobs[token_id]
+                    if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
+                        assert logprob.logprob <= 0
+                    if logprob.logprob > 0:
+                        positive_values = positive_values + 1
+                    total_token_with_logprobs = total_token_with_logprobs + 1
+        assert total_token_with_logprobs >= len(results[0].outputs)
+        if logprobs_mode in ("raw_logits", "processed_logits"):
+            assert positive_values > 0
+    finally:
+        del llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
 
 
 class TestCorrectDecodedToken:
@@ -521,6 +539,10 @@ class TestCorrectDecodedToken:
     result in the Unicode replacement character "�" (U+FFFD). This commonly
     happens with byte-fallback tokenization when multi-byte UTF-8 characters
     are split across tokens.
+
+    The method signature is _correct_decoded_token(token_id, context_token_ids)
+    where token_id is the single token to correct and context_token_ids are
+    the preceding sampled tokens in sequential order.
     """
 
     @pytest.fixture
@@ -532,8 +554,8 @@ class TestCorrectDecodedToken:
         return tokenizer
 
     @pytest.fixture
-    def processor_with_empty_logprobs(self, mock_tokenizer):
-        """Create a LogprobsProcessor with empty logprobs."""
+    def processor(self, mock_tokenizer):
+        """Create a LogprobsProcessor."""
         from vllm.v1.engine.logprobs import LogprobsProcessor
 
         processor = LogprobsProcessor(
@@ -546,209 +568,191 @@ class TestCorrectDecodedToken:
         )
         return processor
 
-    @pytest.fixture
-    def processor_with_previous_logprobs(self, mock_tokenizer):
-        """Create a LogprobsProcessor with previous logprobs."""
-        from vllm.v1.engine.logprobs import LogprobsProcessor
+    def test_correction_with_context(self, processor):
+        """Test correction using context from preceding sampled tokens.
 
-        processor = LogprobsProcessor(
-            tokenizer=mock_tokenizer,
-            logprobs=[{123: None}],  # Previous token ID is 123
-            prompt_logprobs=None,
-            cumulative_logprob=0.0,
-            num_logprobs=1,
-            num_prompt_logprobs=None,
-        )
-        return processor
-
-    def test_correction_with_previous_token_in_list(
-        self, processor_with_empty_logprobs
-    ):
-        """Test correction using previous token in the same list.
-
-        Scenario: Token at idx=1 ends with "�", but when decoded with
-        the previous token (idx=0), it forms a valid UTF-8 sequence.
-        Example: token[0]="�", token[1]="�" -> together form "polarized"
+        Scenario: A byte-fallback token that completes a multi-byte
+        UTF-8 sequence when decoded with context.
         """
-        processor = processor_with_empty_logprobs
-        tokens = [100, 101, 102]  # token IDs
 
-        # Mock tokenizer behavior:
-        # - decode([102]) returns "�" (ends with replacement char)
-        # - decode([101, 102]) returns "valid" (no replacement char)
-        processor.tokenizer.decode.side_effect = lambda ids: (
-            "valid" if ids == [101, 102] else "�"
-        )
+        # Context is [101] (a preceding sampled token)
+        # Token 102 individually decodes to "�"
+        # decode([101, 102]) returns "valid" (complete sequence)
+        def mock_decode(ids):
+            if ids == [101, 102]:
+                return "hello valid"
+            if ids == [101]:
+                return "hello "
+            return "�"
 
-        result = processor._correct_decoded_token(2, tokens)
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        result = processor._correct_decoded_token(102, [101])
         assert result == "valid"
-        processor.tokenizer.decode.assert_called_with([101, 102])
 
-    def test_correction_with_previous_logprob_token(
-        self, processor_with_previous_logprobs
-    ):
-        """Test correction using previous logprob token.
+    def test_correction_with_context_from_logprobs(self, processor):
+        """Test correction using context from previous logprob entries.
 
-        Scenario: Cannot correct with previous token in list (idx=0),
-        but can correct with previous logprob token.
+        Scenario: Token decoded with context from previously sampled
+        tokens completes a UTF-8 sequence.
         """
-        processor = processor_with_previous_logprobs
-        tokens = [100]  # single token
 
-        # Mock tokenizer behavior:
-        # - decode([100]) returns "�" (ends with replacement char)
-        # - decode([123, 100]) returns " "polarized" (no replacement char)
-        # Token 123 is from previous logprobs
+        # Token 123 was previously sampled (in context)
         def mock_decode(ids):
             if ids == [123, 100]:
-                return ' "polarized"'
+                return 'hello "polarized"'
+            if ids == [123]:
+                return "hello "
             return "�"
 
         processor.tokenizer.decode.side_effect = mock_decode
 
-        result = processor._correct_decoded_token(0, tokens)
-        assert result == ' "polarized"'
+        result = processor._correct_decoded_token(100, [123])
+        assert result == '"polarized"'
 
-    def test_correction_at_idx_zero_no_previous_logprobs(
-        self, processor_with_empty_logprobs
-    ):
-        """Test correction at idx=0 with no previous logprobs.
+    def test_correction_no_context(self, processor):
+        """Test correction with no context available.
 
-        Scenario: First token in list, no previous logprobs available.
         Should return empty string as fallback.
         """
-        processor = processor_with_empty_logprobs
-        tokens = [100]
-
-        # Mock tokenizer always returns "�"
         processor.tokenizer.decode.return_value = "�"
 
-        result = processor._correct_decoded_token(0, tokens)
+        result = processor._correct_decoded_token(100, [])
         assert result == ""
 
-    def test_correction_at_idx_zero_with_previous_logprobs(
-        self, processor_with_previous_logprobs
-    ):
-        """Test correction at idx=0 with previous logprobs available.
+    def test_correction_with_context_succeeds(self, processor):
+        """Test correction with context from previously sampled tokens."""
 
-        Scenario: First token in list, but previous logprobs exist.
-        Should try correction with previous logprob token.
-        """
-        processor = processor_with_previous_logprobs
-        tokens = [200]
-
-        # Mock tokenizer behavior
         def mock_decode(ids):
             if ids == [123, 200]:
-                return "corrected"
+                return "hello corrected"
+            if ids == [123]:
+                return "hello "
             return "�"
 
         processor.tokenizer.decode.side_effect = mock_decode
 
-        result = processor._correct_decoded_token(0, tokens)
+        result = processor._correct_decoded_token(200, [123])
         assert result == "corrected"
 
-    def test_no_correction_needed_returns_fallback(
-        self, processor_with_previous_logprobs
-    ):
-        """Test fallback to empty string when no correction works.
-
-        Scenario: All correction attempts still end with "�".
-        Should return empty string as final fallback.
-        """
-        processor = processor_with_previous_logprobs
-        tokens = [100, 101, 102]
-
-        # Mock tokenizer always returns text ending with "�"
+    def test_fallback_when_all_attempts_fail(self, processor):
+        """Test fallback to empty string when no correction works."""
         processor.tokenizer.decode.return_value = "still�"
 
-        result = processor._correct_decoded_token(2, tokens)
+        result = processor._correct_decoded_token(102, [100, 101])
         assert result == ""
 
-    def test_middle_token_correction(self, processor_with_previous_logprobs):
-        """Test correction for a token in the middle of the list.
+    def test_increasing_context_window(self, processor):
+        """Test that increasing context window finds the correction.
 
-        Scenario: Token at idx=5 in a longer list needs correction.
+        Scenario: 3-byte UTF-8 char. With 1 context token, still
+        incomplete. With 2 context tokens, completes the sequence.
         """
-        processor = processor_with_previous_logprobs
-        tokens = [10, 20, 30, 40, 50, 60, 70, 80]
 
-        # Mock tokenizer behavior for middle token
         def mock_decode(ids):
-            if ids == [50, 60]:
-                return "olar"
+            # 1 context token: still incomplete
+            if ids == [81, 82]:
+                return "�"
+            # 2 context tokens: complete
+            if ids == [80, 81, 82]:
+                return "\u201c"
+            # Context-only decodes
+            if ids == [81]:
+                return "�"
+            if ids == [80, 81]:
+                return "�"
             return "�"
 
         processor.tokenizer.decode.side_effect = mock_decode
 
-        result = processor._correct_decoded_token(5, tokens)
-        assert result == "olar"
+        # Context has 2 preceding tokens [80, 81]
+        result = processor._correct_decoded_token(82, [80, 81])
+        assert result == "\u201c"
 
-    def test_multiple_consecutive_replacement_chars(
-        self, processor_with_previous_logprobs
-    ):
+    def test_multiple_consecutive_replacement_chars(self, processor):
         """Test handling of multiple consecutive replacement characters.
 
-        Scenario: Sequence like ["�", "�", "p"] where first two should
-        become empty strings.
+        Scenario: Multi-byte sequence where intermediate bytes return
+        empty string and the final byte returns the complete character.
         """
-        processor = processor_with_previous_logprobs
-
-        # Test first replacement char
-        tokens = [100, 101, 102]
         processor.tokenizer.decode.return_value = "still�"
-        result1 = processor._correct_decoded_token(0, tokens)
+
+        # First byte with no useful context: returns ""
+        result1 = processor._correct_decoded_token(100, [50])
         assert result1 == ""
 
-        # Test second replacement char
-        result2 = processor._correct_decoded_token(1, tokens)
+        # Second byte with same context: still returns ""
+        result2 = processor._correct_decoded_token(101, [50])
         assert result2 == ""
 
-    def test_correction_with_multibyte_utf8(self, processor_with_previous_logprobs):
+    def test_correction_with_multibyte_utf8(self, processor):
         """Test correction involving multi-byte UTF-8 characters.
 
-        Scenario: Byte-fallback tokenization splits multi-byte UTF-8
-        characters (e.g., curly quotes, Chinese characters, emojis).
-        Example from user: "�", "�" -> "", "\""
+        Scenario: Byte-fallback tokenization splits curly quotes.
+        The last byte token should produce the complete character.
         """
-        processor = processor_with_previous_logprobs
-        tokens = [200, 201]
 
-        # Mock tokenizer behavior for multi-byte UTF-8 correction
         def mock_decode(ids):
-            # When decoding first token (idx=0) with previous logprob token
+            # Context [123] + first byte: completes to left curly quote
             if ids == [123, 200]:
-                return ' "'  # Space + left curly quote
-            # When decoding second token (idx=1) with previous token in list
-            elif ids == [200, 201]:
-                return '"'  # Right curly quote
-            # When decoding second token (idx=1) with previous logprob + prev token
-            elif ids == [123, 200, 201]:
-                return ' ""'  # Full sequence
-            return "�"
+                return "hello \u201c"
+            if ids == [123]:
+                return "hello "
+            # Context [123] + second byte: completes to right curly quote
+            if ids == [123, 201]:
+                return "hello \u201d"
+            return "\ufffd"
 
         processor.tokenizer.decode.side_effect = mock_decode
 
-        # First token correction (idx=0)
-        # Will call decode([123, 200]) since idx=0 uses previous logprob token
-        result1 = processor._correct_decoded_token(0, tokens)
-        assert result1 == ' "'
+        # Each top-k token is corrected independently with same context
+        result1 = processor._correct_decoded_token(200, [123])
+        assert result1 == "\u201c"
 
-        # Second token correction (idx=1)
-        # Will call decode([200, 201]) since idx>0 uses previous token in list
-        result2 = processor._correct_decoded_token(1, tokens)
-        assert result2 == '"'
+        result2 = processor._correct_decoded_token(201, [123])
+        assert result2 == "\u201d"
+
+    def test_topk_tokens_corrected_independently(self, processor):
+        """Test that top-k alternatives at the same position are each
+        corrected independently using only sequential context, not
+        each other.
+
+        This is the core fix for issue #27300: when logprobs > 0,
+        alternative tokens must not be combined with each other.
+        """
+        # Context: previously sampled token 50
+        context = [50]
+
+        def mock_decode(ids):
+            # Token 100 (sampled) with context
+            if ids == [50, 100]:
+                return "prefix \u201c"
+            # Token 200 (top-k alternative) with context
+            if ids == [50, 200]:
+                return "prefix \u2014"
+            # Context alone
+            if ids == [50]:
+                return "prefix "
+            return "\ufffd"
+
+        processor.tokenizer.decode.side_effect = mock_decode
+
+        # Both tokens at the same position use the SAME context [50]
+        result_sampled = processor._correct_decoded_token(100, context)
+        assert result_sampled == "\u201c"
+
+        result_alt = processor._correct_decoded_token(200, context)
+        assert result_alt == "\u2014"
 
     def test_real_world_opt125m_scenario(self, mock_tokenizer):
-        """Test the real-world scenario from user's example.
+        """Test the real-world scenario from the bug report.
 
-        User's example with facebook/opt-125m:
-        Before: [" the", " term", " �", "�", "p", "olar", "ized", "�", "�", ...]
-        After: [" the", " term", "", " "", "p", "olar", "ized", "", "\"", ...]
+        Simulates the OPT-125m sequence where curly quotes are split
+        into byte-fallback tokens. Each token is corrected using only
+        the preceding sampled tokens as context.
         """
         from vllm.v1.engine.logprobs import LogprobsProcessor
 
-        # Simulate the sequence of tokens
         processor = LogprobsProcessor(
             tokenizer=mock_tokenizer,
             logprobs=[],
@@ -758,47 +762,106 @@ class TestCorrectDecodedToken:
             num_prompt_logprobs=None,
         )
 
-        # Token IDs representing the problematic sequence
-        tokens = [1, 2, 3, 4, 5, 6, 7, 8, 9]  # placeholder IDs
-
-        # Mock decode behavior simulating the real scenario
+        # Simulating: byte tokens 3, 4 form left curly quote "\u201c"
+        # byte tokens 8, 9 form right curly quote "\u201d"
         def mock_decode(ids):
-            # Simulate cases where individual tokens decode to "�"
-            # but combinations decode correctly
-            if len(ids) == 1:
-                if ids[0] == 3 or ids[0] == 4 or ids[0] == 8 or ids[0] == 9:
-                    return "�"
-            elif len(ids) == 2:
-                if ids == [2, 3]:
-                    return " term�"  # Still ends with �, need more context
-                elif ids == [3, 4]:
-                    return ' "'  # Corrected to space + left curly quote
-                elif ids == [7, 8]:
-                    return "ized�"  # Still ends with �
-                elif ids == [8, 9]:
-                    return '"'  # Corrected to right curly quote
-            elif len(ids) == 3:
-                if ids == [1, 2, 3]:
-                    return " the term�"  # Still ends with issue
-                elif ids == [2, 3, 4]:
-                    return ' term "'  # With all context
+            # Context decodes
+            if ids == [2]:
+                return " term"
+            if ids == [1, 2]:
+                return " the term"
+            if ids == [3]:
+                return "\ufffd"
+            if ids == [2, 3]:
+                return " term\ufffd"
+            if ids == [1, 2, 3]:
+                return " the term\ufffd"
+            # Token 4 with context [2, 3] -> completes left curly quote
+            if ids == [3, 4]:
+                return "\u201c"
+            if ids == [2, 3, 4]:
+                return " term\u201c"
+            # Context for right curly quote
+            if ids == [7]:
+                return "ized"
+            if ids == [7, 8]:
+                return "ized\ufffd"
+            if ids == [8, 9]:
+                return "\u201d"
+            if ids == [7, 8, 9]:
+                return "ized\u201d"
             return "normal_text"
 
         mock_tokenizer.decode.side_effect = mock_decode
 
-        # Test token at index 2 (should fail to correct, return "")
-        # Token 3 individually is "�"
-        # decode([2, 3]) = " term�" (still ends with �)
-        # No previous logprobs, so fallback to ""
-        result = processor._correct_decoded_token(2, tokens)
+        # First byte (token 3) of left curly quote with no context
+        result = processor._correct_decoded_token(3, [])
         assert result == ""
 
-        # Test token at index 3 (should correct to " "")
-        # Token 4 individually is "�"
-        # decode([3, 4]) = " "" (corrected!)
-        processor.logprobs = [{2: None}]  # Add previous logprob
-        result = processor._correct_decoded_token(3, tokens)
-        assert result == ' "'
+        # First byte (token 3) with context [2] -> still incomplete
+        result = processor._correct_decoded_token(3, [2])
+        assert result == ""
+
+        # Second byte (token 4) of left curly quote with context [2, 3]
+        # Token 3 is byte-fallback, so clean context is [2] only.
+        # decode([2, 3, 4]) = " term\u201c", decode([2]) = " term"
+        # result = "\u201c"
+        result = processor._correct_decoded_token(4, [2, 3])
+        assert result == "\u201c"
+
+        # Second byte (token 9) of right curly quote with context [7, 8]
+        result = processor._correct_decoded_token(9, [7, 8])
+        assert result == "\u201d"
+
+    def test_byte_fallback_context_preserves_space(self, mock_tokenizer):
+        """Test that text from byte-fallback context tokens is preserved.
+
+        In OPT-125m, token 44 = space + 2 bytes of curly quote.
+        When token 44 returns "" (incomplete), the space it carried
+        must be attributed to the completing token (48).
+        """
+        from vllm.v1.engine.logprobs import LogprobsProcessor
+
+        processor = LogprobsProcessor(
+            tokenizer=mock_tokenizer,
+            logprobs=[],
+            prompt_logprobs=None,
+            cumulative_logprob=0.0,
+            num_logprobs=1,
+            num_prompt_logprobs=None,
+        )
+
+        def mock_decode(ids):
+            # Token 44 = space + 2 bytes (like OPT-125m's \u0120\u00e2\u0080)
+            if ids == [44]:
+                return " \ufffd"
+            if ids == [48]:
+                return "\ufffd"
+            # Together they form: space + left curly quote
+            if ids == [44, 48]:
+                return " \u201c"
+            # With preceding clean context
+            if ids == [1385]:
+                return " term"
+            if ids == [1385, 44]:
+                return " term \ufffd"
+            if ids == [1385, 44, 48]:
+                return " term \u201c"
+            return "\ufffd"
+
+        mock_tokenizer.decode.side_effect = mock_decode
+
+        # Token 44 with context [1385] -> still ends with replacement
+        result = processor._correct_decoded_token(44, [1385])
+        assert result == ""
+
+        # Token 48 with context [1385, 44]:
+        # Token 44 is byte-fallback, so clean context is [1385].
+        # decode([1385, 44, 48]) = " term \u201c"
+        # decode([1385]) = " term"
+        # result = " \u201c" (space preserved from token 44!)
+        result = processor._correct_decoded_token(48, [1385, 44])
+        assert result == " \u201c"
 
 
 def test_verify_tokens_integration():
@@ -808,42 +871,41 @@ def test_verify_tokens_integration():
     corrects tokens ending with the replacement character "�".
     Uses facebook/opt-125m which is known to produce these issues.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=0,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        # Use a prompt that triggers multi-byte UTF-8 issues
+        # Based on user's example: "In this example,"
+        test_prompts = ["In this example,"]
 
-    # Use a prompt that triggers multi-byte UTF-8 issues
-    # Based on user's example: "In this example,"
-    test_prompts = ["In this example,"]
+        sampling_params = SamplingParams(
+            max_tokens=16,
+            temperature=0,
+            logprobs=0,
+        )
 
-    sampling_params = SamplingParams(
-        max_tokens=16,
-        temperature=0,
-        logprobs=0,
-    )
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
-    results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
-
-    # Verify that decoded tokens don't contain replacement characters
-    for result in results:
-        assert result.outputs[0].logprobs is not None
-        for logprob_dict in result.outputs[0].logprobs:
-            for token_id, logprob_info in logprob_dict.items():
-                decoded_token = logprob_info.decoded_token
-                # Decoded tokens should not end with replacement character
-                # They should either be corrected or empty string
-                assert not decoded_token.endswith("�"), (
-                    f"Token {token_id} decoded to '{decoded_token}' which "
-                    f"ends with replacement character"
-                )
-                # Decoded tokens should not contain lone replacement characters
-                assert decoded_token != "�", (
-                    f"Token {token_id} is a lone replacement character"
-                )
+        # Verify that decoded tokens don't contain replacement characters
+        for result in results:
+            assert result.outputs[0].logprobs is not None
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    # Decoded tokens should not end with replacement character
+                    # They should either be corrected or empty string
+                    assert not decoded_token.endswith("�"), (
+                        f"Token {token_id} decoded to '{decoded_token}' which "
+                        f"ends with replacement character"
+                    )
+                    # Decoded tokens should not contain lone replacement characters
+                    assert decoded_token != "�", (
+                        f"Token {token_id} is a lone replacement character"
+                    )
 
 
 def test_utf8_edge_cases_with_real_model():
@@ -852,45 +914,44 @@ def test_utf8_edge_cases_with_real_model():
     Tests prompts that are likely to trigger byte-fallback tokenization
     and multi-byte UTF-8 splitting.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=1,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        # Prompts with various multi-byte UTF-8 characters
+        test_prompts = [
+            'Smart quotes: "Hello"',  # Curly quotes
+            "Em dash — test",  # Em dash
+            "Ellipsis… continues",  # Ellipsis
+            "Chinese: 你好",  # Chinese characters
+            "Emoji: 😀 🎉",  # Emojis
+            'Mixed: "quoted" — with symbols',  # Mixed
+        ]
 
-    # Prompts with various multi-byte UTF-8 characters
-    test_prompts = [
-        'Smart quotes: "Hello"',  # Curly quotes
-        "Em dash — test",  # Em dash
-        "Ellipsis… continues",  # Ellipsis
-        "Chinese: 你好",  # Chinese characters
-        "Emoji: 😀 🎉",  # Emojis
-        'Mixed: "quoted" — with symbols',  # Mixed
-    ]
+        sampling_params = SamplingParams(
+            max_tokens=10,
+            temperature=0,
+            logprobs=1,
+        )
 
-    sampling_params = SamplingParams(
-        max_tokens=10,
-        temperature=0,
-        logprobs=1,
-    )
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
-    results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
+        for i, result in enumerate(results):
+            prompt = test_prompts[i]
+            assert result.outputs[0].logprobs is not None
 
-    for i, result in enumerate(results):
-        prompt = test_prompts[i]
-        assert result.outputs[0].logprobs is not None
-
-        # Check that no decoded tokens end with replacement character
-        for logprob_dict in result.outputs[0].logprobs:
-            for token_id, logprob_info in logprob_dict.items():
-                decoded_token = logprob_info.decoded_token
-                assert not decoded_token.endswith("�"), (
-                    f"Prompt: '{prompt}'\n"
-                    f"Token {token_id} decoded to '{decoded_token}' which "
-                    f"ends with replacement character"
-                )
+            # Check that no decoded tokens end with replacement character
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    assert not decoded_token.endswith("�"), (
+                        f"Prompt: '{prompt}'\n"
+                        f"Token {token_id} decoded to '{decoded_token}' which "
+                        f"ends with replacement character"
+                    )
 
 
 def test_correct_decoded_token_preserves_valid_tokens():
@@ -900,36 +961,35 @@ def test_correct_decoded_token_preserves_valid_tokens():
     ending with "�", but this test verifies the broader _verify_tokens
     logic doesn't affect valid tokens.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=2,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        # Simple prompt with standard ASCII characters
+        test_prompts = ["Hello world, this is a test."]
 
-    # Simple prompt with standard ASCII characters
-    test_prompts = ["Hello world, this is a test."]
+        sampling_params = SamplingParams(
+            max_tokens=10,
+            temperature=0,
+            logprobs=2,
+        )
 
-    sampling_params = SamplingParams(
-        max_tokens=10,
-        temperature=0,
-        logprobs=2,
-    )
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
-    results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
+        for result in results:
+            assert result.outputs[0].logprobs is not None
 
-    for result in results:
-        assert result.outputs[0].logprobs is not None
-
-        # All decoded tokens should be valid strings
-        for logprob_dict in result.outputs[0].logprobs:
-            for token_id, logprob_info in logprob_dict.items():
-                decoded_token = logprob_info.decoded_token
-                # Valid tokens should be non-empty strings (or empty if corrected)
-                assert isinstance(decoded_token, str)
-                # Should not contain replacement character
-                assert "�" not in decoded_token
+            # All decoded tokens should be valid strings
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    # Valid tokens should be non-empty strings (or empty if corrected)
+                    assert isinstance(decoded_token, str)
+                    # Should not contain replacement character
+                    assert "�" not in decoded_token
 
 
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
@@ -984,15 +1044,32 @@ def test_correct_decoded_token_preserves_valid_tokens():
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, dict, int],
+    monkeypatch,
 ):
     """Spec decode logprobs should match those of the base model.
+
+    Runs the base model and spec decode model sequentially, ensuring
+    only one LLM instance is alive at a time to avoid GPU memory
+    contention. Both use identical chunked prefill settings and eager
+    mode to control for infrastructure differences.
 
     Args:
         logprobs_mode: logprobs mode.
         model_setup: Tuple of (method, base model name,
             speculative_config dict, top_logprobs).
+        monkeypatch: pytest fixture for setting env vars.
     """
     from vllm import LLM
+
+    # The ROCm skinny GEMM kernels (gemm_kernels.cu) are
+    # non-deterministic across LLM instantiations due to persistent
+    # workgroup scheduling and wave-level shuffle reductions, which
+    # causes logprob differences that get misattributed to spec decode.
+    # Disable them so this test isolates spec decode correctness only.
+    # TODO(akaratza): Remove this workaround once the follow-up to
+    # https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+    # lands with a determinism fix for wvSplitK kernels.
+    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     method, model_name, spec_config, top_logprobs = model_setup
 
@@ -1019,6 +1096,7 @@ def test_spec_decode_logprobs(
         logprobs_mode=logprobs_mode,
         gpu_memory_utilization=0.4,
         enable_prefix_caching=False,
+        **ROCM_DETERMINISM_KWARGS,
     )
     ref_results = ref_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
@@ -1030,7 +1108,7 @@ def test_spec_decode_logprobs(
             for logprobs in output.logprobs:
                 ref_logprobs.extend(logprobs.values())
     del ref_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Run spec decode LLM.
@@ -1048,6 +1126,7 @@ def test_spec_decode_logprobs(
         enable_chunked_prefill=True,
         max_num_batched_tokens=32,
         enable_prefix_caching=False,
+        **ROCM_DETERMINISM_KWARGS,
     )
     spec_results = spec_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
@@ -1059,7 +1138,7 @@ def test_spec_decode_logprobs(
             for logprobs in output.logprobs:
                 spec_logprobs.extend(logprobs.values())
     del spec_llm
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
 
     # Per-token logprobs are expected to be the same.
@@ -1067,8 +1146,17 @@ def test_spec_decode_logprobs(
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
         assert math.isclose(
             ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+        ), (
+            f"Logprob mismatch: ref={ref_logprob.logprob} "
+            f"spec={spec_logprob.logprob} "
+            f"diff={abs(ref_logprob.logprob - spec_logprob.logprob)} "
+            f"(token={ref_logprob.decoded_token!r})"
         )
-        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.rank == spec_logprob.rank, (
+            f"Rank mismatch: ref={ref_logprob.rank} "
+            f"spec={spec_logprob.rank} "
+            f"(token={ref_logprob.decoded_token!r})"
+        )
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 

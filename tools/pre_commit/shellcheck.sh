@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 scversion="stable"
 
@@ -19,4 +19,6 @@ if ! [ -x "$(command -v shellcheck)" ]; then
 fi
 
 # TODO - fix warnings in .buildkite/scripts/hardware_ci/run-amd-test.sh
-find . -name "*.sh" ".git" -prune -not -path "./.buildkite/scripts/hardware_ci/run-amd-test.sh" -print0 | xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash "{}"'
+find . -path ./.git -prune -o -name "*.sh" \
+  -not -path "./.buildkite/scripts/hardware_ci/run-amd-test.sh" -print0 | \
+  xargs -0 sh -c "for f in \"\$@\"; do git check-ignore -q \"\$f\" || shellcheck -s bash \"\$f\"; done" --

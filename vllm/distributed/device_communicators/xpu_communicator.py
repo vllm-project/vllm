@@ -47,9 +47,10 @@ class XpuCommunicator(DeviceCommunicatorBase):
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
                 logger.info("Using AgRs manager on XPU device.")
 
-    def all_reduce(self, input_) -> torch.Tensor:
-        dist.all_reduce(input_, group=self.device_group)
-        return input_
+    def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        output = input_.clone() if torch.compiler.is_compiling() else input_
+        dist.all_reduce(output, group=self.device_group)
+        return output
 
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
@@ -70,7 +71,7 @@ class XpuCommunicator(DeviceCommunicatorBase):
             output_shape, dtype=input_tensor.dtype, device=input_tensor.device
         )
 
-        dist.reduce_scatter_tensor(output, input_tensor)
+        dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -103,9 +104,9 @@ class XpuCommunicator(DeviceCommunicatorBase):
         if sizes is not None and sizes.count(sizes[0]) != len(sizes):
             # if inputs shape in different ranks is not the same using reduce_scatter
             input_splits = list(input_tensor.split(sizes, dim=0))
-            dist.reduce_scatter(output, input_splits)
+            dist.reduce_scatter(output, input_splits, group=self.device_group)
         else:
-            dist.reduce_scatter_tensor(output, input_tensor)
+            dist.reduce_scatter_tensor(output, input_tensor, group=self.device_group)
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
 
@@ -149,10 +150,10 @@ class XpuCommunicator(DeviceCommunicatorBase):
                             device=input_.device,
                         )
                     )
-                dist.all_gather(all_gather_list, input_)
+                dist.all_gather(all_gather_list, input_, group=self.device_group)
                 output_tensor = torch.cat(all_gather_list, dim=0)
             else:
-                dist.all_gather([output_tensor], input_)
+                dist.all_gather([output_tensor], input_, group=self.device_group)
             return output_tensor
 
         if isinstance(input_, torch.Tensor):

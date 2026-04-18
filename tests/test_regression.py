@@ -12,29 +12,26 @@ import gc
 import pytest
 import torch
 
+from tests.utils import large_gpu_mark
 from vllm import LLM, SamplingParams
+from vllm.platforms import current_platform
 
 
-@pytest.mark.skip(reason="In V1, we reject tokens > max_seq_len")
-def test_duplicated_ignored_sequence_group():
-    """https://github.com/vllm-project/vllm/issues/1655"""
-
-    sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=256)
-    llm = LLM(
-        model="distilbert/distilgpt2",
-        max_num_batched_tokens=4096,
-        tensor_parallel_size=1,
-    )
-    prompts = ["This is a short prompt", "This is a very long prompt " * 1000]
-    outputs = llm.generate(prompts, sampling_params=sampling_params)
-
-    assert len(prompts) == len(outputs)
-
-
-def test_max_tokens_none():
+@pytest.mark.parametrize(
+    "model",
+    [
+        pytest.param(
+            "distilbert/distilgpt2",
+            marks=[
+                *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
+            ],
+        ),
+    ],
+)
+def test_max_tokens_none(model):
     sampling_params = SamplingParams(temperature=0.01, top_p=0.1, max_tokens=None)
     llm = LLM(
-        model="distilbert/distilgpt2",
+        model=model,
         max_num_batched_tokens=4096,
         tensor_parallel_size=1,
     )
@@ -49,12 +46,12 @@ def test_gc():
     del llm
 
     gc.collect()
-    torch.cuda.empty_cache()
+    torch.accelerator.empty_cache()
 
     # The memory allocated for model and KV cache should be released.
     # The memory allocated for PyTorch and others should be less than 50MB.
     # Usually, it's around 10MB.
-    allocated = torch.cuda.memory_allocated()
+    allocated = torch.accelerator.memory_allocated()
     assert allocated < 50 * 1024 * 1024
 
 
@@ -65,7 +62,8 @@ def test_model_from_modelscope(monkeypatch: pytest.MonkeyPatch):
         # Don't use HF_TOKEN for ModelScope repos, otherwise it will fail
         # with 400 Client Error: Bad Request.
         m.setenv("HF_TOKEN", "")
-        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat")
+        attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+        llm = LLM(model="qwen/Qwen1.5-0.5B-Chat", attention_backend=attn_backend)
 
         prompts = [
             "Hello, my name is",
