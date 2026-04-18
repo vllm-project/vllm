@@ -8,7 +8,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass, replace
+from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -49,6 +49,7 @@ from .utils import (
     CompileFactors,
     SupportsCompileFactors,
     config,
+    replace,
 )
 from .weight_transfer import WeightTransferConfig
 

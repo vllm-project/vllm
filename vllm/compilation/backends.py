@@ -1097,22 +1097,21 @@ class VllmBackend:
         # Persist and log only hash-relevant factors together.
         try:
             meta_path = os.path.join(local_cache_dir, "cache_key_factors.json")
-            if not os.path.exists(meta_path):
-                with open(meta_path, "w") as f:
-                    json.dump(
-                        {
-                            "env": env_factors,  # raw factors used for env_hash
-                            "config": config_factors,
-                            "config_hash": config_hash,
-                            "compiler": compiler_factors,
-                            "compiler_hash": compiler_hash,
-                            "code_hash": code_hash,
-                            "code": code_factors,
-                        },
-                        f,
-                        indent=2,
-                        sort_keys=True,
-                    )
+            with open(meta_path, "w") as f:
+                json.dump(
+                    {
+                        "env": env_factors,  # raw factors used for env_hash
+                        "config": config_factors,
+                        "config_hash": config_hash,
+                        "compiler": compiler_factors,
+                        "compiler_hash": compiler_hash,
+                        "code_hash": code_hash,
+                        "code": code_factors,
+                    },
+                    f,
+                    indent=2,
+                    sort_keys=True,
+                )
             logger.debug(
                 (
                     "Persisted compile cache factors to %s "

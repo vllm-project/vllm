@@ -28,7 +28,7 @@ import gc
 import pickle
 import weakref
 from collections import namedtuple
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import timedelta
@@ -184,7 +184,7 @@ def patched_fused_scaled_matmul_reduce_scatter_fake(
     orig_scatter_dim: int,
     scatter_dim_after_maybe_reshape: int,
     group_name: str,
-    output_shape: Sequence[int],
+    output_shape: list[int],
     bias: torch.Tensor | None = None,
     result_scale: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
@@ -236,7 +236,7 @@ def patched_fused_scaled_matmul_reduce_scatter(
     orig_scatter_dim: int,
     scatter_dim_after_maybe_reshape: int,
     group_name: str,
-    output_shape: Sequence[int],
+    output_shape: list[int],
     bias: torch.Tensor | None = None,
     result_scale: torch.Tensor | None = None,
     out_dtype: torch.dtype | None = None,
