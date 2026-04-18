@@ -31,6 +31,7 @@ QuantizationMethods = Literal[
     "inc",
     "mxfp4",
     "mxfp8",
+    "pairwise_fp4",
     "petit_nvfp4",
     "cpu_awq",
 ]
@@ -129,6 +130,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .mxfp8 import Mxfp8Config
+    from .pairwise_fp4.config import PairwiseFP4Config
     from .petit import PetitNvFp4Config
     from .torchao import TorchAOConfig
 
@@ -155,6 +157,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "mxfp8": Mxfp8Config,
+        "pairwise_fp4": PairwiseFP4Config,
         "petit_nvfp4": PetitNvFp4Config,
         "cpu_awq": CPUAWQConfig,
     }
