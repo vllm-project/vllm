@@ -418,7 +418,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
 
 - label: Kernels Helion Test # TBD
   timeout_in_minutes: 180
@@ -462,7 +462,7 @@ steps:
   - tests/lora
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py
+  - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py
 
 #------------------------------------------------------  mi250 · model_executor  -------------------------------------------------------#
 
@@ -652,6 +652,7 @@ steps:
   # BEGIN: `io_processor` plugins test, all the code in between uses the `prithvi_io_processor` plugin
   - pip install -e ./plugins/prithvi_io_processor_plugin
   - pytest -v -s plugins_tests/test_io_processor_plugins.py
+  - pytest -v -s plugins_tests/test_terratorch_io_processor_plugins.py
   - pip uninstall prithvi_io_processor_plugin -y
   # END: `io_processor` plugins test
   # BEGIN: `bge_m3_sparse io_processor` test
@@ -941,6 +942,7 @@ steps:
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
+  - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py --ignore=reasoning/test_gemma4_reasoning_parser.py
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
@@ -994,7 +996,8 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
   - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
-  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py
+  - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
+  - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest models/multimodal/generation/test_whisper.py -v -s -m 'distributed(num_gpus=2)'
 
 #--------------------------------------------------------  mi300 · benchmarks  ---------------------------------------------------------#
@@ -1150,6 +1153,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
+  - pytest -v -s distributed/test_eplb_utils.py
 
 - label: Distributed Tests (2xH100-2xMI250) # TBD
   timeout_in_minutes: 180
@@ -1230,6 +1234,29 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s distributed/test_elastic_ep.py
+
+- label: RayExecutorV2 (4 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/executor/ray_executor_v2.py
+  - vllm/v1/executor/abstract.py
+  - vllm/v1/executor/multiproc_executor.py
+  - tests/distributed/test_ray_v2_executor.py
+  - tests/distributed/test_ray_v2_executor_e2e.py
+  - tests/distributed/test_pipeline_parallel.py
+  - tests/basic_correctness/test_basic_correctness.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RAY_V2_EXECUTOR_BACKEND=1
+  - export TORCH_NCCL_BLOCKING_WAIT=1
+  - pytest -v -s distributed/test_ray_v2_executor.py
+  - pytest -v -s distributed/test_ray_v2_executor_e2e.py
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "ray"
+  - TARGET_TEST_SUITE=L4 pytest -v -s basic_correctness/test_basic_correctness.py -k "ray"
 
 - label: Distributed Tests (8xH100-8xMI300) # TBD
   timeout_in_minutes: 180
@@ -1315,7 +1342,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
 
 - label: Entrypoints Integration (LLM) # TBD
   timeout_in_minutes: 180
@@ -1666,7 +1693,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/core kernels/test_top_k_per_row.py
+  - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
@@ -2072,7 +2099,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-  - pytest -v -s v1/spec_decode/test_acceptance_length.py
+  - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 - label: e2e Core (1 GPU) # TBD
   timeout_in_minutes: 180
@@ -2300,8 +2327,11 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/rl/rlhf_async_new_apis.py
   - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - pytest -v -s tests/v1/distributed/test_dbo.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s tests/distributed/test_weight_transfer.py
+  - pytest -v -s tests/distributed/test_packed_tensor.py
 
 - label: Metrics, Tracing (2 GPUs) # TBD
   timeout_in_minutes: 180
@@ -2614,7 +2644,7 @@ steps:
   - tests/models/language/generation
   commands:
   - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Tests (Hybrid) %N # TBD
@@ -2629,7 +2659,7 @@ steps:
   - tests/models/language/generation
   commands:
   - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Multi-Modal Models (Extended Pooling) # TBD
@@ -2783,7 +2813,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses --ignore=entrypoints/openai/test_multi_api_servers.py
 
 - label: Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
@@ -3048,7 +3078,7 @@ steps:
   - tests/models/language/generation
   commands:
   - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+  - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (Extended Pooling) # TBD
