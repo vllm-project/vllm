@@ -76,7 +76,7 @@ class RequestManager:
             num_buckets=self.cp_world_size,
             max_length=long_request_threshold)
 
-    def select_dp(self, request: Request, is_long: bool, num_new_tokens: int) -> list[int] | None:
+    def select_dp(self, request: Request, is_long: bool, num_new_tokens: int, rank_budgets: list) -> list[int] | None:
         if len(request.cp_ranks) > 0:
             if all([self.num_req_per_dp[rank] < self.max_num_seqs for rank in request.cp_ranks]):
                 return request.cp_ranks
@@ -91,6 +91,10 @@ class RequestManager:
             # Get the the dp with the least number of requests
             # best_dp = min(range(len(self.num_req_per_dp)), key=lambda i: self.num_req_per_dp[i])
             best_dp = self.balancer.dispatch_task_without_id(num_new_tokens)
+            if rank_budgets[best_dp] < num_new_tokens:
+                if num_new_tokens not in rank_budgets:
+                    return None
+                best_dp = rank_budgets.index(num_new_tokens)
             return [best_dp]
 
     def add_req(self, request: Request) -> None:
@@ -683,7 +687,30 @@ class CrossDPScheduler(Scheduler):
         """
         TODO(AoChen): Token budget for each DCP rank is not implemented yet.
         """
-        token_budget = self.max_num_scheduled_tokens
+        # Per-rank token budgets: each rank can process up to
+        # max_num_scheduled_tokens.  CP requests split tokens across ranks,
+        # so their per-rank cost is num_tokens / cp_size.
+        rank_budgets = [self.max_num_scheduled_tokens] * self.cp_world_size
+
+        def _get_effective_budget(is_long_seq: bool, cp_ranks: list[int] | None = None) -> int:
+            """Return the max tokens a request on *cp_ranks* can schedule."""
+            if cp_ranks is None:
+                if is_long_seq:
+                    return min(rank_budgets[r] for r in cp_ranks) * cp_size
+                else:
+                    return max(rank_budgets)
+            else:
+                cp_size = len(cp_ranks)
+                if cp_size > 1:
+                    return min(rank_budgets[r] for r in cp_ranks) * cp_size
+                return rank_budgets[cp_ranks[0]]
+
+        def _deduct_budget(cp_ranks: list[int], num_tokens: int) -> None:
+            """Deduct per-rank cost from *rank_budgets* in-place."""
+            cp_size = len(cp_ranks)
+            per_rank_cost = (num_tokens + cp_size - 1) // cp_size
+            for r in cp_ranks:
+                rank_budgets[r] -= per_rank_cost
 
         # # Encoder-related.
         scheduled_encoder_inputs: dict[str, list[int]] = {}
@@ -696,7 +723,7 @@ class CrossDPScheduler(Scheduler):
 
         # First, schedule the RUNNING requests.
         req_index = 0
-        while req_index < len(self.running) and token_budget > 0:
+        while req_index < len(self.running) and max(rank_budgets) > 0:
             request = self.running[req_index]
 
             if (
@@ -726,7 +753,8 @@ class CrossDPScheduler(Scheduler):
             """
             if 0 < self.scheduler_config.long_prefill_token_threshold < num_new_tokens:
                 num_new_tokens = self.scheduler_config.long_prefill_token_threshold
-            num_new_tokens = min(num_new_tokens, token_budget)
+            num_new_tokens = min(num_new_tokens,
+                                _get_effective_budget(self.waiting.is_long_request(request), request.cp_ranks))
 
             # Make sure the input position does not exceed the max model len.
             # This is necessary when using spec decoding.
@@ -815,7 +843,7 @@ class CrossDPScheduler(Scheduler):
                 num_scheduled_tokens[rank][request_id] = num_new_tokens
                 cp_rank_scheduled_tokens[rank][request_id] = len(request.cp_ranks)
 
-            token_budget -= num_new_tokens
+            _deduct_budget(request.cp_ranks, num_new_tokens)
             req_index += 1
 
         # Use a temporary RequestQueue to collect requests that need to be
@@ -824,7 +852,7 @@ class CrossDPScheduler(Scheduler):
 
         # Next, schedule the WAITING requests.
         if not any(preempted_reqs):
-            while self.waiting and token_budget > 0:
+            while self.waiting and max(rank_budgets) > 0:
                 if len(self.running) == (
                     (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
                 ):
@@ -936,17 +964,24 @@ class CrossDPScheduler(Scheduler):
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
 
+                    effective_budget = _get_effective_budget(self.waiting.is_long_request(request))
                     # chunked prefill has to be enabled explicitly to allow
                     # pooling requests to be chunked
                     if (
                         not self.scheduler_config.enable_chunked_prefill
-                        and num_new_tokens > token_budget
+                        and num_new_tokens > effective_budget
                     ):
+                        if self.waiting.is_long_request(request):
+                            # CP request too large — skip it and keep
+                            # looking for shorter DP requests.
+                            self.waiting.pop_request()
+                            skipped_waiting_requests.prepend_request(request)
+                            continue
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
 
-                    num_new_tokens = min(num_new_tokens, token_budget)
+                    num_new_tokens = min(num_new_tokens, effective_budget)
                     assert num_new_tokens > 0
 
                 # [vllm add]
@@ -980,15 +1015,17 @@ class CrossDPScheduler(Scheduler):
                         request,
                         self.waiting.is_long_request(request),
                         num_new_tokens,
+                        rank_budgets,
                     )
                 else:
                     selected_dp = self.request_manager.select_dp(
                         request,
                         self.waiting.is_long_request(request),
                         num_new_tokens,
+                        rank_budgets,
                     )
-                    if selected_dp is None:
-                        break
+                if selected_dp is None:
+                    break
 
                 if len(selected_dp) > 1:
                     logger.info(f"It's a cp req, selected_dp: {selected_dp}, request id: {request.request_id}")
@@ -1019,7 +1056,7 @@ class CrossDPScheduler(Scheduler):
 
                 req_id_to_cp_size[request.request_id] = len(selected_dp)
 
-                for dp_rank in selected_dp:
+                for dp_rank in selected_dp:    # revised
                     cp_rank_to_req_id[dp_rank].append(request.request_id)
 
                 """
@@ -1084,7 +1121,7 @@ class CrossDPScheduler(Scheduler):
                     num_scheduled_tokens[rank][request.request_id] = num_new_tokens
                     cp_rank_scheduled_tokens[rank][request.request_id] = len(request.cp_ranks)
 
-                token_budget -= num_new_tokens
+                _deduct_budget(request.cp_ranks, num_new_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 # Count the number of prefix cached tokens.
@@ -1096,13 +1133,20 @@ class CrossDPScheduler(Scheduler):
             self.waiting.prepend_requests(skipped_waiting_requests)
 
         # Check if the scheduling constraints are satisfied.
-        """
-        TODO(AoChen): total_num_scheduled_tokens scheduling constraints are not implemented yet.
-        """
-        total_num_scheduled_tokens = sum([sum(scheduled_tokens.values()) for scheduled_tokens in num_scheduled_tokens])
-        assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens * self.cp_world_size
+        # Verify per-rank effective tokens don't exceed the per-rank limit.
+        for idx in range(self.cp_world_size):
+            effective_rank_tokens = 0
+            for req_id, tokens in num_scheduled_tokens[idx].items():
+                cp_size = cp_rank_scheduled_tokens[idx].get(req_id, 1)
+                effective_rank_tokens += (tokens + cp_size - 1) // cp_size
+            assert effective_rank_tokens <= self.max_num_scheduled_tokens, (
+                f"rank {idx} effective tokens {effective_rank_tokens} "
+                f"> {self.max_num_scheduled_tokens}"
+            )
 
-        assert token_budget >= 0
+        assert all(b >= 0 for b in rank_budgets), (
+            f"rank_budgets underflow: {rank_budgets}"
+        )
         assert len(self.running) <= (
             (self.max_num_running_reqs - self.waiting.running_long_count) * self.cp_world_size + self.waiting.running_long_count
         )
@@ -1161,7 +1205,7 @@ class CrossDPScheduler(Scheduler):
                 scheduler_output = SchedulerOutput.make_empty()
                 scheduler_output.none_tokens_in_peer_sched = none_tokens_in_peer_sched
                 scheduler_output.req_id_to_cp_size = req_id_to_cp_size
-                scheduler_output.cp_rank_to_req_id = cp_rank_to_req_id[idx]
+                scheduler_output.cp_rank_to_req_id = cp_rank_to_req_id[idx]    # revised
                 total_scheduler_output.append(scheduler_output)
             else:
                 total_scheduler_output.append(
@@ -1184,7 +1228,7 @@ class CrossDPScheduler(Scheduler):
                         cp_rank_scheduled_tokens=cp_rank_scheduled_tokens[idx],
                         num_cp_request=sum([1 if cp_size > 1 else 0 for cp_size in  cp_rank_scheduled_tokens[idx].values()]),
                         req_id_to_cp_size=req_id_to_cp_size,
-                        cp_rank_to_req_id=cp_rank_to_req_id[idx],
+                        cp_rank_to_req_id=cp_rank_to_req_id[idx],    # revised
                         none_tokens_in_peer_sched=none_tokens_in_peer_sched
                     )
                 )
