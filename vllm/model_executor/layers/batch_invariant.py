@@ -1012,7 +1012,7 @@ def override_envs_for_invariance(
         # AttentionBackendEnum.FLEX_ATTENTION,  # IMA issue
         # AttentionBackendEnum.FLASHINFER_MLA,  # PR #28967
     ]
-    if attention_backend not in supported_backends:
+    if attention_backend is not None and attention_backend not in supported_backends:
         supported_names = [b.name for b in supported_backends]
         backend_name = attention_backend.name if attention_backend else None
         error = (
@@ -1022,7 +1022,10 @@ def override_envs_for_invariance(
             "one of the supported backends before enabling batch_invariant."
         )
         raise RuntimeError(error)
-    if attention_backend not in decode_invariant_backends:
+    if (
+        attention_backend is not None
+        and attention_backend not in decode_invariant_backends
+    ):
         warning = (
             "You are using a non-decode-invariant form of batch invariance. "
             "This will not be invariant between prefill and decode."
