@@ -40,13 +40,11 @@ logger = init_logger(__name__)
 
 
 class _LoadTracker:
-    """Tracks active and completed load jobs on the worker."""
+    """Tracks active load jobs on the worker."""
 
     def __init__(self):
         # job_id -> req_id
         self.active: dict[int, ReqId] = {}
-        # completed job IDs to report via worker metadata
-        self.completed: dict[int, int] = {}
 
     def add(self, job_id: int, req_id: ReqId) -> None:
         self.active[job_id] = req_id
@@ -56,7 +54,7 @@ class _LoadTracker:
 
 
 class _StoreTracker:
-    """Tracks active and completed store jobs on the worker."""
+    """Tracks active store jobs on the worker."""
 
     def __init__(self):
         # job_id -> req_id
@@ -67,8 +65,6 @@ class _StoreTracker:
         self.unsubmitted: list[tuple[int, TransferSpec]] = []
         # requests that finished generating but have pending stores
         self.reqs_waiting: set[ReqId] = set()
-        # completed job IDs to report via worker metadata
-        self.completed: dict[int, int] = {}
 
     def add(self, job_id: int, req_id: ReqId, transfer_spec: TransferSpec):
         self.active[job_id] = req_id
@@ -94,6 +90,7 @@ class OffloadingConnectorWorker:
         self.kv_connector_stats = OffloadingConnectorStats()
         self._loads = _LoadTracker()
         self._stores = _StoreTracker()
+        self._connector_worker_meta = OffloadingWorkerMetadata()
 
     def _register_handlers(self, kv_caches: CanonicalKVCaches):
         for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
@@ -385,12 +382,12 @@ class OffloadingConnectorWorker:
             # Check if this is a load or store.
             req_id = self._loads.pop(job_id)
             if req_id is not None:
-                self._loads.completed[job_id] = 1
+                self._connector_worker_meta.mark_completed(job_id)
                 finished_recving.add(req_id)
                 continue
 
             # Store completed.
-            self._stores.completed[job_id] = 1
+            self._connector_worker_meta.mark_completed(job_id)
             req_id = self._stores.pop(job_id)
             if req_id is None:
                 continue
@@ -413,14 +410,11 @@ class OffloadingConnectorWorker:
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""
-        if not self._stores.completed and not self._loads.completed:
+        if not self._connector_worker_meta.completed_jobs:
             return None
-        # Job IDs are globally unique across loads and stores (single counter
-        # in the scheduler), so merging is collision-free.
-        completed_jobs = {**self._stores.completed, **self._loads.completed}
-        self._stores.completed = {}
-        self._loads.completed = {}
-        return OffloadingWorkerMetadata(completed_jobs=completed_jobs)
+        meta = self._connector_worker_meta
+        self._connector_worker_meta = OffloadingWorkerMetadata()
+        return meta
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
@@ -440,5 +434,5 @@ class OffloadingConnectorWorker:
         self._stores.by_req.clear()
         self._stores.reqs_waiting.clear()
         self._loads.active.clear()
-        self._loads.completed.clear()
+        self._connector_worker_meta = OffloadingWorkerMetadata()
         self.worker.shutdown()
