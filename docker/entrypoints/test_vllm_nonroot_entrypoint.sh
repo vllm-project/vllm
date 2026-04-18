@@ -166,16 +166,42 @@ else
 fi
 
 # -----------------------------------------------------------------------------
-# Case 8: wrapper chdirs into $HOME before exec'ing vllm. Protects against
-# cwd-relative path resolution happening in an unwritable directory (the
-# confusing "PermissionError on model arg" symptom).
+# Case 8: caller's writable CWD is preserved — wrapper must NOT chdir to HOME
+# when cwd is usable. Protects relative-path workflows like
+# `docker run -w /models ... --model ./llama.gguf`.
 # -----------------------------------------------------------------------------
 case8_home="$WORKDIR/case8-home"
 mkdir -p "$case8_home"
+case8_cwd="$WORKDIR/case8-cwd"
+mkdir -p "$case8_cwd"
 out="$WORKDIR/case8.out"
-run_wrapper "$out" "HOME=$case8_home" "USER=alice" "LOGNAME=alice" -- --model foo
-grep -q "^PWD=$case8_home\$" "$out" || fail "$out" "case8: cwd not $case8_home"
-echo "PASS: case8 (wrapper chdirs into \$HOME before exec)"
+(cd "$case8_cwd" && run_wrapper "$out" "HOME=$case8_home" "USER=alice" "LOGNAME=alice" -- --model ./relpath)
+grep -q "^PWD=$case8_cwd\$" "$out" \
+    || fail "$out" "case8: writable cwd not preserved (got $(grep '^PWD=' "$out"))"
+grep -q "^ARGV=serve --model \\./relpath\$" "$out" \
+    || fail "$out" "case8: relative argv not preserved"
+echo "PASS: case8 (writable cwd preserved; relative argv still resolves from caller's cwd)"
+
+# -----------------------------------------------------------------------------
+# Case 9: unwritable CWD is overridden — wrapper falls back to HOME so vllm's
+# cwd-relative path probe doesn't crash under arbitrary UIDs landing on a
+# readonly WORKDIR. Skipped as root (DAC override).
+# -----------------------------------------------------------------------------
+if [ "$(id -u)" = "0" ]; then
+    echo "SKIP: case9 (running as root; DAC override makes unwritable cwd meaningless)"
+else
+    case9_home="$WORKDIR/case9-home"
+    mkdir -p "$case9_home"
+    case9_ro="$WORKDIR/case9-ro"
+    mkdir -p "$case9_ro"
+    chmod 0555 "$case9_ro"
+    out="$WORKDIR/case9.out"
+    (cd "$case9_ro" && run_wrapper "$out" "HOME=$case9_home" "USER=alice" "LOGNAME=alice" -- --model foo)
+    grep -q "^PWD=$case9_home\$" "$out" \
+        || fail "$out" "case9: unwritable cwd not overridden to HOME (got $(grep '^PWD=' "$out"))"
+    chmod 0700 "$case9_ro"
+    echo "PASS: case9 (unwritable cwd falls back to \$HOME)"
+fi
 
 echo ""
 echo "ALL CASES PASSED."

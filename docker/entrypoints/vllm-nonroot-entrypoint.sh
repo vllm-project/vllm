@@ -34,13 +34,19 @@ if [ -z "${HOME:-}" ] || [ ! -w "${HOME}" ]; then
     fi
 fi
 
-# chdir into $HOME so any cwd-relative path resolution later (e.g. vllm's
-# "is this model arg a local path?" probe) happens in a writable directory.
-# The image's WORKDIR is /home/vllm for the supported `--user <uid>:0` case;
-# this also makes unsupported non-GID-0 runs fail with clearer errors than
-# "PermissionError on Qwen/Qwen3-VL-2B-Instruct" that looks like a model-ID
-# mistake.
-cd "$HOME"
+# If the current working directory is not writable (e.g. an arbitrary UID in
+# a non-0 GID landing on the image's WORKDIR=/home/vllm, or a misconfigured
+# `-w /readonly/path`), chdir into $HOME so vllm's cwd-relative path probe
+# (e.g. "is this model arg a local path?") doesn't crash with a confusing
+# PermissionError.
+#
+# We *only* chdir when the CWD is actually unusable. This preserves
+# caller-provided CWDs for the common case of `docker run -w /models ...`
+# plus relative argv like `--model ./llama.gguf`, `--chat-template
+# ./t.jinja`, relative TLS cert paths, etc.
+if [ ! -w . ]; then
+    cd "$HOME"
+fi
 
 # getpass.getuser() prefers $USER/$LOGNAME/etc. before hitting getpwuid();
 # setting it here makes the "UID not in passwd" path a no-op for everything
