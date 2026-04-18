@@ -37,10 +37,13 @@ vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
 Check with --help for more options:
 
 ```bash
-# To list all groups
-vllm serve --help=listgroup
+# To view all config groups and their descriptions
+vllm serve --help
 
-# To view a argument group
+# To view all parameters
+vllm serve --help=all
+
+# To view an argument group
 vllm serve --help=ModelConfig
 
 # To view a single argument
@@ -48,9 +51,6 @@ vllm serve --help=max-num-seqs
 
 # To search by keyword
 vllm serve --help=max
-
-# To view full help with pager (less/more)
-vllm serve --help=page
 ```
 
 See [vllm serve](./serve.md) for the full reference of all available arguments.
