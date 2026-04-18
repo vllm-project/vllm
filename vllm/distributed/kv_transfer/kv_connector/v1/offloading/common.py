@@ -54,7 +54,7 @@ class OffloadingWorkerMetadata(KVConnectorWorkerMetadata):
         assert isinstance(other, OffloadingWorkerMetadata)
 
         merged = dict(self.completed_jobs)
-        for k, v in other.completed_jobs.items():
-            merged[k] = merged.get(k, 0) + v
+        for job_id, v in other.completed_jobs.items():
+            merged[job_id] = merged.get(job_id, 0) + v
 
         return OffloadingWorkerMetadata(completed_jobs=merged)
