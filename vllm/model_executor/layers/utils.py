@@ -148,6 +148,146 @@ def _init_tinygemm():
 _init_tinygemm()
 
 
+# State for the torch.compile-wrapped BF16 linear fast path.
+# Keyed by (x.ndim, weight.shape, bias_is_not_none); each distinct shape
+# triggers one inductor compile with mode="max-autotune-no-cudagraphs",
+# letting inductor pick between triton/aten/cutlass without compiling
+# the whole model.
+_unquant_bf16_linear_cache: dict[tuple, Callable] = {}
+_unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
+_unquant_bf16_linear_torch_compile_configured = False
+_unquant_bf16_linear_torch_compile_disabled = False
+
+
+def _configure_unquant_bf16_linear_torch_compile_once() -> None:
+    global _unquant_bf16_linear_torch_compile_configured
+    if _unquant_bf16_linear_torch_compile_configured:
+        return
+
+    import torch._dynamo.config
+    import torch._inductor.config
+
+    torch._inductor.config.coordinate_descent_tuning = True
+    torch._inductor.config.triton.unique_kernel_names = True
+    torch._inductor.config.fx_graph_cache = True
+
+    torch._dynamo.config.accumulated_cache_size_limit = 1024
+    if hasattr(torch._dynamo.config, "cache_size_limit"):
+        torch._dynamo.config.cache_size_limit = 1024
+
+    _unquant_bf16_linear_torch_compile_configured = True
+
+
+def _unquant_bf16_linear_eager(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def _unquant_bf16_linear_cache_key(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> tuple:
+    return (x.ndim, tuple(weight.shape), bias is not None)
+
+
+def _get_or_create_unquant_bf16_linear_kernel(
+    key: tuple, allow_new_compile: bool
+) -> Callable | None:
+    compiled = _unquant_bf16_linear_cache.get(key)
+    if compiled is not None:
+        return compiled
+
+    if not allow_new_compile:
+        return None
+
+    _configure_unquant_bf16_linear_torch_compile_once()
+    compiled = torch.compile(
+        _unquant_bf16_linear_eager,
+        backend="inductor",
+        mode="max-autotune-no-cudagraphs",
+        dynamic=True,
+    )
+    _unquant_bf16_linear_cache[key] = compiled
+    return compiled
+
+
+def _should_use_unquant_bf16_linear_torch_compile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> bool:
+    if _unquant_bf16_linear_torch_compile_disabled:
+        return False
+    # Avoid nested compile: if dynamo is already tracing (e.g. vLLM's
+    # piecewise model-level torch.compile), let it see the plain F.linear.
+    if torch._dynamo.is_compiling():
+        return False
+    if not x.is_cuda or x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+        return False
+    if bias is not None and bias.dtype != torch.bfloat16:
+        return False
+    if not x.is_contiguous():
+        return False
+    return True
+
+
+def _apply_unquant_bf16_linear_torch_compile(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor | None:
+    global _unquant_bf16_linear_torch_compile_disabled
+
+    key = _unquant_bf16_linear_cache_key(x, weight, bias)
+    is_capturing = torch.cuda.is_current_stream_capturing()
+
+    # Never compile during CUDA graph capture; only reuse kernels whose
+    # shape key has been observed and compiled in an earlier warm-up.
+    if is_capturing and key not in _unquant_bf16_linear_capture_safe_keys:
+        return None
+
+    compiled = _get_or_create_unquant_bf16_linear_kernel(
+        key, allow_new_compile=not is_capturing
+    )
+    if compiled is None:
+        return None
+
+    try:
+        output = compiled(x, weight, bias)
+    except Exception:
+        if is_capturing:
+            return None
+        logger.warning(
+            "Disabling compiled BF16 linear fast path after "
+            "torch.compile failure.",
+            exc_info=True,
+        )
+        _unquant_bf16_linear_torch_compile_disabled = True
+        return None
+
+    if not is_capturing:
+        _unquant_bf16_linear_capture_safe_keys.add(key)
+
+    return output
+
+
+def _torch_compile_bf16_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    if _should_use_unquant_bf16_linear_torch_compile(x, weight, bias):
+        output = _apply_unquant_bf16_linear_torch_compile(x, weight, bias)
+        if output is not None:
+            return output
+    return torch.nn.functional.linear(x, weight, bias)
+
+
 def _tinygemm_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
@@ -395,6 +535,11 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
+    elif (
+        envs.VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE
+        and current_platform.is_cuda()
+    ):
+        return _torch_compile_bf16_unquantized_gemm
     elif _TINYGEMM_AVAILABLE:
         return _tinygemm_unquantized_gemm
     else:
