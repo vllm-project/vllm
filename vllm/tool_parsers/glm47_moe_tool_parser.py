@@ -16,14 +16,17 @@ import regex as re
 
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.tool_parsers.abstract_tool_parser import Tool
 from vllm.tool_parsers.glm4_moe_tool_parser import Glm4MoeModelToolParser
 
 logger = init_logger(__name__)
 
 
 class Glm47MoeModelToolParser(Glm4MoeModelToolParser):
-    def __init__(self, tokenizer: TokenizerLike):
-        super().__init__(tokenizer)
+    supports_required_and_named = False
+
+    def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
+        super().__init__(tokenizer, tools)
         # GLM-4.7 format: <tool_call>func_name[<arg_key>...]*</tool_call>
         # The function name can be followed by a newline, whitespace, or
         # directly by <arg_key> tags (no separator).  The arg section is
