@@ -75,13 +75,15 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
+    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=mm_features if mm_features else None,
-        sampling_params=SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
@@ -742,6 +744,12 @@ def _make_hybrid_kv_cache_config(
             shapes=(1, 1),
             dtypes=(torch.float32,),
         ),
+        "mamba_align": lambda: MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
     }
 
     kv_cache_groups = [
@@ -857,6 +865,8 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
 
+    manager.new_step_starts()
+
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
@@ -956,6 +966,46 @@ def test_prefill_hybrid_model_combinations_eagle(
 
     manager.free(req0)
     manager.free(req1)
+
+
+def test_prefill_hybrid_model_mamba_align():
+    """Test that MambaManager.cache_blocks() handles null blocks in align mode.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/34361.
+    In mamba_cache_mode="align", allocate_new_blocks() pads req_to_blocks with
+    null blocks. cache_full_blocks() correctly skips them, but
+    MambaManager.cache_blocks() must also skip null blocks when tracking
+    cached_blocks_this_step.
+    """
+    block_size = 16
+    num_blocks = 30
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, ["full", "mamba_align"]
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    hash_fn = sha256
+
+    # 3 full blocks (48 tokens) + 7 partial tokens = 55 tokens total
+    all_token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
+
+    # First request: allocate_slots should not crash with the assertion error
+    # in MambaManager.cache_blocks() when null blocks are present.
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+
+    blocks = manager.allocate_slots(req0, 55, num_computed_tokens, computed_blocks)
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
+
+    manager.free(req0)
 
 
 def test_prefill_plp():
@@ -1520,20 +1570,24 @@ def test_mm_prefix_caching():
     block_hashes = req0.block_hashes
     assert len(block_hashes) == 3
     assert block_hashes[0] == sha256(
-        (kv_cache_utils.NONE_HASH, tuple(all_token_ids[:block_size]), ("aaa",))
+        (
+            kv_cache_utils.NONE_HASH,
+            tuple(all_token_ids[:block_size]),
+            (("aaa", 11),),
+        )
     )
     assert block_hashes[1] == sha256(
         (
             block_hashes[0],
             tuple(all_token_ids[block_size : block_size * 2]),
-            ("aaa", "bbb"),
+            (("aaa", -5), ("bbb", 14)),
         )
     )
     assert block_hashes[2] == sha256(
         (
             block_hashes[1],
             tuple(all_token_ids[block_size * 2 : block_size * 3]),
-            ("bbb",),
+            (("bbb", -2),),
         )
     )
 
@@ -1553,7 +1607,11 @@ def test_mm_prefix_caching():
     assert new_blocks is not None and len(new_blocks.blocks[0]) == 0
     assert len(block_hashes) == 4
     assert block_hashes[3] == sha256(
-        (block_hashes[2], tuple(all_token_ids[3 * block_size :] + [8] * 5), ("ccc",))
+        (
+            block_hashes[2],
+            tuple(all_token_ids[3 * block_size :] + [8] * 5),
+            (("ccc", 0),),
+        )
     )
 
     # Cache hit.
@@ -1912,6 +1970,7 @@ def test_null_parent_block_hash():
     block_size = 1
     num_cached_blocks = 2
     num_full_blocks = 4
+    kv_cache_group_id = 0
 
     pool = BlockPool(
         num_gpu_blocks=8,
@@ -1944,7 +2003,7 @@ def test_null_parent_block_hash():
         num_cached_blocks=num_cached_blocks,
         num_full_blocks=num_full_blocks,
         block_size=block_size,
-        kv_cache_group_id=0,
+        kv_cache_group_id=kv_cache_group_id,
     )
 
     events = pool.take_events()
@@ -1963,6 +2022,7 @@ def test_null_parent_block_hash():
         for h in req.block_hashes[num_cached_blocks:num_full_blocks]
     ]
     assert event.block_hashes == expected_new_hashes
+    assert event.group_idx == kv_cache_group_id
 
     # Ensure we didn't accidentally assign a hash to the null block.
     assert pool.null_block.block_hash is None
@@ -2027,6 +2087,153 @@ def test_kv_cache_events_with_lora(blocks_to_cache: int):
     assert block_stored_event.lora_id is None  # Should be None when no LoRA request
     assert len(block_stored_event.block_hashes) == blocks_to_cache
     assert block_stored_event.block_size == block_size
+
+
+@pytest.mark.parametrize("group_id", [0, 1, 2])
+def test_block_stored_event_group_idx(group_id: int):
+    """Test BlockStored events emitted by cache_full_blocks carry the correct
+    group_idx."""
+    block_size = 4
+    num_tokens = block_size * 2
+
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_grp_idx",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    blocks = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=group_id,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 1
+    assert isinstance(events[0], BlockStored)
+    assert events[0].group_idx == group_id
+
+
+def test_block_stored_event_group_idx_multiple_groups():
+    """
+    Test BlockStored events for separate HMA groups that each carry the
+    correct group_idx.
+
+    Simulates the HMA scenario where full-attention blocks (group 0) and
+    sliding-window blocks (group 1) are cached independently and must be
+    distinguishable by consumers doing HMA-aware prefix-cache routing.
+    """
+    block_size = 4
+    num_tokens = block_size * 2
+
+    # null block + 4 usable (2 per group)
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_multi_grp",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    # Cache blocks for group 0 (full-attention)
+    blocks_grp0 = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks_grp0,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=0,
+    )
+
+    # Cache blocks for group 1 (sliding-window)
+    blocks_grp1 = pool.get_new_blocks(2)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=blocks_grp1,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=1,
+    )
+
+    events = pool.take_events()
+    assert len(events) == 2
+    assert isinstance(events[0], BlockStored)
+    assert events[0].group_idx == 0
+    assert isinstance(events[1], BlockStored)
+    assert events[1].group_idx == 1
+
+
+@pytest.mark.parametrize("group_id", [0, 1, 2])
+def test_block_removed_event_group_idx(group_id: int):
+    """
+    Test BlockRemoved events emitted on eviction carry the group_idx extracted
+    from the evicted block's BlockHashWithGroupId via get_group_id().
+    """
+    block_size = 4
+    num_tokens = block_size * 2
+
+    # null block + 4 usable; allocate all 4, cache 2, free all, re-allocate
+    # all 4 so the 2 cached blocks are forced through _maybe_evict_cached_block.
+    pool = BlockPool(
+        num_gpu_blocks=5,
+        enable_caching=True,
+        hash_block_size=block_size,
+        enable_kv_cache_events=True,
+    )
+
+    req = make_request(
+        "req_evict_grp",
+        prompt_token_ids=list(range(num_tokens)),
+        block_size=block_size,
+        hash_fn=sha256,
+    )
+
+    # Allocate all usable blocks and cache the first two for the target group.
+    all_blocks = pool.get_new_blocks(4)
+    pool.cache_full_blocks(
+        request=req,
+        blocks=all_blocks,
+        num_cached_blocks=0,
+        num_full_blocks=2,
+        block_size=block_size,
+        kv_cache_group_id=group_id,
+    )
+
+    # Drain the BlockStored events so only eviction events remain later.
+    pool.take_events()
+
+    # Return all blocks to the free queue so they become eviction candidates.
+    pool.free_blocks(all_blocks)
+
+    # Re-allocate all blocks; the two with hashes trigger BlockRemoved events.
+    pool.get_new_blocks(4)
+
+    events = pool.take_events()
+    removed_events = [e for e in events if isinstance(e, BlockRemoved)]
+
+    assert len(removed_events) == 2
+    for event in removed_events:
+        assert event.group_idx == group_id
 
 
 def test_eagle_enabled_removes_last_block():
@@ -2254,22 +2461,22 @@ def test_block_lookup_cache_single_block_per_key():
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 100) is None
     assert cache.get_one_block(key0) is block0
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key0, block ID 0)
+    # block popped with (key0, block ID 0)
     assert cache.pop(key0, 0) is block0
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # No block poped due to block_id mismatch
+    # No block popped due to block_id mismatch
     assert cache.pop(key0, 1) is None
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is block1
     assert cache.get_one_block(key2) is None
-    # block poped with (key1, block ID 1)
+    # block popped with (key1, block ID 1)
     assert cache.pop(key1, 1) is block1
     assert cache.get_one_block(key0) is None
     assert cache.get_one_block(key1) is None

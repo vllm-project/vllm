@@ -39,6 +39,12 @@ When run, benchmark script generates results under **benchmark/results** folder,
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
 - `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
+- `PROMPTS_PER_CONCURRENCY`: Multiplier to compute `num_prompts` for serving tests (`num_prompts = max_concurrency × value`). Overrides JSON `num_prompts`. Default is NULL.
+- `ENABLE_ADAPTIVE_CONCURRENCY`: set the value to '1' to enable adaptive SLA-based concurrency search after the static serving max_concurrency sweep. Default value is 0.
+- `SLA_TTFT_MS`: default TTFT SLA threshold in milliseconds for adaptive concurrency search. Default value is 3000.
+- `SLA_TPOT_MS`: default TPOT SLA threshold in milliseconds for adaptive concurrency search. Default value is 100.
+- `ADAPTIVE_MAX_PROBES`: maximum number of extra adaptive search probes. Default value is 8.
+- `ADAPTIVE_MAX_CONCURRENCY`: maximum allowed concurrency during adaptive search. Default value is 1024.
 
 ### Visualization
 
@@ -60,12 +66,12 @@ Here is an example using the script to compare result_a and result_b with max co
 
 ***Output Tput (tok/s) — Model : [ meta-llama/Llama-3.1-8B-Instruct ] , Dataset Name : [ random ] , Input Len : [ 2048.0 ] , Output Len : [ 2048.0 ]***
 
-|    | # of max concurrency | qps  | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio        |
-|----|------|-----|-----------|----------|----------|
-| 0  | 12 | inf | 24.98   | 186.03 |  7.45 |
-| 1  | 16 | inf|  25.49  | 246.92 | 9.69 |
-| 2  | 24 | inf| 27.74  | 293.34 |  10.57 |
-| 3  | 32 | inf| 28.61  |306.69 | 10.72 |
+| | # of max concurrency | qps | results_a/benchmark_results.json | results_b/benchmark_results.json | perf_ratio |
+| | -------------------- | --- | -------------------------------- | -------------------------------- | ---------- |
+| 0 | 12 | inf | 24.98 | 186.03 |  7.45 |
+| 1 | 16 | inf |  25.49 | 246.92 | 9.69 |
+| 2 | 24 | inf | 27.74 | 293.34 |  10.57 |
+| 3 | 32 | inf | 28.61 |306.69 | 10.72 |
 
 ***compare-json-results.py – Command-Line Parameters***  
 

@@ -12,11 +12,7 @@ from vllm.multimodal.utils import encode_image_url, fetch_image
 MODEL_NAME = "muziyongshixin/Qwen2.5-VL-7B-for-VideoCls"
 MAXIMUM_VIDEOS = 1
 
-HF_OVERRIDES = {
-    "text_config": {
-        "architectures": ["Qwen2_5_VLForSequenceClassification"],
-    },
-}
+HF_OVERRIDES = {"architectures": ["Qwen2_5_VLForSequenceClassification"]}
 input_text = "This product was excellent and exceeded my expectations"
 image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/cat_snow.jpg"
 image_base64 = {"url": encode_image_url(fetch_image(image_url))}

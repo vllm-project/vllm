@@ -10,7 +10,7 @@ vllm serve llava-hf/llava-1.5-7b-hf
 
 (multi-image inference with Phi-3.5-vision-instruct)
 vllm serve microsoft/Phi-3.5-vision-instruct --runner generate \
-    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt '{"image":2}'
+    --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt.image 2
 
 (audio inference with Ultravox)
 vllm serve fixie-ai/ultravox-v0_5-llama-3_2-1b \
@@ -20,9 +20,9 @@ run the script with
 python openai_chat_completion_client_for_multimodal.py --chat-type audio
 """
 
-import base64
 import os
 
+import pybase64 as base64
 import requests
 from openai import OpenAI
 from utils import get_first_model
@@ -267,7 +267,7 @@ def run_audio(model: str, max_completion_tokens: int) -> None:
                     {
                         "type": "input_audio",
                         "input_audio": {
-                            # Any format supported by librosa is supported
+                            # Any format supported by soundfile/PyAV is supported
                             "data": audio_base64,
                             "format": "wav",
                         },
@@ -292,7 +292,7 @@ def run_audio(model: str, max_completion_tokens: int) -> None:
                     {
                         "type": "audio_url",
                         "audio_url": {
-                            # Any format supported by librosa is supported
+                            # Any format supported by soundfile/PyAV is supported
                             "url": audio_url
                         },
                     },
@@ -316,7 +316,7 @@ def run_audio(model: str, max_completion_tokens: int) -> None:
                     {
                         "type": "audio_url",
                         "audio_url": {
-                            # Any format supported by librosa is supported
+                            # Any format supported by soundfile/PyAV is supported
                             "url": f"data:audio/ogg;base64,{audio_base64}"
                         },
                     },

@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON };
+enum class ISA { AMX, VEC, VEC16, NEON, VXE };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};
@@ -146,6 +146,9 @@ struct AttentionMetadata {
         break;
       case ISA::NEON:
         ss << "NEON, ";
+        break;
+      case ISA::VXE:
+        ss << "VXE, ";
         break;
     }
     ss << "workitem_group_num: " << workitem_group_num
@@ -821,7 +824,7 @@ struct VecTypeTrait<c10::BFloat16> {
   using vec_t = vec_op::BF16Vec16;
 };
 
-#if !defined(__powerpc__) && !defined(__s390x__)
+#if !defined(__powerpc__)
 template <>
 struct VecTypeTrait<c10::Half> {
   using vec_t = vec_op::FP16Vec16;
@@ -1107,7 +1110,8 @@ class AttentionMainLoop {
           if (sliding_window_left != -1) {
             pos = std::max(pos, curr_token_pos - sliding_window_left);
           }
-          return pos;
+          // Clamp to tile end to avoid OOB when window starts past the tile
+          return std::min(pos, kv_tile_end_pos);
         }();
 
         int32_t right_kv_pos = [&]() {

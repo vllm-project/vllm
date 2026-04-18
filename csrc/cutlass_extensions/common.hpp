@@ -6,14 +6,16 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <torch/headeronly/util/shim_utils.h>
+
 /**
  * Helper function for checking CUTLASS errors
  */
-#define CUTLASS_CHECK(status)                       \
-  {                                                 \
-    cutlass::Status error = status;                 \
-    TORCH_CHECK(error == cutlass::Status::kSuccess, \
-                cutlassGetStatusString(error));     \
+#define CUTLASS_CHECK(status)                           \
+  {                                                     \
+    cutlass::Status error = status;                     \
+    STD_TORCH_CHECK(error == cutlass::Status::kSuccess, \
+                    cutlassGetStatusString(error));     \
   }
 
 inline int get_cuda_max_shared_memory_per_block_opt_in(int const device) {
@@ -149,6 +151,17 @@ struct enable_sm120_only : Kernel {
     printf("This kernel only supports sm120.\n");
     asm("trap;");
   #endif
+#endif
+  }
+};
+
+// SM12x family includes SM120 (RTX 5090) and SM121 (DGX Spark GB10)
+template <typename Kernel>
+struct enable_sm120_family : Kernel {
+  template <typename... Args>
+  CUTLASS_DEVICE void operator()(Args&&... args) {
+#if defined __CUDA_ARCH__ && (__CUDA_ARCH__ >= 1200 && __CUDA_ARCH__ < 1300)
+    Kernel::operator()(std::forward<Args>(args)...);
 #endif
   }
 };

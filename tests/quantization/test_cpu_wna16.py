@@ -11,13 +11,15 @@ MODELS = [
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-AWQ",
     "TheBloke/TinyLlama-1.1B-Chat-v1.0-GPTQ",  # with g_idx
     "Qwen/Qwen1.5-0.5B-Chat-GPTQ-Int4",  # without g_idx
+    "RedHatAI/Qwen3-1.7B-quantized.w4a16",  # with zp
+    "OPEA/Qwen2.5-0.5B-Instruct-int4-sym-inc",
 ]
 DTYPE = ["bfloat16"]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", DTYPE)
-def test_ipex_quant(vllm_runner, model, dtype):
+def test_cpu_quant(vllm_runner, model, dtype):
     with vllm_runner(model, dtype=dtype) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=32)
     assert output

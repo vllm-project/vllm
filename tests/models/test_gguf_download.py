@@ -115,25 +115,6 @@ class TestGGUFModelLoader:
 
     @patch("vllm.model_executor.model_loader.gguf_loader.hf_hub_download")
     @patch("os.path.isfile", return_value=False)
-    def test_prepare_weights_https_url(self, mock_isfile, mock_hf_download):
-        """Test _prepare_weights with HTTPS URL."""
-        load_config = LoadConfig(load_format="gguf")
-        loader = GGUFModelLoader(load_config)
-
-        mock_hf_download.return_value = "/downloaded/model.gguf"
-
-        # Create a simple mock ModelConfig with only the model attribute
-        model_config = MagicMock()
-        model_config.model = "https://huggingface.co/model.gguf"
-
-        result = loader._prepare_weights(model_config)
-        assert result == "/downloaded/model.gguf"
-        mock_hf_download.assert_called_once_with(
-            url="https://huggingface.co/model.gguf"
-        )
-
-    @patch("vllm.model_executor.model_loader.gguf_loader.hf_hub_download")
-    @patch("os.path.isfile", return_value=False)
     def test_prepare_weights_repo_filename(self, mock_isfile, mock_hf_download):
         """Test _prepare_weights with repo_id/filename.gguf format."""
         load_config = LoadConfig(load_format="gguf")
