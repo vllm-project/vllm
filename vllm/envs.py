@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE: bool = False
+    VLLM_INDUCTOR_OVERRIDE_BIG_GPU: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
@@ -1099,6 +1100,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Opt-in; takes precedence over the tinygemm_bf16 fast path when set.
     "VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "0"))
+    ),
+    # Force `torch._inductor.utils.is_big_gpu` to return True, bypassing
+    # the 68-SM threshold that otherwise excludes sub-68-SM CUDA devices
+    # (e.g. GB10 / DGX Spark with 48 SMs) from max-autotune-gemm Triton
+    # templates. Opt-in: expands the autotune candidate pool at the cost
+    # of longer first-compile time per new shape. Applies to any
+    # torch.compile call in the process, not just vLLM's own paths.
+    "VLLM_INDUCTOR_OVERRIDE_BIG_GPU": lambda: bool(
+        int(os.getenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "0"))
     ),
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.

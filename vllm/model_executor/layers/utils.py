@@ -148,6 +148,76 @@ def _init_tinygemm():
 _init_tinygemm()
 
 
+_inductor_big_gpu_override_applied = False
+
+
+def _maybe_override_inductor_is_big_gpu() -> None:
+    """Bypass inductor's 68-SM gate for max-autotune-gemm Triton templates.
+
+    `torch._inductor.utils.is_big_gpu` compares `multi_processor_count`
+    against a hard-coded 68 (3080 baseline). On sub-68-SM CUDA devices
+    (notably GB10 / DGX Spark with 48 SMs) this causes max-autotune-gemm
+    to silently drop Triton templates from the autotune pool, even when
+    the user explicitly includes them in
+    `config.max_autotune_gemm_backends`.
+
+    When `VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1`, monkey-patch the helper to
+    always return True. The patch is global (affects any torch.compile
+    call in the process) and one-shot. Must run before the first
+    inductor autotune call, since `is_big_gpu` is `@functools.cache`d.
+    """
+    global _inductor_big_gpu_override_applied
+    if _inductor_big_gpu_override_applied:
+        return
+    if not envs.VLLM_INDUCTOR_OVERRIDE_BIG_GPU:
+        return
+    try:
+        import torch._inductor.utils as inductor_utils
+    except Exception:
+        logger.warning(
+            "VLLM_INDUCTOR_OVERRIDE_BIG_GPU set but torch._inductor.utils "
+            "could not be imported; leaving is_big_gpu untouched.",
+            exc_info=True,
+        )
+        _inductor_big_gpu_override_applied = True
+        return
+    original = getattr(inductor_utils, "is_big_gpu", None)
+    if original is None:
+        logger.warning(
+            "VLLM_INDUCTOR_OVERRIDE_BIG_GPU set but "
+            "torch._inductor.utils.is_big_gpu not found; "
+            "torch version may have renamed it."
+        )
+        _inductor_big_gpu_override_applied = True
+        return
+    if getattr(original, "__vllm_big_gpu_override__", False):
+        _inductor_big_gpu_override_applied = True
+        return
+
+    def _forced_big_gpu(index_or_device=0) -> bool:  # noqa: ARG001
+        return True
+
+    _forced_big_gpu.__vllm_big_gpu_override__ = True  # type: ignore[attr-defined]
+    inductor_utils.is_big_gpu = _forced_big_gpu
+    # Clear any cached result from a prior call in this process.
+    cache_clear = getattr(original, "cache_clear", None)
+    if callable(cache_clear):
+        try:
+            cache_clear()
+        except Exception:
+            pass
+    logger.info(
+        "VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1: patched "
+        "torch._inductor.utils.is_big_gpu to always return True. "
+        "Triton GEMM templates are now eligible for max-autotune-gemm "
+        "on sub-68-SM CUDA devices."
+    )
+    _inductor_big_gpu_override_applied = True
+
+
+_maybe_override_inductor_is_big_gpu()
+
+
 # State for the torch.compile-wrapped BF16 linear fast path.
 # Keyed by (x.ndim, weight.shape, bias_is_not_none); each distinct shape
 # triggers one inductor compile with mode="max-autotune-no-cudagraphs",
