@@ -1647,18 +1647,7 @@ class OpenAIServingResponses(OpenAIServing):
                         current_content_index = 0
                         tool_call_item_started = True
 
-                    if delta_message.tool_calls[0].function.arguments:
-                        yield _increment_sequence_number_and_return(
-                            ResponseFunctionCallArgumentsDeltaEvent(
-                                type="response.function_call_arguments.delta",
-                                sequence_number=-1,
-                                output_index=current_output_index,
-                                item_id=current_item_id,
-                                delta=delta_message.tool_calls[0].function.arguments,
-                            )
-                        )
-                    # tool call initiated with no arguments
-                    elif (
+                    if (
                         delta_message.tool_calls[0].function.name
                         and not tool_call_item_started
                     ):
@@ -1728,7 +1717,20 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         # skip content part for tool call
                         current_content_index = 1
-                        continue
+                        tool_call_item_started = True
+                        if not delta_message.tool_calls[0].function.arguments:
+                            continue
+
+                    if delta_message.tool_calls[0].function.arguments:
+                        yield _increment_sequence_number_and_return(
+                            ResponseFunctionCallArgumentsDeltaEvent(
+                                type="response.function_call_arguments.delta",
+                                sequence_number=-1,
+                                output_index=current_output_index,
+                                item_id=current_item_id,
+                                delta=delta_message.tool_calls[0].function.arguments,
+                            )
+                        )
                 elif delta_message.reasoning is not None:
                     yield _increment_sequence_number_and_return(
                         ResponseReasoningTextDeltaEvent(

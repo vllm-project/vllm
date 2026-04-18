@@ -1124,3 +1124,53 @@ class TestAutoToolStreaming:
             if event.type == "response.function_call_arguments.delta"
         ]
         assert "".join(argument_deltas) == '{"location":"Berlin"}'
+
+    @pytest.mark.skip_global_cleanup
+    @pytest.mark.asyncio
+    async def test_auto_tool_choice_late_tool_start_accepts_name_and_args(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+        delta_sequence = [
+            DeltaMessage(content="Let me check."),
+            DeltaMessage(
+                tool_calls=[
+                    DeltaToolCall(
+                        id="call_test",
+                        type="function",
+                        index=0,
+                        function=DeltaFunctionCall(
+                            name="get_weather",
+                            arguments='{"location":"Berlin"}',
+                        ),
+                    )
+                ]
+            ),
+        ]
+        events = await self._collect_events(delta_sequence)
+
+        function_items = [
+            event
+            for event in events
+            if event.type == "response.output_item.added"
+            and getattr(event.item, "type", None) == "function_call"
+        ]
+        assert len(function_items) == 1
+        assert function_items[0].item.name == "get_weather"
+
+        argument_deltas = [
+            event.delta
+            for event in events
+            if event.type == "response.function_call_arguments.delta"
+        ]
+        assert argument_deltas == ['{"location":"Berlin"}']
+
+        argument_done = [
+            event
+            for event in events
+            if event.type == "response.function_call_arguments.done"
+        ]
+        assert len(argument_done) == 1
+        assert argument_done[0].name == "get_weather"
+        assert argument_done[0].arguments == '{"location":"Berlin"}'
