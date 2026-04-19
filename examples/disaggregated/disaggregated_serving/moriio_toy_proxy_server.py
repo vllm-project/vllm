@@ -340,7 +340,11 @@ async def handle_request(api: str, request: Request):
 async def send_profile_cmd(req_data: dict, profiler_cmd: str):
     assert profiler_cmd in {"start", "stop"}
 
-    if not prefill_instances and not decode_instances:
+    with _list_lock:
+        p_instances = list(prefill_instances)
+        d_instances = list(decode_instances)
+
+    if not p_instances and not d_instances:
         raise RuntimeError(
             "Service Unavailable: No prefill or decode instances are registered."
         )
