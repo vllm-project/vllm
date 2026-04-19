@@ -9,11 +9,18 @@ import torch._dynamo
 import torch.fx as fx
 from torch.fx.experimental.proxy_tensor import make_fx
 
-from vllm.compilation.backends import _is_empty_allocation_node, split_graph
+from vllm.compilation.backends import (
+    _decompose_size_nodes,
+    _is_empty_allocation_node,
+    split_graph,
+)
 from vllm.compilation.passes.fx_utils import find_op_nodes
+from vllm.platforms import current_platform
 
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def test_getitem_moved_to_producer_subgraph():
@@ -147,7 +154,7 @@ def test_consecutive_ops_in_split():
         final_result = torch.sigmoid(attn_inout)
         return final_result
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     # Create the traced FX graph for the model
     x = torch.randn(8, 4)
@@ -325,7 +332,7 @@ def test_builtin_empty_only_partition_is_merged():
         "Expected two builtin empty_like nodes in merged non-splitting subgraph"
     )
 
-    x = torch.randn(2, 3, device="cuda")
+    x = torch.randn(2, 3, device=DEVICE_TYPE)
     output_original = gm(x)
     output_split = split_gm(x)
     assert torch.allclose(output_original, output_split), "Output mismatch after split"
@@ -622,3 +629,73 @@ def test_sym_size_metadata_propagated():
             else:
                 example_inputs.append(int(ev))
         standalone_compile(submod, example_inputs, dynamic_shapes="from_example_inputs")
+
+
+def test_decompose_size_with_getitem_user():
+    """
+    Regression test: _decompose_size_nodes must handle getitem users of size()
+    correctly.
+
+    When a graph contains x.shape[i], it can appear as:
+
+        %size = call_method[target="size"](args = (%x,))
+        %getitem = call_function[target=operator.getitem](args = (%size, 1))
+
+    The old code spliced *all* per-dim values into every user's args
+    unconditionally, turning the 2-arg getitem into a malformed 3-arg node:
+
+        %getitem(args = (%sym_size_int, 5120, 1))   # TypeError at runtime
+
+    The fix detects getitem users and replaces them with dims[idx] directly.
+    """
+    # Build a graph manually to guarantee the size() + getitem pattern.
+    #
+    # Graph:
+    #   %x = placeholder
+    #   %size = x.size()
+    #   %dim1 = getitem(%size, 1)       <-- the getitem branch we're testing
+    #   %relu = relu(%x)
+    #   %view = view(%relu, -1, %dim1)
+    #   return %view
+    graph = fx.Graph()
+    x = graph.placeholder("x")
+    size_node = graph.call_method("size", args=(x,))
+    getitem_node = graph.call_function(operator.getitem, args=(size_node, 1))
+    relu_node = graph.call_function(torch.ops.aten.relu.default, args=(x,))
+    view_node = graph.call_function(
+        torch.ops.aten.view.default, args=(relu_node, [-1, getitem_node])
+    )
+    graph.output(view_node)
+
+    # Attach example_value metadata so _decompose_size_nodes can inspect dims.
+    # dim 0 is dynamic (SymInt), dim 1 is static (8).
+    from torch._dynamo.source import LocalSource
+    from torch._subclasses.fake_tensor import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+    shape_env = ShapeEnv()
+    src = LocalSource("batch_size")
+    sym_batch = shape_env.create_symintnode(shape_env.create_symbol(4, src), hint=4)
+    fake_mode = FakeTensorMode(shape_env=shape_env)
+    with fake_mode:
+        fake_x = torch.empty_strided((sym_batch, 8), (8, 1))
+    x.meta["example_value"] = fake_x
+
+    gm = fx.GraphModule(torch.nn.Module(), graph)
+
+    # Run decomposition — this would produce a 3-arg getitem without the fix
+    _decompose_size_nodes(gm)
+
+    # Verify no size() nodes remain
+    remaining_size_nodes = list(gm.graph.find_nodes(op="call_method", target="size"))
+    assert len(remaining_size_nodes) == 0, (
+        f"size() nodes should be fully decomposed, found {len(remaining_size_nodes)}"
+    )
+
+    # Verify no malformed getitem nodes (3+ args)
+    for node in gm.graph.nodes:
+        if node.op == "call_function" and node.target is operator.getitem:
+            assert len(node.args) == 2, (
+                f"getitem node '{node.name}' has {len(node.args)} args "
+                f"(expected 2): {node.args}"
+            )
