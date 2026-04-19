@@ -423,8 +423,9 @@ class OffloadingConnectorScheduler:
             job_status.pending_count -= count
             if job_status.pending_count > 0:
                 continue
+            assert job_status.pending_count == 0
 
-            # All TP workers reported — job is complete.
+            # All workers reported — job is complete.
             self._jobs.pop(job_id)
             req_status = self._req_status.get(job_status.req_id)
             if req_status is None:
