@@ -1490,6 +1490,11 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                 quant_params = router_quant_params[router_name]
                 if len(quant_params) == 3:
                     weight_name = f"{router_name}.weight"
+                    if is_pp_missing_parameter(weight_name, self):
+                        del router_quant_params[router_name]
+                        continue
+                    if weight_name not in params_dict:
+                        raise KeyError(weight_name)
                     param = params_dict[weight_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader

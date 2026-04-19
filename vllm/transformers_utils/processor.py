@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import importlib
 import inspect
 from functools import lru_cache
@@ -367,7 +368,9 @@ def cached_processor_from_config(
             model_config.model,
             getattr(model_config.hf_config, "model_type", None),
         )
-        processor.tokenizer = tokenizer
+        if tokenizer is not processor.tokenizer:
+            processor = copy.copy(processor)
+            processor.tokenizer = tokenizer
     return processor
 
 
