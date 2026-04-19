@@ -134,6 +134,21 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
+def _register_config_class(model_type: str,
+                           config_class: type[PretrainedConfig]) -> None:
+    config_class.model_type = model_type
+    AutoConfig.register(model_type, config_class, exist_ok=True)
+
+
+def _maybe_register_hf_config(config: PretrainedConfig | None) -> None:
+    if config is None:
+        return
+
+    model_type = getattr(config, "model_type", None)
+    if isinstance(model_type, str) and model_type in _CONFIG_REGISTRY:
+        _register_config_class(model_type, type(config))
+
+
 def is_rope_parameters_nested(rope_parameters: dict[str, Any]) -> bool:
     """Check if rope_parameters is nested by layer types."""
     # Cannot be nested if rope_parameters is empty
@@ -208,8 +223,7 @@ class HFConfigParser(ConfigParserBase):
                 # Register the config class to AutoConfig to ensure it's used in future
                 # calls to `from_pretrained`
                 config_class = _CONFIG_REGISTRY[model_type]
-                config_class.model_type = model_type
-                AutoConfig.register(model_type, config_class, exist_ok=True)
+                _register_config_class(model_type, config_class)
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
             try:
