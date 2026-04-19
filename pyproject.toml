@@ -170,6 +170,7 @@ eles = "eles"
 datas = "datas"
 ser = "ser"
 ure = "ure"
+VALU = "VALU"
 # Walsh-Hadamard Transform
 wht = "wht"
 WHT = "WHT"
