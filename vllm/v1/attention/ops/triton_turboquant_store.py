@@ -380,7 +380,12 @@ def triton_turboquant_store(
 
     # ── FP8 PATH: in-kernel FP8 cast + scatter via fp8 kernel ──
     if key_fp8:
-        k_flat = key.reshape(NH, D).contiguous()
+        # Keep Triton's float8 input contract local to the TurboQuant
+        # launcher so the kernel itself stays dtype-agnostic.
+        if key.dtype == torch.bfloat16:
+            k_flat = key.float().reshape(NH, D).contiguous()
+        else:
+            k_flat = key.reshape(NH, D).contiguous()
         v_flat = value.reshape(NH, D).contiguous()
 
         fp8_e4b15 = _use_fp8_e4b15(key.device.index or 0)

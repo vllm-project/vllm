@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
+import torch.nn.functional as F
 from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
@@ -18,9 +19,17 @@ from vllm.model_executor.layers.quantization import (
     QuantizationConfig,
     QuantizationMethods,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    check_marlin_supports_layer,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    unpack_quantized_values_into_int32,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (
+    ChannelQuantScaleParameter,
     GroupQuantScaleParameter,
+    PackedColumnParameter,
     PackedvLLMParameter,
     RowvLLMParameter,
 )
@@ -341,6 +350,18 @@ class INCConfig(QuantizationConfig):
             group_size,
             sym,
         )
+        if (
+            isinstance(layer, LinearBase)
+            and group_size > 0
+            and getattr(layer, "input_size_per_partition", layer.input_size)
+            % group_size
+            != 0
+        ):
+            return INCGPTQRowParallelTailLinearMethod(
+                weight_bits=weight_bits,
+                group_size=group_size,
+                sym=sym,
+            )
         if backend == "auto" or "marlin" in backend:
             GPTQ_TYPE_MAP = {
                 (4, True): scalar_types.uint4b8,
@@ -351,6 +372,10 @@ class INCConfig(QuantizationConfig):
             )
             if isinstance(layer, FusedMoE):
                 use_marlin = use_marlin and check_moe_marlin_supports_layer(
+                    layer, group_size
+                )
+            elif isinstance(layer, LinearBase):
+                use_marlin = use_marlin and check_marlin_supports_layer(
                     layer, group_size
                 )
         else:
@@ -625,3 +650,124 @@ class INCXPULinearMethod(LinearMethodBase):
             None,  # g_idx not needed: desc_act is always False for INC models
         )
         return out.reshape(out_shape)
+
+
+class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
+    """Fallback for row-parallel GPTQ-family linears with group-tail shards."""
+
+    def __init__(self, weight_bits: int, group_size: int, sym: bool):
+        self.weight_bits = weight_bits
+        self.group_size = group_size
+        self.sym = sym
+        self.pack_factor = 32 // weight_bits
+        self.weight_type = {
+            4: scalar_types.uint4b8,
+            8: scalar_types.uint8b128,
+        }[weight_bits]
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        del output_size  # Unused.
+        output_size_per_partition = sum(output_partition_sizes)
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        full_num_groups = (input_size + self.group_size - 1) // self.group_size
+
+        qweight = PackedvLLMParameter(
+            data=torch.empty(
+                input_size_per_partition // self.pack_factor,
+                output_size_per_partition,
+                dtype=torch.int32,
+            ),
+            input_dim=0,
+            output_dim=1,
+            packed_dim=0,
+            packed_factor=self.pack_factor,
+            weight_loader=weight_loader,
+        )
+        scales = ChannelQuantScaleParameter(
+            data=torch.empty(
+                full_num_groups,
+                output_size_per_partition,
+                dtype=params_dtype,
+            ),
+            output_dim=1,
+            weight_loader=weight_loader,
+        )
+        qzeros = PackedColumnParameter(
+            data=torch.empty(
+                full_num_groups,
+                output_size_per_partition // self.pack_factor,
+                dtype=torch.int32,
+            ),
+            output_dim=1,
+            packed_dim=1,
+            packed_factor=self.pack_factor,
+            weight_loader=weight_loader,
+        )
+
+        layer.register_parameter("qweight", qweight)
+        layer.register_parameter("scales", scales)
+        layer.register_parameter("qzeros", qzeros)
+
+        shard_width = getattr(
+            layer, "input_size_per_partition", input_size_per_partition
+        )
+        shard_offset = qweight.tp_rank * shard_width
+        g_idx = torch.tensor(
+            [
+                (shard_offset + i) // self.group_size
+                for i in range(input_size_per_partition)
+            ],
+            dtype=torch.int32,
+        )
+        layer.register_parameter("g_idx", Parameter(g_idx, requires_grad=False))
+        layer.register_buffer("_inc_tail_dequant_weight", None, persistent=False)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if self.sym:
+            layer.qzeros = Parameter(
+                torch.tensor([8], dtype=torch.int8, device=layer.qweight.device),
+                requires_grad=False,
+            )
+        else:
+            layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
+        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
+        layer.scales = Parameter(layer.scales.data, requires_grad=False)
+
+    def _get_dequantized_weight(self, layer: torch.nn.Module) -> torch.Tensor:
+        cached = layer._inc_tail_dequant_weight
+        if cached is not None:
+            return cached
+
+        qweight = unpack_quantized_values_into_int32(
+            layer.qweight.data, self.weight_type, packed_dim=0
+        ).to(torch.float32)
+        if self.sym:
+            qweight = qweight - float(self.weight_type.bias)
+
+        g_idx = layer.g_idx.data.to(torch.long)
+        scales = layer.scales.data.to(torch.float32)
+        dequant = qweight * scales.index_select(0, g_idx)
+        weight = dequant.t().contiguous()
+        layer._inc_tail_dequant_weight = weight
+        return weight
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        out_shape = x.shape[:-1] + (layer.qweight.shape[1],)
+        x_2d = x.reshape(-1, x.shape[-1]).to(torch.float32)
+        bias_2d = bias.to(torch.float32) if bias is not None else None
+        output = F.linear(x_2d, self._get_dequantized_weight(layer), bias_2d)
+        return output.to(x.dtype).reshape(out_shape)

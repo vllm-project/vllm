@@ -97,8 +97,14 @@ def get_attn_backend(
         use_non_causal=use_non_causal,
     )
 
+    backend = vllm_config.attention_config.backend
+    if getattr(backend, "name", None) == "TURBOQUANT" and kv_cache_dtype == "auto":
+        from vllm.platforms.interface import AttentionBackendEnum
+
+        backend = AttentionBackendEnum.TRITON_ATTN
+
     return _cached_get_attn_backend(
-        backend=vllm_config.attention_config.backend,
+        backend=backend,
         attn_selector_config=attn_selector_config,
         num_heads=num_heads,
     )

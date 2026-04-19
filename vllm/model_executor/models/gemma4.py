@@ -48,6 +48,9 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    unpack_quantized_values_into_int32,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -58,6 +61,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.platforms import current_platform
+from vllm.scalar_type import scalar_types
 from vllm.sequence import IntermediateTensors
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import KVSharingFastPrefillMetadata
@@ -193,6 +197,47 @@ def gemma4_routing_function_torch(
     expert_scales = per_expert_scale[topk_ids].to(topk_weights.dtype)
     topk_weights = topk_weights * expert_scales
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+
+
+def _dequantize_autoround_gptq_router_weight(
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    num_bits: int,
+    group_size: int,
+    sym: bool,
+    params_dtype: torch.dtype,
+) -> torch.Tensor:
+    weight_type = {
+        4: scalar_types.uint4b8,
+        8: scalar_types.uint8b128,
+    }[num_bits]
+    unpacked_qweight = unpack_quantized_values_into_int32(
+        qweight, weight_type, packed_dim=0
+    ).to(torch.float32)
+    unpacked_qzeros = unpack_quantized_values_into_int32(
+        qzeros, weight_type, packed_dim=1
+    ).to(torch.float32)
+    if sym:
+        unpacked_qzeros = unpacked_qzeros + 1
+    row_groups = (
+        torch.arange(unpacked_qweight.shape[0], device=qweight.device) // group_size
+    )
+    scales_per_row = scales.to(torch.float32)[row_groups]
+    qzeros_per_row = unpacked_qzeros[row_groups]
+    weight = (unpacked_qweight - qzeros_per_row) * scales_per_row
+    return weight.t().to(params_dtype)
+
+
+def _map_gemma4_moe_suffix(name: str, source_base: str, target_base: str) -> str | None:
+    for source_suffix, target_suffix in (
+        (source_base, f"{target_base}_weight"),
+        (f"{source_base}_packed", f"{target_base}_weight_packed"),
+        (f"{source_base}_scale", f"{target_base}_weight_scale"),
+    ):
+        if name.endswith(source_suffix):
+            return name[: -len(source_suffix)] + target_suffix
+    return None
 
 
 def _get_text_config(config):
@@ -1403,6 +1448,7 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         # Include buffers (e.g. layer_scalar) so they can be loaded too
         params_dict.update(dict(self.named_buffers()))
         loaded_params: set[str] = set()
+        router_quant_params: dict[str, dict[str, torch.Tensor]] = {}
         for name, loaded_weight in weights:
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
@@ -1424,6 +1470,35 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(remapped_name)
                     continue
+
+            if (
+                self.quant_config is not None
+                and name.endswith((".qweight", ".qzeros", ".scales"))
+                and ".router.proj." in name
+            ):
+                router_name, _, suffix = name.rpartition(".")
+                router_quant_params.setdefault(router_name, {})[suffix] = loaded_weight
+                loaded_params.add(name)
+                quant_params = router_quant_params[router_name]
+                if len(quant_params) == 3:
+                    weight_name = f"{router_name}.weight"
+                    param = params_dict[weight_name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    router_weight = _dequantize_autoround_gptq_router_weight(
+                        qweight=quant_params["qweight"],
+                        qzeros=quant_params["qzeros"],
+                        scales=quant_params["scales"],
+                        num_bits=self.quant_config.weight_bits,
+                        group_size=self.quant_config.group_size,
+                        sym=self.quant_config.sym,
+                        params_dtype=param.dtype,
+                    )
+                    weight_loader(param, router_weight)
+                    loaded_params.add(weight_name)
+                    del router_quant_params[router_name]
+                continue
 
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
@@ -1456,12 +1531,13 @@ class Gemma4Model(nn.Module, EagleModelMixin):
                     if weight_name in name:
                         # Has suffix (e.g., .weight_scale)
                         moe_name = name.replace(weight_name, param_name)
-                    elif name.endswith(weight_name_base):
-                        # Bare weight (no suffix)
-                        moe_name = name.replace(
-                            weight_name_base, param_name.rstrip("_") + "_weight"
-                        )
                     else:
+                        moe_name = _map_gemma4_moe_suffix(
+                            name,
+                            weight_name_base,
+                            param_name.rstrip("_"),
+                        )
+                    if moe_name is None:
                         continue
                     if moe_name not in params_dict:
                         continue
@@ -1673,6 +1749,35 @@ class Gemma4ForCausalLM(
                 # No transpose needed: checkpoint orientation already
                 # matches FusedMoE's expected layout.
                 if "moe.gate_up_proj" in name and weight.dim() == 3:
+                    if name.endswith("_packed") or name.endswith("_scale"):
+                        num_experts = weight.size(0)
+                        split_size = weight.size(1) // 2
+                        for expert_id in range(num_experts):
+                            gate_weight = weight[expert_id, :split_size, :]
+                            up_weight = weight[expert_id, split_size:, :]
+                            base = name.replace("moe.", f"moe.experts.{expert_id}.")
+                            if name.endswith("_packed"):
+                                gate_name = base.replace(
+                                    "gate_up_proj_packed",
+                                    "gate_proj.weight_packed",
+                                )
+                                up_name = base.replace(
+                                    "gate_up_proj_packed",
+                                    "up_proj.weight_packed",
+                                )
+                            else:
+                                gate_name = base.replace(
+                                    "gate_up_proj_scale",
+                                    "gate_proj.weight_scale",
+                                )
+                                up_name = base.replace(
+                                    "gate_up_proj_scale",
+                                    "up_proj.weight_scale",
+                                )
+                            yield gate_name, gate_weight
+                            yield up_name, up_weight
+                        continue
+
                     num_experts = weight.size(0)
                     intermediate_size = weight.size(1) // 2
                     for expert_id in range(num_experts):
@@ -1687,6 +1792,14 @@ class Gemma4ForCausalLM(
                     num_experts = weight.size(0)
                     for expert_id in range(num_experts):
                         expert_name = name.replace("moe.", f"moe.experts.{expert_id}.")
+                        if expert_name.endswith("_packed"):
+                            expert_name = expert_name.replace(
+                                "down_proj_packed", "down_proj.weight_packed"
+                            )
+                        elif expert_name.endswith("_scale"):
+                            expert_name = expert_name.replace(
+                                "down_proj_scale", "down_proj.weight_scale"
+                            )
                         yield expert_name, weight[expert_id]
                     continue
 
