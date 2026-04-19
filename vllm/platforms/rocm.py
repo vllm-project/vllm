@@ -389,19 +389,24 @@ def flash_attn_triton_available() -> bool:
     try:
         from importlib.util import find_spec
 
-        if find_spec("flash_attn") is None:
-            return False
         # Locate the Triton-AMD kernels. Older ROCm/flash-attention (pre
         # 2026-03) shipped them as the flash_attn.flash_attn_triton_amd
         # subpackage. The main_perf migration commit 3f94643 moved them
         # into aiter at aiter.ops.triton._triton_kernels.flash_attn_triton_amd,
-        # so accept either location.
-        if (
-            find_spec("flash_attn.flash_attn_triton_amd") is None
-            and find_spec(
+        # so accept either location. Guard each probe independently because
+        # find_spec on a submodule raises ModuleNotFoundError when the
+        # parent package is absent.
+        def _has_spec(name: str) -> bool:
+            try:
+                return find_spec(name) is not None
+            except (ImportError, ValueError):
+                return False
+
+        if not (
+            _has_spec("flash_attn.flash_attn_triton_amd")
+            or _has_spec(
                 "aiter.ops.triton._triton_kernels.flash_attn_triton_amd"
             )
-            is None
         ):
             return False
         if os.environ.get("FLASH_ATTENTION_TRITON_AMD_ENABLE") != "TRUE":
