@@ -26,17 +26,13 @@ class CPUOffloadingSpec(OffloadingSpec):
 
         # calculate kv_bytes_per_offloaded_block
         assert kv_cache_config is not None
-        page_sizes = {
-            kv_cache_group.kv_cache_spec.page_size_bytes
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-        }
-        assert len(page_sizes) == 1
-        page_size_bytes = page_sizes.pop()
-        kv_bytes_per_block = (
-            page_size_bytes
-            * len(kv_cache_config.kv_cache_tensors)
-            * vllm_config.parallel_config.world_size
-        )
+        if kv_cache_config.num_blocks > 0:
+            total_gpu_kv_bytes = sum(t.size for t in kv_cache_config.kv_cache_tensors)
+            kv_bytes_per_block = (
+                total_gpu_kv_bytes // kv_cache_config.num_blocks
+            ) * vllm_config.parallel_config.world_size
+        else:
+            kv_bytes_per_block = 0
 
         kv_bytes_per_offloaded_block = kv_bytes_per_block * self.block_size_factor
         self.num_blocks = (
@@ -60,12 +56,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
             )
 
-            assert len(self.gpu_block_size) == 1
-            gpu_block_size = self.gpu_block_size[0]
-            offloaded_block_size = gpu_block_size * self.block_size_factor
-
             self._manager = CPUOffloadingManager(
-                block_size=offloaded_block_size,
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=enable_events,

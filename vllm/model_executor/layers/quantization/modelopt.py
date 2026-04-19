@@ -8,8 +8,13 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+    init_mxfp8_linear_kernel,
+    init_nvfp4_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -56,7 +61,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    W8A8BlockFp8LinearOp,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
 )
@@ -67,16 +71,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
-    Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
-    apply_nvfp4_linear,
-    convert_to_nvfp4_linear_kernel_format,
-    select_nvfp4_linear_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
+    create_fp8_quant_key,
     is_layer_skipped,
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
@@ -85,7 +84,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
-    cutlass_block_fp8_supported,
     requantize_with_max_scale,
 )
 from vllm.model_executor.parameter import (
@@ -408,7 +406,7 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
         if algo is not None and algo == "FP8":
@@ -449,12 +447,8 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8StaticTensorSym,
-            weight_quant_key=kFp8StaticTensorSym,
-            out_dtype=torch.get_default_dtype(),
-            module_name=self.__class__.__name__,
-        )
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
         self,
@@ -504,6 +498,15 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", scale)
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8StaticTensorSym,
+            weight_quant_key=kFp8StaticTensorSym,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         weight = layer.weight
         max_w_scale = layer.weight_scale.max()
@@ -514,6 +517,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -535,12 +539,8 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticTokenSym,
-            out_dtype=torch.get_default_dtype(),
-            module_name=self.__class__.__name__,
-        )
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
         self,
@@ -586,9 +586,19 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticTokenSym,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = Parameter(layer.weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -615,12 +625,16 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         self.quant_config = quant_config
         block_n, block_k = self._WEIGHT_BLOCK_SIZE
         self.weight_block_size = list(self._WEIGHT_BLOCK_SIZE)
-        self.w8a8_block_fp8_linear = W8A8BlockFp8LinearOp(
-            weight_group_shape=GroupShape(block_n, block_k),
-            act_quant_group_shape=GroupShape(1, block_k),
-            cutlass_block_fp8_supported=cutlass_block_fp8_supported(),
-            use_aiter_and_is_supported=False,
+
+        self.activation_quant_key = create_fp8_quant_key(
+            static=False, group_shape=GroupShape(1, block_k)
         )
+        self.weight_quant_key = create_fp8_quant_key(
+            static=True, group_shape=GroupShape(block_n, block_k)
+        )
+
+        self.out_dtype = torch.get_default_dtype()
+        self.input_dtype = get_current_vllm_config().model_config.dtype
 
     def create_weights(
         self,
@@ -687,8 +701,17 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         weight_scale[:] = torch.finfo(torch.float32).min
         layer.register_parameter("weight_scale", weight_scale)
 
+        self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=self.activation_quant_key,
+            weight_quant_key=self.weight_quant_key,
+            weight_shape=layer.weight.shape,
+            input_dtype=self.input_dtype,
+            out_dtype=self.out_dtype,
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Keep weight in [out, in] layout for W8A8BlockFp8LinearOp.
+        # Keep weight in [out, in] layout for Fp8BlockScaledMMLinearKernel.
         layer.weight = Parameter(layer.weight.data, requires_grad=False)
 
         scale = layer.weight_scale
@@ -712,13 +735,7 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.w8a8_block_fp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            input_scale=None,
-            bias=bias,
-        )
+        return self.w8a8_block_fp8_linear.apply_weights(layer, x, bias)
 
 
 class ModelOptFp8MoEMethod(FusedMoEMethodBase):
@@ -1013,7 +1030,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
         if algo is not None and ("NVFP4" in algo or "FP4" in algo):
@@ -1072,7 +1089,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: ModelOptNvFp4Config) -> None:
         self.quant_config = quant_config
         self.marlin_input_dtype = None
-        self.backend = select_nvfp4_linear_backend()
+        self.kernel = init_nvfp4_linear_kernel()
 
     def create_weights(
         self,
@@ -1149,10 +1166,23 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if (
+            torch.unique(layer.input_scale).numel() != 1
+            or torch.unique(layer.weight_scale_2).numel() != 1
+        ):
+            logger.warning_once(
+                "In NVFP4 linear, the global scale for input or weight are different"
+                " for parallel layers (e.g. q_proj, k_proj, v_proj). This "
+                " will likely results in reduce accuracy. Please verify the model"
+                " accuracy. Consider using a checkpoint with a shared global NVFP4"
+                " scale for parallel layers."
+            )
+
         # Rename ModelOpt checkpoint names to standardized names
         input_global_scale = layer.input_scale.max().to(torch.float32)
         layer.input_global_scale = Parameter(input_global_scale, requires_grad=False)
         del layer.input_scale
+
         weight_global_scale = layer.weight_scale_2.max().to(torch.float32)
         layer.weight_global_scale = Parameter(weight_global_scale, requires_grad=False)
         del layer.weight_scale_2
@@ -1166,7 +1196,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         )
 
         # Convert layer to NVFP4 linear kernel format
-        convert_to_nvfp4_linear_kernel_format(self.backend, layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -1174,12 +1204,7 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
-        )
+        return self.kernel.apply_weights(layer=layer, x=x, bias=bias)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
@@ -1502,7 +1527,7 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
         if algo is not None and "MXFP8" in algo:
@@ -1553,7 +1578,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        self.mxfp8_linear_op = Mxfp8LinearOp()
+        self.kernel = init_mxfp8_linear_kernel()
 
     def create_weights(
         self,
@@ -1635,7 +1660,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f" got {layer.weight_scale.dtype}"
         )
 
-        self.mxfp8_linear_op.process_weights(layer)
+        self.kernel.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -1643,16 +1668,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.mxfp8_linear_op.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=x.dtype,
-            bias=bias,
-            workspace=getattr(layer, "workspace", None),
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-        )
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
@@ -2038,7 +2054,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> QuantizationMethods | None:
         algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
         if algo is not None and algo == "MIXED_PRECISION":
