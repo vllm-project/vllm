@@ -13,6 +13,7 @@ from humming.layer import HummingLayerMeta, HummingMethod
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
@@ -107,6 +108,21 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
         self.compute_config_str = json.dumps(self.compute_config)
         self.w13_tuning_config_str = json.dumps(self.w13_tuning_config)
         self.w2_tuning_config_str = json.dumps(self.w2_tuning_config)
+
+    def get_global_valid_shape_m(self, topk_ids: torch.Tensor):
+        num_tokens = topk_ids.size(0)
+        ctx = get_forward_context()
+        if ctx.dp_metadata is not None:
+            num_tokens = ctx.dp_metadata.num_tokens_across_dp_cpu.sum().item()
+
+        return num_tokens * topk_ids.size(1)
+
+    def estimate_local_valid_shape_m(self, topk_ids: torch.Tensor):
+        # estimate shape_m for kernel tuning
+        global_valid_shape_m = self.get_global_valid_shape_m(topk_ids)
+        num_experts = self.num_experts
+        global_num_experts = self.global_num_experts
+        return math.ceil(global_valid_shape_m * num_experts / global_num_experts)
 
     @property
     def humming_gemm_type(self) -> HummingGemmType:
@@ -391,8 +407,7 @@ class HummingIndexedExpertsBase(HummingExpertsBase):
         expert_map: torch.Tensor | None,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
-        valid_shape_m = math.ceil(valid_shape_m)
+        valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
 
         for min_shape_m, max_shape_m, config in self.w13_tuning_config:
             if valid_shape_m > min_shape_m and valid_shape_m <= max_shape_m:
@@ -545,8 +560,7 @@ class HummingGroupedExperts(HummingExpertsBase):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
     ):
-        valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
-        valid_shape_m = math.ceil(valid_shape_m)
+        valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
 
         buffers = self.prepare_buffers(
             workspace1,
@@ -641,8 +655,7 @@ class BatchedHummingGroupedExperts(HummingExpertsBase):
     ):
         assert expert_tokens_meta is not None
         hidden_states = hidden_states.view(-1, hidden_states.size(-1))
-        valid_shape_m = topk_ids.nelement() * self.num_experts / self.global_num_experts
-        valid_shape_m = math.ceil(valid_shape_m)
+        valid_shape_m = self.estimate_local_valid_shape_m(topk_ids)
         expert_num_tokens = expert_tokens_meta.expert_num_tokens
 
         buffers = self.prepare_buffers(
