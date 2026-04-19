@@ -14,7 +14,7 @@ def sort_by_id(w, ids):
     return w.gather(1, order), ids.gather(1, order)
 
 
-# Gemma4 Moe Model has context length of 250K
+# Gemma4 MoE Model has context length of 250K
 # the minus 1 is to ensure that edge cases are tested
 @pytest.mark.parametrize("num_tokens", [1, 2, 2048, 250000])
 @pytest.mark.parametrize("num_experts", [128])  # gemma4 moe experts
