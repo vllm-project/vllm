@@ -60,9 +60,11 @@ logger = init_logger(__name__)
 
 
 def _get_step3p5_layer_types(config: Any) -> list[str]:
-    return getattr(config, "vllm_layer_types", None) or getattr(
-        config, "layer_types", None
-    ) or []
+    return (
+        getattr(config, "vllm_layer_types", None)
+        or getattr(config, "layer_types", None)
+        or []
+    )
 
 
 class FP32ReplicatedLinear(ReplicatedLinear):
