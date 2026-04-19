@@ -24,6 +24,7 @@ from transformers.video_utils import VideoInput
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.tokenizers.registry import _maybe_patch_gemma4_gguf_tokenizer
 from vllm.transformers_utils import processors
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
@@ -352,13 +353,21 @@ def cached_processor_from_config(
         model = model_config.model
         revision = model_config.revision
 
-    return cached_get_processor_without_dynamic_kwargs(
+    processor = cached_get_processor_without_dynamic_kwargs(
         model,
         revision=revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
     )
+    tokenizer = getattr(processor, "tokenizer", None)
+    if tokenizer is not None:
+        _maybe_patch_gemma4_gguf_tokenizer(
+            tokenizer,
+            model_config.model,
+            getattr(model_config.hf_config, "model_type", None),
+        )
+    return processor
 
 
 def get_feature_extractor(

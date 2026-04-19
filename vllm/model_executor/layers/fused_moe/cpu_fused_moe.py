@@ -48,6 +48,10 @@ _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
     MoEActivation.SILU: SiluAndMul.forward_native,
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
     MoEActivation.GELU: _gelu_and_mul,
+    MoEActivation.GELU_TANH: (
+        lambda x: F.gelu(x[..., : x.shape[-1] // 2], approximate="tanh")
+        * x[..., x.shape[-1] // 2 :]
+    ),
 }
 
 

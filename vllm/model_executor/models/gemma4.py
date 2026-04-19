@@ -208,6 +208,8 @@ def _dequantize_autoround_gptq_router_weight(
     sym: bool,
     params_dtype: torch.dtype,
 ) -> torch.Tensor:
+    if num_bits not in (4, 8):
+        raise ValueError(f"Router dequant: unsupported num_bits={num_bits}")
     weight_type = {
         4: scalar_types.uint4b8,
         8: scalar_types.uint8b128,
@@ -399,7 +401,11 @@ class Gemma4MoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             custom_routing_function=routing_function,
-            activation="gelu",
+            activation=(
+                "gelu_tanh"
+                if config.hidden_activation == "gelu_pytorch_tanh"
+                else "gelu"
+            ),
         )
 
     def forward(self, x: torch.Tensor, router_logits: torch.Tensor) -> torch.Tensor:

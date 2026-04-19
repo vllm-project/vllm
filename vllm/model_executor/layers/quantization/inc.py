@@ -747,11 +747,16 @@ class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
         if cached is not None:
             return cached
 
+        if not self.sym:
+            raise NotImplementedError(
+                "INCGPTQRowParallelTailLinearMethod currently supports only "
+                "symmetric checkpoints."
+            )
+
         qweight = unpack_quantized_values_into_int32(
             layer.qweight.data, self.weight_type, packed_dim=0
         ).to(torch.float32)
-        if self.sym:
-            qweight = qweight - float(self.weight_type.bias)
+        qweight = qweight - float(self.weight_type.bias)
 
         g_idx = layer.g_idx.data.to(torch.long)
         scales = layer.scales.data.to(torch.float32)

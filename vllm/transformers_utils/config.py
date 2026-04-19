@@ -574,8 +574,14 @@ def maybe_override_with_speculators(
         Tuple of (resolved_model, resolved_tokenizer, speculative_config)
     """
     if check_gguf_file(model):
-        kwargs["gguf_file"] = Path(model).name
         gguf_model_repo = Path(model).parent
+        # Prefer sibling config.json when present instead of forcing
+        # transformers to parse GGUF metadata directly. This keeps local GGUF
+        # models loadable even when the installed transformers GGUF parser
+        # lags behind the architecture but the repository config.json is
+        # already available.
+        if not file_or_path_exists(gguf_model_repo, HF_CONFIG_NAME, revision=revision):
+            kwargs["gguf_file"] = Path(model).name
     elif is_remote_gguf(model):
         repo_id, _ = split_remote_gguf(model)
         gguf_model_repo = Path(repo_id)
@@ -627,9 +633,15 @@ def get_config(
     _is_remote_gguf = is_remote_gguf(model)
     if _is_gguf:
         if check_gguf_file(model):
-            # Local GGUF file
-            kwargs["gguf_file"] = Path(model).name
-            model = Path(model).parent
+            # Local GGUF file. Prefer sibling config.json when available
+            # rather than routing through transformers' GGUF checkpoint
+            # loader, which may not support the architecture yet.
+            gguf_model_dir = Path(model).parent
+            if not file_or_path_exists(
+                gguf_model_dir, HF_CONFIG_NAME, revision=revision
+            ):
+                kwargs["gguf_file"] = Path(model).name
+            model = gguf_model_dir
         elif _is_remote_gguf:
             # Remote GGUF - extract repo_id from repo_id:quant_type format
             # The actual GGUF file will be downloaded later by GGUFModelLoader
