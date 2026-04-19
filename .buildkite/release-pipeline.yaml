@@ -98,10 +98,10 @@ steps:
   #   commands:
   #     - "bash .buildkite/scripts/generate-and-upload-nightly-index.sh"
 
-  # - block: "Unblock to build release Docker images"
-  #   depends_on: ~
-  #   key: block-build-release-images
-  #   if: build.env("NIGHTLY") != "1"
+  - block: "Unblock to build release Docker images"
+    depends_on: ~
+    key: block-build-release-images
+    if: build.env("NIGHTLY") != "1"
 
   # - group: "Build release Docker images"
   #   key: "build-release-images"
