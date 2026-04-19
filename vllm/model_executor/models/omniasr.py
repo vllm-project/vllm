@@ -34,6 +34,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsTranscription,
 )
+from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
 
 
 class OmniASRModel(nn.Module):
@@ -382,7 +383,8 @@ class OmniAsrForConditionalGeneration(
         config: OmniASRConfig = vllm_config.model_config.hf_config
         self.config = config
         quant_config = vllm_config.quant_config
-        self.model = OmniASRModel(config)
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.model = OmniASRModel(config)
         self.final_proj = ParallelLMHead(
             config.target_vocab_size,
             config.text_config.hidden_size,
@@ -391,6 +393,16 @@ class OmniAsrForConditionalGeneration(
         )
         self.logits_processor = LogitsProcessor(
             config.target_vocab_size, config.target_vocab_size
+        )
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["LlamaForCausalLM"],
+            )
+        self.make_empty_intermediate_tensors = (
+            self.language_model.make_empty_intermediate_tensors
         )
 
     def get_encoder_outputs(
@@ -405,20 +417,31 @@ class OmniAsrForConditionalGeneration(
 
     def get_language_model(self) -> nn.Module:
         # TODO: return self.model.language_model once LLaMA is integrated
-        return self.model
+        return self.language_model
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        intermediate_tensors=None,
         encoder_outputs: list[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
-        # TODO: integrate LLaMA decoder
-        pass
+        if intermediate_tensors is not None:
+            inputs_embeds = None
+        else:
+            inputs_embeds = None
+        hidden_states = self.language_model.model(
+            input_ids,
+            positions,
+            intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+        return hidden_states
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         return self.logits_processor(self.final_proj, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        return self.model.load_weights(weights)
+        loader = AutoWeightsLoader(self, skip_prefixes=["language_model"])
+        return loader.load_weights(weights)
