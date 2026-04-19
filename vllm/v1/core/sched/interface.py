@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -240,4 +242,16 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
+        return None
+
+    def pop_aborted_routed_experts(self, req_id: str) -> "np.ndarray | None":
+        """Pop cached routed experts for a request about to be aborted.
+
+        Default implementation returns ``None``. Schedulers that enable
+        routed-experts capture (``enable_return_routed_experts``) override
+        this to surface the last-known routing snapshot for aborted
+        requests. Kept on the interface so callers typed against
+        ``SchedulerInterface`` (e.g. ``EngineCoreProc``) type-check
+        cleanly regardless of the concrete scheduler class.
+        """
         return None

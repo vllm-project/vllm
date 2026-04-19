@@ -12,6 +12,7 @@ import numpy as np
 import torch
 
 from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
@@ -38,17 +39,6 @@ def get_num_experts(hf_config) -> int:
     )
 
 
-def _expert_id_dtype(num_experts: int, *, numpy: bool = False):
-    """Pick the smallest unsigned int type that fits all expert IDs.
-
-    Expert IDs are 0..num_experts-1; uint8 fits 256 distinct values
-    (0..255), so the boundary is ``<= 256`` (NOT ``< 256``).
-    """
-    if numpy:
-        return np.uint8 if num_experts <= 256 else np.uint16
-    return torch.uint8 if num_experts <= 256 else torch.uint16
-
-
 class RoutedExpertsCapturer:
     """Worker-side capturer for routed experts, lives on GPU.
 
@@ -59,13 +49,22 @@ class RoutedExpertsCapturer:
     device buffer, issues a D2H copy into a pinned CPU buffer, and hands
     the result to the scheduler via :class:`RoutedExpertsLists`.
 
+    The device / pinned-CPU transit buffers use ``torch.int32`` (not a
+    narrow ``uint8``/``uint16`` sized by ``num_experts``). This keeps the
+    SP all-gather path free of dtype casts, matches the router's native
+    ``topk_ids`` indices dtype more closely, and costs only a few MB per
+    worker (``max_num_batched_tokens * num_layers * top_k * 4`` bytes).
+    The scheduler-side slot buffer
+    (``RoutedExpertsManager.routed_experts_by_slot``) still uses the
+    narrow dtype -- numpy fancy-index assignment in ``store_batch``
+    narrows the data on the way in.
+
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
           worst-case step (``max_num_batched_tokens`` tokens).
         - :meth:`clear_buffer` is called at the start of every step, so
           unused slots stay zero.
-        - ``device_buffer.dtype`` is picked by ``num_experts``; callers
-          should not assume int32.
+        - ``device_buffer.dtype`` is ``torch.int32``.
     """
 
     def __init__(
@@ -74,29 +73,45 @@ class RoutedExpertsCapturer:
         vllm_config: VllmConfig,
     ) -> None:
         hf_config = vllm_config.model_config.hf_text_config
-        num_experts = get_num_experts(hf_config)
         self.device_buffer = torch.zeros(
             (
                 max_num_batched_tokens,
                 hf_config.num_hidden_layers,
                 hf_config.num_experts_per_tok,
             ),
-            dtype=_expert_id_dtype(num_experts),
+            # Use int32 for the device / host transit buffers: it
+            # matches the router's native topk_ids dtype, is universally
+            # supported by NCCL (uint8/uint16 are version-dependent),
+            # and the extra bytes are small (few MB per worker). The
+            # big scheduler-side slot buffer stays narrow.
+            dtype=torch.int32,
             device=current_platform.device_type,
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         """Capture expert routing decisions for a specific layer.
 
-        Under data parallelism, ``topk_ids`` may have two different batch
-        layouts depending on where the DP combine happens:
+        Under data parallelism, ``topk_ids`` may have three different batch
+        layouts depending on where the DP combine happens and whether
+        Sequence Parallelism (SP) is active for the MoE layer:
           - ``n == total`` (naive dispatch): all DP ranks' tokens are
             concatenated before routing; we slice out this rank's span
             using the cumulative per-rank counts.
           - ``n == token_num_per_dp`` (modular-kernel path): DP combine
             happens inside ``quant_method.apply``; ``select_experts`` only
             ever sees this rank's tokens, so we take the whole tensor.
+          - ``n == ceil(token_num_per_dp / tp_size)`` (SP + modular-kernel
+            path): tokens were split along dim=0 across the TP group by
+            ``_sequence_parallel_context``
+            (``moe_runner_base.py:_sequence_parallel_context``), so each
+            TP rank only sees its shard. We all-gather along dim=0 to
+            reconstruct this DP rank's full routing tensor. SP pads with
+            ceil-div (see ``_compute_sp_num_tokens`` in
+            ``forward_context.py``), so the gathered tensor may contain a
+            few trailing padding rows which are trimmed by the downstream
+            ``[:token_num_per_dp]`` slice.
 
         Args:
             layer_id: The layer index.
@@ -127,11 +142,40 @@ class RoutedExpertsCapturer:
                 # rank's tokens, take the whole tensor.
                 start_loc = 0
                 end_loc = token_num_per_dp
+            elif (
+                self.tp_size > 1
+                and n != token_num_per_dp
+                and n == (token_num_per_dp + self.tp_size - 1) // self.tp_size
+            ):
+                # SP + modular-kernel path. All-gather across the TP
+                # group along dim=0 to reconstruct the full per-DP-rank
+                # tensor; keep only the first ``token_num_per_dp`` rows
+                # (trailing rows are SP ceil-div padding). The TP group
+                # is always initialized on real rollout workers, and
+                # every rank in the group reaches this branch in
+                # lockstep (bind is per-FusedMoE layer, SP is a global
+                # condition), so a bare all_gather here will not
+                # deadlock -- let it raise if the precondition is
+                # violated rather than skip silently.
+                #
+                # ``topk_ids`` is already whatever the router produced
+                # (typically int32/int64, both supported by NCCL); the
+                # downstream ``device_buffer[...] = topk_ids[...]``
+                # setitem narrows into int32 automatically.
+                topk_ids = get_tp_group().all_gather(topk_ids, dim=0)
+                start_loc = 0
+                end_loc = token_num_per_dp
             else:
+                sp_expected = (
+                    (token_num_per_dp + self.tp_size - 1) // self.tp_size
+                    if self.tp_size > 0
+                    else -1
+                )
                 raise AssertionError(
-                    "RoutedExpertsCapturer: unexpected topk_ids batch dim "
-                    f"{n} (expected {total} or {token_num_per_dp} "
-                    f"for dp_rank={self.dp_rank})"
+                    "RoutedExpertsCapturer: unexpected topk_ids batch "
+                    f"dim {n} (expected {total}, {token_num_per_dp}, "
+                    f"or {sp_expected} for dp_rank={self.dp_rank}, "
+                    f"tp_size={self.tp_size})"
                 )
 
         # Defensive: model may expose more layers than the capture buffer
@@ -210,13 +254,18 @@ class RoutedExpertsManager:
         hf_config = vllm_config.model_config.hf_text_config
         num_experts = get_num_experts(hf_config)
         max_num_slots = kv_cache_config.num_blocks * self.block_size
+        # Expert IDs are 0..num_experts-1; uint8 fits 256 distinct
+        # values so the boundary is ``<= 256`` (NOT ``< 256``). Keeping
+        # this narrow matters because the slot buffer is sized for the
+        # whole block pool and can reach multiple GB.
+        expert_id_dtype = np.uint8 if num_experts <= 256 else np.uint16
         self.routed_experts_by_slot = np.zeros(
             (
                 max_num_slots,
                 hf_config.num_hidden_layers,
                 hf_config.num_experts_per_tok,
             ),
-            dtype=_expert_id_dtype(num_experts, numpy=True),
+            dtype=expert_id_dtype,
         )
         logger.info(
             "RoutedExpertsManager CPU buffer: %.2f GB "
