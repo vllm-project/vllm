@@ -44,6 +44,33 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
     return y
 
 
+@triton.jit
+def convert_rs_fp8x4_e4m3(x: tl.tensor, rand: tl.tensor) -> tl.tensor:
+    # PTX hardware stochastic-round conversion fp32 -> fp8 E4M3 (SM_100a+).
+    # Packs 4 fp32 inputs, consumes one 32-bit random seed, and emits a packed
+    # 32-bit (4 x fp8) result with saturate-to-finite semantics.  Triton packs
+    # pack=4 elements per asm call: 4 fp32 inputs occupy 4 regs ($1..$4), 4
+    # random u32 inputs occupy 4 regs ($5..$8) of which only $5 is consumed.
+    #
+    # Critical: the fp32 source regs in the {...} list are REVERSED.  Triton's
+    # inline_asm_elementwise places lane `i` at the low-i byte of the packed
+    # output (little-endian), but PTX `cvt.rs.satfinite.e4m3x4.f32` writes the
+    # leftmost source argument to the HIGH byte of the destination register.
+    # Same convention as the existing `convert_rs_fp16x2` helper (which swaps
+    # `$1` and `$2`).  Using the natural `{$1, $2, $3, $4}` order silently
+    # transposes every group of 4 contiguous elements along the innermost
+    # (dstate) axis — see triton-lang/triton#8822.
+    y = tl.inline_asm_elementwise(
+        asm="cvt.rs.satfinite.e4m3x4.f32 $0, {$4, $3, $2, $1}, $5;",
+        constraints="=r,r,r,r,r,r,r,r,r",
+        args=(x, rand),
+        dtype=tl.float8e4nv,
+        is_pure=True,
+        pack=4,
+    )
+    return y
+
+
 @triton.heuristics({"HAS_DT_BIAS": lambda args: args["dt_bias_ptr"] is not None})
 @triton.heuristics({"HAS_D": lambda args: args["D_ptr"] is not None})
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
@@ -319,25 +346,11 @@ def _selective_scan_update_kernel(
             z_ptr += stride_z_batch
 
     if not IS_SPEC_DECODING:
-        if QUANT_MAX > 0.0:
-            # Block-scale quantize: compute per-dim amax over dstate, encode and
-            # store the decode scale, then clip and cast to the quantized dtype.
-            amax = tl.max(tl.abs(state), axis=1, keep_dims=True)
-            encode_scale = tl.where(amax == 0.0, 1.0, QUANT_MAX / amax)
-            new_decode_scale = 1.0 / encode_scale
-            # Guard scale store: padded CUDA-graph slots have out-of-bounds ptrs.
-            dst_scales_mask = offs_m[:, None] < dim
-            if HAS_STATE_BATCH_INDICES:
-                dst_scales_mask = dst_scales_mask & (state_batch_idx != null_block_id)
-            tl.store(dst_state_scales_ptrs, new_decode_scale, mask=dst_scales_mask)
-            state = state * encode_scale
-            state = tl.extra.cuda.libdevice.round(state)
-            state = tl.minimum(tl.maximum(state, -QUANT_MAX), QUANT_MAX)
-            tl.store(dst_state_ptrs, state.to(dst_state_ptrs.dtype.element_ty), mask=mask)
-        elif USE_RS_ROUNDING:
-            # Load random seed
+        # Compute a per-element uniform random u32 once up front when SR is
+        # enabled; it is then consumed by whichever store path is active
+        # (integer-domain SR for the quantized branch, PTX fp16 SR otherwise).
+        if USE_RS_ROUNDING:
             rand_seed = tl.load(rand_seed_ptr)
-            # Generate random offsets for each element in state
             if HAS_STATE_BATCH_INDICES:
                 rand_offsets = (
                     state_batch_idx * stride_state_batch + pid_h * stride_state_head
@@ -348,12 +361,46 @@ def _selective_scan_update_kernel(
                 offs_m[:, None] * stride_state_dim
                 + offs_n[None, :] * stride_state_dstate
             )
-            # Generate random 32-bits for each element in state
             if PHILOX_ROUNDS > 0:
                 rand = tl.randint(rand_seed, rand_offsets, PHILOX_ROUNDS)
             else:
                 rand = tl.randint(rand_seed, rand_offsets)
-            # Convert state to fp16 with RS rounding
+
+        if QUANT_MAX > 0.0:
+            # Block-scale quantize: compute per-dim amax over dstate, encode
+            # and store the decode scale, then round/clamp/cast.
+            amax = tl.max(tl.abs(state), axis=1, keep_dims=True)
+            encode_scale = tl.where(amax == 0.0, 1.0, QUANT_MAX / amax)
+            new_decode_scale = 1.0 / encode_scale
+            # Guard: padded CUDA-graph slots have out-of-bounds scale ptrs.
+            dst_scales_mask = offs_m[:, None] < dim
+            if HAS_STATE_BATCH_INDICES:
+                dst_scales_mask = dst_scales_mask & (state_batch_idx != null_block_id)
+            tl.store(dst_state_scales_ptrs, new_decode_scale, mask=dst_scales_mask)
+            state = state * encode_scale
+            if USE_RS_ROUNDING and (
+                dst_state_ptrs.dtype.element_ty == tl.float8e4nv
+            ):
+                # Hardware PTX SR on the true fp8 E4M3 grid (SM_100a+).  One
+                # instruction does unbiased stochastic rounding + saturating
+                # cast, so no explicit clamp/cast is needed here.
+                state = convert_rs_fp8x4_e4m3(state, rand)
+            else:
+                if USE_RS_ROUNDING:
+                    # Unbiased integer-domain SR: floor(x + U[0, 1)).  Top 24
+                    # bits of the random u32 give a uniform fp32 in [0, 1).
+                    # Correct for int8/int16 (uniform integer grid); used as a
+                    # fallback if someone enables SR on a non-fp8 quant dtype.
+                    rand01 = (rand & 0x00FFFFFF).to(tl.float32) * (
+                        1.0 / float(1 << 24)
+                    )
+                    state = tl.extra.cuda.libdevice.floor(state + rand01)
+                else:
+                    state = tl.extra.cuda.libdevice.round(state)
+                state = tl.minimum(tl.maximum(state, -QUANT_MAX), QUANT_MAX)
+                state = state.to(dst_state_ptrs.dtype.element_ty)
+        elif USE_RS_ROUNDING:
+            # PTX-accelerated fp32 -> fp16 stochastic rounding.
             state = convert_rs_fp16x2(state, rand)
             tl.static_assert(state.dtype == tl.float16, "state must be fp16")
             tl.static_assert(
