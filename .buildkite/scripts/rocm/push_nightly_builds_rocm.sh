@@ -8,7 +8,7 @@
 # Run when NIGHTLY=1 after build-rocm-release-image has pushed to ECR.
 #
 # Local testing (no push to Docker Hub):
-#   BUILDKITE_COMMIT=<commit-with-rocm-image-in-ecr> DRY_RUN=1 bash .buildkite/scripts/push-nightly-builds-rocm.sh
+#   BUILDKITE_COMMIT=<commit-with-rocm-image-in-ecr> DRY_RUN=1 bash .buildkite/scripts/rocm/push_nightly_builds_rocm.sh
 # Requires: AWS CLI configured (for ECR public login), Docker. For full run: Docker Hub login.
 
 set -ex

@@ -8,10 +8,10 @@
 # to avoid rebuilding them when Dockerfile.rocm_base hasn't changed.
 #
 # Usage:
-#   cache-rocm-base-wheels.sh check    - Check if cache exists, outputs "hit" or "miss"
-#   cache-rocm-base-wheels.sh upload   - Upload wheels to cache
-#   cache-rocm-base-wheels.sh download - Download wheels from cache
-#   cache-rocm-base-wheels.sh key      - Output the cache key
+#   cache_rocm_base_wheels.sh check    - Check if cache exists, outputs "hit" or "miss"
+#   cache_rocm_base_wheels.sh upload   - Upload wheels to cache
+#   cache_rocm_base_wheels.sh download - Download wheels from cache
+#   cache_rocm_base_wheels.sh key      - Output the cache key
 #
 # Environment variables:
 #   S3_BUCKET          - S3 bucket name (default: vllm-wheels)
