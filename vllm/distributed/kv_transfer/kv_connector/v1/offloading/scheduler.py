@@ -41,6 +41,7 @@ class TransferJobStatus:
     pending_count: int
     # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
+    is_store: bool
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -90,8 +91,9 @@ class RequestOffloadState:
     group_states: tuple[RequestGroupState, ...] = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
-    load_job: int | None = None
-    store_jobs: set[int] = field(default_factory=set)
+    # In-flight job IDs. Per the connector's invariant, at any given time
+    # this contains either a single load job, or one or more store jobs.
+    transfer_jobs: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -281,12 +283,14 @@ class OffloadingConnectorScheduler:
             req_id=request.request_id,
             transfer_spec=(src_spec, dst_spec),
         )
-        assert req_status.load_job is None
-        req_status.load_job = load_job_id
+        # a load can only be issued when no other jobs are pending.
+        assert not req_status.transfer_jobs
+        req_status.transfer_jobs.add(load_job_id)
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
             keys=set(offload_keys),
+            is_store=False,
         )
         group_state.next_stored_block_idx = num_blocks
 
@@ -364,11 +368,16 @@ class OffloadingConnectorScheduler:
             )
 
             job_id = self._generate_job_id()
-            req_status.store_jobs.add(job_id)
+            # a store can only be issued when no load is pending.
+            if req_status.transfer_jobs:
+                any_jid = next(iter(req_status.transfer_jobs))
+                assert self._jobs[any_jid].is_store
+            req_status.transfer_jobs.add(job_id)
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
                 keys=set(keys_to_store),
+                is_store=True,
             )
 
             store_jobs[job_id] = TransferJob(
@@ -392,7 +401,7 @@ class OffloadingConnectorScheduler:
         for req_id in scheduler_output.preempted_req_ids or ():
             req_status = self._req_status.get(req_id)
             if req_status is not None:
-                jobs_to_flush.update(req_status.store_jobs)
+                jobs_to_flush.update(req_status.transfer_jobs)
 
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
@@ -427,23 +436,15 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status.get(job_status.req_id)
             assert req_status is not None
 
-            if job_id in req_status.store_jobs:
-                req_status.store_jobs.remove(job_id)
+            req_status.transfer_jobs.remove(job_id)
+            if job_status.is_store:
                 self.manager.complete_store(job_status.keys)
-            elif job_id == req_status.load_job:
-                req_status.load_job = None
+            else:
                 self.manager.complete_load(job_status.keys)
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-            request_being_stored = bool(req_status.store_jobs)
-            request_being_loaded = req_status.load_job is not None
-
-            if (
-                req_status.req.is_finished()
-                and not request_being_stored
-                and not request_being_loaded
-            ):
+            if not req_status.transfer_jobs:
                 self._req_status.pop(job_status.req_id, None)
 
     def request_finished(
@@ -469,7 +470,7 @@ class OffloadingConnectorScheduler:
         if req_status is None:
             return False, None
 
-        request_being_stored = bool(req_status.store_jobs)
+        request_being_stored = bool(req_status.transfer_jobs)
         if not request_being_stored:
             self._req_status.pop(req_id, None)
         return request_being_stored, None
