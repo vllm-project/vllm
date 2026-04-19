@@ -428,8 +428,7 @@ class OffloadingConnectorScheduler:
             # All workers reported — job is complete.
             self._jobs.pop(job_id)
             req_status = self._req_status.get(job_status.req_id)
-            if req_status is None:
-                continue
+            assert req_status is not None
 
             if job_id in req_status.store_jobs:
                 req_status.store_jobs.remove(job_id)
