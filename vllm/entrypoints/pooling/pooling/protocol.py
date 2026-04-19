@@ -97,6 +97,11 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
             max_total_tokens_param="max_model_len",
         )
 
+    def to_pooling_params(self):
+        return PoolingParams(
+            task=self.task,
+        )
+
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):
     request_id: str | None = None
