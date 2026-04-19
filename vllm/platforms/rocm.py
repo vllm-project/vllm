@@ -342,9 +342,7 @@ def flash_attn_triton_available() -> bool:
         # 2026-03) shipped them as the flash_attn.flash_attn_triton_amd
         # subpackage. The main_perf migration commit 3f94643 moved them
         # into aiter at aiter.ops.triton._triton_kernels.flash_attn_triton_amd,
-        # so accept either location. Guard each probe independently because
-        # find_spec on a submodule raises ModuleNotFoundError when the
-        # parent package is absent.
+        # so accept either location.
         def _has_spec(name: str) -> bool:
             try:
                 return find_spec(name) is not None
