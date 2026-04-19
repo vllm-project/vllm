@@ -146,6 +146,10 @@ class GGUFModelLoader(BaseModelLoader):
         ) -> None:
             if handled_name is None:
                 handled_name = hf_name
+            # handled_name must match the HF state_dict key emitted by the
+            # installed Gemma4 transformers config/model classes. If upstream
+            # renames these tensors, update handled_name alongside the manual
+            # GGUF mapping.
             if handled_name in normalized_state_names:
                 gguf_to_hf_name_map[gguf_name] = hf_name
                 handled_params.add(handled_name)

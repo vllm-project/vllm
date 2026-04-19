@@ -357,6 +357,10 @@ class INCConfig(QuantizationConfig):
             % group_size
             != 0
         ):
+            # Gemma4 AutoRound row-parallel linears can produce TP shards that
+            # straddle a GPTQ group boundary. Fall back to a correctness-first
+            # path in that case instead of using Marlin/GPTQ kernels that
+            # assume group-aligned input shards.
             return INCGPTQRowParallelTailLinearMethod(
                 weight_bits=weight_bits,
                 group_size=group_size,
@@ -733,9 +737,10 @@ class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.sym:
-            # The tail-shard fallback dequantizes weights on demand, so keep
-            # only the effective symmetric zero point instead of the packed
-            # GPTQ qzeros tensor.
+            # The tail-shard fallback dequantizes weights on demand and handles
+            # the symmetric zero point via weight_type.bias in
+            # _get_dequantized_weight(), so the large packed qzeros tensor is
+            # replaced with a tiny placeholder after loading.
             layer.qzeros = Parameter(
                 torch.tensor([8], dtype=torch.int8, device=layer.qweight.device),
                 requires_grad=False,
