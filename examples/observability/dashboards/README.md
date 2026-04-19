@@ -74,8 +74,8 @@ percli apply -f perses/performance_statistics.yaml
 
 For detailed deployment instructions and platform-specific options, see:
 
-- **[Grafana Documentation](./grafana)** - JSON dashboards, operator usage, manual import
-- **[Perses Documentation](./perses)** - YAML specs, CLI usage, operator wrapping
+- **[Grafana Documentation](grafana)** - JSON dashboards, operator usage, manual import
+- **[Perses Documentation](perses)** - YAML specs, CLI usage, operator wrapping
 
 ## Contributing
 
