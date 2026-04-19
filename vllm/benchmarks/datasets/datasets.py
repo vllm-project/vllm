@@ -3583,9 +3583,11 @@ class MMStarDataset(HuggingFaceDataset):
 
 class SpeedBench(CustomDataset):
     """
-    Implements the SPEED-Bench dataset: https://huggingface.co/datasets/nvidia/SPEED-Bench
+    SPEED-Bench dataset: https://huggingface.co/datasets/nvidia/SPEED-Bench
+
     Download the dataset using:
-    curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -
+
+    `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -`
     """  # noqa: E501
 
     def __init__(self, **kwargs) -> None:
