@@ -115,7 +115,7 @@ class MockOffloadingSpec(OffloadingSpec):
 
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.lookup.return_value = 0
-        self.manager.prepare_load = lambda keys: MockLoadStoreSpec(keys)
+        self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.handler = MockOffloadingHandler()
 
     def get_manager(self) -> OffloadingManager:

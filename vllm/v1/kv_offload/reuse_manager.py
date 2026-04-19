@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
+    ReqContext,
 )
 
 
@@ -65,7 +66,7 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # Intercepted methods
     # ------------------------------------------------------------------
 
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
+    def lookup(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> int | None:
         """Record each key, then delegate lookup to backing manager."""
         keys = list(keys)
         for key in keys:
@@ -76,9 +77,11 @@ class FilterReusedOffloadingManager(OffloadingManager):
                 if len(self.counts) >= self.max_tracker_size:
                     self.counts.popitem(last=False)  # evict LRU
                 self.counts[key] = 1
-        return self._backing.lookup(keys)
+        return self._backing.lookup(keys, req_context)
 
-    def prepare_store(self, keys: Iterable[OffloadKey]) -> PrepareStoreOutput | None:
+    def prepare_store(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
         """Filter out blocks below threshold, then delegate to backing.
 
         Filtering is evaluated *before* calling the backing manager's
@@ -93,14 +96,16 @@ class FilterReusedOffloadingManager(OffloadingManager):
         # Passing an empty list is intentional and safe — CPUOffloadingManager
         # handles it correctly, returning a PrepareStoreOutput with empty lists.
         # Delegate to the backing manager with only the eligible keys.
-        return self._backing.prepare_store(eligible)
+        return self._backing.prepare_store(eligible, req_context)
 
     # ------------------------------------------------------------------
     # Delegated methods
     # ------------------------------------------------------------------
 
-    def prepare_load(self, keys: Iterable[OffloadKey]) -> LoadStoreSpec:
-        return self._backing.prepare_load(keys)
+    def prepare_load(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> LoadStoreSpec:
+        return self._backing.prepare_load(keys, req_context)
 
     def touch(self, keys: Iterable[OffloadKey]) -> None:
         return self._backing.touch(keys)
