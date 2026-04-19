@@ -8,6 +8,9 @@ import vllm
 from tests.compile.backend import TestBackend
 from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import CompilationConfig, CompilationMode, PassConfig, VllmConfig
+from vllm.platforms import current_platform
+
+DEVICE_TYPE = current_platform.device_type
 
 
 class SplitCoalescingModel(torch.nn.Module):
@@ -28,7 +31,7 @@ class SplitCoalescingModel(torch.nn.Module):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_split_coalescing(dtype):
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

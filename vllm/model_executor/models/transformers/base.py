@@ -150,7 +150,7 @@ class Base(
         if self.quant_config:
             quant_method_name = self.quant_config.get_name()
             # Check for unsupported quantization methods.
-            if quant_method_name == "mxfp4":
+            if quant_method_name in ("mxfp4", "gpt_oss_mxfp4"):
                 raise NotImplementedError(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
@@ -274,6 +274,11 @@ class Base(
             is_encoder=is_encoder,
         )
         class SupportTorchCompileWrapper(cls): ...
+
+        # Preserve __module__ so transformers v5's source-file checks
+        # (e.g. _can_set_experts_implementation) read the original
+        # model's module instead of this file.
+        SupportTorchCompileWrapper.__module__ = cls.__module__
 
         # Patch the class in its module
         module = sys.modules[cls.__module__]

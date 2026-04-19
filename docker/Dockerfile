@@ -22,7 +22,7 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=13.0.0
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
 
@@ -37,7 +37,7 @@ ARG UBUNTU_VERSION=22.04
 # compatibility with other Linux OSes. The main reason for this is that the
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
-ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu${UBUNTU_VERSION}
 
@@ -204,7 +204,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PYTORCH_NIGHTLY
 
 # Install build dependencies
-COPY requirements/build.txt requirements/build.txt
+COPY requirements/build/cuda.txt requirements/build/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 
@@ -219,13 +219,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
@@ -315,7 +315,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 #################### CSRC BUILD IMAGE ####################
 
 #################### EXTENSIONS BUILD IMAGE ####################
-# Build DeepGEMM, DeepEP - runs in PARALLEL with csrc-build
+# Build DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
 ARG CUDA_VERSION
@@ -326,21 +326,6 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
 WORKDIR /workspace
-
-# Build DeepGEMM wheel
-# Default moved here from tools/install_deepgemm.sh for centralized version management
-ARG DEEPGEMM_GIT_REF=477618cd51baffca09c4b0b87e97c03fe827ef03
-COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
-RUN --mount=type=cache,target=/root/.cache/uv \
-    mkdir -p /tmp/deepgemm/dist && \
-    VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh \
-        --cuda-version "${CUDA_VERSION}" \
-        ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} \
-        --wheel-dir /tmp/deepgemm/dist || \
-    echo "DeepGEMM build skipped (CUDA version requirement not met)"
-
-# Ensure the wheel dir exists so COPY won't fail when DeepGEMM is skipped
-RUN mkdir -p /tmp/deepgemm/dist && touch /tmp/deepgemm/dist/.deepgemm_skipped
 
 # Build DeepEP wheels
 COPY tools/ep_kernels/install_python_libraries.sh /tmp/install_python_libraries.sh
@@ -370,7 +355,7 @@ ARG PYTORCH_CUDA_INDEX_BASE_URL
 ARG PYTORCH_NIGHTLY
 
 # Install build dependencies
-COPY requirements/build.txt requirements/build.txt
+COPY requirements/build/cuda.txt requirements/build/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 
@@ -385,13 +370,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing build requirements without torch..." \
         && python3 use_existing_torch.py --prefix \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
+        && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
 
@@ -426,7 +411,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 # Copy extension wheels from extensions-build stage for later use
-COPY --from=extensions-build /tmp/deepgemm/dist /tmp/deepgemm/dist
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
 
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
@@ -466,8 +450,8 @@ ARG PYTORCH_NIGHTLY
 
 # Install development dependencies
 COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.in requirements/test.in
-COPY requirements/test.txt requirements/test.txt
+COPY requirements/test/cuda.in requirements/test/cuda.in
+COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
@@ -475,8 +459,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing dev requirements plus torch nightly..." \
         && python3 use_existing_torch.py --prefix \
-        && cat torch_lib_versions.txt >> requirements/test.in \
-        && uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match \
+        && cat torch_lib_versions.txt >> requirements/test/cuda.in \
+        && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
         -r requirements/dev.txt \
@@ -546,17 +530,23 @@ RUN apt-get update -y \
 # Install CUDA development tools for runtime JIT compilation
 # (FlashInfer, DeepGEMM, EP kernels all require compilation at runtime)
 RUN CUDA_VERSION_DASH=$(echo $CUDA_VERSION | cut -d. -f1,2 | tr '.' '-') && \
+    CUDA_VERSION_SHORT=$(echo $CUDA_VERSION | cut -d. -f1,2) && \
     apt-get update -y && \
-    apt-get install -y --no-install-recommends \
+    apt-get install -y --no-install-recommends --allow-change-held-packages \
         cuda-nvcc-${CUDA_VERSION_DASH} \
         cuda-cudart-${CUDA_VERSION_DASH} \
         cuda-nvrtc-${CUDA_VERSION_DASH} \
         cuda-cuobjdump-${CUDA_VERSION_DASH} \
         libcurand-dev-${CUDA_VERSION_DASH} \
         libcublas-${CUDA_VERSION_DASH} \
-        # Fixes nccl_allocator requiring nccl.h at runtime
-        # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
-        libnccl-dev && \
+        # Required by fastsafetensors (fixes #20384)
+        libnuma-dev && \
+    # Fixes nccl_allocator requiring nccl.h at runtime
+    # https://github.com/vllm-project/vllm/blob/1336a1ea244fa8bfd7e72751cabbdb5b68a0c11a/vllm/distributed/device_communicators/pynccl_allocator.py#L22
+    # NCCL packages don't use the cuda-MAJOR-MINOR naming convention,
+    # so we pin the version to match our CUDA version
+    NCCL_VER=$(apt-cache madison libnccl-dev | grep "+cuda${CUDA_VERSION_SHORT}" | head -1 | awk -F'|' '{gsub(/^ +| +$/, "", $2); print $2}') && \
+    apt-get install -y --no-install-recommends --allow-change-held-packages libnccl-dev=${NCCL_VER} libnccl2=${NCCL_VER} && \
     rm -rf /var/lib/apt/lists/*
 
 # Install uv for faster pip installs
@@ -652,7 +642,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     else \
         BITSANDBYTES_VERSION="${BITSANDBYTES_VERSION_X86}"; \
     fi; \
-    uv pip install --system accelerate hf_transfer modelscope \
+    uv pip install --system accelerate modelscope \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
@@ -688,15 +678,6 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
 RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
-
-# Install deepgemm wheel that has been built in the `build` stage
-RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
-    sh -c 'if ls /tmp/deepgemm/dist/*.whl >/dev/null 2>&1; then \
-              uv pip install --system /tmp/deepgemm/dist/*.whl; \
-           else \
-              echo "No DeepGEMM wheels to install; skipping."; \
-           fi'
 
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
@@ -746,8 +727,8 @@ ARG PYTORCH_NIGHTLY
 
 # Install development dependencies (for testing)
 COPY requirements/lint.txt requirements/lint.txt
-COPY requirements/test.in requirements/test.in
-COPY requirements/test.txt requirements/test.txt
+COPY requirements/test/cuda.in requirements/test/cuda.in
+COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
 COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
@@ -757,8 +738,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
             echo "Installing dev requirements plus torch nightly..." \
             && python3 use_existing_torch.py --prefix \
-            && cat torch_lib_versions.txt >> requirements/test.in \
-            && uv pip compile requirements/test.in -o requirements/test.txt --index-strategy unsafe-best-match \
+            && cat torch_lib_versions.txt >> requirements/test/cuda.in \
+            && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
             && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
             -r requirements/dev.txt \
@@ -775,9 +756,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system -e tests/vllm_test_utils
 
 # enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER 1
+ENV HF_XET_HIGH_PERFORMANCE 1
+
+# increase timeout for hf downloads (for testing)
+ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
@@ -822,7 +804,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
-            apt-get install -y --no-install-recommends ${BUILD_PKGS} && \
+            apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
             uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
