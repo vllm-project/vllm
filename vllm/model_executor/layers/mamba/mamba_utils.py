@@ -79,8 +79,18 @@ class MambaStateDtypeCalculator:
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
     ) -> tuple[torch.dtype, ...]:
-        return cls._mamba_state_dtype(
-            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+        # Mamba2 allocates a third `ssm_state_scales` tensor alongside the
+        # conv + temporal states to support block-scaled SSM-state
+        # quantization (int8 / int16 / fp8_e4m3fn).  The scale tensor is
+        # always fp32 and always present so the kv_cache tuple has a fixed
+        # arity; for non-quantized dtypes it is cheap and unused.  The
+        # matching third entry is returned by `mamba2_state_shape` and
+        # `mamba2_state_copy_func`.
+        return (
+            *cls._mamba_state_dtype(
+                model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+            ),
+            torch.float32,
         )
 
     @classmethod
@@ -89,14 +99,14 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
         mamba_ssm_cache_dtype: MambaDType,
-    ) -> tuple[torch.dtype, ...]:
+    ) -> tuple[torch.dtype, torch.dtype]:
         conv_state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
         if mamba_ssm_cache_dtype == "auto":
             temporal_state_dtype = conv_state_dtype
         else:
             temporal_state_dtype = STR_DTYPE_TO_TORCH_DTYPE[mamba_ssm_cache_dtype]
 
-        return (conv_state_dtype, temporal_state_dtype, torch.float32)
+        return (conv_state_dtype, temporal_state_dtype)
 
     @classmethod
     def short_conv_state_dtype(
