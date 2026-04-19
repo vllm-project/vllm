@@ -40,11 +40,19 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
 
     # Since communication is needed, the buffer is directly initialized as a
     # tensor rather than a tuple of tensor.
-    buffers = torch.zeros(
-        (layer.n_slices, x.shape[0], layer.lora_a_stacked[0].shape[2]),
+    local_lora_rank = layer.lora_a_stacked[0].shape[2]
+    buffer_shape = (layer.n_slices, x.shape[0], local_lora_rank)
+    # Under torch.compile, the local-rank-1 fully-sharded path can otherwise
+    # get lowered to a reinterpret view with a non-canonical layout. The
+    # Triton shrink op mutates this buffer in place and expects the standard
+    # contiguous [slice, token, rank] stride contract.
+    buffers = torch.empty_strided(
+        buffer_shape,
+        (x.shape[0] * local_lora_rank, local_lora_rank, 1),
         dtype=torch.float32,
         device=x.device,
     )
+    buffers.zero_()
 
     shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
         buffers, x, layer.lora_a_stacked, 1.0

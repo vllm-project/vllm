@@ -102,6 +102,27 @@ def is_strictly_contiguous(t: torch.Tensor) -> bool:
     return True
 
 
+def make_strictly_contiguous(t: torch.Tensor) -> torch.Tensor:
+    """Return a canonical contiguous copy when ``t`` has degenerate strides."""
+    if is_strictly_contiguous(t):
+        return t
+
+    expected_stride = 1
+    canonical_strides = []
+    for size in reversed(t.shape):
+        canonical_strides.append(expected_stride)
+        expected_stride *= size
+
+    out = torch.empty_strided(
+        t.shape,
+        tuple(reversed(canonical_strides)),
+        dtype=t.dtype,
+        device=t.device,
+    )
+    out.copy_(t)
+    return out
+
+
 @contextlib.contextmanager
 def set_default_torch_dtype(dtype: torch.dtype):
     """Sets the default torch dtype to the given dtype."""
