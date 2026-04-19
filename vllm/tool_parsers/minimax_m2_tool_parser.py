@@ -39,9 +39,18 @@ class MinimaxM2ToolParser(ToolParser):
         self.tool_call_start_token: str = "<minimax:tool_call>"
         self.tool_call_end_token: str = "</minimax:tool_call>"
 
-        # Streaming state
+        # Streaming state for incremental parsing
         self.is_tool_call_started: bool = False
         self.current_tool_index: int = 0
+        self.current_tool_name_sent: bool = False
+        self._buffer: str = ""
+        self._current_tool_name: str | None = None
+        self._current_tool_id: int = -1
+        self._args_started: list[bool] = [False]
+        self._args_closed: list[bool] = [False]
+        self._pending_key: str | None = None
+        self._streaming_string_value: bool = False
+        self._tool_call_ids: list[str] = []
 
         # Regex patterns for complete parsing
         self.tool_call_complete_regex = re.compile(
@@ -52,6 +61,14 @@ class MinimaxM2ToolParser(ToolParser):
         )
         self.parameter_complete_regex = re.compile(
             r"<parameter name=(.*?)</parameter>", re.DOTALL
+        )
+
+        # Incremental parsing patterns
+        self.invoke_name_regex = re.compile(
+            r'<invoke name=(["\'])(.*?)\1', re.DOTALL
+        )
+        self.parameter_name_regex = re.compile(
+            r'<parameter name=(["\'])(.*?)\1', re.DOTALL
         )
 
         if not self.model_tokenizer:
@@ -85,6 +102,97 @@ class MinimaxM2ToolParser(ToolParser):
         ):
             return name_str[1:-1]
         return name_str
+
+    def _ensure_tool_state(self) -> None:
+        while len(self.streamed_args_for_tool) <= self._current_tool_id:
+            self.streamed_args_for_tool.append("")
+        while len(self.prev_tool_call_arr) <= self._current_tool_id:
+            self.prev_tool_call_arr.append({})
+        while len(self._args_started) <= self._current_tool_id:
+            self._args_started.append(False)
+        while len(self._args_closed) <= self._current_tool_id:
+            self._args_closed.append(False)
+
+    def _begin_tool_call(self) -> None:
+        if self._current_tool_id == -1:
+            self._current_tool_id = 0
+        else:
+            self._current_tool_id += 1
+        self._ensure_tool_state()
+        self._current_tool_name = None
+        self.current_tool_name_sent = False
+        self._args_started[self._current_tool_id] = False
+        self._args_closed[self._current_tool_id] = False
+        self._pending_key = None
+        self._streaming_string_value = False
+        self.streamed_args_for_tool[self._current_tool_id] = ""
+
+    def _finish_tool_call(self) -> None:
+        self.current_tool_index += 1
+        self._current_tool_id += 1
+        self._current_tool_name = None
+        self.current_tool_name_sent = False
+        self._args_started = [False]
+        self._args_closed = [False]
+        self._pending_key = None
+        self._streaming_string_value = False
+        self._buffer = ""
+
+    def _json_escape_string_content(self, s: str) -> str:
+        if not s:
+            return ""
+        return json.dumps(s, ensure_ascii=False)[1:-1]
+
+    def _is_string_type(self, tool_name: str, arg_name: str) -> bool:
+        if self.tools is None:
+            return False
+        for tool in self.tools:
+            if tool.function.name != tool_name:
+                continue
+            if tool.function.parameters is None:
+                return False
+            arg_type = (
+                tool.function.parameters.get("properties", {})
+                .get(arg_name, {})
+                .get("type", None)
+            )
+            return arg_type == "string"
+        return False
+
+    def _emit_tool_name_delta(self, name: str) -> DeltaMessage:
+        tool_call_id = self._generate_tool_call_id()
+        while len(self._tool_call_ids) <= self._current_tool_id:
+            self._tool_call_ids.append(tool_call_id)
+        return DeltaMessage(
+            content=None,
+            tool_calls=[
+                DeltaToolCall(
+                    index=self._current_tool_id,
+                    id=tool_call_id,
+                    function=DeltaFunctionCall(
+                        name=name,
+                        arguments="",
+                    ),
+                    type="function",
+                )
+            ],
+        )
+
+    def _emit_tool_args_delta(self, args_fragment: str) -> DeltaMessage:
+        return DeltaMessage(
+            content=None,
+            tool_calls=[
+                DeltaToolCall(
+                    index=self._current_tool_id,
+                    id=self._tool_call_ids[self._current_tool_id],
+                    function=DeltaFunctionCall(
+                        name=None,
+                        arguments=args_fragment,
+                    ),
+                    type="function",
+                )
+            ],
+        )
 
     def _extract_types_from_schema(self, schema: Any) -> list[str]:
         """
@@ -396,56 +504,170 @@ class MinimaxM2ToolParser(ToolParser):
         previous_text: str,
         current_text: str,
         delta_text: str,
-        previous_token_ids: Sequence[int],  # pylint: disable=unused-argument
-        current_token_ids: Sequence[int],  # pylint: disable=unused-argument
+        previous_token_ids: Sequence[int],
+        current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
         request: ChatCompletionRequest,
     ) -> DeltaMessage | None:
         """Extract tool calls from streaming model output.
 
-        Uses a buffer-until-complete-invoke strategy: tokens are buffered
-        until a complete ``<invoke>...</invoke>`` block is available, then
-        parsed and emitted in one shot.
+        Uses incremental parsing to emit tool names and arguments as soon
+        as they are parsed, rather than waiting for complete <invoke> blocks.
         """
+        self._buffer += delta_text
 
-        start_in_text = self.tool_call_start_token in delta_text
-        start_in_ids = self.tool_call_start_token_id in delta_token_ids
-        tool_call_starting = start_in_text or start_in_ids
-        # Reset state on new request (parser is reused) or new tool-call block.
-        if not previous_text or tool_call_starting:
-            self.current_tool_index = 0
-            self.prev_tool_call_arr.clear()
-            self.streamed_args_for_tool.clear()
-            self.is_tool_call_started = tool_call_starting
-
-        # Pass through content before any tool call.
         if not self.is_tool_call_started:
-            return DeltaMessage(content=delta_text) if delta_text else None
+            start_idx = self._buffer.find(self.tool_call_start_token)
+            if start_idx == -1:
+                for i in range(1, len(self.tool_call_start_token)):
+                    if self._buffer.endswith(self.tool_call_start_token[:i]):
+                        out = self._buffer[: -i]
+                        self._buffer = self._buffer[-i:]
+                        return DeltaMessage(content=out) if out else None
+                out = self._buffer
+                self._buffer = ""
+                return DeltaMessage(content=out) if out else None
 
-        # Capture content before the start token.
-        content_before = None
-        if start_in_text:
-            before = delta_text[: delta_text.index(self.tool_call_start_token)]
-            content_before = before or None
+            if start_idx > 0:
+                out = self._buffer[:start_idx]
+                self._buffer = self._buffer[start_idx:]
+                return DeltaMessage(content=out) if out else None
 
-        # Extract newly completed <invoke> blocks as DeltaToolCalls.
-        delta_tool_calls = self._extract_delta_tool_calls(current_text, request)
+            self._buffer = self._buffer[len(self.tool_call_start_token) :]
+            self.is_tool_call_started = True
+            self._begin_tool_call()
 
-        if delta_tool_calls or content_before:
-            return DeltaMessage(
-                content=content_before,
-                tool_calls=delta_tool_calls,
-            )
+        while True:
+            if not self.current_tool_name_sent:
+                invoke_name_match = self.invoke_name_regex.search(self._buffer)
+                if invoke_name_match:
+                    self._current_tool_name = self._extract_name(
+                        invoke_name_match.group(2)
+                    )
+                    self._buffer = self._buffer[invoke_name_match.end() :]
+                    self.current_tool_name_sent = True
+                    self._begin_tool_call()
+                    return self._emit_tool_name_delta(self._current_tool_name)
 
-        # EOS and </minimax:tool_call> both arrive as special tokens with
-        # no decoded text. Return non-None for EOS so the serving framework
-        # reaches the finish-reason handling path instead of skipping.
-        if (
-            not delta_text
-            and delta_token_ids
-            and self.prev_tool_call_arr
-            and self.tool_call_end_token_id not in delta_token_ids
-        ):
-            return DeltaMessage(content="")
+                end_pos = self._buffer.find(self.tool_call_end_token)
+                if end_pos == -1:
+                    return None
 
-        return None
+                if self._buffer.strip():
+                    self._buffer = self._buffer[end_pos + len(self.tool_call_end_token) :]
+                    self._finish_tool_call()
+                    continue
+                return None
+
+            if self._streaming_string_value:
+                val_end = self._buffer.find("</parameter>")
+                if val_end != -1:
+                    raw_content = self._buffer[:val_end]
+                    self._buffer = self._buffer[val_end + len("</parameter>") :]
+                    self._streaming_string_value = False
+
+                    escaped = self._json_escape_string_content(raw_content)
+                    frag = escaped + '"'
+                    self.streamed_args_for_tool[self._current_tool_id] += frag
+                    self._pending_key = None
+                    return self._emit_tool_args_delta(frag)
+                else:
+                    safe_len = len(self._buffer)
+                    for i in range(1, len("</parameter>")):
+                        if self._buffer.endswith("</parameter>"[:i]):
+                            safe_len = len(self._buffer) - i
+                            break
+                    if safe_len > 0:
+                        to_emit = self._buffer[:safe_len]
+                        self._buffer = self._buffer[safe_len:]
+                        escaped = self._json_escape_string_content(to_emit)
+                        if escaped:
+                            self.streamed_args_for_tool[self._current_tool_id] += escaped
+                            return self._emit_tool_args_delta(escaped)
+                    return None
+
+            if self._pending_key is not None:
+                val_pos = self._buffer.find(">")
+                if val_pos == -1:
+                    return None
+
+                self._buffer = self._buffer[val_pos + 1 :]
+
+                key = self._pending_key.strip()
+                is_string = self._is_string_type(
+                    self._current_tool_name or "", key
+                )
+
+                if is_string:
+                    if not self._args_started[self._current_tool_id]:
+                        key_json = json.dumps(key, ensure_ascii=False)
+                        frag = "{" + key_json + ': "'
+                        self._args_started[self._current_tool_id] = True
+                    else:
+                        key_json = json.dumps(key, ensure_ascii=False)
+                        frag = ", " + key_json + ': "'
+                    self.streamed_args_for_tool[self._current_tool_id] += frag
+                    self._streaming_string_value = True
+                    return self._emit_tool_args_delta(frag)
+                else:
+                    val_end = self._buffer.find("</parameter>")
+                    if val_end == -1:
+                        return None
+                    raw_val = self._buffer[:val_end].strip()
+                    self._buffer = self._buffer[val_end + len("</parameter>") :]
+                    self._pending_key = None
+
+                    if not self._args_started[self._current_tool_id]:
+                        key_json = json.dumps(key, ensure_ascii=False)
+                        frag = "{" + key_json + ": " + raw_val
+                        self._args_started[self._current_tool_id] = True
+                    else:
+                        key_json = json.dumps(key, ensure_ascii=False)
+                        frag = ", " + key_json + ": " + raw_val
+                    self.streamed_args_for_tool[self._current_tool_id] += frag
+                    return self._emit_tool_args_delta(frag)
+
+            end_pos = self._buffer.find(self.tool_call_end_token)
+            param_start = self._buffer.find("<parameter name=")
+            if end_pos != -1 and (param_start == -1 or end_pos < param_start):
+                self._buffer = self._buffer[end_pos + len(self.tool_call_end_token) :]
+                frag_or_none = None
+                if self._args_started[self._current_tool_id] and not self._args_closed[
+                    self._current_tool_id
+                ]:
+                    self.streamed_args_for_tool[
+                        self._current_tool_id
+                    ] += "}"
+                    self._args_closed[self._current_tool_id] = True
+                    frag_or_none = "}"
+                if self._current_tool_name and self.streamed_args_for_tool[
+                    self._current_tool_id
+                ]:
+                    try:
+                        args_dict = json.loads(
+                            self.streamed_args_for_tool[self._current_tool_id]
+                        )
+                        self.prev_tool_call_arr.append({
+                            "name": self._current_tool_name,
+                            "arguments": args_dict,
+                        })
+                    except json.JSONDecodeError:
+                        pass
+                self._finish_tool_call()
+                return (
+                    self._emit_tool_args_delta(frag_or_none) if frag_or_none else None
+                )
+
+            if param_start == -1:
+                return None
+            if param_start > 0:
+                self._buffer = self._buffer[param_start:]
+
+            param_match = self.parameter_name_regex.search(self._buffer)
+            if not param_match:
+                return None
+
+            param_name = self._extract_name(param_match.group(2))
+            self._buffer = self._buffer[param_match.end() :]
+            self._pending_key = param_name
+            continue
