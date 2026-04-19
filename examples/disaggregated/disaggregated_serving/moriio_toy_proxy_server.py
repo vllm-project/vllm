@@ -14,6 +14,7 @@ import aiohttp
 import msgpack
 import zmq
 from quart import Quart, Request, make_response, request
+
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConstants,
 )
@@ -358,7 +359,7 @@ async def send_profile_cmd(req_data: dict, profiler_cmd: str):
     async with aiohttp.ClientSession(
         timeout=aiohttp.ClientTimeout(total=60)
     ) as session:
-        for instances in (prefill_instances, decode_instances):
+        for instances in (p_instances, d_instances):
             for inst in instances:
                 _p = urlparse(inst["request_address"])
                 url = f"http://{_p.hostname}:{_p.port}/{profiler_cmd}_profile"
