@@ -116,6 +116,7 @@ any extra bookkeeping on your part.
 ```python
 from typing import Iterable, Set, Tuple
 import torch
+from torch import nn
 from vllm.model_executor.models.utils import AutoWeightsLoader
 
 class MyModelForCausalLM(nn.Module):
@@ -146,6 +147,7 @@ The general pattern:
 ```python
 from typing import Iterable, Set, Tuple
 import torch
+from torch import nn
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 class MyModelForCausalLM(nn.Module):
