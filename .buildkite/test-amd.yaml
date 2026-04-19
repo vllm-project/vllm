@@ -123,7 +123,7 @@ steps:
   soft_fail: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
-  - requirements/nightly_torch_test.txt
+  - requirements/test/nightly-torch.txt
   - vllm/platforms/rocm.py
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
@@ -532,28 +532,6 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Speculative Decoding (slow) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/
-  - vllm/v1/attention/
-  - vllm/model_executor/layers/
-  - tests/v1/spec_decode/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_eagle.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_extract_hidden_states.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_max_len.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_mtp.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_ngram.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_speculators_eagle3.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_tree_attention.py
-
-
 - label: V1 attention (H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -791,7 +769,7 @@ steps:
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
-  - pip install helion==0.3.3
+  - pip install helion==1.0.0
   - pytest -v -s kernels/helion/
 
 
@@ -1073,7 +1051,8 @@ steps:
   - tests/models/multimodal/test_mapping.py
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
@@ -1878,28 +1857,6 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Speculative Decoding (slow) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/
-  - vllm/v1/attention/
-  - vllm/model_executor/layers/
-  - tests/v1/spec_decode/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_eagle.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_extract_hidden_states.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_max_len.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_mtp.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_ngram.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_speculators_eagle3.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_tree_attention.py
-
 
 - label: Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
@@ -1914,7 +1871,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-  - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  - pytest -v -s v1/spec_decode/test_acceptance_length.py
 
 
 - label: V1 attention (H100-MI325) # 14.5m
@@ -2165,7 +2122,15 @@ steps:
   - vllm/platforms/rocm.py
   - tests/quantization
   commands:
-  - uv pip install --system torchao==0.14.1
+
+  # temporary install here since we need nightly, will move to requirements/test.in
+  # after torchao 0.12 release, and pin a working version of torchao nightly here
+
+  # since torchao nightly is only compatible with torch nightly currently
+  # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
+  # we can only upgrade after this is resolved
+  # TODO(jerryzh168): resolve the above comment
+  - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
@@ -2290,7 +2255,8 @@ steps:
   - tests/models/multimodal/generation
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 
@@ -2924,10 +2890,10 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
 
 ##### .buildkite/test_areas/compile.yaml #####
-# Slowly setting up the tests so that it is also easier for the 
+# Slowly setting up the tests so that it is also easier for the
 # CI team to review and upstream to the pipelinev2.
 # The following tests are important for vLLM IR Ops refactoring,
-# which affects fusion passes on ROCm. So we have to 
+# which affects fusion passes on ROCm. So we have to
 # enable them as as soon as possible.
 
 ## TODO: Enable the test in this group
@@ -3006,7 +2972,7 @@ steps:
 
 ## There are no ops on ROCm for these tests.
 ## The test still passes but the logs are not useful.
-## fused ops just call torch.ops.symm_mem which 
+## fused ops just call torch.ops.symm_mem which
 ## exists in ROCm even though they don't work
 # - label: AsyncTP Correctness Tests (2xH100-2xMI325)
 # - label: Fusion E2E TP2 Quick (H100-MI325)
@@ -3178,28 +3144,6 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Speculative Decoding (slow) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  agent_pool: mi355_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/
-  - vllm/v1/attention/
-  - vllm/model_executor/layers/
-  - tests/v1/spec_decode/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_eagle.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_extract_hidden_states.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_max_len.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_mtp.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_ngram.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_speculators_eagle3.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_tree_attention.py
-
-
 - label: V1 attention (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3338,7 +3282,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - uv pip install --system torchao==0.14.1
+  - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
@@ -3444,7 +3388,8 @@ steps:
   - tests/models/multimodal/generation
   commands:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
-  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing
+  - pytest -v -s models/multimodal/generation/test_memory_leak.py -m core_model
   - cd .. && VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s tests/models/multimodal/generation/test_whisper.py -m core_model
 
 

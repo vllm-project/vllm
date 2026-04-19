@@ -6,8 +6,7 @@ from typing import Union
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -938,15 +937,6 @@ class FusedMoEParallelConfig:
     enable_eplb: bool  # whether to enable expert load balancing
 
     @property
-    def use_dp_chunking(self) -> bool:
-        return (
-            self.use_deepep_ll_kernels
-            or self.use_mori_kernels
-            or self.use_fi_nvl_two_sided_kernels
-            or self.use_nixl_ep_kernels
-        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
-
-    @property
     def is_sequence_parallel(self) -> bool:
         return self.sp_size > 1
 
@@ -1184,7 +1174,7 @@ class FusedMoEConfig:
     intermediate_size_per_partition_unpadded: int | None = None
 
     moe_backend: str = "auto"
-    max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+    max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False

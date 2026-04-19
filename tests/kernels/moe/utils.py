@@ -69,6 +69,7 @@ def make_dummy_moe_config(
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
+        max_num_tokens=512,
     )
 
 
@@ -248,7 +249,7 @@ def make_quantized_test_activations(
     return a, a_q, a_scale
 
 
-def moe_quantize_weights(
+def moe_quantize_weights_2d(
     w: torch.Tensor,
     w_s: torch.Tensor | None,
     quant_dtype: torch.dtype | str | None,
@@ -293,6 +294,40 @@ def moe_quantize_weights(
     return w, w_s, w_gs
 
 
+def moe_quantize_weights(
+    w: torch.Tensor,
+    w_s: torch.Tensor | None,
+    quant_dtype: torch.dtype | str | None,
+    per_token_quant: bool,
+    block_shape: list[int] | None,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
+    assert w.dim() == 3
+    e, rows, cols = w.shape
+    w_l = [None] * e
+    w_s_l = [None] * e
+    w_gs_l = [None] * e
+    for idx in range(e):
+        w_l[idx], w_s_l[idx], w_gs_l[idx] = moe_quantize_weights_2d(
+            w[idx], None, quant_dtype, per_token_quant, block_shape
+        )
+
+    w = torch.stack(w_l)
+    w_s = torch.stack(w_s_l)
+    w_gs = torch.stack(w_gs_l) if e > 0 and w_gs_l[0] is not None else None
+
+    if w_s.ndim == 2:
+        assert w_s.shape[-1] == 1
+        w_s = w_s.view(-1, 1, 1)
+
+    if block_shape is not None:
+        block_n, block_k = block_shape
+        n_tiles = (rows + block_n - 1) // block_n
+        k_tiles = (cols + block_k - 1) // block_k
+        assert w_s.shape == (e, n_tiles, k_tiles)
+
+    return w, w_s, w_gs
+
+
 def make_test_weight(
     e: int,
     rows: int,
@@ -303,30 +338,11 @@ def make_test_weight(
     per_out_ch_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
     w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
-    w_gs = None
 
     if quant_dtype is not None:
-        w_l = [None] * e
-        w_s_l = [None] * e
-        w_gs_l = [None] * e
-        for idx in range(e):
-            w_l[idx], w_s_l[idx], w_gs_l[idx] = moe_quantize_weights(
-                w_16[idx], None, quant_dtype, per_out_ch_quant, block_shape
-            )
-
-        w = torch.stack(w_l)
-        w_s = torch.stack(w_s_l)
-        if e > 0 and w_gs_l[0] is not None:
-            w_gs = torch.stack(w_gs_l)
-        if w_s.ndim == 2:
-            assert w_s.shape[-1] == 1
-            w_s = w_s.view(-1, 1, 1)
-
-        if block_shape is not None:
-            block_n, block_k = block_shape
-            n_tiles = (rows + block_n - 1) // block_n
-            k_tiles = (cols + block_k - 1) // block_k
-            assert w_s.shape == (e, n_tiles, k_tiles)
+        w, w_s, w_gs = moe_quantize_weights(
+            w_16, None, quant_dtype, per_out_ch_quant, block_shape
+        )
     else:
         w = w_16
         w_s = None
@@ -454,7 +470,6 @@ def fused_moe(
     )
 
 
-# CustomOp?
 class BaselineMM(torch.nn.Module):
     def __init__(
         self,
@@ -462,11 +477,20 @@ class BaselineMM(torch.nn.Module):
         out_dtype: torch.dtype,
     ):
         super().__init__()
-        self.b = b.to(dtype=torch.float32)
+        self.b = torch.nn.Parameter(b.to(dtype=torch.float32))
         self.out_dtype = out_dtype
 
     def forward(self, a: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
         return torch.mm(a.to(dtype=torch.float32), self.b).to(self.out_dtype), None
+
+
+class BaselineSiluAndMul(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        return torch.nn.functional.silu(x[..., :d]) * x[..., d:]
 
 
 class TestMLP(torch.nn.Module):
@@ -479,7 +503,7 @@ class TestMLP(torch.nn.Module):
         super().__init__()
         self.gate_up_proj = BaselineMM(w1, out_dtype)
         self.down_proj = BaselineMM(w2, out_dtype)
-        self.act_fn = SiluAndMul()
+        self.act_fn = BaselineSiluAndMul()
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
@@ -564,35 +588,24 @@ class RealMLP(torch.nn.Module):
         return x
 
 
-def make_shared_experts(
+def make_shared_experts_with_weights(
     N: int,
     K: int,
-    in_dtype: torch.dtype = torch.bfloat16,
+    in_dtype: torch.dtype,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_s: torch.Tensor | None = None,
+    w2_s: torch.Tensor | None = None,
     quant_dtype: torch.dtype | str | None = None,
 ) -> torch.nn.Module:
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-
-    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
-        1,
-        N,
-        K,
-        in_dtype=in_dtype,
-        quant_dtype=quant_dtype,
-    )
     old_dtype = torch.get_default_dtype()
     try:
         torch.set_default_dtype(in_dtype)
         if quant_dtype == torch.float8_e4m3fn:
-            w1 = w1[0].transpose(0, 1)
-            w2 = w2[0].transpose(0, 1)
-            w1_s = w1_s[0].transpose(0, 1) if w1_s is not None else None
-            w2_s = w2_s[0].transpose(0, 1) if w2_s is not None else None
+            from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+
             quant_config = Fp8Config(True)
         else:
-            w1 = w1[0]
-            w2 = w2[0]
-            w1_s = None
-            w2_s = None
             quant_config = None
 
         return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
@@ -613,4 +626,23 @@ def modular_triton_fused_moe(
         ),
         TritonExperts(moe_config, quant_config),
         inplace=False,
+    )
+
+
+def make_shared_experts(
+    N: int,
+    K: int,
+    in_dtype: torch.dtype = torch.bfloat16,
+    quant_dtype: torch.dtype | str | None = None,
+) -> torch.nn.Module:
+    (_, w1, w1_s, _), (_, w2, w2_s, _) = make_test_weights(
+        1,
+        N,
+        K,
+        in_dtype=in_dtype,
+        quant_dtype=quant_dtype,
+    )
+
+    return make_shared_experts_with_weights(
+        N, K, in_dtype, w1, w2, w1_s=w1_s, w2_s=w2_s, quant_dtype=quant_dtype
     )
