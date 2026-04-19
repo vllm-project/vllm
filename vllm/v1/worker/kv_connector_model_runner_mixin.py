@@ -15,18 +15,18 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CanonicalKVCaches,
-    KVCacheBlockDataRef,
-    KVCacheBlockTensor,
-    supports_hma,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import supports_hma
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
+)
+from vllm.v1.kv_offload.spec import (
+    CanonicalKVCacheRef,
+    CanonicalKVCaches,
+    CanonicalKVCacheTensor,
 )
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -443,8 +443,9 @@ class KVConnectorModelRunnerMixin:
                 layer_to_group_idx[layer_name] = gid
 
         kv_caches: dict[str, torch.Tensor] = {}
-        group_data_refs: list[list[KVCacheBlockDataRef]] = [
-            [] for _ in kv_cache_config.kv_cache_groups
+        group_data_refs: list[list[CanonicalKVCacheRef]] = [
+            [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size)]
+            for _ in kv_cache_config.kv_cache_groups
         ]
 
         # Single cross-layers canonical tensor: (num_blocks, page_size_bytes)
@@ -497,18 +498,9 @@ class KVConnectorModelRunnerMixin:
                 )
                 kv_caches[layer_name] = typed_buffer.permute(*inv_order)[i]
 
-            for layer_name in kv_cache_tensor.shared_by:
-                layer_gid = layer_to_group_idx[layer_name]
-                group_data_refs[layer_gid].append(
-                    KVCacheBlockDataRef(
-                        tensor_idx=0,
-                        page_size_bytes=page_size,
-                    )
-                )
-
         return kv_caches, CanonicalKVCaches(
             tensors=[
-                KVCacheBlockTensor(
+                CanonicalKVCacheTensor(
                     tensor=cross_layers_tensor,
                     page_size_bytes=cross_layer_page_size,
                 )

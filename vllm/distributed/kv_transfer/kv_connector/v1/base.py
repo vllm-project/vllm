@@ -51,6 +51,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.kv_offload.spec import CanonicalKVCaches
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
@@ -166,56 +167,6 @@ class KVConnectorWorkerMetadata(ABC):
         Aggregate metadata with another `KVConnectorWorkerMetadata` object.
         """
         pass
-
-
-@dataclass
-class KVCacheBlockTensor:
-    """
-    A canonicalized KV cache tensor whose first dimension is num_blocks.
-
-    For attention backends where the raw tensor has num_blocks at a
-    non-leading physical dimension (e.g. FlashAttention's
-    (2, num_blocks, ...) layout), the tensor is split so that each
-    resulting KVCacheBlockTensor starts with (num_blocks, ...).
-    """
-
-    # The KV cache tensor with shape (num_blocks, ...)
-    tensor: torch.Tensor
-    # The (possibly padded) page size per block in bytes
-    page_size_bytes: int
-
-
-@dataclass
-class KVCacheBlockDataRef:
-    """
-    Per-layer (or group of layers) reference to a specific (by index)
-    KVCacheBlockTensor and records the un-padded page size used by that layer.
-    """
-
-    # Index into the list of KVCacheBlockTensor objects
-    tensor_idx: int
-    # The un-padded page size per block in bytes
-    page_size_bytes: int
-
-
-@dataclass
-class CanonicalKVCaches:
-    """
-    Canonicalized block-level representation of the KV caches.
-
-    Composed of:
-        - Unique list of KV cache data tensors,
-          each with shape (num_blocks, page_size_in_bytes) and int8 dtype.
-        - Per-group data references of the tensors.
-          i.e. how each KV cache group maps to the tensors.
-    """
-
-    # Ordered list of unique block tensors, each with shape
-    # (num_blocks, ...).
-    tensors: list[KVCacheBlockTensor]
-    # Per-KV-cache-group list of data references that map each layer
-    # in the group to the appropriate entry in the tensors list.
-    group_data_refs: list[list[KVCacheBlockDataRef]]
 
 
 @dataclass

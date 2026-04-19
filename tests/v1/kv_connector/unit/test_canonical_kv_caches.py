@@ -7,10 +7,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.base import (
-    CanonicalKVCaches,
-    SupportsHMA,
-)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import SupportsHMA
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -19,6 +16,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.kv_offload.spec import CanonicalKVCaches
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
     KVConnectorModelRunnerMixin,
 )
@@ -293,11 +291,10 @@ def test_allocate_canonical_kv_caches():
     # each row is contiguous and covers all positions for one block
     assert bt.tensor.is_contiguous()
 
-    # -- group_data_refs: 3 groups, each with 2 layers
+    # -- group_data_refs: a single data reference per group (3 groups)
     assert len(canonical.group_data_refs) == 3
     full_page = config.kv_cache_groups[0].kv_cache_spec.page_size_bytes
     for refs in canonical.group_data_refs:
-        assert len(refs) == 2
-        assert [r.tensor_idx for r in refs] == [0, 0]
-        for ref in refs:
-            assert ref.page_size_bytes == full_page
+        assert len(refs) == 1
+        assert refs[0].tensor_idx == 0
+        assert refs[0].page_size_bytes == full_page
