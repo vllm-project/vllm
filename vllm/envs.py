@@ -1101,12 +1101,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "0"))
     ),
-    # Force `torch._inductor.utils.is_big_gpu` to return True, bypassing
-    # the 68-SM threshold that otherwise excludes sub-68-SM CUDA devices
-    # (e.g. GB10 / DGX Spark with 48 SMs) from max-autotune-gemm Triton
-    # templates. Opt-in: expands the autotune candidate pool at the cost
-    # of longer first-compile time per new shape. Applies to any
-    # torch.compile call in the process, not just vLLM's own paths.
+    # Force inductor max-autotune-gemm on sub-data-center Blackwell devices.
+    # Patches `torch._inductor.utils.is_big_gpu` (68-SM gate) and
+    # `torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch`
+    # (SM100-only whitelist) to unlock Triton templates and Blackwell
+    # codegen on GB10 / DGX Spark (SM121, 48 SMs) and RTX Pro 6000
+    # (SM120). Also sets inductor config to prefer ATEN+TRITON backends
+    # with persistent TMA matmul. Opt-in; affects every torch.compile
+    # call in the process, not just vLLM's own paths.
     "VLLM_INDUCTOR_OVERRIDE_BIG_GPU": lambda: bool(
         int(os.getenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "0"))
     ),

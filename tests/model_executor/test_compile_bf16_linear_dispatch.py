@@ -303,62 +303,128 @@ def test_compile_failure_disables_fast_path(monkeypatch):
 
 
 # --------------------------------------------------------------------- #
-# is_big_gpu override
+# is_big_gpu / is_datacenter_blackwell_arch override
 # --------------------------------------------------------------------- #
 
 
-def test_big_gpu_override_noop_when_env_off(monkeypatch):
+@pytest.fixture
+def _restore_inductor_hooks():
+    """Capture and restore the inductor helpers the override mutates."""
+    pytest.importorskip("torch._inductor.utils")
+    pytest.importorskip("torch._inductor.codegen.cuda")
+    import torch._inductor.config as inductor_config
+    import torch._inductor.utils as inductor_utils
+    from torch._inductor.codegen.cuda import cuda_env
+
+    originals = {
+        "is_big_gpu": inductor_utils.is_big_gpu,
+        "is_datacenter_blackwell_arch": cuda_env.is_datacenter_blackwell_arch,
+        "max_autotune": inductor_config.max_autotune,
+        "max_autotune_gemm": inductor_config.max_autotune_gemm,
+        "max_autotune_gemm_backends": (
+            inductor_config.max_autotune_gemm_backends
+        ),
+        "enable_persistent_tma_matmul": getattr(
+            inductor_config.triton, "enable_persistent_tma_matmul", None
+        ),
+    }
+    yield inductor_utils, cuda_env, inductor_config
+    inductor_utils.is_big_gpu = originals["is_big_gpu"]
+    cuda_env.is_datacenter_blackwell_arch = originals[
+        "is_datacenter_blackwell_arch"
+    ]
+    inductor_config.max_autotune = originals["max_autotune"]
+    inductor_config.max_autotune_gemm = originals["max_autotune_gemm"]
+    inductor_config.max_autotune_gemm_backends = originals[
+        "max_autotune_gemm_backends"
+    ]
+    if originals["enable_persistent_tma_matmul"] is not None:
+        inductor_config.triton.enable_persistent_tma_matmul = originals[
+            "enable_persistent_tma_matmul"
+        ]
+
+
+def test_big_gpu_override_noop_when_env_off(
+    monkeypatch, _restore_inductor_hooks
+):
+    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
     monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "0")
     monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
 
-    pytest.importorskip("torch._inductor.utils")
-    import torch._inductor.utils as inductor_utils
-
-    before = inductor_utils.is_big_gpu
+    before_big = inductor_utils.is_big_gpu
+    before_bw = cuda_env.is_datacenter_blackwell_arch
     utils._maybe_override_inductor_is_big_gpu()
-    assert inductor_utils.is_big_gpu is before
+    assert inductor_utils.is_big_gpu is before_big
+    assert cuda_env.is_datacenter_blackwell_arch is before_bw
 
 
-def test_big_gpu_override_patches_when_env_on(monkeypatch):
-    pytest.importorskip("torch._inductor.utils")
-    import torch._inductor.utils as inductor_utils
+def test_big_gpu_override_patches_is_big_gpu(
+    monkeypatch, _restore_inductor_hooks
+):
+    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
+    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
+    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
 
-    original = inductor_utils.is_big_gpu
-    try:
-        monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
-        monkeypatch.setattr(
-            utils, "_inductor_big_gpu_override_applied", False
-        )
+    utils._maybe_override_inductor_is_big_gpu()
 
-        utils._maybe_override_inductor_is_big_gpu()
-
-        # Patched function always returns True regardless of device.
-        assert inductor_utils.is_big_gpu() is True
-        assert inductor_utils.is_big_gpu(0) is True
-        assert getattr(
-            inductor_utils.is_big_gpu, "__vllm_big_gpu_override__", False
-        )
-    finally:
-        inductor_utils.is_big_gpu = original
+    # The override accepts arbitrary args (future-proof signature).
+    assert inductor_utils.is_big_gpu() is True
+    assert inductor_utils.is_big_gpu(0) is True
+    assert inductor_utils.is_big_gpu(torch.device("cpu")) is True
+    assert getattr(
+        inductor_utils.is_big_gpu, "__vllm_big_gpu_override__", False
+    )
 
 
-def test_big_gpu_override_idempotent(monkeypatch):
-    pytest.importorskip("torch._inductor.utils")
-    import torch._inductor.utils as inductor_utils
+def test_big_gpu_override_patches_blackwell_arch(
+    monkeypatch, _restore_inductor_hooks
+):
+    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
+    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
+    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
 
-    original = inductor_utils.is_big_gpu
-    try:
-        monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
-        monkeypatch.setattr(
-            utils, "_inductor_big_gpu_override_applied", False
-        )
+    # Simulate an SM120 device via torch.cuda.get_device_capability.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (12, 0))
 
-        utils._maybe_override_inductor_is_big_gpu()
-        first = inductor_utils.is_big_gpu
-        utils._maybe_override_inductor_is_big_gpu()
-        assert inductor_utils.is_big_gpu is first
-    finally:
-        inductor_utils.is_big_gpu = original
+    utils._maybe_override_inductor_is_big_gpu()
+
+    assert cuda_env.is_datacenter_blackwell_arch() is True
+    assert getattr(
+        cuda_env.is_datacenter_blackwell_arch,
+        "__vllm_blackwell_family_override__",
+        False,
+    )
+
+
+def test_big_gpu_override_sets_inductor_config(
+    monkeypatch, _restore_inductor_hooks
+):
+    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
+    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
+    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
+
+    utils._maybe_override_inductor_is_big_gpu()
+
+    assert inductor_config.max_autotune is True
+    assert inductor_config.max_autotune_gemm is True
+    assert "TRITON" in inductor_config.max_autotune_gemm_backends
+    assert "ATEN" in inductor_config.max_autotune_gemm_backends
+    if hasattr(inductor_config.triton, "enable_persistent_tma_matmul"):
+        assert inductor_config.triton.enable_persistent_tma_matmul is True
+
+
+def test_big_gpu_override_idempotent(monkeypatch, _restore_inductor_hooks):
+    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
+    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
+    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
+
+    utils._maybe_override_inductor_is_big_gpu()
+    first_big = inductor_utils.is_big_gpu
+    first_bw = cuda_env.is_datacenter_blackwell_arch
+    utils._maybe_override_inductor_is_big_gpu()
+    assert inductor_utils.is_big_gpu is first_big
+    assert cuda_env.is_datacenter_blackwell_arch is first_bw
 
 
 # --------------------------------------------------------------------- #

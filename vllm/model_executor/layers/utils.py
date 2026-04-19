@@ -151,50 +151,23 @@ _init_tinygemm()
 _inductor_big_gpu_override_applied = False
 
 
-def _maybe_override_inductor_is_big_gpu() -> None:
-    """Bypass inductor's 68-SM gate for max-autotune-gemm Triton templates.
+def _patch_is_big_gpu(inductor_utils) -> bool:
+    """Force `torch._inductor.utils.is_big_gpu` to return True.
 
-    `torch._inductor.utils.is_big_gpu` compares `multi_processor_count`
-    against a hard-coded 68 (3080 baseline). On sub-68-SM CUDA devices
-    (notably GB10 / DGX Spark with 48 SMs) this causes max-autotune-gemm
-    to silently drop Triton templates from the autotune pool, even when
-    the user explicitly includes them in
-    `config.max_autotune_gemm_backends`.
-
-    When `VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1`, monkey-patch the helper to
-    always return True. The patch is global (affects any torch.compile
-    call in the process) and one-shot. Must run before the first
-    inductor autotune call, since `is_big_gpu` is `@functools.cache`d.
+    Returns True if the patch was applied (or was already applied) this
+    process, False if `is_big_gpu` is missing on this torch version.
     """
-    global _inductor_big_gpu_override_applied
-    if _inductor_big_gpu_override_applied:
-        return
-    if not envs.VLLM_INDUCTOR_OVERRIDE_BIG_GPU:
-        return
-    try:
-        import torch._inductor.utils as inductor_utils
-    except Exception:
-        logger.warning(
-            "VLLM_INDUCTOR_OVERRIDE_BIG_GPU set but torch._inductor.utils "
-            "could not be imported; leaving is_big_gpu untouched.",
-            exc_info=True,
-        )
-        _inductor_big_gpu_override_applied = True
-        return
     original = getattr(inductor_utils, "is_big_gpu", None)
     if original is None:
         logger.warning(
-            "VLLM_INDUCTOR_OVERRIDE_BIG_GPU set but "
             "torch._inductor.utils.is_big_gpu not found; "
             "torch version may have renamed it."
         )
-        _inductor_big_gpu_override_applied = True
-        return
+        return False
     if getattr(original, "__vllm_big_gpu_override__", False):
-        _inductor_big_gpu_override_applied = True
-        return
+        return True
 
-    def _forced_big_gpu(index_or_device=0) -> bool:  # noqa: ARG001
+    def _forced_big_gpu(*args, **kwargs) -> bool:  # noqa: ARG001
         return True
 
     _forced_big_gpu.__vllm_big_gpu_override__ = True  # type: ignore[attr-defined]
@@ -206,13 +179,134 @@ def _maybe_override_inductor_is_big_gpu() -> None:
             cache_clear()
         except Exception:
             pass
-    logger.info(
-        "VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1: patched "
-        "torch._inductor.utils.is_big_gpu to always return True. "
-        "Triton GEMM templates are now eligible for max-autotune-gemm "
-        "on sub-68-SM CUDA devices."
-    )
+    return True
+
+
+def _patch_is_datacenter_blackwell_arch() -> bool:
+    """Expand inductor's Blackwell-arch gate to SM120/121 and beyond.
+
+    `torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch`
+    currently whitelists only arch ∈ [100, 110) (data-center SM100, e.g.
+    B200). GB10 / DGX Spark (SM121) and RTX Pro 6000 Blackwell (SM120)
+    report False, disabling Blackwell-specific codegen paths. Patch the
+    helper to also return True for any major ≥ 10 (Blackwell family).
+    """
+    try:
+        from torch._inductor.codegen.cuda import cuda_env
+    except Exception:
+        logger.warning(
+            "torch._inductor.codegen.cuda.cuda_env could not be imported; "
+            "leaving is_datacenter_blackwell_arch untouched.",
+            exc_info=True,
+        )
+        return False
+    original = getattr(cuda_env, "is_datacenter_blackwell_arch", None)
+    if original is None:
+        logger.warning(
+            "torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch"
+            " not found; torch version may have renamed it."
+        )
+        return False
+    if getattr(original, "__vllm_blackwell_family_override__", False):
+        return True
+
+    def _forced_blackwell_family_arch() -> bool:
+        if original():
+            return True
+        if torch.cuda.is_available():
+            major, _minor = torch.cuda.get_device_capability()
+            if major >= 10:
+                return True
+        return False
+
+    _forced_blackwell_family_arch.__vllm_blackwell_family_override__ = True  # type: ignore[attr-defined]
+    cuda_env.is_datacenter_blackwell_arch = _forced_blackwell_family_arch
+    cache_clear = getattr(original, "cache_clear", None)
+    if callable(cache_clear):
+        try:
+            cache_clear()
+        except Exception:
+            pass
+    return True
+
+
+def _apply_inductor_autotune_config() -> None:
+    """Set global inductor config for max-autotune-gemm with Triton templates
+    and persistent TMA matmul (Blackwell-aware). Also bump dynamo cache limits
+    so many distinct shapes don't evict each other."""
+    try:
+        import torch._dynamo.config
+        import torch._inductor.config as inductor_config
+    except Exception:
+        logger.warning(
+            "torch._inductor/_dynamo config modules could not be imported.",
+            exc_info=True,
+        )
+        return
+
+    inductor_config.max_autotune = True
+    inductor_config.max_autotune_gemm = True
+    inductor_config.max_autotune_gemm_backends = "ATEN,TRITON"
+    if hasattr(inductor_config, "triton") and hasattr(
+        inductor_config.triton, "enable_persistent_tma_matmul"
+    ):
+        inductor_config.triton.enable_persistent_tma_matmul = True
+
+    torch._dynamo.config.accumulated_cache_size_limit = 1024
+    if hasattr(torch._dynamo.config, "cache_size_limit"):
+        torch._dynamo.config.cache_size_limit = 1024
+
+
+def _maybe_override_inductor_is_big_gpu() -> None:
+    """Force inductor max-autotune-gemm on sub-68-SM / Blackwell-edge devices.
+
+    Inductor has two hard-coded gates that exclude sub-data-center Blackwell
+    hardware from its best GEMM templates:
+
+    1. `torch._inductor.utils.is_big_gpu` compares `multi_processor_count`
+       against 68 (3080 baseline). GB10 / DGX Spark (48 SMs) fails this,
+       dropping Triton templates from the max-autotune-gemm pool.
+    2. `torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch`
+       whitelists only arch ∈ [100, 110), excluding SM120/121 (consumer /
+       edge Blackwell), which disables Blackwell-specific codegen paths.
+
+    When `VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1`, monkey-patch both helpers and
+    set global inductor config to prefer Triton + ATEN templates with
+    persistent TMA matmul. All patches are global (affect every
+    torch.compile call in the process) and one-shot. Must run before the
+    first inductor autotune call, since both helpers are cached.
+    """
+    global _inductor_big_gpu_override_applied
+    if _inductor_big_gpu_override_applied:
+        return
+    if not envs.VLLM_INDUCTOR_OVERRIDE_BIG_GPU:
+        return
     _inductor_big_gpu_override_applied = True
+
+    try:
+        import torch._inductor.utils as inductor_utils
+    except Exception:
+        logger.warning(
+            "VLLM_INDUCTOR_OVERRIDE_BIG_GPU set but torch._inductor.utils "
+            "could not be imported; leaving inductor config untouched.",
+            exc_info=True,
+        )
+        return
+
+    big_gpu_ok = _patch_is_big_gpu(inductor_utils)
+    blackwell_ok = _patch_is_datacenter_blackwell_arch()
+    _apply_inductor_autotune_config()
+
+    logger.info(
+        "VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1: is_big_gpu patched=%s, "
+        "is_datacenter_blackwell_arch patched=%s. Inductor config set to "
+        "max_autotune_gemm=True, backends=ATEN,TRITON, "
+        "persistent TMA matmul=True. For FP32 GEMMs (e.g. Nemotron "
+        "routers), also set VLLM_FLOAT32_MATMUL_PRECISION=high to let "
+        "Triton autotune pick tensor-core kernels.",
+        big_gpu_ok,
+        blackwell_ok,
+    )
 
 
 _maybe_override_inductor_is_big_gpu()
