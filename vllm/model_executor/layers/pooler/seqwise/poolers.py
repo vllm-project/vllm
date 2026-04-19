@@ -118,7 +118,8 @@ def pooler_for_classify(
     head = ClassifierPoolerHead(
         head_dtype=model_config.head_dtype,
         classifier=classifier,
-        logit_bias=model_config.pooler_config.logit_bias,
+        logit_mean=model_config.pooler_config.logit_mean,
+        logit_sigma=model_config.pooler_config.logit_sigma,
         activation=resolve_classifier_act_fn(
             model_config, static_num_labels=True, act_fn=act_fn
         ),

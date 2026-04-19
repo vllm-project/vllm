@@ -42,7 +42,7 @@ FROM python-install AS pyarrow
 # Build Apache Arrow
 WORKDIR /tmp
 RUN --mount=type=cache,target=/root/.cache/uv \
-    git clone https://github.com/apache/arrow.git && \
+    git clone https://github.com/apache/arrow.git  -b maint-19.0.1 && \
     cd arrow/cpp && \
     mkdir release && cd release && \
     cmake -DCMAKE_BUILD_TYPE=Release \
@@ -68,19 +68,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements-build.txt && \
     python setup.py build_ext --build-type=$ARROW_BUILD_TYPE --bundle-arrow-cpp bdist_wheel
 
-FROM python-install AS numa-build
-# Install numactl (needed for numa.h dependency)
-WORKDIR /tmp
-RUN curl -LO https://github.com/numactl/numactl/archive/refs/tags/v2.0.16.tar.gz && \
-    tar -xvzf v2.0.16.tar.gz && \
-    cd numactl-2.0.16 && \
-    ./autogen.sh && \
-    ./configure && \
-    make
-
-# Set include path
-ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
-
 FROM python-install AS rust
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
@@ -90,6 +77,18 @@ RUN curl https://sh.rustup.rs -sSf | sh -s -- -y && \
     . "$CARGO_HOME/env" && \
     rustup default stable && \
     rustup show
+
+FROM python-install AS numa-build
+WORKDIR /tmp
+RUN curl -LO https://github.com/numactl/numactl/archive/refs/tags/v2.0.19.tar.gz && \
+    tar -xvzf v2.0.19.tar.gz && \
+    cd numactl-2.0.19 && \
+    ./autogen.sh && \
+    ./configure && \
+    make
+
+# Set include path
+ENV C_INCLUDE_PATH="/usr/local/include:$C_INCLUDE_PATH"
 
 FROM python-install AS torch-vision
 # Install torchvision
@@ -133,7 +132,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git clone --recursive https://github.com/numba/llvmlite.git -b v0.44.0 && \
     git clone --recursive https://github.com/numba/numba.git -b ${NUMBA_VERSION} && \
     cd llvm-project && mkdir build && cd  build && \
-    uv pip install 'cmake<4' setuptools numpy && \
+    uv pip install 'cmake<4' 'setuptools<70' numpy && \
     export PREFIX=/usr/local && CMAKE_ARGS="${CMAKE_ARGS} -DLLVM_ENABLE_PROJECTS=lld;libunwind;compiler-rt" \
     CFLAGS="$(echo $CFLAGS | sed 's/-fno-plt //g')" \
     CXXFLAGS="$(echo $CXXFLAGS | sed 's/-fno-plt //g')" \
@@ -193,27 +192,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd opencv-python && \
     python -m build --wheel --installer=uv --outdir /tmp/opencv-python/dist
 
-# Build Outlines Core
-FROM python-install AS outlines-core-builder
+## Todo(r3hankhan123): Remove guidance-builder stage once vLLM upgrades to new version of llguidance that fixes s390x issues. See https://github.com/guidance-ai/llguidance/issues/330
+FROM python-install AS guidance-builder
 WORKDIR /tmp
 ENV CARGO_HOME=/root/.cargo
 ENV RUSTUP_HOME=/root/.rustup
 ENV PATH="$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
-COPY requirements/common.txt /tmp/requirements/common.txt
-ARG OUTLINES_CORE_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=rust,source=/root/.cargo,target=/root/.cargo,rw \
     --mount=type=bind,from=rust,source=/root/.rustup,target=/root/.rustup,rw \
-    OUTLINES_CORE_VERSION=${OUTLINES_CORE_VERSION:-$(grep -E '^outlines_core\s*==\s*[0-9.]+' /tmp/requirements/common.txt | grep -Eo '[0-9.]+')} && \
-    if [ -z "${OUTLINES_CORE_VERSION}" ]; then echo "ERROR: Could not determine outlines_core version"; exit 1; fi && \
-    git clone https://github.com/dottxt-ai/outlines-core.git && \
-    cd outlines-core && \
-    git checkout tags/${OUTLINES_CORE_VERSION} && \
-    sed -i "s/version = \"0.0.0\"/version = \"${OUTLINES_CORE_VERSION}\"/" Cargo.toml && \
+    git clone https://github.com/guidance-ai/llguidance.git && \
+    cd llguidance && \
+    git checkout s390x-fix-v2  && \
     uv pip install maturin && \
-    python -m maturin build --release --out dist
+    python -m maturin build --release --out dist --compatibility linux
 
-# Final build stage
+# # Final build stage
 FROM python-install AS vllm-cpu
 ARG PYTHON_VERSION
 ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
@@ -229,10 +223,12 @@ ENV PKG_CONFIG_PATH="/opt/rh/gcc-toolset-14/root/usr/lib64/pkgconfig:/usr/local/
 ENV PATH="${VIRTUAL_ENV:+${VIRTUAL_ENV}/bin}:/opt/rh/gcc-toolset-14/root/usr/bin:/usr/local/bin:$CARGO_HOME/bin:$RUSTUP_HOME/bin:$PATH"
 ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 ENV UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
+# Force pure Python protobuf to avoid s390x C++ extension crashes
+ENV PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
 COPY . /workspace/vllm
 WORKDIR /workspace/vllm
 
-RUN --mount=type=bind,from=numa-build,src=/tmp/numactl-2.0.16,target=/numactl \
+RUN --mount=type=bind,from=numa-build,src=/tmp/numactl-2.0.19,target=/numactl \
     make -C /numactl install
 
 # Install dependencies, including PyTorch and Apache Arrow
@@ -245,24 +241,24 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=numba-builder,source=/tmp/llvmlite/dist,target=/tmp/llvmlite-wheels/ \
     --mount=type=bind,from=numba-builder,source=/tmp/numba/dist,target=/tmp/numba-wheels/ \
     --mount=type=bind,from=opencv-builder,source=/tmp/opencv-python/dist,target=/tmp/opencv-wheels/ \
-    --mount=type=bind,from=outlines-core-builder,source=/tmp/outlines-core/dist,target=/tmp/outlines-core/dist/ \
-     ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/pyarrow-*.whl) && \
+    --mount=type=bind,from=guidance-builder,source=/tmp/llguidance/dist,target=/tmp/guidance-wheels/ \
+     ARROW_WHL_FILE=$(ls /tmp/arrow-wheels/*.whl) && \
      VISION_WHL_FILE=$(ls /tmp/vision-wheels/*.whl) && \
      HF_XET_WHL_FILE=$(ls /tmp/hf-xet-wheels/*.whl) && \
      LLVM_WHL_FILE=$(ls /tmp/llvmlite-wheels/*.whl) && \
      NUMBA_WHL_FILE=$(ls /tmp/numba-wheels/*.whl) && \
      OPENCV_WHL_FILE=$(ls /tmp/opencv-wheels/*.whl) && \
-     OUTLINES_CORE_WHL_FILE=$(ls /tmp/outlines-core/dist/*.whl) && \
-     uv pip install -v \
-        $ARROW_WHL_FILE  \
+     GUIDANCE_WHL_FILE=$(ls /tmp/guidance-wheels/*.whl) && \
+     uv pip install -v \    
+        $ARROW_WHL_FILE \
         $VISION_WHL_FILE \
         $HF_XET_WHL_FILE \
         $LLVM_WHL_FILE \
         $NUMBA_WHL_FILE \
         $OPENCV_WHL_FILE \
-        $OUTLINES_CORE_WHL_FILE \
+        $GUIDANCE_WHL_FILE \
         --index-strategy unsafe-best-match \
-        -r requirements/cpu-build.txt \
+        -r requirements/build/cpu.txt \
         -r requirements/cpu.txt
 
 
@@ -270,6 +266,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     VLLM_TARGET_DEVICE=cpu VLLM_CPU_MOE_PREPACK=0 python setup.py bdist_wheel && \
     uv pip install "$(echo dist/*.whl)[tensorizer]"
+
+# Remove protobuf C++ extension that crashes on s390x
+RUN rm -rf /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/google/_upb/*.so \
+           /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/google/protobuf/pyext/*.so 2>/dev/null || true
 
 # setup non-root user for vllm
 RUN umask 002 && \
