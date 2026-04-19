@@ -5,13 +5,12 @@ import importlib
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
-from typing import TypeAlias
 
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
 )
-from openai.types.responses.tool import Tool as ResponsesTool
+from openai.types.responses.function_tool import FunctionTool
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -29,13 +28,13 @@ from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.utils import get_json_schema_from_tools
+from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
 
-logger = init_logger(__name__)
+__all__ = ["Tool"]
 
-Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
+logger = init_logger(__name__)
 
 
 class ToolParser:
@@ -44,6 +43,17 @@ class ToolParser:
     properties and methods should be used in
     derived classes.
     """
+
+    # When True (default), the serving layer uses the standard JSON-based
+    # parsing for tool_choice="required" and named function tool_choice,
+    # which works for models where guided decoding produces well-formed
+    # JSON output (e.g. Hermes).
+    # Subclasses set False when the standard parsing does not work for
+    # their model's output format (e.g. GLM models that use XML).  When
+    # False, the serving layer falls back to the tool_parser's
+    # extract_tool_calls / extract_tool_calls_streaming methods for
+    # required/named tool_choice, treating them the same as "auto".
+    supports_required_and_named: bool = True
 
     def __init__(
         self,
@@ -57,7 +67,14 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
-        self.tools = tools
+        if tools:
+            self.tools: list[ChatCompletionToolsParam | FunctionTool] = [
+                tool
+                for tool in tools
+                if isinstance(tool, (ChatCompletionToolsParam, FunctionTool))
+            ]
+        else:
+            self.tools = []
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -65,7 +82,9 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
+    def adjust_request(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
         """
         Static method that used to adjust the request parameters.
         """

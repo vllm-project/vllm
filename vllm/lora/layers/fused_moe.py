@@ -19,6 +19,9 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.fused_moe.config import (
     _get_config_dtype_str,
 )
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
+    UnfusedOAITritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
 )
@@ -27,9 +30,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
-)
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
@@ -48,6 +48,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         assert not self.base_layer.use_ep, (
             "EP support for Fused MoE LoRA is not implemented yet."
+        )
+        assert not self.base_layer.quant_method.is_monolithic, (
+            "Monolithic kernels are not supported for Fused MoE LoRA."
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -591,10 +594,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
         return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
-
-    @property
-    def _shared_experts(self):
-        return self.base_layer._shared_experts
 
     @property
     def quant_method(self):

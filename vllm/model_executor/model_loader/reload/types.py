@@ -13,21 +13,26 @@ LayerTensors = tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]
 
 @dataclass
 class LayerReloadingInfo:
-    # model format (meta), populated by `record_metadata_for_reloading`
-    restore_metadata: LayerTensors = field(default_factory=lambda: ({}, {}))
+    # model format metadata, recorded by `record_metadata_for_reloading`
+    restore_metadata: LayerTensors
 
-    # kernel format (device), used to copy into when reloading only
-    kernel_tensors: LayerTensors | None = None
+    # device to materialize layers with, recorded by `record_metadata_for_reloading`
+    restore_device: torch.device
 
-    # track how many restored elements are ready for loading
+    # track how many elements are ready for loading, used by `online_process_loader`
     load_numel: int = 0
     load_numel_total: int | None = None
 
-    # stores arguments and tensors ready for loading
+    # used by `online_process_loader` to buffer args and tensors until ready to load
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
 
+    # kernel formatted tensors, copied into by `_layerwise_process` when reloading
+    kernel_tensors: LayerTensors | None = None
+
     def reset(self):
-        self.__init__(restore_metadata=self.restore_metadata)  # type: ignore[misc]
+        self.__init__(  # type: ignore[misc]
+            restore_metadata=self.restore_metadata, restore_device=self.restore_device
+        )
 
     def can_load(self) -> bool:
         return self.load_numel_total is not None

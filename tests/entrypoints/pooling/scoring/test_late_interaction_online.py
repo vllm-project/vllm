@@ -6,7 +6,7 @@ import pytest
 import requests
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.pooling.score.protocol import RerankResponse, ScoreResponse
+from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 
 from .util import ColBERTScoringHfRunner
 
@@ -26,12 +26,17 @@ TEXTS_2 = [
 ]
 
 
-@pytest.fixture(scope="module")
-def server():
+@pytest.fixture(scope="module", params=[True, False])
+def server(request):
     args = [
         "--max-model-len",
         str(MAX_MODEL_LEN),
     ]
+
+    # Test run pooling score MaxSim on worker side (GPU)
+    # aka flash-late-interaction
+    if not request.param:
+        args += ["--no-enable-flash-late-interaction"]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server

@@ -19,7 +19,8 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
-    apt-transport-https ca-certificates wget curl
+    apt-transport-https ca-certificates wget curl \
+    libnuma-dev
 RUN python3 -m pip install --upgrade pip
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
@@ -191,9 +192,10 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
 FROM base AS build_deep
 ARG ROCSHMEM_BRANCH="ba0bf0f3"
 ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
-ARG DEEPEP_BRANCH="e84464ec"
+ARG DEEPEP_BRANCH="5d90af8b"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
+ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
 ENV ROCSHMEM_DIR=/opt/rocshmem
 
 RUN git clone ${ROCSHMEM_REPO} \
@@ -201,13 +203,11 @@ RUN git clone ${ROCSHMEM_REPO} \
  && git checkout ${ROCSHMEM_BRANCH} \
  && mkdir -p projects/rocshmem/build \
  && cd projects/rocshmem/build \
- && cmake .. \
-    -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
-    -DROCM_PATH=/opt/rocm \
-    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-    -DUSE_EXTERNAL_MPI=OFF \
- && make -j \
- && make install
+ && bash ../scripts/build_configs/all_backends \
+      -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
+      -DROCM_PATH=/opt/rocm \
+      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
+      -DUSE_EXTERNAL_MPI=OFF
 
 # Build DeepEP wheel.
 # DeepEP looks for rocshmem at ROCSHMEM_DIR.
@@ -261,30 +261,6 @@ RUN --mount=type=bind,source=.git,target=vllm/.git \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
 
-# Fail if git-based package dependencies are found in requirements files
-# (uv doesn't handle git+ URLs well, and packages should be distributed on PyPI)
-# Extra notes: pip install is able to handle git+ URLs, but uv doesn't.
-RUN echo "Checking for git-based packages in requirements files..." \
-    && echo "Checking common.txt for git-based packages:" \
-    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; then \
-         echo "ERROR: Git-based packages found in common.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in common.txt"; \
-       fi \
-    && echo "Checking rocm.txt for git-based packages:" \
-    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; then \
-         echo "ERROR: Git-based packages found in rocm.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in rocm.txt"; \
-       fi \
-    && echo "All requirements files are clean - no git-based packages found"
-
 # Pin vLLM dependencies to exact versions of custom ROCm wheels
 # This ensures 'pip install vllm' automatically installs correct torch/triton/torchvision/amdsmi
 COPY tools/vllm-rocm/pin_rocm_dependencies.py /tmp/pin_rocm_dependencies.py
@@ -328,14 +304,14 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
     && uv pip install --system -r requirements/rocm.txt \
-    && uv pip install --system -r requirements/rocm-test.txt \
+    && uv pip install --system -r requirements/test/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
-# Verify that PyTorch is the ROCm build, not CUDA
-RUN python3 -c "import torch; assert torch.version.hip is not None, \
-    f'Expected ROCm PyTorch but got CUDA (torch.version.cuda={torch.version.cuda}, torch.version.hip={torch.version.hip})'; \
-    print(f'Verified: PyTorch {torch.__version__} with ROCm (HIP {torch.version.hip})')"
+# Persist the built wheel in the image so python_only_compile_rocm.sh can
+# reinstall it after removing compilers. The bind-mounted /install contents
+# above are not available once that RUN step completes.
+COPY --from=export_vllm /*.whl /opt/vllm-wheels/
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
@@ -364,9 +340,10 @@ RUN cd /vllm-workspace \
     && python3 -m pip install pytest-shard
 
 # enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_XET_HIGH_PERFORMANCE=1
+
+# increase timeout for hf downloads (for testing)
+ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # install audio decode package `torchcodec` from source (required due to 
 # ROCm and torch version mismatch) for tests with datasets package
@@ -390,7 +367,21 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 RUN mkdir src && mv vllm src/vllm
 
 # This is a workaround to ensure pytest exits with the correct status code in CI tests.
-RUN echo "import os\n\ndef pytest_sessionfinish(session, exitstatus):\n    os._exit(int(exitstatus))" > /vllm-workspace/conftest.py
+RUN printf '%s\n' \
+    'import os' \
+    '' \
+    '_exit_code = 1' \
+    '' \
+    'def pytest_sessionfinish(session, exitstatus):' \
+    '    global _exit_code' \
+    '    _exit_code = int(exitstatus)' \
+    '' \
+    'def pytest_unconfigure(config):' \
+    '    import sys' \
+    '    sys.stdout.flush()' \
+    '    sys.stderr.flush()' \
+    '    os._exit(_exit_code)' \
+    > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image

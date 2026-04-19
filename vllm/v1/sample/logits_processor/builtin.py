@@ -301,12 +301,14 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
 
         # Check if thinking is enabled
-        self.is_enabled = reasoning_config is not None
+        self.is_enabled = reasoning_config is not None and reasoning_config.enabled
 
-        self.think_start_token_ids = getattr(
-            reasoning_config, "think_start_token_ids", []
+        self.reasoning_start_token_ids = getattr(
+            reasoning_config, "reasoning_start_token_ids", []
         )
-        self.think_end_token_ids = getattr(reasoning_config, "think_end_token_ids", [])
+        self.reasoning_end_token_ids = getattr(
+            reasoning_config, "reasoning_end_token_ids", []
+        )
 
         self.pin_memory = is_pin_memory
         self.device = device
@@ -357,15 +359,15 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             think_count = 0
         else:
             last_start = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_start_token_ids
+                prompt_tok_ids, self.reasoning_start_token_ids
             )
             last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_end_token_ids
+                prompt_tok_ids, self.reasoning_end_token_ids
             )
             in_think = last_start > last_end
             if in_think:
                 think_count = len(prompt_tok_ids) - (
-                    last_start + len(self.think_start_token_ids)
+                    last_start + len(self.reasoning_start_token_ids)
                 )
             else:
                 think_count = 0
@@ -405,8 +407,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         state["prev_output_length"] = current_length
 
         # Check if new tokens contain think start or end sequences
-        start_len = len(self.think_start_token_ids)
-        end_len = len(self.think_end_token_ids)
+        start_len = len(self.reasoning_start_token_ids)
+        end_len = len(self.reasoning_end_token_ids)
 
         # Look for think sequences in recent tokens (including boundary)
         # Check overlapping regions where sequences might span boundaries
@@ -415,10 +417,10 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
 
         # Find any think start/end sequences in recent tokens
         recent_start_pos = self._find_last_sequence_index(
-            recent_tokens, self.think_start_token_ids
+            recent_tokens, self.reasoning_start_token_ids
         )
         recent_end_pos = self._find_last_sequence_index(
-            recent_tokens, self.think_end_token_ids
+            recent_tokens, self.reasoning_end_token_ids
         )
 
         # Update state based on recent sequences
@@ -469,7 +471,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         else:
             # In end mode
             state["end_count"] += 1
-            if state["end_count"] >= len(self.think_end_token_ids):
+            if state["end_count"] >= len(self.reasoning_end_token_ids):
                 state.update(
                     {
                         "in_end": False,
@@ -530,7 +532,9 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             state = self._state.get(i)
             if state and state["in_end"]:
                 self.mask[i] = True
-                self.force_token_ids[i] = self.think_end_token_ids[state["end_count"]]
+                self.force_token_ids[i] = self.reasoning_end_token_ids[
+                    state["end_count"]
+                ]
 
         # Check in CPU first not to sync with GPU
         has_active_thinking = any(

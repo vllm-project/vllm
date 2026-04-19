@@ -12,8 +12,8 @@ from tests.kernels.quant_utils import (
     native_w8a8_block_matmul,
 )
 from vllm.config import VllmConfig
+from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    cutlass_scaled_mm,
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
 )
@@ -202,7 +202,7 @@ def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
 
     # only aligned sizes are supported by deepgemm
     if not should_use_deepgemm_for_fp8_linear(
-        output_dtype=out_dtype, weight=B_fp32, supports_deep_gemm=True
+        output_dtype=out_dtype, weight_shape=B_fp32.shape, supports_deep_gemm=True
     ):
         pytest.skip(f"Skipping test; invalid size {M}, {N}, {K}")
 
