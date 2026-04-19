@@ -181,6 +181,7 @@ class GPTQConfig(QuantizationConfig):
                 "quant_method": "gptq",
                 "bits": self.weight_bits,
                 "group_size": self.group_size,
+                "desc_act": self.desc_act,
                 "sym": True,  # GPTQ typically uses symmetric quantization
                 "lm_head": False,
             }
