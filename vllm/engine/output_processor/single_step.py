@@ -11,6 +11,7 @@ from vllm.logger import init_logger
 from vllm.sequence import (CompletionSequenceGroupOutput, SequenceGroup,
                            SequenceGroupOutput)
 from vllm.transformers_utils.detokenizer import Detokenizer
+from vllm.memshare.handler import MemShareHandler
 from vllm.utils import Counter
 
 logger = init_logger(__name__)
@@ -70,12 +71,14 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def __init__(self, scheduler_config: SchedulerConfig,
                  detokenizer: Detokenizer, scheduler: List[Scheduler],
-                 seq_counter: Counter, stop_checker: StopChecker):
+                 seq_counter: Counter, stop_checker: StopChecker,
+                 memshare_handler: MemShareHandler = None):
         self.scheduler_config = scheduler_config
         self.detokenizer = detokenizer
         self.scheduler = scheduler
         self.seq_counter = seq_counter
         self.stop_checker = stop_checker
+        self.memshare_handler = memshare_handler
 
     def process_outputs(self, sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput],
@@ -125,6 +128,13 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                 seq, sampling_params)
         else:
             new_char_count = 0
+
+        # MemShare: feed newly decoded text to step detector
+        if self.memshare_handler and new_char_count > 0:
+            new_text = seq.output_text[-new_char_count:]
+            self.memshare_handler.on_token(
+                seq_group.request_id, new_text)
+
         self.stop_checker.maybe_stop_sequence(
             seq,
             new_char_count,
@@ -132,5 +142,9 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             lora_req=seq_group.lora_request,
         )
         if seq.is_finished():
+            # MemShare: finalize state for this request
+            if self.memshare_handler:
+                self.memshare_handler.on_request_finished(
+                    seq_group.request_id)
             for scheduler in self.scheduler:
                 scheduler.free_seq(seq)
