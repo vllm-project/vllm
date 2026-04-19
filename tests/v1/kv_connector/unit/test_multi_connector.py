@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiKVConnectorStats,
     MultiKVConnectorWorkerMetadata,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl_connector import (
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlKVConnectorStats,
 )
 from vllm.v1.kv_cache_interface import KVCacheConfig
