@@ -391,10 +391,16 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        jobs_to_flush: set[int] = set()
+        for req_id in scheduler_output.preempted_req_ids or ():
+            req_status = self._req_status.get(req_id)
+            if req_status is not None:
+                jobs_to_flush.update(req_status.store_jobs)
+
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
             store_jobs=self._build_store_jobs(scheduler_output),
-            jobs_to_flush=scheduler_output.preempted_req_ids,
+            jobs_to_flush=jobs_to_flush,
         )
         self._current_batch_load_jobs = {}
         return meta

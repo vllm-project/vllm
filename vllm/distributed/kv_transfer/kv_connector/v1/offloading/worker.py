@@ -308,10 +308,8 @@ class OffloadingConnectorWorker:
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        for req_id in kv_connector_metadata.jobs_to_flush or ():
-            req_state = self._req_state.get(req_id)
-            if req_state and req_state.store_jobs:
-                self.worker.wait(req_state.store_jobs)
+        if kv_connector_metadata.jobs_to_flush:
+            self.worker.wait(kv_connector_metadata.jobs_to_flush)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
