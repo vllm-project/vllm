@@ -202,6 +202,7 @@ class Attention(nn.Module, AttentionLayerBase):
         kv_sharing_target_layer_name: str | None = None,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        kv_cache_page_size_padded: int | None = None,
         **extra_impl_args,
     ) -> None:
         """
@@ -370,6 +371,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        self.kv_cache_page_size_padded = kv_cache_page_size_padded
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
@@ -593,6 +595,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
+                page_size_padded=self.kv_cache_page_size_padded,
             )
         elif self.kv_cache_dtype.startswith("turboquant_"):
             from vllm.model_executor.layers.quantization.turboquant.config import (
@@ -610,6 +613,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size,
                 dtype=self.kv_cache_torch_dtype,
                 tq_slot_size=tq_config.slot_size_aligned,
+                page_size_padded=self.kv_cache_page_size_padded,
             )
         else:
             return FullAttentionSpec(
@@ -619,6 +623,7 @@ class Attention(nn.Module, AttentionLayerBase):
                 head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
+                page_size_padded=self.kv_cache_page_size_padded,
             )
 
 

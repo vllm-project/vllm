@@ -6554,13 +6554,37 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    kv_cache_shape = attn_backend.get_kv_cache_shape(
-                        kernel_num_blocks,
-                        kernel_block_size,
-                        kv_cache_spec.num_kv_heads,
-                        kv_cache_spec.head_size,
-                        cache_dtype_str=self.cache_config.cache_dtype,
-                    )
+                    kv_cache_shape = list(
+                        attn_backend.get_kv_cache_shape(
+                            kernel_num_blocks,
+                            kernel_block_size,
+                            kv_cache_spec.num_kv_heads,
+                            kv_cache_spec.head_size,
+                            cache_dtype_str=self.cache_config.cache_dtype,
+                        ))
+                    if kv_cache_spec.page_size_padded is not None:
+                        from vllm.utils.torch_utils import get_dtype_size
+                        dtype_size = get_dtype_size(kv_cache_spec.dtype)
+                        num_elements_per_kv_block = (
+                            kv_cache_spec.page_size_padded // dtype_size)
+                        num_elements_per_kernel_block = (
+                            num_elements_per_kv_block //
+                            num_blocks_per_kv_block)
+
+                        # Total elements in one kernel block shape
+                        total_elements_per_kernel_block_shape = 1
+                        for d in kv_cache_shape:
+                            total_elements_per_kernel_block_shape *= d
+                        total_elements_per_kernel_block_shape //= kernel_num_blocks
+
+                        current_last_dim = kv_cache_shape[-1]
+                        head_size_padded = (
+                            num_elements_per_kernel_block //
+                            (total_elements_per_kernel_block_shape //
+                             current_last_dim))
+                        kv_cache_shape[-1] = head_size_padded
+
+                    kv_cache_shape = tuple(kv_cache_shape)
                     dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()

@@ -129,6 +129,16 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
 
+    def copy_with_new_block_size(self, block_size: int) -> Self:
+        """
+        Create a new KVCacheSpec from self but replacing the block size.
+        """
+        if self.page_size_padded is not None:
+            ratio = block_size // self.block_size
+            new_padded = self.page_size_padded * ratio
+            return replace(self, block_size=block_size, page_size_padded=new_padded)
+        return super().copy_with_new_block_size(block_size)
+
     @property
     def page_size_bytes(self) -> int:
         real_page_size = self.real_page_size_bytes
