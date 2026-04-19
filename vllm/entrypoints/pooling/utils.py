@@ -11,8 +11,10 @@ import pybase64
 import torch
 from fastapi.responses import JSONResponse
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
+from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import (
     EMBED_DTYPES,
     EmbedDType,
@@ -133,3 +135,20 @@ def get_json_response_cls() -> type[JSONResponse]:
         "To make v1/embeddings API fast, please install orjson by `pip install orjson`"
     )
     return JSONResponse
+
+
+def enable_scoring_api(
+    supported_tasks: tuple["SupportedTask", ...],
+    model_config: ModelConfig | None = None,
+) -> bool:
+    if any(t in supported_tasks for t in ("embed", "token_embed")):
+        return True
+
+    if model_config is not None and "classify" in supported_tasks:
+        num_labels = getattr(model_config.hf_config, "num_labels", 0)
+        if num_labels != 1:
+            logger.debug_once("Scoring API is only enabled for num_labels == 1.")
+            return False
+        return True
+
+    return False

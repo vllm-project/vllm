@@ -9,7 +9,7 @@ from vllm.v1.outputs import PoolerOutput
 from vllm.v1.pool.late_interaction import (
     LATE_INTERACTION_MODE_CACHE_QUERY,
     LATE_INTERACTION_MODE_SCORE_DOC,
-    compute_maxsim_scores,
+    compute_maxsim_score_batched,
 )
 
 
@@ -116,7 +116,7 @@ class LateInteractionRunner:
             raise ValueError(f"Unsupported late-interaction mode: {mode!r}")
 
         if score_indices:
-            score_values = compute_maxsim_scores(score_queries, score_docs)
+            score_values = compute_maxsim_score_batched(score_queries, score_docs)
             for i, req_id, query_key, score in zip(
                 score_indices, score_req_ids, score_query_keys, score_values
             ):
