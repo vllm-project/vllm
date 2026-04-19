@@ -31,8 +31,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.parameter import ModelWeightParameter
 
 logger = init_logger(__name__)
 
@@ -83,16 +82,18 @@ class PairwiseFP4LinearMethod(QuantizeMethodBase):
 
         # BF16 weight – will be rotated + quantised in
         # process_weights_after_loading.
-        weight = torch.nn.Parameter(
-            torch.empty(
+        weight_loader = extra_weight_attrs.get("weight_loader")
+        weight = ModelWeightParameter(
+            data=torch.empty(
                 output_size_per_partition,
                 input_size_per_partition,
                 dtype=params_dtype,
             ),
-            requires_grad=False,
+            input_dim=1,
+            output_dim=0,
+            weight_loader=weight_loader,
         )
         layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, {"weight_loader": default_weight_loader})
 
     # ------------------------------------------------------------------
     # process_weights_after_loading

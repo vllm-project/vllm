@@ -209,4 +209,34 @@ File: `tests/quantization/test_pairwise_fp4_integration.py`
 | TestJointForward | 1 | joint with prebuilt plan |
 | TestIdentityPlanEquivalence | 1 | top_ratio=0 → empty plan → 两次执行结果一致 |
 | TestOutputDeterminism | 1 | 固定 plan + 固定 seed → 3 次输出完全一致 |
+
+---
+
+## Phase D: 最小验收实验 ✅
+
+### Step 12: 基础设施修改
+
+1. **`config.py`**: `get_config_filenames()` 改为返回 `[]`，允许 `LLM(quantization="pairwise_fp4")` 无需配置文件直接使用默认参数
+2. **`config.py`**: 新增 `from_config_dict_json()` 方法，支持通过 `hf_overrides={"quantization_config_dict_json": ...}` 传递自定义参数
+3. **`linear_method.py`**: `create_weights()` 从 plain `Parameter` + `default_weight_loader` 改为 `ModelWeightParameter`（支持 QKV 等 merged linear 层的分片加载）
+
+### Step 13: 实验脚本
+File: `scripts/eval_pairwise_fp4_gsm8k.py`
+
+支持 5 组实验（A: BF16 baseline, B: FP4 no-rotation, C: weight_only, D: activation_only, E: joint），
+CLI 参数控制 `--group`, `--num-samples`, `--model`, `--data`, `--diagnose`。
+
+### Step 14: 实验执行与结果
+
+5 组实验全部跑通（RTX 5090, emulation backend, enforce_eager=True）。
+详细结果见 `pairwise_online_rotation_quant_experiment_log.md`。
+
+关键数据（100 samples）：
+- BF16: 39.0%
+- FP4 no-rotation: 1.0%
+- FP4 weight_only: 1.0%
+
+旋转生效验证：plan builder 产生 45 对旋转（top_ratio=0.1），90/896 通道受影响，
+但 heuristic solver 角度极小（max ~0.017 rad），量化误差改善仅 0.01%。
+FP4 固有精度损失（无 input scale 校准）是准确率下降的主因。
 | TestKernelAttributes | 3 | all required attributes exist, alpha=input_gs*weight_gs, weight halved |

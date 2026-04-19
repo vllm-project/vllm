@@ -83,7 +83,10 @@ class PairwiseFP4Config(QuantizationConfig):
 
     @staticmethod
     def get_config_filenames() -> list[str]:
-        return ["pairwise_fp4_config.json"]
+        # Return empty so LLM(quantization="pairwise_fp4") works with
+        # defaults (no config file required).  Custom params can be passed
+        # via hf_overrides={"quantization_config_dict_json": ...}.
+        return []
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "PairwiseFP4Config":
@@ -121,6 +124,13 @@ class PairwiseFP4Config(QuantizationConfig):
             )
             return PairwiseFP4LinearMethod(self)
         return None
+
+    @classmethod
+    def from_config_dict_json(cls, json_str: str) -> "PairwiseFP4Config":
+        """Create config from a JSON string (used by hf_overrides)."""
+        import json
+        config = json.loads(json_str)
+        return cls.from_config(config)
 
     # ------------------------------------------------------------------
     # Convenience helpers
