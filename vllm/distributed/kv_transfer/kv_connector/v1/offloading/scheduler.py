@@ -124,9 +124,6 @@ class RequestOffloadState:
         for group_state, new_blocks in zip(self.group_states, new_block_id_groups):
             group_state.block_ids.extend(new_blocks)
 
-    def is_idle(self) -> bool:
-        return self.req.is_finished() and self.load_job is None and not self.store_jobs
-
 
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
@@ -439,7 +436,14 @@ class OffloadingConnectorScheduler:
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
 
-            if req_status.is_idle():
+            request_being_stored = bool(req_status.store_jobs)
+            request_being_loaded = req_status.load_job is not None
+
+            if (
+                req_status.req.is_finished()
+                and not request_being_stored
+                and not request_being_loaded
+            ):
                 self._req_status.pop(job_status.req_id, None)
 
     def request_finished(
@@ -466,7 +470,7 @@ class OffloadingConnectorScheduler:
             return False, None
 
         request_being_stored = bool(req_status.store_jobs)
-        if req_status.is_idle():
+        if not request_being_stored:
             self._req_status.pop(req_id, None)
         return request_being_stored, None
 
