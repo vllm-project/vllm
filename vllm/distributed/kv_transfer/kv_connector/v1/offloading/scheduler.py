@@ -39,6 +39,8 @@ class TransferJobStatus:
     # Number of workers still pending. Starts at num_workers,
     # decremented as each worker reports completion. Job is done at 0.
     pending_count: int
+    # Offload keys this job covers; passed to manager.complete_*().
+    keys: set[OffloadKey]
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -144,9 +146,6 @@ class OffloadingConnectorScheduler:
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
         self._jobs: dict[int, TransferJobStatus] = {}
-        # Offload keys for each in-flight job. Populated at job creation
-        # and removed on completion, preemption.
-        self._job_keys: dict[int, set[OffloadKey]] = {}
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -286,10 +285,10 @@ class OffloadingConnectorScheduler:
             transfer_spec=(src_spec, dst_spec),
         )
         req_status.load_job = load_job_id
-        self._job_keys[load_job_id] = set(offload_keys)
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
             pending_count=self.config.num_workers,
+            keys=set(offload_keys),
         )
         group_state.next_stored_block_idx = num_blocks
 
@@ -368,10 +367,10 @@ class OffloadingConnectorScheduler:
 
             job_id = self._generate_job_id()
             req_status.store_jobs.add(job_id)
-            self._job_keys[job_id] = set(keys_to_store)
             self._jobs[job_id] = TransferJobStatus(
                 req_id=req_id,
                 pending_count=self.config.num_workers,
+                keys=set(keys_to_store),
             )
 
             store_jobs[job_id] = TransferJob(
@@ -420,19 +419,18 @@ class OffloadingConnectorScheduler:
 
             # All TP workers reported — job is complete.
             self._jobs.pop(job_id)
-            keys = self._job_keys.pop(job_id, None)
             req_status = self._req_status.get(job_status.req_id)
-            if req_status is None or keys is None:
+            if req_status is None:
                 continue
 
             if job_id in req_status.store_jobs:
                 req_status.store_jobs.remove(job_id)
-                self.manager.complete_store(keys)
+                self.manager.complete_store(job_status.keys)
             elif job_id == req_status.load_job:
                 req_status.load_job = None
-                self.manager.complete_load(keys)
+                self.manager.complete_load(job_status.keys)
                 if self._blocks_being_loaded:
-                    self._blocks_being_loaded.difference_update(keys)
+                    self._blocks_being_loaded.difference_update(job_status.keys)
 
             if req_status.is_idle():
                 self._req_status.pop(job_status.req_id, None)
