@@ -367,6 +367,7 @@ def cached_processor_from_config(
             model_config.model,
             getattr(model_config.hf_config, "model_type", None),
         )
+        processor.tokenizer = tokenizer
     return processor
 
 
