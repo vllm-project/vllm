@@ -743,6 +743,28 @@ class VllmConfig:
                 "`--enable-mamba-cache-stochastic-rounding`."
             )
 
+        # Quantized SSM cache (block-scaled int8 / int16 / fp8_e4m3fn) is
+        # incompatible with speculative decoding: the spec-decoding store
+        # branch of `_selective_scan_update_kernel` does not yet compute or
+        # persist per-`(head, dim)` decode scales.  Running the two together
+        # would leave `ssm_state_scales` stale and silently corrupt the
+        # recurrence on the next decode step.  Fail loudly at startup
+        # instead of producing wrong results.
+        _QUANTIZED_SSM_DTYPES = ("int8", "int16", "fp8_e4m3fn")
+        if (
+            self.cache_config.mamba_ssm_cache_dtype in _QUANTIZED_SSM_DTYPES
+            and self.num_speculative_tokens > 0
+        ):
+            raise ValueError(
+                "Quantized Mamba SSM cache "
+                f"(--mamba-ssm-cache-dtype={self.cache_config.mamba_ssm_cache_dtype}) "
+                "is not yet supported with speculative decoding. The spec-"
+                "decoding store path does not update the per-channel scale "
+                "tensor and would silently corrupt state across steps. "
+                "Either disable speculative decoding or use "
+                "`--mamba-ssm-cache-dtype {auto,float16,float32}`."
+            )
+
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config

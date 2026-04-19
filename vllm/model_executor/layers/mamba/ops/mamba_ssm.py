@@ -395,8 +395,15 @@ def _selective_scan_update_kernel(
                         1.0 / float(1 << 24)
                     )
                     state = tl.extra.cuda.libdevice.floor(state + rand01)
-                else:
+                elif dst_state_ptrs.dtype.element_ty != tl.float8e4nv:
+                    # int8 / int16 round-to-nearest: snap explicitly to the
+                    # uniform integer grid before the int cast.
                     state = tl.extra.cuda.libdevice.round(state)
+                # fp8_e4m3fn round-to-nearest: skip the explicit `round()` and
+                # let `.to(float8e4nv)` perform native RN on the true E4M3
+                # grid.  Rounding to integer first would destroy fp8's
+                # sub-integer precision for |x| < 16 where the E4M3 grid is
+                # finer than 1 (e.g. ulp = 0.015625 near 0.125).
                 state = tl.minimum(tl.maximum(state, -QUANT_MAX), QUANT_MAX)
                 state = state.to(dst_state_ptrs.dtype.element_ty)
         elif USE_RS_ROUNDING:
