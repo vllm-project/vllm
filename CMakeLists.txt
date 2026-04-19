@@ -225,8 +225,8 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
   # a lot of warnings that always mask real issues. Suppressing until this is properly addressed.
   #
-  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
+  set(CMAKE_${VLLM_GPU_LANG}_FLAGS "${CMAKE_${VLLM_GPU_LANG}_FLAGS} -Wno-unused-result -Wno-unused-value")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result -Wno-unused-value")
 endif()
 
 #
@@ -299,6 +299,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
   "csrc/quantization/w8a8/fp8/common.cu"
   "csrc/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
+  "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
   "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/quantization/activation_kernels.cu"
   "csrc/cuda_utils_kernels.cu"
@@ -306,6 +307,8 @@ set(VLLM_EXT_SRC
   "csrc/torch_bindings.cpp")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  list(APPEND VLLM_EXT_SRC "csrc/minimax_reduce_rms_kernel.cu")
+
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
@@ -340,8 +343,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
   list(APPEND VLLM_EXT_SRC
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/cutlass_extensions/common.cpp"
-    "csrc/quantization/fused_kernels/fused_silu_mul_block_quant.cu")
+    "csrc/cutlass_extensions/common.cpp")
 
   set_gencode_flags_for_srcs(
     SRCS "${VLLM_EXT_SRC}"
@@ -921,6 +923,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    # nvfp4_kv_cache_kernels uses non-stable torch API and is called directly
+    # from cache_kernels.cu, so it belongs in _C rather than _C_stable.
+    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${NVFP4_KV_SRC}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM120=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
@@ -942,11 +952,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${SRCS}")
+    set(NVFP4_KV_SRC "csrc/nvfp4_kv_cache_kernels.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${NVFP4_KV_SRC}"
+      CUDA_ARCHS "${FP4_ARCHS}")
+    target_sources(_C PRIVATE ${NVFP4_KV_SRC})
+    target_compile_definitions(_C PRIVATE ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building NVFP4 for archs: ${FP4_ARCHS}")
@@ -1222,6 +1240,7 @@ endif()
 
 # For CUDA we also build and ship some external projects.
 if (VLLM_GPU_LANG STREQUAL "CUDA")
+    include(cmake/external_projects/deepgemm.cmake)
     include(cmake/external_projects/flashmla.cmake)
     include(cmake/external_projects/qutlass.cmake)
 

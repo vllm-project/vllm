@@ -112,10 +112,12 @@ if current_platform.is_rocm():
             if DEQUANT:
                 k_scale = tl.load(k_scale_ptr)
                 v_scale = tl.load(v_scale_ptr)
-                k_dtype = k_reg.dtype
-                v_dtype = v_reg.dtype
-                k_reg = (k_reg.to(tl.float32) * k_scale).to(k_dtype)
-                v_reg = (v_reg.to(tl.float32) * v_scale).to(v_dtype)
+                k_reg = (k_reg.to(tl.float32) * k_scale).to(
+                    key_ptr_offset.dtype.element_ty
+                )
+                v_reg = (v_reg.to(tl.float32) * v_scale).to(
+                    value_ptr_offset.dtype.element_ty
+                )
             tl.store(key_ptr_offset + col_offsets, k_reg)
             tl.store(value_ptr_offset + col_offsets, v_reg)
 
@@ -842,9 +844,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
+        if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
-                "Encoder self-attention is not implemented for AiterFlashAttentionImpl"
+                "Only decoder self-attention is supported for "
+                "AiterFlashAttentionImpl. ENCODER_DECODER is not supported "
+                "because the prefill path uses cu_seqlens_k set to decoder "
+                "query_start_loc with causal=True, which is incorrect for "
+                "cross-attention."
             )
 
     def extend_for_sliding_window(
