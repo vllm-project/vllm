@@ -86,6 +86,26 @@ COMMON_BROADCAST_SETTINGS = {
 # which cases would be selected and deselected by pytest. In general,
 # this is a good idea for checking your command first, since tests are slow.
 
+def _granite4_vision_vllm_to_hf_output(vllm_output, model):
+    """Post-processor for granite4_vision vLLM output.
+
+    Self-contained to avoid calling AutoConfig/AutoTokenizer without
+    trust_remote_code (needed while the model is not in upstream HF).
+    """
+    output_ids, output_str, out_logprobs = vllm_output
+    mm_token_id = 100352
+    hf_output_ids = [
+        token_id
+        for idx, token_id in enumerate(output_ids)
+        if token_id != mm_token_id or output_ids[idx - 1] != mm_token_id
+    ]
+    hf_output_str = output_str[1:] if output_str and output_str[0] == " " else output_str
+    eos_token_id = 100257
+    if hf_output_ids and hf_output_ids[-1] == eos_token_id:
+        hf_output_str = hf_output_str + "<|end_of_text|>"
+    return hf_output_ids, hf_output_str, out_logprobs
+
+
 VLM_TEST_SETTINGS = {
     #### Core tests to always run in the CI
     "llava": VLMTestInfo(
@@ -424,6 +444,20 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
+    ),
+    "granite4_vision": VLMTestInfo(
+        models=["granite-vision-dev/granite-4.1-3b-vision"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
+        max_model_len=8192,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=_granite4_vision_vllm_to_hf_output,
+        image_size_factors=[(1.0,)],
+        vllm_runner_kwargs={
+            "enable_lora": True,
+            "max_lora_rank": 256,
+            "default_mm_loras": {"image": "granite-vision-dev/granite-4.1-3b-vision"},
+        },
     ),
     "glm4v": VLMTestInfo(
         models=["zai-org/glm-4v-9b"],
