@@ -12,16 +12,7 @@ import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_shrink_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import (
-    direct_register_custom_op,
-    is_strictly_contiguous,
-)
-
-
-def _make_strictly_contiguous_copy(tensor: torch.Tensor) -> torch.Tensor:
-    contiguous = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
-    contiguous.copy_(tensor)
-    return contiguous
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -183,34 +174,20 @@ def _lora_shrink(
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(1) == lora_a_weights[0].size(-1)
-
-    shrink_inputs = inputs
-    if not is_strictly_contiguous(inputs):
-        shrink_inputs = _make_strictly_contiguous_copy(inputs)
-
-    shrink_output = output_tensor
-    if not is_strictly_contiguous(output_tensor):
-        # torch.compile may materialize the mutated output buffer as a
-        # non-canonical temporary during graph capture. The Triton kernel
-        # expects canonical contiguous output, so stage through a fresh
-        # contiguous buffer and copy back afterward.
-        shrink_output = torch.empty(
-            output_tensor.shape,
-            dtype=output_tensor.dtype,
-            device=output_tensor.device,
-        )
+    assert inputs.is_contiguous()
+    assert output_tensor.is_contiguous()
 
     # metadata sanity check
-    M = shrink_inputs.size(0)
+    M = inputs.size(0)
     assert token_lora_mapping.size(0) == M
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
     assert lora_token_start_loc.size(0) == lora_ids.size(0) + 1
 
-    shrink_output.zero_()
+    output_tensor.zero_()
 
     (lora_ptr_tensor, lora_strides_d0, lora_strides_d1, lora_strides_d2) = (
-        _get_lora_a_ptr(lora_a_weights, shrink_inputs.device)
+        _get_lora_a_ptr(lora_a_weights, inputs.device)
     )
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size,N=rank
     NUM_SLICES = len(lora_a_weights)
@@ -247,9 +224,9 @@ def _lora_shrink(
     # making PDL invalid and affecting the kernel performance.
     use_gdc = False  # supports_pdl(inputs.device)
     _lora_shrink_kernel[grid](
-        shrink_inputs,
+        inputs,
         lora_ptr_tensor,
-        shrink_output,
+        output_tensor,
         M,
         N,
         K,
@@ -258,14 +235,14 @@ def _lora_shrink(
         lora_token_start_loc,
         lora_ids,
         scaling,
-        shrink_inputs.stride(0),
-        shrink_inputs.stride(1),
+        inputs.stride(0),
+        inputs.stride(1),
         lora_strides_d0,
         lora_strides_d1,
         lora_strides_d2,
-        shrink_output.stride(0),
-        shrink_output.stride(1),
-        shrink_output.stride(2),
+        output_tensor.stride(0),
+        output_tensor.stride(1),
+        output_tensor.stride(2),
         BLOCK_M,
         BLOCK_N,
         BLOCK_K,
@@ -279,9 +256,6 @@ def _lora_shrink(
         num_stages=NUM_STAGES,
         launch_pdl=use_gdc,
     )
-
-    if shrink_output is not output_tensor:
-        output_tensor.copy_(shrink_output)
 
     return
 

@@ -12,16 +12,7 @@ import torch
 from vllm.lora.ops.triton_ops.kernel_utils import do_expand_kernel
 from vllm.lora.ops.triton_ops.utils import _get_lora_b_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
-from vllm.utils.torch_utils import (
-    direct_register_custom_op,
-    is_strictly_contiguous,
-)
-
-
-def _make_strictly_contiguous_copy(tensor: torch.Tensor) -> torch.Tensor:
-    contiguous = torch.empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
-    contiguous.copy_(tensor)
-    return contiguous
+from vllm.utils.torch_utils import direct_register_custom_op
 
 
 @triton.jit
@@ -187,21 +178,10 @@ def _lora_expand(
         assert weight.dtype in [torch.float16, torch.bfloat16]
 
     assert inputs.size(0) == len(lora_b_weights)
-
-    expand_inputs = inputs
-    if not is_strictly_contiguous(inputs):
-        expand_inputs = _make_strictly_contiguous_copy(inputs)
-
-    expand_output = output_tensor
-    if not is_strictly_contiguous(output_tensor):
-        # torch.compile can hand custom ops tensors with size-1 degenerate
-        # strides during graph capture. `.contiguous()` is not enough here:
-        # PyTorch may treat such layouts as contiguous and return the same
-        # storage. Stage through a fresh canonical buffer instead.
-        expand_output = _make_strictly_contiguous_copy(output_tensor)
+    assert output_tensor.is_contiguous()
 
     # metadata sanity check.
-    M = expand_inputs.size(1)
+    M = inputs.size(1)
     assert token_lora_mapping.size(0) == M
     assert token_lora_mapping.size(0) == token_indices_sorted_by_lora_ids.size(0)
     assert lora_ids.size(0) == num_tokens_per_lora.size(0)
@@ -216,7 +196,7 @@ def _lora_expand(
         hidden_sizes_tensor,
         same_stride,
         MAX_N,
-    ) = _get_lora_b_ptr(lora_b_weights, offset_start, expand_inputs.device)
+    ) = _get_lora_b_ptr(lora_b_weights, offset_start, inputs.device)
 
     K = lora_b_weights[0].shape[-1]  # K= rank
     ADD_INPUTS = add_inputs
@@ -261,9 +241,9 @@ def _lora_expand(
     # making PDL invalid and affecting the kernel performance.
     use_gdc = False  # supports_pdl(inputs.device)
     _lora_expand_kernel[grid](
-        expand_inputs,
+        inputs,
         lora_ptr_tensor,
-        expand_output,
+        output_tensor,
         M,
         MAX_N,
         K,
@@ -272,14 +252,14 @@ def _lora_expand(
         lora_token_start_loc,
         lora_ids,
         slice_start_tensor,
-        expand_inputs.stride(0),
-        expand_inputs.stride(1),
-        expand_inputs.stride(2),
+        inputs.stride(0),
+        inputs.stride(1),
+        inputs.stride(2),
         lora_strides_d0_tensor,
         lora_strides_d1_tensor,
         lora_strides_d2_tensor,
-        expand_output.stride(0),
-        expand_output.stride(1),
+        output_tensor.stride(0),
+        output_tensor.stride(1),
         hidden_sizes_tensor,
         BLOCK_M,
         BLOCK_N,
@@ -295,9 +275,6 @@ def _lora_expand(
         num_stages=NUM_STAGES,
         launch_pdl=use_gdc,
     )
-
-    if expand_output is not output_tensor:
-        output_tensor.copy_(expand_output)
 
     return
 

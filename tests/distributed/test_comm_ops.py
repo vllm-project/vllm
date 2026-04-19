@@ -19,11 +19,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.distributed.device_communicators.base_device_communicator import (
-    DeviceCommunicatorBase,
-)
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
-from vllm.utils.torch_utils import is_strictly_contiguous
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -237,43 +233,6 @@ def _make_group_for_unit_test(
     g.device_group = None
     g.cpu_group = None
     return g
-
-
-def _make_base_device_communicator_for_unit_test(
-    world_size: int,
-) -> DeviceCommunicatorBase:
-    communicator = DeviceCommunicatorBase.__new__(DeviceCommunicatorBase)
-    communicator.world_size = world_size
-    communicator.device_group = None
-    return communicator
-
-
-def test_all_gather_canonicalizes_rank_one_last_dim_layout(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    world_size = 32
-    communicator = _make_base_device_communicator_for_unit_test(world_size)
-
-    def fake_all_gather_into_tensor(
-        output_tensor: torch.Tensor,
-        input_tensor: torch.Tensor,
-        group: Any = None,
-    ) -> None:
-        del group
-        output_tensor.copy_(torch.cat([input_tensor] * world_size, dim=0))
-
-    monkeypatch.setattr(
-        torch.distributed,
-        "all_gather_into_tensor",
-        fake_all_gather_into_tensor,
-    )
-
-    input_tensor = torch.arange(34, dtype=torch.float32).reshape(2, 17, 1)
-    gathered = communicator.all_gather(input_tensor, dim=-1)
-
-    assert gathered.shape == (2, 17, world_size)
-    assert is_strictly_contiguous(gathered)
-    torch.testing.assert_close(gathered, torch.cat([input_tensor] * world_size, dim=-1))
 
 
 def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(

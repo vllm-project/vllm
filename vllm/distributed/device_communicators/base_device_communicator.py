@@ -7,14 +7,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from vllm.utils.torch_utils import is_strictly_contiguous
-
-
-def _make_strictly_contiguous_copy(tensor: torch.Tensor) -> torch.Tensor:
-    contiguous = torch.empty_like(tensor, memory_format=torch.contiguous_format)
-    contiguous.copy_(tensor)
-    return contiguous
-
 
 class Cache:
     def __init__(self):
@@ -191,23 +183,17 @@ class DeviceCommunicatorBase:
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
-        gather_input = input_
-        if not is_strictly_contiguous(gather_input):
-            gather_input = _make_strictly_contiguous_copy(gather_input)
-
-        input_size = gather_input.size()
+        input_size = input_.size()
         # NOTE: we have to use concat-style all-gather here,
         # stack-style all-gather has compatibility issues with
         # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
         output_size = (input_size[0] * self.world_size,) + input_size[1:]
         # Allocate output tensor.
         output_tensor = torch.empty(
-            output_size, dtype=gather_input.dtype, device=gather_input.device
+            output_size, dtype=input_.dtype, device=input_.device
         )
         # All-gather.
-        dist.all_gather_into_tensor(
-            output_tensor, gather_input, group=self.device_group
-        )
+        dist.all_gather_into_tensor(output_tensor, input_, group=self.device_group)
         # Reshape
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
@@ -216,8 +202,6 @@ class DeviceCommunicatorBase:
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]
         )
-        if not is_strictly_contiguous(output_tensor):
-            output_tensor = _make_strictly_contiguous_copy(output_tensor)
         return output_tensor
 
     def all_gatherv(
