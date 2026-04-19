@@ -103,7 +103,121 @@ Note that all the linear layers above take `linear_method` as an input. vLLM wil
 ## 4. Implement the weight loading logic
 
 You now need to implement the `load_weights` method in your `*ForCausalLM` class.
-This method should load the weights from the HuggingFace's checkpoint file and assign them to the corresponding layers in your model. Specifically, for `MergedColumnParallelLinear` and `QKVParallelLinear` layers, if the original model has separated weight matrices, you need to load the different parts separately.
+This method loads weights from a HuggingFace checkpoint and assigns them to the
+corresponding layers in your model.
+
+### Approach 1: `AutoWeightsLoader` (recommended for most models)
+
+`AutoWeightsLoader` automatically matches HuggingFace weight names to vLLM layer
+parameters and correctly dispatches to each layer's `weight_loader`. It handles
+sharded layers such as `MergedColumnParallelLinear` and `QKVParallelLinear` without
+any extra bookkeeping on your part.
+
+```python
+from typing import Iterable, Set, Tuple
+import torch
+from vllm.model_executor.models.utils import AutoWeightsLoader
+
+class MyModelForCausalLM(nn.Module):
+    ...
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
+```
+
+Use this approach when the parameter names in your vLLM model already match those in
+the HuggingFace checkpoint. If the names differ you will need the manual approach
+described below.
+
+### Approach 2: Manual weight loading
+
+Use manual loading when HuggingFace checkpoint weight names differ from your vLLM
+module names (common when fusing separate matrices such as `gate_proj` and `up_proj`
+into a single `gate_up_proj`), or when you need to skip or transform certain weights.
+
+The general pattern:
+
+1. Build `params_dict` — a flat mapping from parameter name to `nn.Parameter`.
+2. Define `stacked_params_mapping` for fused/merged weight matrices.
+3. Iterate over the incoming weights, remapping names as needed, and call
+   `weight_loader` on each target parameter.
+
+```python
+from typing import Iterable, Set, Tuple
+import torch
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+class MyModelForCausalLM(nn.Module):
+    ...
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (vllm_param_name, hf_weight_name, shard_id)
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj",   1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+
+        for name, loaded_weight in weights:
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+
+        return loaded_params
+```
+
+### Handling fused linear layers
+
+`MergedColumnParallelLinear` and `QKVParallelLinear` expose a `weight_loader` method
+that accepts a `shard_id` to route each incoming shard into the correct offset of the
+fused weight matrix.
+
+For `MergedColumnParallelLinear` (e.g., a fused `gate_proj + up_proj`), use a
+numeric `shard_id`:
+
+```python
+stacked_params_mapping = [
+    ("gate_up_proj", "gate_proj", 0),  # shard 0 = gate
+    ("gate_up_proj", "up_proj",   1),  # shard 1 = up
+]
+```
+
+For `QKVParallelLinear` (fused Q, K, V projections), use string `shard_id` values:
+
+```python
+stacked_params_mapping = [
+    ("qkv_proj", "q_proj", "q"),
+    ("qkv_proj", "k_proj", "k"),
+    ("qkv_proj", "v_proj", "v"),
+]
+```
+
+!!! note
+    If the HuggingFace checkpoint stores Q, K, V as separate tensors but your vLLM
+    model uses `QKVParallelLinear`, the `stacked_params_mapping` tells vLLM which
+    shard each tensor belongs to so the fused parameter is assembled correctly.
+
+### Reference implementations
+
+- [`LlamaForCausalLM`](../../../vllm/model_executor/models/llama.py) — manual weight
+  loading with `stacked_params_mapping` for both QKV and fused MLP projections.
+- [`GPT2ForCausalLM`](../../../vllm/model_executor/models/gpt2.py) — a simpler model
+  that shows how `AutoWeightsLoader` integrates with weight loading.
 
 ## 5. Register your model
 
