@@ -784,10 +784,7 @@ class Granite4VisionForConditionalGeneration(
             # Inject deepstack features at target layers (before layer forward)
             if i in ds_map and vision_mask is not None and vision_mask.any():
                 features = ds_map[i][:num_tokens]
-                hidden_states = hidden_states.clone()
-                hidden_states[vision_mask] = (
-                    hidden_states[vision_mask] + features[vision_mask]
-                )
+                hidden_states[vision_mask] += features[vision_mask]
 
             hidden_states = layer(positions, hidden_states)
 
