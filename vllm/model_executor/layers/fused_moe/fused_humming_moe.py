@@ -211,6 +211,8 @@ class HummingExpertsBase(mk.FusedMoEExpertsModular):
             output_shape = (num_experts, max_num_tokens * num_dispatchers, K)
         else:
             input_shape_m = M
+            if self.humming_gemm_type != HummingGemmType.INDEXED:
+                input_shape_m = M * topk
             real_shape_m = M * topk
             output_shape = (M, K)
 

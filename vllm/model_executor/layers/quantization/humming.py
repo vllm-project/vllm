@@ -662,7 +662,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     part_subccess = param.weight_loader(
                         param=param,
                         loaded_weight=tensor.cpu(),
-                        weight_name=weight_name,
+                        weight_name=shard_id + "_" + key,
                         shard_id=shard_id,
                         expert_id=expert_id,
                         return_success=return_success,
