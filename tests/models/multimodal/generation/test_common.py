@@ -173,6 +173,9 @@ VLM_TEST_SETTINGS = {
         marks=[
             pytest.mark.core_model,
         ],
+        vllm_runner_kwargs={"attention_backend": "TRITON_ATTN"}
+        if current_platform.is_rocm()
+        else {},
     ),
     "ultravox": VLMTestInfo(
         models=["fixie-ai/ultravox-v0_5-llama-3_2-1b"],
@@ -183,7 +186,14 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModel,
         hf_output_post_proc=model_utils.ultravox_trunc_hf_output,
-        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        marks=[
+            pytest.mark.core_model,
+            pytest.mark.cpu_model,
+            # TODO: Remove skip once model has been upstreamed to Transformers
+            pytest.mark.skip(
+                reason="Custom model code is not compatible with Transformers v5"
+            ),
+        ],
     ),
     #### Transformers fallback to test
     ## To reduce test burden, we only test batching arbitrary image size
@@ -203,9 +213,7 @@ VLM_TEST_SETTINGS = {
             "model_impl": "transformers",
             "default_torch_num_threads": 1,
         },
-        # FIXME: Investigate why the test hangs
-        # when processing the 3rd prompt in vLLM
-        marks=[pytest.mark.core_model, pytest.mark.skip(reason="Test hangs")],
+        marks=[pytest.mark.core_model],
     ),
     # Gemma3 has bidirectional mask on images
     "gemma3-transformers": VLMTestInfo(
@@ -219,7 +227,10 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "model_impl": "transformers",
         },
-        marks=[pytest.mark.core_model],
+        marks=[
+            pytest.mark.core_model,
+            *([large_gpu_mark(min_gb=80)] if current_platform.is_rocm() else []),
+        ],
     ),
     "idefics3-transformers": VLMTestInfo(
         models=["HuggingFaceTB/SmolVLM-256M-Instruct"],
@@ -390,6 +401,22 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={"mm_processor_kwargs": {"do_pan_and_scan": True}},
         patch_hf_runner=model_utils.gemma3_patch_hf_runner,
     ),
+    "gemma4": VLMTestInfo(
+        models=["google/gemma-4-E2B-it"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<bos><|turn>user\n{img_prompt}<turn|>\n<|turn>model\n",  # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "<|image|>What's the content in the center of the image?",  # noqa: E501
+                "cherry_blossom": "<|image|>What is the season?",
+            }
+        ),
+        multi_image_prompt="<|image|><|image|>Describe the two images in detail.",  # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_runner_kwargs={"limit_mm_per_prompt": {"image": 4}},
+    ),
     "granite_vision": VLMTestInfo(
         models=["ibm-granite/granite-vision-3.3-2b"],
         test_type=(VLMTestType.IMAGE),
@@ -513,6 +540,12 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[
+            pytest.mark.skip(
+                reason="Custom model code tries to access data from meta-tensor"
+            )
+        ],
     ),
     "intern_vl-video": VLMTestInfo(
         models=[
@@ -525,6 +558,12 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
         num_logprobs=10 if current_platform.is_rocm() else 5,
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[
+            pytest.mark.skip(
+                reason="Custom model code tries to access data from meta-tensor"
+            )
+        ],
     ),
     "intern_vl-hf": VLMTestInfo(
         models=["OpenGVLab/InternVL3-1B-hf"],
@@ -541,8 +580,12 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
     ),
     "isaac": VLMTestInfo(
+        # NOTE: PerceptronAI/Isaac-0.1 removed because the upstream HF
+        # repo has a stale model.safetensors.index.json that references
+        # shard files which no longer exist (consolidated into a single
+        # model.safetensors on 2026-03-20). Re-add once upstream fixes
+        # the index file.
         models=[
-            "PerceptronAI/Isaac-0.1",
             "PerceptronAI/Isaac-0.2-2B-Preview",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -567,6 +610,8 @@ VLM_TEST_SETTINGS = {
         hf_model_kwargs={"device_map": "auto"},
         patch_hf_runner=model_utils.isaac_patch_hf_runner,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[pytest.mark.skip(reason="Custom model imports deleted object")],  # noqa: E501
     ),
     "kimi_vl": VLMTestInfo(
         models=["moonshotai/Kimi-VL-A3B-Instruct"],
@@ -776,12 +821,18 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForCausalLM,
+        patch_hf_runner=model_utils.paddleocr_vl_patch_hf_runner,
         image_size_factors=[(0.25,)],
         marks=[
             pytest.mark.skipif(
                 Version(TRANSFORMERS_VERSION) == Version("4.57.3"),
                 reason="This model is broken in Transformers v4.57.3",
-            )
+            ),
+            pytest.mark.skipif(
+                Version(TRANSFORMERS_VERSION) >= Version("5.0.0"),
+                reason="Model's custom code uses ROPE_INIT_FUNCTIONS"
+                "['default'] which was removed in transformers v5",
+            ),
         ],
     ),
     "phi3v": VLMTestInfo(
@@ -934,6 +985,12 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 2},
             )
             for inp in custom_inputs.different_patch_input_cases_internvl()
+        ],
+        # TODO: Remove skip once model has been upstreamed to Transformers
+        marks=[
+            pytest.mark.skip(
+                reason="Custom model code tries to access data from meta-tensor"
+            )
         ],
     ),
     "llava_onevision-multiple-images": VLMTestInfo(

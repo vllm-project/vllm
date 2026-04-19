@@ -19,7 +19,8 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 # Install some basic utilities
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
-    apt-transport-https ca-certificates wget curl
+    apt-transport-https ca-certificates wget curl \
+    libnuma-dev
 RUN python3 -m pip install --upgrade pip
 # Remove sccache only if not using sccache (it exists in base image from Dockerfile.rocm_base)
 ARG USE_SCCACHE
@@ -29,8 +30,11 @@ RUN if [ "$USE_SCCACHE" != "1" ]; then \
         rm -f "$(which sccache)" || true; \
     fi
 
-# Install UV
-RUN curl -LsSf https://astral.sh/uv/install.sh | env UV_INSTALL_DIR="/usr/local/bin" sh
+# Install UV — download first, then run, so a curl failure is not masked by the pipe
+RUN curl -LsSf --retry 3 --retry-delay 5 https://astral.sh/uv/install.sh -o /tmp/uv-install.sh \
+    && env UV_INSTALL_DIR="/usr/local/bin" sh /tmp/uv-install.sh \
+    && rm -f /tmp/uv-install.sh \
+    && uv --version
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -184,6 +188,33 @@ RUN cd /opt/rixl && mkdir -p /app/install && \
         --ucx-plugins-dir ${UCX_HOME}/lib/ucx \
         --nixl-plugins-dir ${RIXL_HOME}/lib/x86_64-linux-gnu/plugins
 
+# DeepEP build stage
+FROM base AS build_deep
+ARG ROCSHMEM_BRANCH="ba0bf0f3"
+ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
+ARG DEEPEP_BRANCH="5d90af8b"
+ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
+ARG DEEPEP_NIC="cx7"
+ARG DEEPEP_ROCM_ARCH="gfx942;gfx950"
+ENV ROCSHMEM_DIR=/opt/rocshmem
+
+RUN git clone ${ROCSHMEM_REPO} \
+ && cd rocm-systems \
+ && git checkout ${ROCSHMEM_BRANCH} \
+ && mkdir -p projects/rocshmem/build \
+ && cd projects/rocshmem/build \
+ && bash ../scripts/build_configs/all_backends \
+      -DCMAKE_INSTALL_PREFIX="${ROCSHMEM_DIR}" \
+      -DROCM_PATH=/opt/rocm \
+      -DGPU_TARGETS="${DEEPEP_ROCM_ARCH}" \
+      -DUSE_EXTERNAL_MPI=OFF
+
+# Build DeepEP wheel.
+# DeepEP looks for rocshmem at ROCSHMEM_DIR.
+RUN git clone ${DEEPEP_REPO} \
+ && cd DeepEP \
+ && git checkout ${DEEPEP_BRANCH} \
+ && python3 setup.py --variant rocm --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
 # -----------------------
 # vLLM wheel release build stage (for building distributable wheels)
@@ -230,30 +261,6 @@ RUN --mount=type=bind,source=.git,target=vllm/.git \
     && echo "Detected vLLM version: ${VLLM_VERSION}" \
     && echo "${VLLM_VERSION}" > /tmp/vllm_version.txt
 
-# Fail if git-based package dependencies are found in requirements files
-# (uv doesn't handle git+ URLs well, and packages should be distributed on PyPI)
-# Extra notes: pip install is able to handle git+ URLs, but uv doesn't.
-RUN echo "Checking for git-based packages in requirements files..." \
-    && echo "Checking common.txt for git-based packages:" \
-    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; then \
-         echo "ERROR: Git-based packages found in common.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/common.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in common.txt"; \
-       fi \
-    && echo "Checking rocm.txt for git-based packages:" \
-    && if grep -q 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; then \
-         echo "ERROR: Git-based packages found in rocm.txt:"; \
-         grep 'git+' ${COMMON_WORKDIR}/vllm/requirements/rocm.txt; \
-         echo "Please publish these packages to PyPI instead of using git dependencies."; \
-         exit 1; \
-       else \
-         echo "  ✓ No git-based packages found in rocm.txt"; \
-       fi \
-    && echo "All requirements files are clean - no git-based packages found"
-
 # Pin vLLM dependencies to exact versions of custom ROCm wheels
 # This ensures 'pip install vllm' automatically installs correct torch/triton/torchvision/amdsmi
 COPY tools/vllm-rocm/pin_rocm_dependencies.py /tmp/pin_rocm_dependencies.py
@@ -297,13 +304,23 @@ RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
     && uv pip install --system -r requirements/rocm.txt \
-    && uv pip install --system -r requirements/rocm-test.txt \
+    && uv pip install --system -r requirements/test/rocm.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
+
+# Persist the built wheel in the image so python_only_compile_rocm.sh can
+# reinstall it after removing compilers. The bind-mounted /install contents
+# above are not available once that RUN step completes.
+COPY --from=export_vllm /*.whl /opt/vllm-wheels/
 
 # Install RIXL wheel
 RUN --mount=type=bind,from=build_rixl,src=/app/install,target=/rixl_install \
     uv pip install --system /rixl_install/*.whl
+
+# Install DeepEP wheel
+RUN --mount=type=bind,from=build_deep,src=/app/deep_install,target=/deep_install \
+    uv pip install --system /deep_install/*.whl
+COPY --from=build_deep /opt/rocshmem /opt/rocshmem
 
 # RIXL/MoRIIO runtime dependencies (RDMA userspace libraries)
 RUN apt-get update -q -y && apt-get install -q -y \
@@ -323,9 +340,10 @@ RUN cd /vllm-workspace \
     && python3 -m pip install pytest-shard
 
 # enable fast downloads from hf (for testing)
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system hf_transfer
-ENV HF_HUB_ENABLE_HF_TRANSFER=1
+ENV HF_XET_HIGH_PERFORMANCE=1
+
+# increase timeout for hf downloads (for testing)
+ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # install audio decode package `torchcodec` from source (required due to 
 # ROCm and torch version mismatch) for tests with datasets package
@@ -347,6 +365,23 @@ ENV MIOPEN_DEBUG_CONV_GEMM=0
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
 RUN mkdir src && mv vllm src/vllm
+
+# This is a workaround to ensure pytest exits with the correct status code in CI tests.
+RUN printf '%s\n' \
+    'import os' \
+    '' \
+    '_exit_code = 1' \
+    '' \
+    'def pytest_sessionfinish(session, exitstatus):' \
+    '    global _exit_code' \
+    '    _exit_code = int(exitstatus)' \
+    '' \
+    'def pytest_unconfigure(config):' \
+    '    import sys' \
+    '    sys.stdout.flush()' \
+    '    sys.stderr.flush()' \
+    '    os._exit(_exit_code)' \
+    > /vllm-workspace/conftest.py
 
 # -----------------------
 # Final vLLM image

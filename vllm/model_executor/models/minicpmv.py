@@ -41,6 +41,7 @@ from typing_extensions import TypeVar
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (
     BaseResampler,
@@ -54,7 +55,6 @@ from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM
 from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     NestedTensors,
@@ -64,7 +64,6 @@ from vllm.multimodal.parse import (
     ImageItem,
     ImageProcessorItems,
     ImageSize,
-    ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -387,8 +386,8 @@ class Resampler4_5(Resampler2_5):
             pos_embed_2d, batch_first=True, padding_value=0.0
         ).permute(1, 0, 2)  # BLD => L * B * D
 
-        k = x
-        v = x + pos_embed_2d
+        k = x + pos_embed_2d
+        v = x
         if pos_embed_temporal:
             k += torch.stack(pos_embed_temporal, dim=0)
             bs = len(temporal_ids)
@@ -1051,8 +1050,16 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                 quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "resampler"),
             )
+            self._resampler_moved = False
 
         self.make_empty_intermediate_tensors = self.llm.make_empty_intermediate_tensors
+
+    def _ensure_resampler_device(self) -> None:
+        if self._resampler_moved:
+            return
+        # Only move device, DO NOT touch dtype (fp8 quant needs its own dtype)
+        self.resampler.to(current_platform.device_type)
+        self._resampler_moved = True
 
     def _parse_and_validate_vision_input(
         self,
@@ -1172,7 +1179,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        self._ensure_resampler_device()
+        return loaded
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """
@@ -1277,9 +1286,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                 prefix=prefix,
             )
 
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        return resampler.to(dtype=torch.get_default_dtype())
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1336,6 +1343,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1359,9 +1367,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
                 prefix=prefix,
             )
 
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        return resampler.to(dtype=torch.get_default_dtype())
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1428,6 +1434,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1452,9 +1459,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
                 prefix=prefix,
             )
 
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        return resampler.to(dtype=torch.get_default_dtype())
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1489,7 +1494,9 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        self._ensure_resampler_device()
+        return loaded
 
 
 class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
@@ -1525,6 +1532,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1548,10 +1556,7 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
                 quant_config=quant_config,
                 prefix=prefix,
             )
-
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        return resampler.to(dtype=torch.get_default_dtype())
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1586,7 +1591,9 @@ class MiniCPMV4_0(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        self._ensure_resampler_device()
+        return loaded
 
 
 class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
@@ -1622,6 +1629,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
         model = Idefics2VisionTransformer(
             config.vision_config,
             quant_config=quant_config,
+            apply_encoder_attention_mask=True,
             prefix=prefix,
         )
         if self.config.drop_vision_last_layer:
@@ -1646,9 +1654,7 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
                 prefix=prefix,
             )
 
-        return resampler.to(
-            device=current_platform.device_type, dtype=torch.get_default_dtype()
-        )
+        return resampler.to(dtype=torch.get_default_dtype())
 
     def get_vision_hidden_states(self, data: MiniCPMVImagePixelInputs) -> torch.Tensor:
         pixel_values = data["pixel_values"]
@@ -1687,7 +1693,9 @@ class MiniCPMV4_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_prefixes=["apm.", "audio", "tts"])
-        return loader.load_weights(weights)
+        loaded = loader.load_weights(weights)
+        self._ensure_resampler_device()
+        return loaded
 
 
 _SUPPORT_VERSION = {

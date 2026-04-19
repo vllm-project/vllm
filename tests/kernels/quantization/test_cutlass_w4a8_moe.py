@@ -269,7 +269,7 @@ def test_cutlass_w4a8_moe_mm_end_to_end(shape, random_zero):
         setup.c_strides,
         setup.group_scale_strides,
     )
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
     out_ref = compute_moe_reference_output(setup)
     torch.testing.assert_close(setup.out, out_ref, rtol=1e-2, atol=1e-2)

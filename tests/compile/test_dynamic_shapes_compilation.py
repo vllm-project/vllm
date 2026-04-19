@@ -23,8 +23,14 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 def get_test_models():
     """Get list of models to test based on PyTorch version"""
-    # TODO "Qwen/Qwen3-4B-Instruct-2507" fails Fix issue and support it.
-    return ["gpt2", "Qwen/Qwen2-7B-Instruct", "meta-llama/Llama-3.1-8B"]
+    models = [
+        "gpt2",
+        "Qwen/Qwen2-7B-Instruct",
+        "meta-llama/Llama-3.1-8B",
+    ]
+    if is_torch_equal_or_newer("2.12.0"):
+        models.append("Qwen/Qwen3-4B-Instruct-2507")
+    return models
 
 
 @pytest.mark.parametrize("model_name", get_test_models())
@@ -99,8 +105,8 @@ def test_dynamic_shapes_compilation(
     # Clean up GPU memory
     del model
     gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
+    torch.accelerator.empty_cache()
+    torch.accelerator.synchronize()
     print("GPU memory cleared")
 
 
@@ -216,3 +222,47 @@ def test_model_specialization_with_evaluate_guards(
         torch.randn(1, 10).cuda(),
         is_01_specialization=True,
     )
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_piecewise_backend_empty_sym_shape_indices():
+    """Test that PiecewiseBackend handles empty sym_shape_indices correctly.
+
+    When all inputs have static shapes (no torch.SymInt), sym_shape_indices
+    will be empty. The fix in PiecewiseBackend.__call__ handles this case
+    by using the first compiled range_entry.
+    """
+    gc.collect()
+    torch.accelerator.empty_cache()
+    torch.accelerator.synchronize()
+
+    # Use small max_model_len and max_num_batched_tokens to encourage
+    # static shape compilation with empty sym_shape_indices
+    llm = LLM(
+        model="Qwen/Qwen3-0.6B",
+        max_model_len=512,
+        max_num_batched_tokens=1,
+        compilation_config={
+            "mode": CompilationMode.VLLM_COMPILE,
+            "dynamic_shapes_config": {
+                "type": DynamicShapesType.BACKED.value,
+            },
+        },
+    )
+
+    sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=10)
+
+    # Generate with static shape inputs
+    output = llm.generate("Hello, my name is", sampling_params=sampling_params)
+    result = output[0].outputs[0].text
+    assert len(result) > 0, "Should generate non-empty output"
+
+    # Generate again to verify compilation works with empty sym_shape_indices
+    output = llm.generate("The capital of France is", sampling_params=sampling_params)
+    result = output[0].outputs[0].text
+    assert len(result) > 0, "Should generate non-empty output on second run"
+
+    del llm
+    gc.collect()
+    torch.accelerator.empty_cache()
+    torch.accelerator.synchronize()

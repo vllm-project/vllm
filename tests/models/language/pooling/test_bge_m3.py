@@ -14,7 +14,7 @@ MAX_MODEL_LEN = 512
 
 
 # Example from https://huggingface.co/BAAI/bge-m3
-sentences_1 = ["What is BGE M3?", "Defination of BM25"]
+sentences_1 = ["What is BGE M3?", "Definition of BM25"]
 sentences_2 = [
     "BGE M3 is an embedding model supporting dense retrieval, "
     "lexical matching and multi-vector interaction.",
@@ -22,7 +22,7 @@ sentences_2 = [
     "of documents based on the query terms appearing in each document",
 ]
 
-similarity_reference = [[0.6265, 0.3477], [0.3499, 0.678]]
+similarity_reference = [[0.6259, 0.3474], [0.3309, 0.6734]]
 lexical_score_reference = [0.19554901123046875, 0.0]
 colbert_score_reference = [0.7797, 0.4620]
 

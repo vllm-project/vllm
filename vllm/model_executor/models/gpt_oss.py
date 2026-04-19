@@ -47,7 +47,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsEagle3, SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -256,7 +262,7 @@ class TransformerBlock(torch.nn.Module):
 
 
 @support_torch_compile
-class GptOssModel(nn.Module):
+class GptOssModel(nn.Module, EagleModelMixin):
     def __init__(
         self,
         *,
@@ -267,7 +273,6 @@ class GptOssModel(nn.Module):
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
         self.parallel_config = vllm_config.parallel_config
-        self.config.hidden_size = self.config.hidden_size
         self.embedding = VocabParallelEmbedding(
             self.config.vocab_size,
             self.config.hidden_size,
@@ -285,7 +290,6 @@ class GptOssModel(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], self.config.hidden_size
         )
-        self.aux_hidden_state_layers = tuple[int, ...]()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embedding(input_ids)
@@ -309,12 +313,13 @@ class GptOssModel(nn.Module):
             x = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, x, residual
+        )
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            if i in self.aux_hidden_state_layers:
-                aux_hidden_states.append(x if residual is None else x + residual)
             x, residual = layer(x, positions, residual)
+            self._maybe_add_hidden_state(aux_hidden_states, i + 1, x, residual)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": x, "residual": residual})
         x, _ = self.norm(x, residual)
@@ -555,6 +560,14 @@ class GptOssModel(nn.Module):
                 pcp_rank=get_pcp_group().rank_in_group,
             )
 
+        def _is_mxfp4(weight_dtype: str | None) -> bool:
+            """Return True for any MXFP4 weight-dtype variant.
+
+            Covers "gpt_oss_mxfp4" (GptOssMxfp4MoEMethod) and "mxfp4"
+            (QuarkMoEMethod with fp4 weights) and any future variants.
+            """
+            return weight_dtype is not None and "mxfp4" in weight_dtype
+
         def _get_moe_weight_dtype(layer_id: int = 0) -> str | None:
             """Helper function to get MoE quantization weight dtype.
 
@@ -573,7 +586,7 @@ class GptOssModel(nn.Module):
 
         moe_weight_dtype = _get_moe_weight_dtype(layer_id=0)
 
-        if moe_weight_dtype == "mxfp4":
+        if _is_mxfp4(moe_weight_dtype):
             # MXFP4 requires OCP_MX_BLOCK_SIZE alignment
             intermediate_size_block = intermediate_size // OCP_MX_BLOCK_SIZE
             per_rank_intermediate_size_block = cdiv(intermediate_size_block, tp_size)
@@ -677,7 +690,7 @@ class GptOssModel(nn.Module):
                 continue
 
             # Unified handler for mxfp4 weights and scales
-            elif moe_quant_method == "mxfp4" and any(
+            elif _is_mxfp4(moe_quant_method) and any(
                 name.endswith(suffix)
                 for suffix in [
                     ".w13_weight_scale",
@@ -1111,8 +1124,22 @@ class GptOssModel(nn.Module):
             if hasattr(self.config, "quantization_config")
             else None
         )
-
+        # Normalize the checkpoint's quant_method to the internal name.
+        # Note: there are three places where "mxfp4" -> "gpt_oss_mxfp4"
+        # normalization occurs, each serving a different data path:
+        #   1. GptOssMxfp4Config.override_quantization_method() — sets
+        #      ModelConfig.quantization (used to select the QuantizationConfig
+        #      class at model init time), reading from model_arch_config which
+        #      is a snapshot taken before verify_and_update_model_config runs.
+        #   2. GptOssForCausalLMConfig.verify_and_update_model_config() —
+        #      patches hf_config.quantization_config in-place (a separate copy
+        #      of the dict from model_arch_config) for later hf_config lookups.
+        #   3. Here — reads directly from self.config (the raw HF config) which
+        #      may still carry the original "mxfp4" string from the checkpoint.
         if quant_method == "mxfp4":
+            quant_method = "gpt_oss_mxfp4"
+
+        if quant_method == "gpt_oss_mxfp4":
             return self._load_weights_mxfp4(
                 ep_rank_end,
                 ep_rank_start,
@@ -1141,7 +1168,9 @@ class GptOssModel(nn.Module):
             )
 
 
-class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
+class GptOssForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle, SupportsEagle3, SupportsLoRA
+):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
@@ -1196,13 +1225,6 @@ class GptOssForCausalLM(nn.Module, SupportsPP, SupportsEagle3, SupportsLoRA):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

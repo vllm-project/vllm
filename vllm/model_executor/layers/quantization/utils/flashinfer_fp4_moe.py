@@ -6,28 +6,19 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
+import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-    FusedMoEParallelConfig,
-    RoutingMethodType,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
     align_fp4_moe_weights_for_fi,
+    align_trtllm_fp4_moe_hidden_dim_for_fi,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kNvfp4Dynamic,
-    kNvfp4Static,
-)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    has_flashinfer_cutlass_fused_moe,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
@@ -42,92 +33,15 @@ __all__ = [
     "reorder_w1w3_to_w3w1",
 ]
 
-#
-# Methods used by the oracle for kernel selection.
-#
 
-
-def _supports_current_device() -> bool:
-    """Supports only Blackwell-family GPUs."""
-    p = current_platform
-    return p.is_cuda() and p.is_device_capability_family(100)
-
-
-def _supports_no_act_and_mul() -> bool:
-    """Supports non-gated MoE."""
-    return True
-
-
-def _supports_quant_scheme(
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
-) -> bool:
-    """Supports Nvfp4 quantization."""
-    SUPPORTED_W_A = [
-        (kNvfp4Static, kNvfp4Dynamic),
-    ]
-    return (weight_key, activation_key) in SUPPORTED_W_A
-
-
-def _supports_activation(activation: MoEActivation) -> bool:
-    return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
-
-
-def _supports_routing_method(
-    routing_method: RoutingMethodType,
-) -> bool:
-    """Monolithic kernels need to express router support."""
-    # NOTE(rob): potentially allow others here. This is a conservative list.
-    return routing_method in [
-        RoutingMethodType.DeepSeekV3,
-        RoutingMethodType.Renormalize,
-        RoutingMethodType.RenormalizeNaive,
-        RoutingMethodType.Llama4,
-    ]
-
-
-def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-    """
-    TRTLLM is a monolithic kernel that requires dispatch_router_logits() for
-    the naive dispatch/combine path. DeepEP HT only implements dispatch() for
-    the modular kernel path, so TRTLLM is incompatible with DeepEP HT.
-    """
-    return not moe_parallel_config.use_deepep_ht_kernels
-
-
-def is_supported_config_trtllm(
-    moe_config: FusedMoEConfig,
-    weight_key: QuantKey | None,
-    activation_key: QuantKey | None,
-    activation_format: mk.FusedMoEActivationFormat,
-) -> tuple[bool, str | None]:
-    """
-    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
-    """
-
-    def _make_reason(reason: str) -> str:
-        return f"kernel does not support {reason}"
-
-    if not _supports_current_device():
-        return False, _make_reason(f"current device {current_platform.device_name}")
-    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
-        return False, _make_reason("no act_and_mul MLP layer")
-    elif not _supports_activation(moe_config.activation):
-        return False, _make_reason(f"{moe_config.activation} activation")
-    elif not _supports_quant_scheme(weight_key, activation_key):
-        return False, _make_reason(f"quantization scheme {weight_key}x{activation_key}")
-    elif not _supports_parallel_config(moe_config.moe_parallel_config):
-        return False, _make_reason(f"parallel config {moe_config.moe_parallel_config}")
-    elif not _supports_routing_method(moe_config.routing_method):
-        return False, _make_reason(f"routing method {moe_config.routing_method}")
-    elif activation_format != mk.FusedMoEActivationFormat.Standard:
-        return False, _make_reason(f"activation format {activation_format}")
-    elif moe_config.hidden_dim % 512 != 0:
-        return False, _make_reason(
-            f"hidden_dim must be divisible by 512, found {moe_config.hidden_dim}"
-        )
-
-    return True, None
+def is_flashinfer_fp4_cutlass_moe_available() -> bool:
+    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
+    return (
+        envs.VLLM_USE_FLASHINFER_MOE_FP4
+        and has_flashinfer_cutlass_fused_moe()
+        and current_platform.is_cuda()
+        and current_platform.has_device_capability(100)
+    )
 
 
 def reorder_w1w3_to_w3w1(
@@ -144,6 +58,100 @@ def reorder_w1w3_to_w3w1(
     return (
         torch.cat([w3, w1], dim=dim).contiguous(),
         torch.cat([s3, s1], dim=dim).contiguous(),
+    )
+
+
+def interleave_linear_and_gate(
+    x: torch.Tensor,
+    group_size: int = 64,
+    dim: int = -1,
+) -> torch.Tensor:
+    """Interleave gate and linear weight rows for CuteDSL wrapper."""
+    sizes = x.size()
+    dim = dim % x.dim()
+    assert sizes[dim] % (group_size * 2) == 0, (
+        f"dim {dim} size {sizes[dim]} must be divisible by {group_size * 2}"
+    )
+    prev_sizes = sizes[:dim]
+    post_sizes = sizes[dim + 1 :]
+    x = x.view(*prev_sizes, 2, sizes[dim] // (group_size * 2), group_size, *post_sizes)
+    x = x.transpose(dim, dim + 1).contiguous().view(*sizes)
+    return x
+
+
+def prepare_nvfp4_moe_layer_for_flashinfer_cutedsl(
+    layer: "FusedMoE",
+    w13: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w13_scale_2: torch.Tensor,
+    a13_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_scale_2: torch.Tensor,
+    a2_scale: torch.Tensor,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Prepare weights for the CuteDSL wrapper-based NvFP4 MoE backend.
+
+    Converts weight scale factors to MMA layout expected by CuteDslMoEWrapper,
+    and interleaves w13 gate/linear rows.
+    """
+    from flashinfer.cute_dsl.utils import convert_sf_to_mma_layout
+
+    # Global scaling factors (same as other FlashInfer backends).
+    num_experts = w13.shape[0]
+    a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
+    a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+
+    half = w13.shape[1] // 2
+    w13 = torch.cat([w13[:, half:], w13[:, :half]], dim=1)
+    w13_scale = torch.cat([w13_scale[:, half:], w13_scale[:, :half]], dim=1)
+
+    # Interleave up/gate rows for w13 weights and scales.
+    w13 = interleave_linear_and_gate(w13, group_size=64, dim=1)
+    w13_scale = interleave_linear_and_gate(w13_scale, group_size=64, dim=1)
+
+    # Convert w13 scale factors: linear → swizzled → MMA layout.
+    w13_scale = swizzle_blockscale(w13_scale)
+    E, M_padded, K_sf_padded = w13_scale.shape
+    w13_scale_flat = w13_scale.reshape(E * M_padded, K_sf_padded)
+    w13_scale = convert_sf_to_mma_layout(
+        w13_scale_flat,
+        m=M_padded,
+        k=K_sf_padded * 16,
+        num_groups=E,
+        sf_vec_size=16,
+    )
+
+    # Convert w2 scale factors: linear → swizzled → MMA layout.
+    w2_scale = swizzle_blockscale(w2_scale)
+    E, M_padded, K_sf_padded = w2_scale.shape
+    w2_scale_flat = w2_scale.reshape(E * M_padded, K_sf_padded)
+    w2_scale = convert_sf_to_mma_layout(
+        w2_scale_flat,
+        m=M_padded,
+        k=K_sf_padded * 16,
+        num_groups=E,
+        sf_vec_size=16,
+    )
+
+    return (
+        w13,
+        w13_scale,
+        w13_scale_2,
+        a13_scale,
+        w2,
+        w2_scale,
+        w2_scale_2,
+        a2_scale,
     )
 
 
@@ -276,190 +284,6 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     )
 
 
-def flashinfer_trtllm_fp4_moe(
-    layer: torch.nn.Module,
-    x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-    router_logits: torch.Tensor,
-    top_k: int,
-    activation: MoEActivation,
-    global_num_experts: int,
-    num_expert_group: int | None,
-    topk_group: int | None,
-    custom_routing_function: object | None,
-    e_score_correction_bias: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Apply FlashInfer TensorRT-LLM FP4 MoE kernel.
-
-    Args:
-        layer: The MoE layer with weights and scales
-        x: Input tensor
-        router_logits: Router logits for expert selection
-        top_k: Number of experts to select per token
-        activation: Activation function to use
-        global_num_experts: Total number of experts across all ranks
-        num_expert_group: Number of expert groups (for grouped routing)
-        topk_group: Top-k within each group
-        custom_routing_function: Custom routing function (e.g., Llama4)
-        e_score_correction_bias: Optional routing bias correction
-
-    Returns:
-        Output tensor from the MoE layer
-    """
-    import flashinfer
-
-    from vllm.model_executor.models.llama4 import Llama4MoE
-
-    SUPPORTED_ACTIVATIONS = [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
-    assert activation in SUPPORTED_ACTIVATIONS, (
-        f"Only {SUPPORTED_ACTIVATIONS} activations are supported for FlashInfer "
-        f"TRTLLM FP4 MoE, {activation} found instead."
-    )
-
-    # Quantize input to FP4
-    if isinstance(x, tuple):
-        hidden_states_fp4, hidden_states_scale_linear_fp4 = x
-    else:
-        # hidden_states is the already quantized
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
-            x, layer.a1_gscale, is_sf_swizzled_layout=False
-        )
-
-    # Determine routing method type
-    use_llama4_routing = custom_routing_function is Llama4MoE.custom_routing_function
-    routing_method_type = layer.routing_method_type
-    if use_llama4_routing:
-        routing_method_type = flashinfer.RoutingMethodType.Llama4
-
-    # Cast to Fp32 (required by kernel).
-    router_logits = (
-        router_logits.to(torch.float32)
-        if routing_method_type == RoutingMethodType.DeepSeekV3
-        else router_logits
-    )
-
-    # Determine activation type
-    activation_type = activation_to_flashinfer_int(layer.activation)
-
-    # Call TRT-LLM FP4 block-scale MoE kernel
-    out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
-        routing_logits=router_logits,
-        routing_bias=e_score_correction_bias,
-        hidden_states=hidden_states_fp4,
-        hidden_states_scale=hidden_states_scale_linear_fp4.view(
-            torch.float8_e4m3fn
-        ).reshape(*hidden_states_fp4.shape[:-1], -1),
-        gemm1_weights=layer.w13_weight.data,
-        gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
-        gemm1_bias=None,
-        gemm1_alpha=None,
-        gemm1_beta=None,
-        gemm1_clamp_limit=None,
-        gemm2_weights=layer.w2_weight.data,
-        gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
-        gemm2_bias=None,
-        output1_scale_scalar=layer.g1_scale_c.data,
-        output1_scale_gate_scalar=layer.g1_alphas.data,
-        output2_scale_scalar=layer.g2_alphas.data,
-        num_experts=global_num_experts,
-        top_k=top_k,
-        n_group=num_expert_group if num_expert_group is not None else 0,
-        topk_group=topk_group if topk_group is not None else 0,
-        intermediate_size=layer.intermediate_size_per_partition,
-        local_expert_offset=layer.ep_rank * layer.local_num_experts,
-        local_num_experts=layer.local_num_experts,
-        routed_scaling_factor=None,
-        routing_method_type=routing_method_type,
-        do_finalize=True,
-        activation_type=activation_type,
-    )[0]
-
-    return out
-
-
-def flashinfer_trtllm_fp4_routed_moe(
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    topk_ids: torch.Tensor,
-    topk_weights: torch.Tensor,
-    top_k: int,
-    activation: MoEActivation,
-    global_num_experts: int,
-) -> torch.Tensor:
-    """
-    Apply FlashInfer TensorRT-LLM FP4 MoE kernel. Uses packed
-    input top k expert indices and scores rather than computing
-    top k expert indices from scores.
-
-    Args:
-        layer: The MoE layer with weights and scales
-        x: Input tensor
-        topk_ids: Ids of selected experts
-        top_k: Number of experts to select per token
-        activation: Activation function to use
-        global_num_experts: Total number of experts across all ranks
-
-    Returns:
-        Output tensor from the MoE layer
-    """
-    import flashinfer
-
-    # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2535
-    assert activation == MoEActivation.SILU, (
-        "Only SiLU activation is supported for FlashInfer TRTLLM FP4 Routed MoE. "
-        f"{activation} found instead."
-    )
-
-    # Pack top k ids and expert weights into a single int32 tensor, as
-    # required by TRT-LLM
-    packed_tensor = (topk_ids.to(torch.int32) << 16) | topk_weights.to(
-        torch.bfloat16
-    ).view(torch.int16)
-
-    if isinstance(x, tuple):
-        # Hidden_states is the already quantized
-        hidden_states_fp4, hidden_states_scale_linear_fp4 = x
-    else:
-        # Quantize input to FP4
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
-            x, layer.a1_gscale, is_sf_swizzled_layout=False
-        )
-
-    # Call TRT-LLM FP4 block-scale MoE kernel
-    out = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
-        topk_ids=packed_tensor,
-        routing_bias=None,
-        hidden_states=hidden_states_fp4,
-        hidden_states_scale=hidden_states_scale_linear_fp4.view(
-            torch.float8_e4m3fn
-        ).reshape(*hidden_states_fp4.shape[:-1], -1),
-        gemm1_weights=layer.w13_weight.data,
-        gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
-        gemm1_bias=None,
-        gemm1_alpha=None,
-        gemm1_beta=None,
-        gemm1_clamp_limit=None,
-        gemm2_weights=layer.w2_weight.data,
-        gemm2_weights_scale=layer.w2_weight_scale.data.view(torch.float8_e4m3fn),
-        gemm2_bias=None,
-        output1_scale_scalar=layer.g1_scale_c.data,
-        output1_scale_gate_scalar=layer.g1_alphas.data,
-        output2_scale_scalar=layer.g2_alphas.data,
-        num_experts=global_num_experts,
-        top_k=top_k,
-        n_group=0,
-        topk_group=0,
-        intermediate_size=layer.intermediate_size_per_partition,
-        local_expert_offset=layer.ep_rank * layer.local_num_experts,
-        local_num_experts=layer.local_num_experts,
-        routed_scaling_factor=None,
-        routing_method_type=1,
-        do_finalize=True,
-    )[0]
-
-    return out
-
-
 def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
     layer: "FusedMoE",
@@ -492,7 +316,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
-        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
     ]
 
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
@@ -518,6 +342,13 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        w13, w13_scale, w2, w2_scale, padded_hidden = (
+            align_trtllm_fp4_moe_hidden_dim_for_fi(w13, w13_scale, w2, w2_scale)
+        )
+        if layer.moe_config.hidden_dim_unpadded is None:
+            layer.moe_config.hidden_dim_unpadded = layer.moe_config.hidden_dim
+        layer.moe_config.hidden_dim = padded_hidden
+
         # Align weights for FI NVFP4 MoE kernels.
         min_alignment = 16 if is_gated else 128
         w13, w13_scale, w2, w2_scale, padded_intermediate = (
@@ -525,7 +356,7 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
                 w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
             )
         )
-        layer.intermediate_size_per_partition = padded_intermediate
+        layer.moe_config.intermediate_size_per_partition = padded_intermediate
 
         w13, w13_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
             w13,
@@ -537,16 +368,6 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
             num_experts=w13.size(0),
             is_gated_activation=is_gated,
         )
-
-        # We do not need to make this a parameter, because
-        # it is not used during the weight (re)-loading process.
-        if is_gated:
-            layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
-        else:
-            layer.g1_scale_c = torch.ones_like(a13_scale) / a2_scale
-        layer.a1_gscale = 1.0 / a13_scale
-        layer.g1_alphas = a13_scale * w13_scale_2
-        layer.g2_alphas = a2_scale * w2_scale_2
     else:
         # Swizzle the block scales for other FI NVFP4 MoE kernels.
         w13_scale = swizzle_blockscale(w13_scale)

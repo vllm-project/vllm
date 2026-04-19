@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from vllm.config import PassConfig
+from vllm.platforms import current_platform
 
 from ...utils import multi_gpu_test
 from .common import (
@@ -22,6 +23,8 @@ from .models import (
     llama4_scout_fp8,
     qwen3_a3b,
 )
+
+pytestmark = pytest.mark.skipif(not current_platform.is_cuda(), reason="Only test CUDA")
 
 
 @multi_gpu_test(num_gpus=2)
@@ -55,6 +58,7 @@ def test_tp2_async_tp_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
+    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -118,6 +122,7 @@ def test_tp2_async_tp_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
+    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,

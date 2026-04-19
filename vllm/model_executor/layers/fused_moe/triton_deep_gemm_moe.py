@@ -9,7 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     DeepGemmExperts,
     _valid_deep_gemm,
     _valid_deep_gemm_shape,
@@ -32,8 +32,8 @@ class TritonOrDeepGemmExperts(FallbackExperts):
 
     @staticmethod
     def get_clses() -> tuple[
-        type[mk.FusedMoEPermuteExpertsUnpermute],
-        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEExpertsModular],
+        type[mk.FusedMoEExpertsModular],
     ]:
         return (DeepGemmExperts, TritonExperts)
 
@@ -79,7 +79,7 @@ class TritonOrDeepGemmExperts(FallbackExperts):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         if is_deep_gemm_e8m0_used() or _valid_deep_gemm(hidden_states, w1, w2):
             return self.experts
         else:

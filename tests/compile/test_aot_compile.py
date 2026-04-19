@@ -4,6 +4,7 @@
 import functools
 import hashlib
 import multiprocessing
+import os
 import pickle
 import tempfile
 from contextlib import contextmanager
@@ -13,11 +14,14 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.activation
+from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
     VllmSerializableFunction,
 )
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CompilationConfig,
@@ -159,6 +163,9 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
+    from torch._subclasses import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
     def foo(x: torch.Tensor):
         return x[slice(0, x.shape[0])]
 
@@ -169,12 +176,13 @@ def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
     gm = torch.fx.symbolic_trace(foo)
     assert "getitem_1 = x[slice(0, getitem, None)]" in gm.code
     with use_vllm_config(vllm_config):
-        payload = VllmSerializableFunction.serialize_compile_artifacts(
-            VllmSerializableFunction(gm, (example_input,), "", foo)
+        payload = VllmSerializableFunction.serialize_graph_module(gm)
+        fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+        loaded_gm = VllmSerializableFunction.deserialize_graph_module(
+            payload, fake_mode
         )
-        fn = VllmSerializableFunction.deserialize_compile_artifacts(payload)
 
-    assert gm.code == fn.graph_module.code
+    assert gm.code == loaded_gm.code
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
@@ -431,6 +439,37 @@ def test_partition_wrapper_applied_on_aot_load(
         assert spy.call_args_list[-1][0][0] is None, (
             "Last call on subsequent call should clear the wrapper"
         )
+
+
+@create_new_process_for_each_test("spawn")
+def test_standalone_compile_correctness():
+    """Outputs must match regardless of VLLM_USE_STANDALONE_COMPILE."""
+    import json
+
+    from ..utils import compare_two_settings
+
+    compilation_config = json.dumps(
+        {
+            "mode": CompilationMode.VLLM_COMPILE,
+        }
+    )
+
+    common_args = [
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "256",
+        "--compilation_config",
+        compilation_config,
+    ]
+
+    compare_two_settings(
+        "facebook/opt-125m",
+        common_args,
+        common_args,
+        env1={"VLLM_USE_STANDALONE_COMPILE": "1"},
+        env2={"VLLM_USE_STANDALONE_COMPILE": "0"},
+    )
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
@@ -721,3 +760,160 @@ class TestStandaloneCompiledArtifactsIntegration:
             ("mod3", "shape3"),
         ]:
             assert cache.get(submod, shape) == shared_data
+
+    @pytest.mark.skipif(
+        envs.VLLM_USE_MEGA_AOT_ARTIFACT,
+        reason="There's no AOT Autograd run with mega artifact",
+    )
+    def test_functorch_config(self):
+        vllm_config = make_vllm_config()
+        example_inputs = (torch.randn(10, 10),)
+
+        def add_1(x: torch.Tensor):
+            return x + 1
+
+        gm = torch._dynamo.functional_export.dynamo_graph_capture_for_export(add_1)(
+            *example_inputs
+        )
+
+        gm.graph._codegen = torch.fx.graph.CodeGen()
+        gm._dynamo_bytecode_flatten = None
+        gm._dynamo_bytecode_unflatten = None
+
+        with (
+            torch._functorch.config.patch(bundled_autograd_cache=False),
+            set_current_vllm_config(vllm_config),
+        ):
+            with torch._functorch.config.patch(bundled_autograd_cache=True):
+                fn = VllmSerializableFunction(gm, example_inputs, "", add_1)
+
+            payload = VllmSerializableFunction.serialize_compile_artifacts(fn)
+
+            config = None
+
+            def backend(*args, **kwargs) -> VllmSerializableFunction:
+                nonlocal config
+                # bundled_autograd_cache should be True even compiler backend
+                # runs with bundled_autograd_cache=False in ambient context.
+                config = torch._functorch.config.save_config_portable()
+                return fn
+
+            loaded_fn = VllmSerializableFunction.deserialize_compile_artifacts(payload)
+            with patch.object(VllmBackend, "__call__", backend):
+                loaded_fn(*example_inputs)
+
+        assert isinstance(config, dict)
+        assert "bundled_autograd_cache" in config
+        assert config["bundled_autograd_cache"] is True
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_disable_compile_cache_skips_aot_save(
+    monkeypatch: pytest.MonkeyPatch, fresh_vllm_cache: str
+):
+    """When VLLM_DISABLE_COMPILE_CACHE=1, AOT artifacts must not be saved."""
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    disable_envs_cache()
+
+    args = (torch.randn(10, 10),)
+    expected = reference_fn(*args)
+    vllm_config = make_vllm_config()
+
+    with (
+        use_vllm_config(vllm_config),
+        compilation_counter.expect(
+            num_aot_compiles=1,
+            num_aot_artifacts_saved=0,
+            num_aot_artifacts_loaded=0,
+        ),
+    ):
+        mod = CompiledMod(vllm_config=vllm_config)
+        actual = mod(*args)
+
+    assert torch.allclose(actual, expected)
+
+    # No cached artifact should exist on disk
+    aot_dir = os.path.join(fresh_vllm_cache, "torch_compile_cache", "torch_aot_compile")
+    if os.path.isdir(aot_dir):
+        for root, _dirs, files in os.walk(aot_dir):
+            for f in files:
+                assert f != "model", (
+                    f"AOT artifact unexpectedly saved at {os.path.join(root, f)}"
+                )
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_disable_compile_cache_skips_aot_load(
+    monkeypatch: pytest.MonkeyPatch, fresh_vllm_cache: str
+):
+    """When VLLM_DISABLE_COMPILE_CACHE=1, AOT artifacts must not be loaded."""
+    # Phase 1: compile and save with cache enabled
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    disable_envs_cache()
+
+    args = (torch.randn(10, 10),)
+    vllm_config = make_vllm_config()
+
+    with (
+        use_vllm_config(vllm_config),
+        compilation_counter.expect(num_aot_artifacts_saved=1),
+    ):
+        CompiledMod(vllm_config=vllm_config)(*args)
+
+    # Phase 2: disable cache, compile again — should NOT load from disk
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    disable_envs_cache()
+    torch._dynamo.reset()
+
+    vllm_config = make_vllm_config()
+    with (
+        use_vllm_config(vllm_config),
+        compilation_counter.expect(
+            num_aot_compiles=1,
+            num_aot_artifacts_saved=0,
+            num_aot_artifacts_loaded=0,
+        ),
+    ):
+        mod = CompiledMod(vllm_config=vllm_config)
+        mod(*args)
+
+    assert not mod.was_aot_compile_fn_loaded_from_disk
+
+
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_aot_counters_on_save_and_load(
+    monkeypatch: pytest.MonkeyPatch, fresh_vllm_cache: str
+):
+    """Verify AOT counters are incremented correctly on save and load."""
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    disable_envs_cache()
+
+    args = (torch.randn(10, 10),)
+
+    # Phase 1: fresh compile + save
+    vllm_config = make_vllm_config()
+    with (
+        use_vllm_config(vllm_config),
+        compilation_counter.expect(
+            num_aot_compiles=1,
+            num_aot_artifacts_saved=1,
+            num_aot_artifacts_loaded=0,
+        ),
+    ):
+        CompiledMod(vllm_config=vllm_config)(*args)
+
+    # Phase 2: load from cache
+    monkeypatch.setenv("VLLM_FORCE_AOT_LOAD", "1")
+    disable_envs_cache()
+
+    vllm_config = make_vllm_config()
+    with (
+        use_vllm_config(vllm_config),
+        compilation_counter.expect(
+            num_aot_compiles=0,
+            num_aot_artifacts_saved=0,
+            num_aot_artifacts_loaded=1,
+        ),
+    ):
+        CompiledMod(vllm_config=vllm_config)(*args)

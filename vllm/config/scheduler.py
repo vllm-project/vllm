@@ -40,6 +40,7 @@ class SchedulerConfig:
     """
 
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+    DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
     runner_type: RunnerType = "generate"
@@ -52,7 +53,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_num_scheduled_tokens: int | None = Field(default=None)
+    max_num_scheduled_tokens: int | None = None
     """Maximum number of tokens that the scheduler may issue in a single iteration.
     
     This is usually equal to max_num_batched_tokens, but can be smaller in cases
@@ -106,11 +107,12 @@ class SchedulerConfig:
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
     policy: SchedulerPolicy = "fcfs"
-    """The scheduling policy to use:\n
-    - "fcfs" means first come first served, i.e. requests are handled in order
-    of arrival.\n
+    """The scheduling policy to use:
+
+    - "fcfs" means first come first served, i.e. requests are handled in order 
+      of arrival.
     - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties)."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -122,7 +124,7 @@ class SchedulerConfig:
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
-    scheduler_cls: str | type[object] | None = Field(default=None)
+    scheduler_cls: str | type[object] | None = None
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
@@ -135,7 +137,13 @@ class SchedulerConfig:
     and starting configuration.
     """
 
-    async_scheduling: bool | None = Field(default=None)
+    scheduler_reserve_full_isl: bool = True
+    """If True, the scheduler checks whether the full input sequence length
+    fits in the KV cache before admitting a new request, rather than only
+    checking the first chunk. Prevents over-admission and KV cache thrashing
+    with chunked prefill."""
+
+    async_scheduling: bool | None = None
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
@@ -173,7 +181,7 @@ class SchedulerConfig:
         logger.warning_once(
             "Using custom scheduler class %s. This scheduler interface is "
             "not public and compatibility may not be maintained.",
-            self.scheduler_cls,
+            self.scheduler_cls,  # type: ignore[arg-type]
         )
         if not isinstance(self.scheduler_cls, str):
             return cast(type["SchedulerInterface"], self.scheduler_cls)
@@ -228,9 +236,10 @@ class SchedulerConfig:
         self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
-            logger.info(
+            logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+                scope="local",
             )
 
         if self.max_num_partial_prefills > 1:

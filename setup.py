@@ -18,8 +18,6 @@ import torch
 from packaging.version import Version, parse
 from setuptools import Extension, setup
 from setuptools.command.build_ext import build_ext
-from setuptools.command.build_py import build_py
-from setuptools.command.develop import develop
 from setuptools_scm import get_version
 from torch.utils.cpp_extension import CUDA_HOME, ROCM_HOME
 
@@ -56,6 +54,9 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
     if torch.version.hip is not None:
         VLLM_TARGET_DEVICE = "rocm"
         logger.info("Auto-detected ROCm")
+    elif torch.version.xpu is not None:
+        VLLM_TARGET_DEVICE = "xpu"
+        logger.info("Auto-detected XPU")
     elif torch.version.cuda is not None:
         VLLM_TARGET_DEVICE = "cuda"
         logger.info("Auto-detected CUDA")
@@ -81,79 +82,64 @@ def is_freethreaded():
     return bool(sysconfig.get_config_var("Py_GIL_DISABLED"))
 
 
-def compile_grpc_protos():
-    """Compile gRPC protobuf definitions during build.
+def should_bundle_tcmalloc() -> bool:
+    import platform
 
-    This generates *_pb2.py, *_pb2_grpc.py, and *_pb2.pyi files from
-    the vllm_engine.proto definition.
-    """
+    return (
+        VLLM_TARGET_DEVICE == "cpu"
+        and sys.platform.startswith("linux")
+        and platform.machine() in ("aarch64", "x86_64")
+    )
+
+
+def find_tcmalloc() -> Path | None:
     try:
-        from grpc_tools import protoc
-    except ImportError:
-        logger.warning(
-            "grpcio-tools not installed, skipping gRPC proto compilation. "
-            "gRPC server functionality will not be available."
+        # get all shared libs the dynamic loader knows about
+        output = subprocess.check_output(
+            ["ldconfig", "-p"],
+            text=True,
+            stderr=subprocess.DEVNULL,
         )
-        return False
+    except Exception:
+        return None
 
-    proto_file = ROOT_DIR / "vllm" / "grpc" / "vllm_engine.proto"
-    if not proto_file.exists():
-        logger.warning("Proto file not found at %s, skipping compilation", proto_file)
-        return False
+    # search for libtcmalloc and libtcmalloc_minimal
+    for library_pattern in (
+        r"\blibtcmalloc_minimal\.so\.(\d+)\b",
+        r"\blibtcmalloc\.so\.(\d+)\b",
+    ):
+        candidates: list[tuple[int, Path]] = []
+        for line in output.splitlines():
+            match = re.search(library_pattern, line)
+            if match is None or "=>" not in line:
+                continue
+            candidate = Path(line.split("=>")[1].strip())
+            if candidate.exists():
+                candidates.append((int(match.group(1)), candidate))
 
-    logger.info("Compiling gRPC protobuf: %s", proto_file)
+        if candidates:
+            # if multiple candidates are found, pick the one with the highest
+            # version number
+            return max(candidates, key=lambda item: item[0])[1]
 
-    result = protoc.main(
-        [
-            "grpc_tools.protoc",
-            f"--proto_path={ROOT_DIR}",
-            f"--python_out={ROOT_DIR}",
-            f"--grpc_python_out={ROOT_DIR}",
-            f"--pyi_out={ROOT_DIR}",
-            str(proto_file),
-        ]
-    )
-
-    if result != 0:
-        logger.error("protoc failed with exit code %s", result)
-        return False
-
-    # Add SPDX headers and mypy ignore to generated files
-    spdx_header = (
-        "# SPDX-License-Identifier: Apache-2.0\n"
-        "# SPDX-FileCopyrightText: Copyright contributors to the vLLM project\n"
-        "# mypy: ignore-errors\n"
-    )
-
-    grpc_dir = ROOT_DIR / "vllm" / "grpc"
-    for generated_file in [
-        grpc_dir / "vllm_engine_pb2.py",
-        grpc_dir / "vllm_engine_pb2_grpc.py",
-        grpc_dir / "vllm_engine_pb2.pyi",
-    ]:
-        if generated_file.exists():
-            content = generated_file.read_text()
-            if not content.startswith("# SPDX-License-Identifier"):
-                generated_file.write_text(spdx_header + content)
-
-    logger.info("gRPC protobuf compilation successful")
-    return True
+    return None
 
 
-class BuildPyAndGenerateGrpc(build_py):
-    """Build Python modules and generate gRPC stubs from proto files."""
+def bundle_tcmalloc(build_lib: str) -> None:
+    tcmalloc_library = find_tcmalloc()
+    if tcmalloc_library is None:
+        logger.warning(
+            "Failed to locate tcmalloc. For best performance, "
+            "please install tcmalloc (e.g. `sudo apt-get "
+            "install -y --no-install-recommends libtcmalloc-minimal4`)"
+        )
+        return
 
-    def run(self):
-        compile_grpc_protos()
-        super().run()
-
-
-class DevelopAndGenerateGrpc(develop):
-    """Develop mode that also generates gRPC stubs from proto files."""
-
-    def run(self):
-        compile_grpc_protos()
-        super().run()
+    bundle_dir = os.path.join(build_lib, "vllm", "libs")
+    os.makedirs(bundle_dir, exist_ok=True)
+    bundle_path = os.path.join(bundle_dir, tcmalloc_library.name)
+    shutil.copy2(tcmalloc_library, bundle_path)
+    logger.info("Bundled tcmalloc into wheel: %s", bundle_path)
 
 
 class CMakeExtension(Extension):
@@ -359,6 +345,10 @@ class cmake_build_ext(build_ext):
         # First, run the standard build_ext command to compile the extensions
         super().run()
 
+        # bundle tcmalloc into CPU wheels for best OOB perf
+        if should_bundle_tcmalloc():
+            bundle_tcmalloc(self.build_lib)
+
         # copy vllm/vllm_flash_attn/**/*.py from self.build_lib to current
         # directory so that they can be included in the editable build
         import glob
@@ -388,6 +378,20 @@ class cmake_build_ext(build_ext):
                 "vllm/third_party/triton_kernels",
                 dirs_exist_ok=True,
             )
+
+        if _is_cuda():
+            # copy vendored deep_gemm package from build_lib to source tree
+            # for editable installs
+            deep_gemm_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "deep_gemm"
+            )
+            if os.path.exists(deep_gemm_build):
+                print(f"Copying {deep_gemm_build} to vllm/third_party/deep_gemm")
+                shutil.copytree(
+                    deep_gemm_build,
+                    "vllm/third_party/deep_gemm",
+                    dirs_exist_ok=True,
+                )
 
 
 class precompiled_build_ext(build_ext):
@@ -674,6 +678,7 @@ class precompiled_wheel_utils:
             with zipfile.ZipFile(wheel_path) as wheel:
                 files_to_copy = [
                     "vllm/_C.abi3.so",
+                    "vllm/_C_stable_libtorch.abi3.so",
                     "vllm/_moe_C.abi3.so",
                     "vllm/_flashmla_C.abi3.so",
                     "vllm/_flashmla_extension_C.abi3.so",
@@ -688,17 +693,29 @@ class precompiled_wheel_utils:
                 flash_attn_regex = re.compile(
                     r"vllm/vllm_flash_attn/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # __init__.py and flash_attn_interface.py are source-controlled
+                # in vllm and should not be overwritten (matches cmake exclusions)
+                flash_attn_files_to_skip = {
+                    "vllm/vllm_flash_attn/__init__.py",
+                    "vllm/vllm_flash_attn/flash_attn_interface.py",
+                }
                 triton_kernels_regex = re.compile(
                     r"vllm/third_party/triton_kernels/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
                 flashmla_regex = re.compile(
                     r"vllm/third_party/flashmla/(?:[^/.][^/]*/)*(?!\.)[^/]*\.py"
                 )
+                # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
+                deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
                 file_members = list(
                     filter(lambda x: x.filename in files_to_copy, wheel.filelist)
                 )
                 file_members += list(
-                    filter(lambda x: flash_attn_regex.match(x.filename), wheel.filelist)
+                    filter(
+                        lambda x: flash_attn_regex.match(x.filename)
+                        and x.filename not in flash_attn_files_to_skip,
+                        wheel.filelist,
+                    )
                 )
                 file_members += list(
                     filter(
@@ -707,6 +724,9 @@ class precompiled_wheel_utils:
                 )
                 file_members += list(
                     filter(lambda x: flashmla_regex.match(x.filename), wheel.filelist)
+                )
+                file_members += list(
+                    filter(lambda x: deep_gemm_regex.match(x.filename), wheel.filelist)
                 )
 
                 for file in file_members:
@@ -734,13 +754,18 @@ class precompiled_wheel_utils:
     def get_base_commit_in_main_branch() -> str:
         try:
             # Get the latest commit hash of the upstream main branch.
-            resp_json = subprocess.check_output(
-                [
-                    "curl",
-                    "-s",
-                    "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            curl_cmd = [
+                "curl",
+                "-s",
+                "https://api.github.com/repos/vllm-project/vllm/commits/main",
+            ]
+            github_token = os.getenv("GH_TOKEN", os.getenv("GITHUB_TOKEN"))
+            if github_token:
+                curl_cmd += [
+                    "-H",
+                    f"Authorization: token {github_token}",
                 ]
-            ).decode("utf-8")
+            resp_json = subprocess.check_output(curl_cmd).decode("utf-8")
             upstream_main_commit = json.loads(resp_json)["sha"]
             print(f"Upstream main branch latest commit: {upstream_main_commit}")
 
@@ -991,26 +1016,43 @@ if _is_cuda():
         ext_modules.append(
             CMakeExtension(name="vllm._flashmla_extension_C", optional=True)
         )
+    if envs.VLLM_USE_PRECOMPILED or (
+        CUDA_HOME and get_nvcc_cuda_version() >= Version("12.3")
+    ):
+        # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
+        # Optional since it won't build on unsupported architectures
+        ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
 
 if _is_cpu():
     import platform
 
     if platform.machine() in ("x86_64", "AMD64"):
         ext_modules.append(CMakeExtension(name="vllm._C"))
+        ext_modules.append(CMakeExtension(name="vllm._C_AVX512"))
         ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
     else:
         ext_modules.append(CMakeExtension(name="vllm._C"))
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
+    # also _is_hip() once https://github.com/vllm-project/vllm/issues/35163 is
+    # fixed
+    if _is_cuda():
+        ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
 
 package_data = {
     "vllm": [
         "py.typed",
+        "libs/*.so*",
         "model_executor/layers/fused_moe/configs/*.json",
         "model_executor/layers/quantization/utils/configs/*.json",
         "entrypoints/serve/instrumentator/static/*.js",
         "entrypoints/serve/instrumentator/static/*.css",
+        "distributed/kv_transfer/kv_connector/v1/hf3fs/utils/*.cpp",
+        # DeepGEMM JIT include headers (vendored via cmake)
+        "third_party/deep_gemm/include/**/*.cuh",
+        "third_party/deep_gemm/include/**/*.h",
+        "third_party/deep_gemm/include/**/*.hpp",
     ]
 }
 
@@ -1028,17 +1070,12 @@ if _no_device():
     ext_modules = []
 
 if not ext_modules:
-    cmdclass = {
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
-    }
+    cmdclass = {}
 else:
     cmdclass = {
         "build_ext": precompiled_build_ext
         if envs.VLLM_USE_PRECOMPILED
         else cmake_build_ext,
-        "build_py": BuildPyAndGenerateGrpc,
-        "develop": DevelopAndGenerateGrpc,
     }
 
 setup(
@@ -1047,22 +1084,28 @@ setup(
     ext_modules=ext_modules,
     install_requires=get_requirements(),
     extras_require={
+        # AMD Zen CPU optimizations via zentorch
+        "zen": [
+            "zentorch-weekly==5.2.1.dev20260408"
+        ],  # Zentorch has weekly releases. This pulls the known-good version.
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"],
         "tensorizer": ["tensorizer==2.10.1"],
         "fastsafetensors": ["fastsafetensors >= 0.2.2"],
-        "runai": ["runai-model-streamer[s3,gcs] >= 0.15.3"],
+        "instanttensor": ["instanttensor >= 0.1.5"],
+        "runai": ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"],
         "audio": [
-            "librosa",
             "scipy",
-            "soundfile",
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
-        # Optional deps for AMD FP4 quantization support
-        "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
-        "helion": ["helion"],
+        # NOTE: When updating helion version, also update CI files:
+        #   - .buildkite/test_areas/kernels.yaml
+        #   - .buildkite/test-amd.yaml
+        "helion": ["helion==1.0.0"],
+        # Optional deps for gRPC server (vllm serve --grpc)
+        "grpc": ["smg-grpc-servicer[vllm] >= 0.5.0"],
         # Optional deps for OpenTelemetry tracing
         "otel": [
             "opentelemetry-sdk>=1.26.0",

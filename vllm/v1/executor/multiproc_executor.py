@@ -42,13 +42,16 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
+from vllm.utils import numa_utils
 from vllm.utils.network_utils import (
     get_distributed_init_method,
     get_ip,
     get_loopback_ip,
     get_open_port,
 )
+from vllm.utils.ompmultiprocessing import OMPProcessManager
 from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
@@ -66,25 +69,29 @@ logger = init_logger(__name__)
 class FutureWrapper(Future):
     def __init__(
         self,
-        futures_queue: deque[tuple["FutureWrapper", Callable]],
+        futures_queue: deque["FutureWrapper"],
+        get_response: Callable[[], Any],
         aggregate: Callable = lambda x: x,
     ):
         self.futures_queue = futures_queue
+        self.get_response = get_response
         self.aggregate = aggregate
         super().__init__()
+        self.futures_queue.appendleft(self)
 
     def result(self, timeout=None):
         if timeout is not None:
             raise RuntimeError("timeout not implemented")
+
         # Drain any futures ahead of us in the queue.
         while not self.done():
-            future, get_response = self.futures_queue.pop()
-            future.wait_for_response(get_response)
+            future = self.futures_queue.pop()
+            future._wait_for_response()
         return super().result()
 
-    def wait_for_response(self, get_response: Callable):
+    def _wait_for_response(self):
         try:
-            response = self.aggregate(get_response())
+            response = self.aggregate(self.get_response())
             with suppress(InvalidStateError):
                 self.set_result(response)
         except Exception as e:
@@ -104,7 +111,6 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
-        self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
@@ -115,7 +121,6 @@ class MultiprocExecutor(Executor):
             f"_parallel_size ({pcp_size}). "
         )
 
-        # Set multiprocessing envs
         set_multiprocessing_worker_envs()
 
         # use the loopback address get_loopback_ip() for communication.
@@ -158,11 +163,22 @@ class MultiprocExecutor(Executor):
             global_start_rank = (
                 self.local_world_size * self.parallel_config.node_rank_within_dp
             )
+            # When using fork, keep track of socket file descriptors that are
+            # inherited by the worker, so that we can close them in subsequent
+            # workers
+            inherited_fds: list[int] | None = (
+                [] if context.get_start_method() == "fork" else None
+            )
+
+            # For CPU backend only, to setup OpenMP threads affinity
+            cpu_omp_manager = OMPProcessManager(self.vllm_config)
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
-                unready_workers.append(
-                    WorkerProc.make_worker_process(
+                with cpu_omp_manager.configure_omp_envs(
+                    rank=global_rank, local_rank=local_rank
+                ):
+                    unready_worker_handle = WorkerProc.make_worker_process(
                         vllm_config=self.vllm_config,
                         local_rank=local_rank,
                         rank=global_rank,
@@ -170,8 +186,12 @@ class MultiprocExecutor(Executor):
                         input_shm_handle=scheduler_output_handle,
                         shared_worker_lock=shared_worker_lock,
                         is_driver_worker=is_driver_worker,
+                        inherited_fds=inherited_fds,
                     )
-                )
+                unready_workers.append(unready_worker_handle)
+                if inherited_fds is not None:
+                    inherited_fds.append(unready_worker_handle.death_writer.fileno())
+                    inherited_fds.append(unready_worker_handle.ready_pipe.fileno())
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -208,7 +228,7 @@ class MultiprocExecutor(Executor):
             for response_mq in self.response_mqs:
                 response_mq.wait_until_ready()
 
-            self.futures_queue = deque[tuple[FutureWrapper, Callable]]()
+            self.futures_queue = deque[FutureWrapper]()
 
             self._post_init_executor()
 
@@ -220,6 +240,7 @@ class MultiprocExecutor(Executor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
+                        uw.death_writer = None
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.output_rank = self._get_output_rank()
@@ -255,6 +276,7 @@ class MultiprocExecutor(Executor):
             died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
+                logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
             proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
@@ -354,8 +376,6 @@ class MultiprocExecutor(Executor):
         if output_rank is not None:
             response_mqs = (response_mqs[output_rank],)
 
-        shutdown_event = self.shutdown_event
-
         def get_response():
             responses = []
             for mq in response_mqs:
@@ -363,9 +383,7 @@ class MultiprocExecutor(Executor):
                     None if deadline is None else (deadline - time.monotonic())
                 )
                 try:
-                    status, result = mq.dequeue(
-                        timeout=dequeue_timeout, cancel=shutdown_event
-                    )
+                    status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
@@ -376,17 +394,13 @@ class MultiprocExecutor(Executor):
                 responses.append(result)
             return responses[0] if output_rank is not None else responses
 
-        if non_block:
-            future = FutureWrapper(self.futures_queue, aggregate=aggregate)
-            self.futures_queue.appendleft((future, get_response))
-            return future
+        future = FutureWrapper(
+            self.futures_queue,
+            get_response=get_response,
+            aggregate=aggregate,
+        )
 
-        # First drain any pending futures in the queue.
-        while self.futures_queue:
-            future, get_fut_response = self.futures_queue.pop()
-            future.wait_for_response(get_fut_response)
-
-        return aggregate(get_response())
+        return future if non_block else future.result()
 
     @staticmethod
     def _ensure_worker_termination(worker_procs: list[BaseProcess]):
@@ -408,20 +422,26 @@ class MultiprocExecutor(Executor):
 
         active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
         # Give processes time to clean themselves up properly first
+        logger.debug("Worker Termination: allow workers to gracefully shutdown")
         if wait_for_termination(active_procs(), 4):
             return
 
         # Send SIGTERM if still running
+        logger.debug("Worker Termination: workers still running sending SIGTERM")
         for p in active_procs():
             p.terminate()
         if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
+            logger.debug(
+                "Worker Termination: resorting to SIGKILL to take down workers"
+            )
             for p in active_procs():
                 p.kill()
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not getattr(self, "shutting_down", False):
+            logger.debug("Triggering shutdown of workers")
             self.shutting_down = True
 
             # Make sure all the worker processes are terminated first.
@@ -431,12 +451,21 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
-                    w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
 
-            self.shutdown_event.set()
+                for w in workers:
+                    # Shutdown response queues
+                    if w.worker_response_mq is not None:
+                        w.worker_response_mq.shutdown()
+                        w.worker_response_mq = None
 
-        self.rpc_broadcast_mq = None
+        if rpc_broadcast_mq := getattr(self, "rpc_broadcast_mq", None):
+            rpc_broadcast_mq.shutdown()
+            self.rpc_broadcast_mq = None
+        if response_mqs := getattr(self, "response_mqs", None):
+            for mq in response_mqs:
+                mq.shutdown()
+            self.response_mqs = []
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
@@ -463,6 +492,10 @@ class MultiprocExecutor(Executor):
             - self.parallel_config.tensor_parallel_size
             * self.parallel_config.prefill_context_parallel_size
         )
+
+    @classmethod
+    def supports_async_scheduling(cls) -> bool:
+        return True
 
 
 @dataclass
@@ -570,6 +603,21 @@ class WorkerProc:
         wrapper.init_worker(all_kwargs)
         self.worker = wrapper
 
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+        )
+
+        # Load model
+        self.worker.init_device()
+        # Update process title now that parallel groups are initialized
+        self.setup_proc_title_and_log_prefix(
+            enable_ep=vllm_config.parallel_config.enable_expert_parallel
+        )
+        if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.worker.elastic_ep_execute("load_model")
+        else:
+            self.worker.load_model()
+
         scheduler_config = vllm_config.scheduler_config
         self.use_async_scheduling = scheduler_config.async_scheduling
         if self.use_async_scheduling:
@@ -581,20 +629,12 @@ class WorkerProc:
             )
             self.async_output_copy_thread.start()
 
-        self.setup_proc_title_and_log_prefix(
-            enable_ep=vllm_config.parallel_config.enable_expert_parallel
-        )
+        # Set block size based on the attention backends
+        current_platform.update_block_size_for_backend(vllm_config)
 
-        # Load model
+        # Initialize message queues after init_device() since multi-node setups
+        # (nnodes_within_dp > 1) require distributed groups to be initialized
         self._init_message_queues(input_shm_handle, vllm_config)
-        is_eep_new_worker = envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH
-        if not is_eep_new_worker:
-            self.worker.init_device()
-            # Update process title now that parallel groups are initialized
-            self.setup_proc_title_and_log_prefix(
-                enable_ep=vllm_config.parallel_config.enable_expert_parallel
-            )
-            self.worker.load_model()
 
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
@@ -609,24 +649,28 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
         is_driver_worker: bool,
+        inherited_fds: list[int] | None = None,
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
-        # (reader, writer)
-        reader, writer = context.Pipe(duplex=False)
-
-        # Create death pipe to detect parent process exit
+        # Ready pipe to communicate readiness from child to parent
+        ready_reader, ready_writer = context.Pipe(duplex=False)
+        # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
-
+        if inherited_fds is not None:
+            inherited_fds = inherited_fds.copy()
+            inherited_fds.extend((ready_reader.fileno(), death_writer.fileno()))
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
-            "ready_pipe": (reader, writer),
+            "ready_pipe": ready_writer,
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
+            # Have the worker close parent end of this worker's pipes too
+            "inherited_fds": inherited_fds if inherited_fds is not None else [],
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -636,11 +680,18 @@ class WorkerProc:
             daemon=True,
         )
 
-        proc.start()
-        writer.close()
+        # Apply NUMA binding if configured
+        with numa_utils.configure_subprocess(
+            vllm_config, local_rank, process_kind="worker"
+        ):
+            proc.start()
+
+        # Close child ends of pipes here in the parent
+        ready_writer.close()
+        death_reader.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
-        return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
+        return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
 
     @staticmethod
     def wait_for_response_handle_ready(
@@ -668,9 +719,8 @@ class WorkerProc:
         unready_proc_handles: list[UnreadyWorkerProcHandle],
     ) -> list[WorkerProcHandle]:
         e = Exception(
-            "WorkerProc initialization failed due to "
-            "an exception in a background process. "
-            "See stack trace for root cause."
+            "WorkerProc initialization failed due to an exception in a "
+            "background process. See stack trace for root cause."
         )
 
         pipes = {handle.ready_pipe: handle for handle in unready_proc_handles}
@@ -703,11 +753,40 @@ class WorkerProc:
         return cast(list[WorkerProcHandle], ready_proc_handles)
 
     def shutdown(self):
+        if self.rpc_broadcast_mq is not None:
+            self.rpc_broadcast_mq.shutdown()
+        if self.worker_response_mq is not None:
+            self.worker_response_mq.shutdown()
         self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
+
+    def monitor_death_pipe(self, death_pipe, shutdown_requested: threading.Event):
+        if death_pipe is None:
+            return
+
+        def death_pipe_monitor(queues_to_shutdown: list[MessageQueue]):
+            try:
+                # This will block until parent process exits (pipe closes)
+                death_pipe.recv()
+            except EOFError:
+                logger.info_once("Parent process exited, terminating worker queues")
+                shutdown_requested.set()
+                for mq in queues_to_shutdown:
+                    if mq is not None:
+                        mq.shutdown()
+            except Exception as e:
+                logger.warning("Death monitoring error: %s", e)
+
+        # Pass queue references directly to avoid gc issues if passing self
+        Thread(
+            target=death_pipe_monitor,
+            args=([self.rpc_broadcast_mq, self.worker_response_mq],),
+            daemon=True,
+            name="DeathPipeMonitor",
+        ).start()
 
     @staticmethod
     def worker_main(*args, **kwargs):
@@ -717,12 +796,12 @@ class WorkerProc:
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
-        shutdown_requested = False
+        shutdown_requested = threading.Event()
 
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
+            if not shutdown_requested.is_set():
+                shutdown_requested.set()
                 logger.debug(
                     "WorkerProc handling signal %d, raising SystemExit", signum
                 )
@@ -733,33 +812,20 @@ class WorkerProc:
         signal.signal(signal.SIGINT, signal_handler)
 
         worker = None
-        # tuple[Connection, Connection]
-        reader, ready_writer = kwargs.pop("ready_pipe")
-        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
-        shutdown_event = threading.Event()
-        # Start death monitoring thread if death_pipe is provided
-        if death_pipe is not None:
+        ready_writer = kwargs.pop("ready_pipe")
+        death_pipe = kwargs.pop("death_pipe", None)
 
-            def monitor_parent_death():
-                try:
-                    # This will block until parent process exits (pipe closes)
-                    death_pipe.recv()
-                except EOFError:
-                    # Parent process has exited, terminate this worker
-                    logger.info_once("Parent process exited, terminating worker")
-                    # Send signal to self to trigger clean shutdown
-                    shutdown_event.set()
-                except Exception as e:
-                    logger.warning("Death monitoring error: %s", e)
-
-            death_monitor = Thread(
-                target=monitor_parent_death, daemon=True, name="WorkerDeathMonitor"
-            )
-            death_monitor.start()
+        # Close inherited pipes from parent (incl. other worker pipes)
+        # Explicitly passing in existing pipes and closing them makes the pipe
+        # behave when using fork. Otherwise, a hidden reference to the pipes
+        # exist in the child process and prevents EOF closure.
+        for fd in kwargs.pop("inherited_fds", []):
+            try:
+                os.close(fd)
+            except Exception as e:
+                logger.warning("Error closing inherited connection: %s: %s", type(e), e)
 
         try:
-            reader.close()
-
             # Initialize tracer
             rank = kwargs.get("rank", 0)
             maybe_init_worker_tracer(
@@ -770,6 +836,10 @@ class WorkerProc:
 
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
+            if kwargs["vllm_config"].parallel_config.numa_bind:
+                numa_utils.log_current_affinity_state(f"Worker_{worker.rank}")
+
+            worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
             # Send READY once we know everything is loaded
             ready_writer.send(
@@ -788,7 +858,7 @@ class WorkerProc:
             ready_writer.close()
             ready_writer = None
 
-            worker.worker_busy_loop(cancel=shutdown_event)
+            worker.worker_busy_loop()
 
         except Exception:
             # NOTE: if an Exception arises in busy_loop, we send
@@ -798,7 +868,7 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
-            elif shutdown_event.is_set():
+            elif shutdown_requested.is_set():
                 logger.info("WorkerProc shutting down.")
             else:
                 logger.exception("WorkerProc failed.")
@@ -806,7 +876,7 @@ class WorkerProc:
             # The parent sends a SIGTERM to all worker processes if
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
-            shutdown_requested = True
+            shutdown_requested.set()
 
         except SystemExit as e:
             # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
@@ -855,16 +925,28 @@ class WorkerProc:
 
     def async_output_busy_loop(self):
         """Entrypoint for the thread which handles outputs asynchronously."""
+
+        # set device to the worker device for the thread.
+        # a thread will not inherit the context of the main thread.
+        # when calling any cuda runtime functions, it will implicitly
+        # create a new cuda context on device 0, consuming extra memory.
+        # here we set the device to the worker device for the thread,
+        # enforcing the context to be the same as the main thread.
+        from vllm.platforms import current_platform
+
+        if hasattr(self.worker, "device"):
+            current_platform.set_device(self.worker.device)
+
         while True:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
 
-    def worker_busy_loop(self, cancel: threading.Event | None = None):
+    def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
-                cancel=cancel, indefinite=True
+                indefinite=True
             )
             try:
                 if isinstance(method, str):
@@ -931,23 +1013,26 @@ def set_multiprocessing_worker_envs():
 
     _maybe_force_spawn()
 
-    # Configure thread parallelism if OMP_NUM_THREADS isn't set
-    #
-    # Helps to avoid CPU contention. The default of spawning a thread per
-    # core combined with multiprocessing for each GPU can have a negative
-    # impact on performance. The contention is amplified when running in a
-    # container where CPU limits can cause throttling.
-    default_omp_num_threads = 1
-    if (
-        "OMP_NUM_THREADS" not in os.environ
-        and (current_parallelism := torch.get_num_threads()) > default_omp_num_threads
-    ):
-        logger.warning(
-            "Reducing Torch parallelism from %d threads to %d to avoid "
-            "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
-            "external environment to tune this value as needed.",
-            current_parallelism,
-            default_omp_num_threads,
-        )
-        os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
-        torch.set_num_threads(default_omp_num_threads)
+    if not current_platform.is_cpu():
+        # Configure thread parallelism if OMP_NUM_THREADS isn't set
+        #
+        # Helps to avoid CPU contention. The default of spawning a thread per
+        # core combined with multiprocessing for each GPU can have a negative
+        # impact on performance. The contention is amplified when running in a
+        # container where CPU limits can cause throttling.
+        default_omp_num_threads = 1
+        if (
+            "OMP_NUM_THREADS" not in os.environ
+            and (current_parallelism := torch.get_num_threads())
+            > default_omp_num_threads
+        ):
+            logger.warning_once(
+                "Reducing Torch parallelism from %d threads to %d to avoid "
+                "unnecessary CPU contention. Set OMP_NUM_THREADS in the "
+                "external environment to tune this value as needed.",
+                current_parallelism,
+                default_omp_num_threads,
+                scope="local",
+            )
+            os.environ["OMP_NUM_THREADS"] = str(default_omp_num_threads)
+            torch.set_num_threads(default_omp_num_threads)

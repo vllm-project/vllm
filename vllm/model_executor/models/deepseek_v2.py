@@ -47,7 +47,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import GateLinear, SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    GateLinear,
+    RoutingMethodType,
+    SharedFusedMoE,
+)
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -62,8 +66,14 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    scaled_dequantize,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    SparseAttnIndexer,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -75,13 +85,20 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerBackend,
 )
 from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
 
-from .interfaces import MixtureOfExperts, SupportsEagle, SupportsLoRA, SupportsPP
+from .interfaces import (
+    MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     PPMissingLayer,
     is_pp_missing_parameter,
@@ -326,8 +343,12 @@ class DeepseekV2MoE(nn.Module):
         # NOTE(rob): this is a hack until we finish off the PR for
         # merging TRTLLM kernels into the MK framework. Then we can
         # query the MonolithicMK for the expected router logits.
+        # NOTE(dbari): Use BF16 if routing is not Deepseek, e.g. Mistral Large 3
         self.gate.set_out_dtype(
-            torch.float32 if self.experts.quant_method.is_monolithic else torch.bfloat16
+            torch.float32
+            if self.experts.quant_method.is_monolithic
+            and self.experts.routing_method_type == RoutingMethodType.DeepSeekV3
+            else torch.bfloat16
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -571,7 +592,7 @@ class DeepseekV32IndexerCache(torch.nn.Module, AttentionLayerBase):
         self, head_dim: int, dtype: torch.dtype, prefix: str, cache_config: CacheConfig
     ):
         super().__init__()
-        self.kv_cache = [torch.tensor([])]
+        self.kv_cache = torch.tensor([])
         self.head_dim = head_dim
         self.prefix = prefix
         self.cache_config = cache_config
@@ -610,6 +631,7 @@ class Indexer(nn.Module):
         super().__init__()
         self.vllm_config = vllm_config
         self.config = config
+        self.quant_config = quant_config
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
@@ -624,21 +646,17 @@ class Indexer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.wq_b",
         )
-        self.wk = ReplicatedLinear(
+        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
+        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
+        self.wk_weights_proj = MergedColumnParallelLinear(
             hidden_size,
-            self.head_dim,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.wk",
-        )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
-        self.weights_proj = ReplicatedLinear(
-            hidden_size,
-            self.n_head,
+            [self.head_dim, self.n_head],
             bias=False,
             quant_config=None,
-            prefix=f"{prefix}.weights_proj",
+            disable_tp=True,
+            prefix=f"{prefix}.wk_weights_proj",
         )
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -678,8 +696,11 @@ class Indexer(nn.Module):
         q_pe, q_nope = torch.split(
             q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
         )
+        # Fused wk + weights_proj: one GEMM, then split
+        kw, _ = self.wk_weights_proj(hidden_states)
+        k = kw[:, : self.head_dim]
+        weights = kw[:, self.head_dim :]
 
-        k, _ = self.wk(hidden_states)
         k = self.k_norm(k)
         k_pe, k_nope = torch.split(
             k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
@@ -708,7 +729,6 @@ class Indexer(nn.Module):
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
         q_scale = q_scale.view(-1, self.n_head, 1)
 
-        weights, _ = self.weights_proj(hidden_states)
         weights = (
             weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
         )
@@ -717,7 +737,85 @@ class Indexer(nn.Module):
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
-class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
+def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
+    """
+    We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
+    in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
+    Upcasting to BF16 during loading enables the fusion. This function loads the FP8 WK
+    weights and scale, and when both are available, dequantizes to BF16 and stores into
+    the fused wk_weights_proj.weight parameter.
+    """
+    if "indexer.wk." not in name or "wk_weights" in name:
+        return False  # Weight is not an isolated WK weight for the indexer, ignore.
+    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
+    is_scale = "weight_scale_inv" in name
+    if not is_weight and not is_scale:
+        return False  # WK is not in FP8 format, ignore.
+    # Buffer this tensor (weight or scale) until both have arrived.
+    layer_prefix = name.rsplit(".wk.", 1)[0]  # e.g. "model.layers.0.self_attn.indexer"
+    entry = buf.setdefault(layer_prefix, {})
+    entry["weight" if is_weight else "scale"] = tensor
+    if "weight" not in entry or "scale" not in entry:
+        return True  # still waiting for the other param
+
+    # We have both weight and scale: dequantize FP8 to BF16.
+    weight_fp8, scale_inv = entry["weight"], entry["scale"]
+    del buf[layer_prefix]
+    block_size = weight_fp8.shape[1] // scale_inv.shape[1]
+    weight_bf16 = scaled_dequantize(
+        weight_fp8,
+        scale_inv,
+        group_shape=GroupShape(block_size, block_size),
+        out_dtype=torch.bfloat16,
+    )
+
+    # Load the dequantized weight into shard 0 of the fused buffer.
+    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
+    param = params_dict[fused_name]
+    param.weight_loader(param, weight_bf16, 0)
+    loaded_params.add(fused_name)
+    return True
+
+
+def _min_latency_fused_qkv_a_proj_impl(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Dynamically run min-latency gemm if num_tokens <= 16.
+    This must be wrapped in a custom op because our torch.compile integration
+    does not support runtime dispatching on num_tokens.
+    """
+    num_tokens = input_.shape[0]
+    if 0 < num_tokens <= 16:
+        output = torch.empty(
+            num_tokens,
+            weight.shape[0],
+            dtype=torch.bfloat16,
+            device=input_.device,
+        )
+        ops.dsv3_fused_a_gemm(output, input_, weight.T)
+        return output
+    else:
+        return torch.nn.functional.linear(input_, weight)
+
+
+def _min_latency_fused_qkv_a_proj_fake(
+    input_: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    return input_.new_empty(input_.shape[0], weight.shape[0])
+
+
+direct_register_custom_op(
+    op_name="min_latency_fused_qkv_a_proj",
+    op_func=_min_latency_fused_qkv_a_proj_impl,
+    mutates_args=[],
+    fake_impl=_min_latency_fused_qkv_a_proj_fake,
+)
+
+
+class DeepSeekV2FusedQkvAProjLinear(MergedColumnParallelLinear):
     def __init__(
         self,
         input_size: int,
@@ -752,19 +850,8 @@ class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
         self,
         input_,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.nn.Parameter | None]:
-        num_tokens = input_.shape[0]
-        if self._use_min_latency_gemm and (0 < num_tokens <= 16):
-            output = torch.empty(
-                num_tokens,
-                2112,
-                dtype=torch.bfloat16,
-                device=input_.device,
-            )
-            ops.dsv3_fused_a_gemm(
-                output,
-                input_,
-                self.weight.T,
-            )
+        if self._use_min_latency_gemm:
+            output = torch.ops.vllm.min_latency_fused_qkv_a_proj(input_, self.weight)
             if not self.return_bias:
                 return output
             output_bias = self.bias if self.skip_bias_add else None
@@ -800,6 +887,7 @@ class DeepseekV2MLAAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        input_size: int | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -819,16 +907,20 @@ class DeepseekV2MLAAttention(nn.Module):
         self.scaling = self.qk_head_dim**-0.5
         self.max_position_embeddings = max_position_embeddings
 
+        # Use input_size for projection input dimensions if provided,
+        # otherwise default to hidden_size (used in Eagle3 Deepseek with MLA)
+        proj_input_size = input_size if input_size is not None else self.hidden_size
+
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProj(
-                self.hidden_size,
+            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProjLinear(
+                proj_input_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 quant_config=quant_config,
                 prefix=f"{prefix}.fused_qkv_a_proj",
             )
         else:
             self.kv_a_proj_with_mqa = ReplicatedLinear(
-                self.hidden_size,
+                proj_input_size,
                 self.kv_lora_rank + self.qk_rope_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -846,7 +938,7 @@ class DeepseekV2MLAAttention(nn.Module):
             )
         else:
             self.q_proj = ColumnParallelLinear(
-                self.hidden_size,
+                proj_input_size,
                 self.num_heads * self.qk_head_dim,
                 bias=False,
                 quant_config=quant_config,
@@ -1129,7 +1221,9 @@ class DeepseekV2Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV2DecoderLayer(
-                vllm_config, prefix, topk_indices_buffer=topk_indices_buffer
+                vllm_config,
+                prefix,
+                topk_indices_buffer=topk_indices_buffer,
             ),
             prefix=f"{prefix}.layers",
         )
@@ -1141,6 +1235,8 @@ class DeepseekV2Model(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
+
+        self.aux_hidden_state_layers = tuple[int, ...]()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1156,6 +1252,11 @@ class DeepseekV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
+                if input_ids is None:
+                    raise ValueError(
+                        "Either input_ids or inputs_embeds must be provided "
+                        "to DeepseekV2Model.forward"
+                    )
                 hidden_states = self.embed_input_ids(input_ids)
             residual = None
         else:
@@ -1177,7 +1278,13 @@ class DeepseekV2Model(nn.Module):
         else:
             llama_4_scaling = None
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(
                 positions, hidden_states, residual, llama_4_scaling
             )
@@ -1188,6 +1295,8 @@ class DeepseekV2Model(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
 
@@ -1233,7 +1342,12 @@ class DeepseekV2MixtureOfExperts(MixtureOfExperts):
 
 
 class DeepseekV2ForCausalLM(
-    nn.Module, SupportsPP, DeepseekV2MixtureOfExperts, SupportsLoRA, SupportsEagle
+    nn.Module,
+    SupportsPP,
+    DeepseekV2MixtureOfExperts,
+    SupportsLoRA,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
@@ -1312,6 +1426,13 @@ class DeepseekV2ForCausalLM(
 
         self.extract_moe_parameters(example_moe)
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
 
@@ -1364,6 +1485,14 @@ class DeepseekV2ForCausalLM(
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
         ]
+        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        _pending_wk_fp8: dict = {}  # When WK is in FP8, we dequant to BF16 for fusion
+        indexer_fused_mapping = [
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
+        ]
+        stacked_params_mapping.extend(indexer_fused_mapping)
+
         if self.use_mha:
             stacked_params_mapping.extend(mha_params_mapping)
         else:
@@ -1398,6 +1527,11 @@ class DeepseekV2ForCausalLM(
             is_fusion_moe_shared_experts_layer = (
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
+
+            if _try_load_fp8_indexer_wk(
+                name, loaded_weight, _pending_wk_fp8, params_dict, loaded_params
+            ):
+                continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).

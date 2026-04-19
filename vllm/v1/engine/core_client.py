@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
 import contextlib
-import multiprocessing
 import queue
 import sys
 import uuid
@@ -12,6 +11,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
+from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
@@ -35,6 +35,7 @@ from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
+    EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
@@ -45,6 +46,7 @@ from vllm.v1.engine import (
 from vllm.v1.engine.coordinator import DPCoordinator
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.engine.exceptions import EngineDeadError
+from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
@@ -52,6 +54,7 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.pool.late_interaction import get_late_interaction_engine_index
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
@@ -127,7 +130,7 @@ class EngineCoreClient(ABC):
         return AsyncMPClient(*client_args)
 
     @abstractmethod
-    def shutdown(self): ...
+    def shutdown(self, timeout: float | None = None) -> None: ...
 
     def get_output(self) -> EngineCoreOutputs:
         raise NotImplementedError
@@ -297,7 +300,7 @@ class InprocClient(EngineCoreClient):
         if len(request_ids) > 0:
             self.engine_core.abort_requests(request_ids)
 
-    def shutdown(self) -> None:
+    def shutdown(self, timeout: float | None = None) -> None:
         self.engine_core.shutdown()
 
     def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
@@ -389,9 +392,9 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.close()
+            self.engine_manager.shutdown()
         if self.coordinator is not None:
-            self.coordinator.close()
+            self.coordinator.shutdown()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.
@@ -454,56 +457,6 @@ class ElasticScalingCache:
     pending_notifications: dict[EEPNotificationType, set[int]]
 
 
-def allocate_stateless_group_ports(parallel_config, new_data_parallel_size: int):
-    """
-    Allocate stateless group ports for elastic EP.
-    """
-    from vllm.utils.network_utils import get_open_ports_list
-
-    assert parallel_config.enable_elastic_ep, "Elastic EP must be enabled"
-    world_size = parallel_config.world_size
-    new_world_size_across_dp = world_size * new_data_parallel_size
-    num_world_groups = 1
-    num_dp_groups = max(1, new_world_size_across_dp // new_data_parallel_size)
-    num_ep_groups = max(
-        1,
-        new_world_size_across_dp
-        // (new_data_parallel_size * parallel_config.tensor_parallel_size),
-    )
-    num_eplb_groups = num_ep_groups
-    total_ports_needed = (
-        num_world_groups + num_dp_groups + num_ep_groups + num_eplb_groups
-    ) * 3 + 5
-    all_ports = get_open_ports_list(total_ports_needed)
-    new_data_parallel_master_port_list = all_ports[-5:]
-    all_ports = all_ports[:-5]
-    new_stateless_world_group_port_list = [
-        all_ports[i : i + 3] for i in range(0, num_world_groups * 3, 3)
-    ]
-    start_idx = num_world_groups * 3
-    new_stateless_dp_group_port_list = [
-        all_ports[i : i + 3] for i in range(start_idx, start_idx + num_dp_groups * 3, 3)
-    ]
-    start_idx += num_dp_groups * 3
-    new_stateless_ep_group_port_list = [
-        all_ports[i : i + 3] for i in range(start_idx, start_idx + num_ep_groups * 3, 3)
-    ]
-    start_idx += num_ep_groups * 3
-    new_stateless_eplb_group_port_list = [
-        all_ports[i : i + 3]
-        for i in range(start_idx, start_idx + num_eplb_groups * 3, 3)
-    ]
-
-    parallel_config._stateless_world_group_port_list = (
-        new_stateless_world_group_port_list
-    )
-    parallel_config._stateless_dp_group_port_list = new_stateless_dp_group_port_list
-    parallel_config._stateless_ep_group_port_list = new_stateless_ep_group_port_list
-    parallel_config._stateless_eplb_group_port_list = new_stateless_eplb_group_port_list
-    parallel_config.data_parallel_master_port = new_data_parallel_master_port_list.pop()
-    parallel_config._data_parallel_master_port_list = new_data_parallel_master_port_list
-
-
 class MPClient(EngineCoreClient):
     """
     MPClient: base client for multi-proc EngineCore.
@@ -526,9 +479,6 @@ class MPClient(EngineCoreClient):
         client_addresses: dict[str, str] | None = None,
     ):
         self.vllm_config = vllm_config
-        # Serialization setup.
-        self.encoder = MsgpackEncoder()
-        self.decoder = MsgpackDecoder(EngineCoreOutputs)
 
         # ZMQ setup.
         sync_ctx = zmq.Context(io_threads=2)
@@ -543,15 +493,27 @@ class MPClient(EngineCoreClient):
         try:
             # State used for data parallel.
             self.engines_running = False
+            parallel_config = vllm_config.parallel_config
+            # Elastic EP can remove a rank and later add it back with the same
+            # identity. The client input ROUTER needs handover to allow the new
+            # engine to replace the dead connection.
+            enable_input_socket_handover = parallel_config.enable_elastic_ep
 
             self.stats_update_address: str | None = None
+            tensor_queue: Queue | None = None
             if client_addresses:
                 # Engines are managed externally to this client.
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
+                # Tensor queues passed via client_addresses for multi-API-server case
+                tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, input_address, zmq.ROUTER, bind=True
+                    self.ctx,
+                    input_address,
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, output_address, zmq.PULL
@@ -560,18 +522,19 @@ class MPClient(EngineCoreClient):
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
-                    self.ctx, addresses.inputs[0], zmq.ROUTER, bind=True
+                    self.ctx,
+                    addresses.inputs[0],
+                    zmq.ROUTER,
+                    bind=True,
+                    router_handover=enable_input_socket_handover,
                 )
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, addresses.outputs[0], zmq.PULL
                 )
 
                 with launch_core_engines(
-                    vllm_config,
-                    executor_class,
-                    log_stats,
-                    addresses,
-                ) as (engine_manager, coordinator, addresses):
+                    vllm_config, executor_class, log_stats, addresses
+                ) as (engine_manager, coordinator, addresses, tensor_queue):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
 
@@ -581,7 +544,17 @@ class MPClient(EngineCoreClient):
                         coordinator.get_stats_publish_address()
                     )
 
-            parallel_config = vllm_config.parallel_config
+            # Serialization setup with tensor queues for multimodal tensor IPC.
+            tensor_ipc_sender: TensorIpcSender | None = None
+            model_config = getattr(vllm_config, "model_config", None)
+            if model_config is not None and model_config.multimodal_config is not None:
+                mm_tensor_ipc = model_config.multimodal_config.mm_tensor_ipc
+                if mm_tensor_ipc == "torch_shm" and tensor_queue is not None:
+                    tensor_ipc_sender = TensorIpcSender(tensor_queue)
+
+            self.encoder = MsgpackEncoder(oob_tensor_consumer=tensor_ipc_sender)
+            self.decoder = MsgpackDecoder(EngineCoreOutputs)
+
             dp_size = parallel_config.data_parallel_size
             dp_rank = parallel_config.data_parallel_index
             dp_local_size = parallel_config.data_parallel_size_local
@@ -609,11 +582,17 @@ class MPClient(EngineCoreClient):
                     timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
                     raise TimeoutError(
-                        "Timed out waiting for engines to send "
-                        "initial message on input socket."
+                        f"Timed out waiting for engine core processes to "
+                        f"start. This is often caused by slow weight loading "
+                        f"for large models. Waited "
+                        f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
+                        f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
+                        f"timeout, set the environment variable: "
+                        f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                     )
-                identity, _ = sync_input_socket.recv_multipart()
+                identity, payload = sync_input_socket.recv_multipart()
                 identities.remove(identity)
+                self._apply_ready_response(payload)
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -631,9 +610,12 @@ class MPClient(EngineCoreClient):
             if not success:
                 self._finalizer()
 
-    def shutdown(self):
-        # Terminate background resources.
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown engine manager under timeout and clean up resources."""
+        if self._finalizer.detach() is not None:
+            if self.resources.engine_manager is not None:
+                self.resources.engine_manager.shutdown(timeout=timeout)
+            self.resources()
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -659,34 +641,20 @@ class MPClient(EngineCoreClient):
     def start_engine_core_monitor(self):
         """Start a monitor thread for engine core processes."""
         engine_manager = self.resources.engine_manager
-        if (
-            engine_manager is None
-            or not hasattr(engine_manager, "processes")
-            or not engine_manager.processes
-        ):
+        if engine_manager is None:
             # No engine processes to monitor
             return
 
-        engine_processes = engine_manager.processes
         self_ref = weakref.ref(self)
 
         # Monitor engine core process liveness. If any die unexpectedly,
-        # logs an error, shuts down the client and invokes the failure
-        # callback to inform the engine.
+        # marks the engine as dead, and shuts down the client.
         def monitor_engine_cores():
-            sentinels = [proc.sentinel for proc in engine_processes]
-            died = multiprocessing.connection.wait(sentinels)
+            engine_manager.monitor_engine_liveness()
             _self = self_ref()
-            if not _self or _self.resources.engine_dead:
+            if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
-            proc_name = next(
-                proc.name for proc in engine_processes if proc.sentinel == died[0]
-            )
-            logger.error(
-                "Engine core proc %s died unexpectedly, shutting down client.",
-                proc_name,
-            )
             _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
             # like MultiprocExecutor, but we set engine_dead flag which will
@@ -695,6 +663,32 @@ class MPClient(EngineCoreClient):
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
+
+    def _apply_ready_response(self, payload: bytes) -> None:
+        """Decode an EngineCoreReadyResponse and sync any post-initialization
+        config changes (e.g. auto-fitted max_model_len) back to the frontend."""
+        if not payload:
+            return
+        vllm_config = self.vllm_config
+        response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        vllm_config.model_config.max_model_len = min(
+            vllm_config.model_config.max_model_len, response.max_model_len
+        )
+
+        # Setup KV cache config with initialization state from
+        # engine core process. Sum values from all engines in DP case.
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
+        num_gpu_blocks += response.num_gpu_blocks
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+
+        # In external DP LB mode, the coordinator address that the
+        # front-end procs connect to is obtained by each engine via it's
+        # initial handshake with the rank 0 front-end.
+        if response.dp_stats_address is not None:
+            if self.stats_update_address is None:
+                self.stats_update_address = response.dp_stats_address
+            else:
+                assert response.dp_stats_address == self.stats_update_address
 
 
 def _process_utility_output(
@@ -1355,7 +1349,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest) -> EngineIdentity:
         # Engines are in rank order.
-        if (eng_index := request.data_parallel_rank) is None:
+        if (eng_index := request.data_parallel_rank) is None and (
+            eng_index := get_late_interaction_engine_index(
+                request.pooling_params, len(self.core_engines)
+            )
+        ) is None:
             current_counts = self.lb_engines
             # TODO use P2C alg for larger DP sizes
             num_engines = len(current_counts)
@@ -1519,6 +1517,28 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         self._ensure_output_queue_task()
         await future
 
+    def _setup_elastic_ep_reconfig_bootstrap(self) -> tuple[str, int]:
+        from vllm.distributed.utils import create_tcp_store
+        from vllm.utils.network_utils import get_open_ports_list
+
+        parallel_config = self.vllm_config.parallel_config
+        parallel_config._data_parallel_master_port_list = get_open_ports_list(5)
+        parallel_config.data_parallel_master_port = (
+            parallel_config._data_parallel_master_port_list.pop()
+        )
+
+        ip = parallel_config.data_parallel_master_ip
+        store = create_tcp_store(
+            ip,
+            0,
+            is_master=True,
+            world_size=-1,
+            wait_for_workers=False,
+        )
+        parallel_config._coord_store_port = store.port
+        self._coord_store = store
+        return ip, store.port
+
     async def _scale_up_elastic_ep(
         self, cur_data_parallel_size: int, new_data_parallel_size: int
     ) -> None:
@@ -1533,7 +1553,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
         parallel_config = self.vllm_config.parallel_config
-        allocate_stateless_group_ports(parallel_config, new_data_parallel_size)
+        ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
 
         # Phase 1: Send reconfig messages to existing engines
         reconfig_futures = []
@@ -1542,13 +1562,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 new_data_parallel_size=new_data_parallel_size,
                 new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
                 new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=parallel_config.data_parallel_master_ip,
+                new_data_parallel_master_ip=ip,
                 new_data_parallel_master_port=parallel_config.data_parallel_master_port,
                 new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
-                new_stateless_world_group_port_list=parallel_config._stateless_world_group_port_list,
-                new_stateless_dp_group_port_list=parallel_config._stateless_dp_group_port_list,
-                new_stateless_ep_group_port_list=parallel_config._stateless_ep_group_port_list,
-                new_stateless_eplb_group_port_list=parallel_config._stateless_eplb_group_port_list,
+                coord_store_port=coord_store_port,
             )
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
@@ -1586,11 +1603,16 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
             ):
                 raise TimeoutError(
-                    "Timed out waiting for new engines to send initial "
-                    "message on input socket."
+                    f"Timed out waiting for new engine core processes to "
+                    f"start. Waited "
+                    f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
+                    f"timeout, set the environment variable: "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                 )
-            identity, _ = sync_input_socket.recv_multipart()
+            identity, payload = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)
+            self._apply_ready_response(payload)
 
         # NOTE(yongji): Before we schedule any requests on the new workers,
         # we should wait for them to switch to the new setup.
@@ -1624,21 +1646,21 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         )
 
         parallel_config = self.vllm_config.parallel_config
-        allocate_stateless_group_ports(parallel_config, new_data_parallel_size)
+        ip, coord_store_port = self._setup_elastic_ep_reconfig_bootstrap()
 
+        removed_dp_size = cur_data_parallel_size - new_data_parallel_size
+        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+        self.resources.engine_manager.remove_run_refs_for_scale_down(removed_dp_size)
         reconfig_futures = []
         for cur_dp_rank, engine in enumerate(self.core_engines):
             reconfig_request = ReconfigureDistributedRequest(
                 new_data_parallel_size=new_data_parallel_size,
                 new_data_parallel_rank=ReconfigureRankType.KEEP_CURRENT_RANK,
                 new_data_parallel_rank_local=ReconfigureRankType.KEEP_CURRENT_RANK,
-                new_data_parallel_master_ip=parallel_config.data_parallel_master_ip,
+                new_data_parallel_master_ip=ip,
                 new_data_parallel_master_port=parallel_config.data_parallel_master_port,
                 new_data_parallel_master_port_list=parallel_config._data_parallel_master_port_list,
-                new_stateless_world_group_port_list=parallel_config._stateless_world_group_port_list,
-                new_stateless_dp_group_port_list=parallel_config._stateless_dp_group_port_list,
-                new_stateless_ep_group_port_list=parallel_config._stateless_ep_group_port_list,
-                new_stateless_eplb_group_port_list=parallel_config._stateless_eplb_group_port_list,
+                coord_store_port=coord_store_port,
             )
             if cur_dp_rank >= new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = (

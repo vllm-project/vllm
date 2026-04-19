@@ -138,7 +138,7 @@ def benchmark_prefill(
     )
 
     def time_fn(fn, warmup=10, trials=20):
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         start = torch.Event(enable_timing=True)
         end = torch.Event(enable_timing=True)
         times = []
@@ -148,7 +148,7 @@ def benchmark_prefill(
             start.record()
             fn()
             end.record()
-            torch.cuda.synchronize()
+            torch.accelerator.synchronize()
             times.append(start.elapsed_time(end))  # ms
         return sum(times) / len(times), torch.std(torch.tensor(times))
 

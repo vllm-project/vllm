@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
@@ -101,19 +102,17 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
         ):
-            if layer_idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
-
             hidden_states, residual = layer(
                 positions,
                 hidden_states,
                 residual,
             )
-
             if deepstack_input_embeds is not None and layer_idx in range(
                 0, len(deepstack_input_embeds)
             ):
@@ -121,6 +120,10 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                     hidden_states
                     + deepstack_input_embeds[f"deepstack_input_embeds_{layer_idx}"]
                 )
+
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -171,10 +174,6 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         ignore_suffixes = (
             ".bias",
             "_bias",
-            ".k_scale",
-            "_k_scale",
-            ".v_scale",
-            "_v_scale",
             ".weight_scale",
             "_weight_scale",
             ".input_scale",
@@ -190,6 +189,11 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
         ]
         num_experts = self.config.num_experts
         for name, loaded_weight in weights:
+            if "scale" in name or "zero_point" in name:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                     is_fused_expert = True
@@ -304,20 +308,8 @@ class Qwen3MoeLLMModel(Qwen3MoeModel):
                     # Skip layers on other devices.
                     if is_pp_missing_parameter(name, self):
                         continue
-                    # Remapping the name of FP8 kv-scale.
-                    if name.endswith("kv_scale"):
-                        remapped_kv_scale_name = name.replace(
-                            ".kv_scale", ".attn.kv_scale"
-                        )
-                        if remapped_kv_scale_name not in params_dict:
-                            logger.warning_once(
-                                "Found kv scale in the checkpoint (e.g. %s), but not found the expected name in the model (e.g. %s). kv-scale is not loaded.",  # noqa: E501
-                                name,
-                                remapped_kv_scale_name,
-                            )
-                            continue
-                        else:
-                            name = remapped_kv_scale_name
+                    if name not in params_dict:
+                        continue
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -415,6 +407,7 @@ class Qwen3VLMoeForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.video_pruning_rate = multimodal_config.video_pruning_rate

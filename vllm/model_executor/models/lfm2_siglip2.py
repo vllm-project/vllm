@@ -10,7 +10,10 @@ from torch import nn
 from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 
-from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -25,7 +28,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from .vision import (
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
-    should_torch_compile_mm_vit,
 )
 
 
@@ -269,7 +271,8 @@ class Siglip2MLP(nn.Module):
 
 @support_torch_compile(
     dynamic_arg_dims={"hidden_states": [0, 1], "cu_seqlens": 0},
-    enable_if=should_torch_compile_mm_vit,
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
 )
 class Siglip2EncoderLayer(nn.Module):
     def __init__(
@@ -393,16 +396,12 @@ class Siglip2VisionTransformer(nn.Module):
         embed_dim = config.hidden_size
         self.config = config
         self.embeddings = Siglip2VisionEmbeddings(config)
-        # Keep the import local to avoid circular dependencies during model init.
-        from vllm.compilation.backends import set_model_tag
-
-        with set_model_tag("Siglip2Encoder", is_encoder=True):
-            self.encoder = Siglip2Encoder(
-                config,
-                quant_config=quant_config,
-                num_hidden_layers_override=num_hidden_layers_override,
-                prefix=f"{prefix}.encoder",
-            )
+        self.encoder = Siglip2Encoder(
+            config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.encoder",
+        )
         num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(

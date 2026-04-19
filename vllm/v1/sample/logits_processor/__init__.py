@@ -18,6 +18,7 @@ from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
     process_dict_updates,
 )
 from vllm.v1.sample.logits_processor.interface import (
@@ -50,6 +51,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -309,12 +311,16 @@ class AdapterLogitsProcessor(LogitsProcessor):
 
         """
         if req_lp := self.new_req_logits_processor(params):
-            args = (
-                [prompt_ids, output_ids]
-                if (len(inspect.signature(req_lp).parameters) == 3)
-                else [output_ids]
-            )
-            return partial(req_lp, *args)  # type: ignore[misc]
+            if len(inspect.signature(req_lp).parameters) == 3:
+                if prompt_ids is None:
+                    raise ValueError(
+                        "Prompt token ids are required for this "
+                        "logits processor but were not provided."
+                    )
+                args = [prompt_ids, output_ids]
+            else:
+                args = [output_ids]
+            return partial(req_lp, *args)
         return None
 
     def update_state(self, batch_update: BatchUpdate | None):
@@ -350,4 +356,5 @@ __all__ = [
     "STR_POOLING_REJECTS_LOGITSPROCS",
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
+    "ThinkingTokenBudgetLogitsProcessor",
 ]
