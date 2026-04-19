@@ -66,6 +66,10 @@ def _parse_gemma4_value(value_str: str) -> object:
     if value_str == "false":
         return False
 
+    # Null
+    if value_str.lower() in ("null", "none", "nil"):
+        return None
+
     # Number (int or float)
     try:
         if "." in value_str:

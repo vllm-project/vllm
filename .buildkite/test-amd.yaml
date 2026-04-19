@@ -532,28 +532,6 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Speculative Decoding (slow) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
-  agent_pool: mi250_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/
-  - vllm/v1/attention/
-  - vllm/model_executor/layers/
-  - tests/v1/spec_decode/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_eagle.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_extract_hidden_states.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_max_len.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_mtp.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_ngram.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_speculators_eagle3.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_tree_attention.py
-
-
 - label: V1 attention (H100-MI250) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
@@ -791,7 +769,7 @@ steps:
   - tests/kernels/helion/
   - vllm/platforms/rocm.py
   commands:
-  - pip install helion==0.3.3
+  - pip install helion==1.0.0
   - pytest -v -s kernels/helion/
 
 
@@ -1879,28 +1857,6 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Speculative Decoding (slow) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
-  optional: true
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/
-  - vllm/v1/attention/
-  - vllm/model_executor/layers/
-  - tests/v1/spec_decode/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_eagle.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_extract_hidden_states.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_max_len.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_mtp.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_ngram.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_speculators_eagle3.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_tree_attention.py
-
 
 - label: Acceptance Length Test (Large Models) # TBD
   timeout_in_minutes: 180
@@ -1915,7 +1871,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
-  - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+  - pytest -v -s v1/spec_decode/test_acceptance_length.py
 
 
 - label: V1 attention (H100-MI325) # 14.5m
@@ -2657,6 +2613,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
+  - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
 
@@ -3188,28 +3145,6 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Speculative Decoding (slow) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
-  agent_pool: mi355_1
-  working_dir: "/vllm-workspace/tests"
-  source_file_dependencies:
-  - vllm/v1/spec_decode/
-  - vllm/model_executor/models/
-  - vllm/v1/attention/
-  - vllm/model_executor/layers/
-  - tests/v1/spec_decode/
-  - vllm/platforms/rocm.py
-  commands:
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_eagle.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_extract_hidden_states.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_max_len.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_mtp.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_ngram.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_speculators_eagle3.py
-  - pytest -v -s -m 'slow_test' v1/spec_decode/test_tree_attention.py
-
-
 - label: V1 attention (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
@@ -3667,7 +3602,6 @@ steps:
   commands:
   - export TORCH_NCCL_BLOCKING_WAIT=1
   - pytest -v -s tests/distributed/test_context_parallel.py
-  - VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
 

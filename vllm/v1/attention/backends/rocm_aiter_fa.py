@@ -844,9 +844,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
+        if attn_type != AttentionType.DECODER:
             raise NotImplementedError(
-                "Encoder self-attention is not implemented for AiterFlashAttentionImpl"
+                "Only decoder self-attention is supported for "
+                "AiterFlashAttentionImpl. ENCODER_DECODER is not supported "
+                "because the prefill path uses cu_seqlens_k set to decoder "
+                "query_start_loc with causal=True, which is incorrect for "
+                "cross-attention."
             )
 
     def extend_for_sliding_window(
@@ -1177,7 +1181,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
 
                     descale_shape = (
-                        attn_metadata.query_start_loc[:num_decodes].shape[0] - 1,
+                        num_decodes,
                         key_cache.shape[2],
                     )
                     unified_attention(
@@ -1185,7 +1189,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         k=key_cache,
                         v=value_cache,
                         out=output[:num_decode_tokens],
-                        cu_seqlens_q=attn_metadata.query_start_loc[:num_decodes],
+                        cu_seqlens_q=attn_metadata.query_start_loc[: num_decodes + 1],
                         max_seqlen_q=decode_max_query_len,
                         seqused_k=attn_metadata.seq_lens[:num_decodes],
                         max_seqlen_k=attn_metadata.max_seq_len,

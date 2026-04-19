@@ -7,31 +7,32 @@ from collections.abc import Callable
 from functools import partial
 from typing import Literal, cast
 
-from fastapi import Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from typing_extensions import assert_never
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.serving import PoolingServingBase
-from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
-from vllm.entrypoints.pooling.pooling.protocol import (
+from vllm.logger import init_logger
+from vllm.outputs import PoolingRequestOutput
+from vllm.tasks import SupportedTask
+from vllm.utils.serial_utils import EmbedDType, Endianness
+
+from ..base.io_processor import PoolingIOProcessor
+from ..base.serving import PoolingServingBase
+from ..factories import init_pooling_io_processors
+from ..typing import AnyPoolingRequest, PoolingServeContext
+from ..utils import (
+    encode_pooling_bytes,
+    encode_pooling_output_base64,
+    encode_pooling_output_float,
+    get_json_response_cls,
+)
+from .protocol import (
     IOProcessorRequest,
     PoolingBytesResponse,
     PoolingRequest,
     PoolingResponse,
     PoolingResponseData,
 )
-from vllm.entrypoints.pooling.typing import AnyPoolingRequest, PoolingServeContext
-from vllm.entrypoints.pooling.utils import (
-    encode_pooling_bytes,
-    encode_pooling_output_base64,
-    encode_pooling_output_float,
-    get_json_response_cls,
-)
-from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
-from vllm.tasks import SupportedTask
-from vllm.utils.serial_utils import EmbedDType, Endianness
 
 logger = init_logger(__name__)
 
@@ -57,27 +58,10 @@ class ServingPooling(PoolingServingBase):
         )
         self.json_response_cls = get_json_response_cls()
 
-    async def __call__(
-        self,
-        request: AnyPoolingRequest,
-        raw_request: Request | None = None,
-    ) -> Response:
+    def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         assert isinstance(request, PoolingRequest)
         pooling_task = self._verify_pooling_task(request)
-
-        io_processor = self.io_processors[pooling_task]
-        ctx = await self._init_ctx(request, raw_request)
-
-        await io_processor.pre_process_online_async(ctx)
-
-        if ctx.pooling_params is None:
-            ctx.pooling_params = io_processor.create_pooling_params(request)
-
-        await self._prepare_generators(ctx)
-        await self._collect_batch(ctx)
-
-        await io_processor.post_process_online_async(ctx)
-        return await self._build_response(ctx)
+        return self.io_processors[pooling_task]
 
     def _verify_pooling_task(self, request: PoolingRequest) -> str:
         if getattr(request, "dimensions", None) is not None:
@@ -117,7 +101,7 @@ class ServingPooling(PoolingServingBase):
 
         return pooling_task
 
-    async def _build_response(
+    def _build_response(
         self,
         ctx: PoolingServeContext,
     ) -> Response:
