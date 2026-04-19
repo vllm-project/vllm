@@ -36,7 +36,7 @@ class TransferJobStatus:
     """Tracks scheduler-side state for a single transfer job."""
 
     req_id: ReqId
-    # Number of TP workers still pending. Starts at num_workers,
+    # Number of workers still pending. Starts at num_workers,
     # decremented as each worker reports completion. Job is done at 0.
     pending_count: int
 
