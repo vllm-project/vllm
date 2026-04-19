@@ -134,4 +134,27 @@ void silu_and_mul_nvfp4_quant(torch::stable::Tensor& out,
                               torch::stable::Tensor& input,
                               torch::stable::Tensor& input_global_scale);
 
+void mxfp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts,
+    int64_t n_experts);
+
+void silu_and_mul_mxfp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts,
+    int64_t n_experts);
+
+void cutlass_mxfp4_group_mm(torch::stable::Tensor& output,
+                            const torch::stable::Tensor& a,
+                            const torch::stable::Tensor& b,
+                            const torch::stable::Tensor& a_blockscale,
+                            const torch::stable::Tensor& b_blockscales,
+                            const torch::stable::Tensor& problem_sizes,
+                            const torch::stable::Tensor& expert_offsets,
+                            const torch::stable::Tensor& sf_offsets);
+
 #endif
