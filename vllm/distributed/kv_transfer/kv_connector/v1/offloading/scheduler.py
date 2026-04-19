@@ -284,6 +284,7 @@ class OffloadingConnectorScheduler:
             req_id=request.request_id,
             transfer_spec=(src_spec, dst_spec),
         )
+        assert req_status.load_job is None
         req_status.load_job = load_job_id
         self._jobs[load_job_id] = TransferJobStatus(
             req_id=request.request_id,
