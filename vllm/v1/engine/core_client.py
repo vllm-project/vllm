@@ -1205,10 +1205,14 @@ class DPAsyncMPClient(AsyncMPClient):
 
                 while True:
                     events = await poller.poll()
+                    has_first_req_event = any(
+                        polled_socket == first_req_rcv_socket
+                        for polled_socket, _ in events
+                    )
                     if (
                         not self.engines_running
                         and len(events) == 2
-                        or (events[0][0] == first_req_rcv_socket)
+                        or has_first_req_event
                     ):
                         # Check if this is a regular request notification or
                         # scale up notification
@@ -1303,7 +1307,8 @@ class DPAsyncMPClient(AsyncMPClient):
         to_await = self._send_input(EngineCoreRequestType.ADD, request, chosen_engine)
         if not self.engines_running:
             # Notify coordinator that we're sending a request
-            req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine))
+            chosen_engine_index = self.core_engines.index(chosen_engine)
+            req_msg = msgspec.msgpack.encode(("FIRST_REQ", chosen_engine_index))
             await self.first_req_send_socket.send(req_msg)
 
         await to_await
