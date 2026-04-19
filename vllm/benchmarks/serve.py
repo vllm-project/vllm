@@ -1718,9 +1718,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "'--dataset-path' if required."
         )
 
-    if args.dataset_name == "random" and args.dataset_path is not None:
+    if args.dataset_name in ["random", "random-mm", "random-rerank", "prefix_repetition"] and args.dataset_path is not None:
         raise ValueError(
-            "Cannot use 'random' dataset with --dataset-path. "
+            f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
             "Please specify the appropriate --dataset-name (e.g., "
             "'sharegpt', 'custom', 'sonnet') for your dataset file: "
             f"{args.dataset_path}"
