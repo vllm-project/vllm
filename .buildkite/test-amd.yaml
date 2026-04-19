@@ -240,7 +240,7 @@ steps:
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_chat.py --ignore=entrypoints/llm/test_accuracy.py --ignore=entrypoints/llm/test_init.py --ignore=entrypoints/llm/test_prompt_validation.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py
   - pytest -v -s entrypoints/offline_mode
 
@@ -740,8 +740,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/core kernels/test_top_k_per_row.py
-
+  - pytest -v -s kernels/core kernels/test_top_k_per_row.py --ignore=kernels/core/test_fused_quant_layernorm.py --ignore=kernels/core/test_permute_cols.py
 
 - label: Kernels Mamba Test # TBD
   timeout_in_minutes: 180
@@ -755,8 +754,7 @@ steps:
   - vllm/model_executor/layers/mamba/ops
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/mamba
-
+  - pytest -v -s kernels/mamba --ignore=kernels/mamba/test_mamba_mixer2.py --ignore=kernels/mamba/test_causal_conv1d.py --ignore=kernels/mamba/test_mamba_ssm_ssd.py
 
 - label: Kernels Helion Test # TBD
   timeout_in_minutes: 180
@@ -883,8 +881,7 @@ steps:
   - tests/models/test_transformers.py
   - tests/models/test_registry.py
   commands:
-  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
-
+  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'
 
 - label: Basic Models Test (Other CPU) # TBD
   timeout_in_minutes: 180
@@ -1425,7 +1422,7 @@ steps:
   - tests/entrypoints/offline_mode
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
+  - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_chat.py --ignore=entrypoints/llm/test_accuracy.py --ignore=entrypoints/llm/test_init.py --ignore=entrypoints/llm/test_prompt_validation.py --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py
   - pytest -v -s entrypoints/offline_mode
 
@@ -1477,8 +1474,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
-
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_completion.py --ignore=entrypoints/openai/models/test_models.py --ignore=entrypoints/openai/test_return_tokens_as_ids.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 - label: Entrypoints Integration (API Server 2) #26.9m
   timeout_in_minutes: 45
@@ -2003,8 +1999,7 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/core kernels/test_top_k_per_row.py
-
+  - pytest -v -s kernels/core kernels/test_top_k_per_row.py --ignore=kernels/core/test_fused_quant_layernorm.py --ignore=kernels/core/test_permute_cols.py
 
 - label: Kernels Attention Test %N # 17.7m
   timeout_in_minutes: 28
@@ -2021,8 +2016,7 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
+  - pytest -v -s kernels/attention --ignore=kernels/attention/test_attention_selector.py --ignore=kernels/attention/test_encoder_decoder_attn.py --ignore=kernels/attention/test_flash_attn.py --ignore=kernels/attention/test_flashinfer.py --ignore=kernels/attention/test_prefix_prefill.py --ignore=kernels/attention/test_cascade_flash_attn.py --ignore=kernels/attention/test_mha_attn.py --ignore=kernels/attention/test_lightning_attn.py --ignore=kernels/attention/test_attention.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels Quantization Test %N # 15.2m
   timeout_in_minutes: 24
@@ -2039,8 +2033,7 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/model_executor/kernels/
   commands:
-  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
+  - pytest -v -s kernels/quantization --ignore=kernels/quantization/test_int8_quant.py --ignore=kernels/quantization/test_machete_mm.py --ignore=kernels/quantization/test_block_fp8.py --ignore=kernels/quantization/test_block_int8.py --ignore=kernels/quantization/test_marlin_gemm.py --ignore=kernels/quantization/test_cutlass_scaled_mm.py --ignore=kernels/quantization/test_int8_kernel.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 19
@@ -2059,9 +2052,8 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
 
 - label: Kernels FP8 MoE Test # TBD
   timeout_in_minutes: 180
@@ -2079,7 +2071,6 @@ steps:
   - vllm/envs.py
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
-
 
 - label: ROCm AITER Ops Test # TBD
   timeout_in_minutes: 180
@@ -3035,8 +3026,7 @@ steps:
   - tests/entrypoints/test_chat_utils
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
-
+  - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_completion.py --ignore=entrypoints/openai/models/test_models.py --ignore=entrypoints/openai/test_return_tokens_as_ids.py --ignore=entrypoints/openai/chat_completion --ignore=entrypoints/openai/completion --ignore=entrypoints/openai/speech_to_text/ --ignore=entrypoints/openai/correctness/ --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
 
 - label: Entrypoints Integration (API Server 2) # TBD
   timeout_in_minutes: 180
@@ -3212,8 +3202,7 @@ steps:
   - vllm/envs.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
+  - pytest -v -s kernels/attention --ignore=kernels/attention/test_attention_selector.py --ignore=kernels/attention/test_encoder_decoder_attn.py --ignore=kernels/attention/test_flash_attn.py --ignore=kernels/attention/test_flashinfer.py --ignore=kernels/attention/test_prefix_prefill.py --ignore=kernels/attention/test_cascade_flash_attn.py --ignore=kernels/attention/test_mha_attn.py --ignore=kernels/attention/test_lightning_attn.py --ignore=kernels/attention/test_attention.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
@@ -3230,8 +3219,7 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/model_executor/kernels/
   commands:
-  - pytest -v -s kernels/quantization --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
+  - pytest -v -s kernels/quantization --ignore=kernels/quantization/test_int8_quant.py --ignore=kernels/quantization/test_machete_mm.py --ignore=kernels/quantization/test_block_fp8.py --ignore=kernels/quantization/test_block_int8.py --ignore=kernels/quantization/test_marlin_gemm.py --ignore=kernels/quantization/test_cutlass_scaled_mm.py --ignore=kernels/quantization/test_int8_kernel.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 180
@@ -3250,9 +3238,8 @@ steps:
   - vllm/_aiter_ops.py
   - vllm/platforms/rocm.py
   commands:
-  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py --ignore=kernels/moe/test_moe.py --ignore=kernels/moe/test_cutlass_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
   - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-
 
 - label: Kernels FP8 MoE Test # TBD
   timeout_in_minutes: 180
@@ -3269,7 +3256,6 @@ steps:
   - vllm/envs.py
   commands:
     - pytest -v -s kernels/moe/test_deepep_moe.py
-
 
 - label: Quantization # TBD
   timeout_in_minutes: 180

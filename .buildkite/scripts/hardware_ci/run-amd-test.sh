@@ -114,8 +114,8 @@ handle_pytest_exit() {
 # unquoted since they have no spaces and work fine.
 #
 # Already-quoted expressions (containing literal single quotes) are passed
-# through untouched to avoid double-quoting values injected by
-# apply_rocm_test_overrides.
+# through untouched to avoid double-quoting values from the pipeline (e.g.
+# pytest -k / -m arguments in test-amd.yaml).
 #
 # NOTE: This ONLY fixes -m/-k flags. It cannot recover arbitrary inner
 # double-quotes stripped by the calling shell (see header comment).
@@ -248,102 +248,6 @@ re_quote_pytest_markers() {
 }
 
 ###############################################################################
-# ROCm-specific pytest command rewrites
-#
-# These apply ignore flags and environment overrides for tests that are not
-# yet supported or behave differently on ROCm hardware. Kept as a single
-# function so new exclusions are easy to add in one place.
-###############################################################################
-
-apply_rocm_test_overrides() {
-  local cmds="$1"
-
-  # --- Model registry filter ---
-  if [[ $cmds == *"pytest -v -s models/test_registry.py"* ]]; then
-    cmds=${cmds//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
-  fi
-
-  # --- LoRA: disable custom paged attention ---
-  if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
-  fi
-
-  # --- Kernel ignores ---
-  if [[ $cmds == *" kernels/core"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/core/test_fused_quant_layernorm.py \
-    --ignore=kernels/core/test_permute_cols.py"
-  fi
-
-  if [[ $cmds == *" kernels/attention"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/attention/test_attention_selector.py \
-    --ignore=kernels/attention/test_encoder_decoder_attn.py \
-    --ignore=kernels/attention/test_flash_attn.py \
-    --ignore=kernels/attention/test_flashinfer.py \
-    --ignore=kernels/attention/test_prefix_prefill.py \
-    --ignore=kernels/attention/test_cascade_flash_attn.py \
-    --ignore=kernels/attention/test_mha_attn.py \
-    --ignore=kernels/attention/test_lightning_attn.py \
-    --ignore=kernels/attention/test_attention.py"
-  fi
-
-  if [[ $cmds == *" kernels/quantization"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/quantization/test_int8_quant.py \
-    --ignore=kernels/quantization/test_machete_mm.py \
-    --ignore=kernels/quantization/test_block_fp8.py \
-    --ignore=kernels/quantization/test_block_int8.py \
-    --ignore=kernels/quantization/test_marlin_gemm.py \
-    --ignore=kernels/quantization/test_cutlass_scaled_mm.py \
-    --ignore=kernels/quantization/test_int8_kernel.py"
-  fi
-
-  if [[ $cmds == *" kernels/mamba"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/mamba/test_mamba_mixer2.py \
-    --ignore=kernels/mamba/test_causal_conv1d.py \
-    --ignore=kernels/mamba/test_mamba_ssm_ssd.py"
-  fi
-
-  if [[ $cmds == *" kernels/moe"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py"
-  fi
-
-  # --- Entrypoint ignores ---
-  if [[ $cmds == *" entrypoints/openai "* ]]; then
-    cmds=${cmds//" entrypoints/openai "/" entrypoints/openai \
-    --ignore=entrypoints/openai/chat_completion/test_audio.py \
-    --ignore=entrypoints/openai/completion/test_shutdown.py \
-    --ignore=entrypoints/openai/test_completion.py \
-    --ignore=entrypoints/openai/models/test_models.py \
-    --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
-    --ignore=entrypoints/openai/chat_completion/test_root_path.py \
-    --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
-  fi
-
-  if [[ $cmds == *" entrypoints/serve"* ]]; then
-    cmds="${cmds} \
-    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
-  fi
-
-  if [[ $cmds == *" entrypoints/llm "* ]]; then
-    cmds=${cmds//" entrypoints/llm "/" entrypoints/llm \
-    --ignore=entrypoints/llm/test_chat.py \
-    --ignore=entrypoints/llm/test_accuracy.py \
-    --ignore=entrypoints/llm/test_init.py \
-    --ignore=entrypoints/llm/test_prompt_validation.py "}
-  fi
-
-  # Clean up escaped newlines from --ignore appends
-  cmds=$(echo "$cmds" | sed 's/ \\ / /g')
-
-  echo "$cmds"
-}
-
-###############################################################################
 # Main
 ###############################################################################
 
@@ -399,9 +303,6 @@ echo "Raw commands: $commands"
 
 # Fix quoting before ROCm overrides (so overrides see correct structure)
 commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
-
-commands=$(apply_rocm_test_overrides "$commands")
 echo "Final commands: $commands"
 
 MYPYTHONPATH=".."
