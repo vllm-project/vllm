@@ -1,0 +1,92 @@
+name: Upload deepwiki-open Docker Archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: Git tag or release name to upload the asset to
+        required: true
+        type: string
+      image_ref:
+        description: Docker image reference to save
+        required: true
+        default: deepwiki-open:latest
+        type: string
+      asset_name:
+        description: Release asset filename
+        required: true
+        default: deepwiki-open.tar
+        type: string
+      create_release:
+        description: Create the GitHub Release when it does not exist
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  upload-archive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Log in to Docker Hub
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        run: |
+          echo "${DOCKERHUB_TOKEN}" \
+            | docker login --username "${DOCKERHUB_USERNAME}" --password-stdin
+
+      - name: Pull Docker image
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+        run: |
+          set -euo pipefail
+          docker pull "${IMAGE_REF}"
+
+      - name: Save Docker image archive
+        env:
+          IMAGE_REF: ${{ inputs.image_ref }}
+          ASSET_NAME: ${{ inputs.asset_name }}
+        run: |
+          set -euo pipefail
+          docker save "${IMAGE_REF}" -o "${ASSET_NAME}"
+          sha256sum "${ASSET_NAME}" > "${ASSET_NAME}.sha256"
+
+      - name: Ensure GitHub Release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag_name }}
+          CREATE_RELEASE: ${{ inputs.create_release }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          if [ "${CREATE_RELEASE}" != "true" ]; then
+            echo "Release '${TAG_NAME}' does not exist." >&2
+            exit 1
+          fi
+
+          gh release create "${TAG_NAME}" \
+            --target "${GITHUB_SHA}" \
+            --title "${TAG_NAME}" \
+            --notes "Docker image archive for deepwiki-open."
+
+      - name: Upload archive to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ inputs.tag_name }}
+          ASSET_NAME: ${{ inputs.asset_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "${TAG_NAME}" \
+            "${ASSET_NAME}" \
+            "${ASSET_NAME}.sha256" \
+            --clobber

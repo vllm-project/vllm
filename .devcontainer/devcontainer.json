@@ -1,0 +1,101 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/ubuntu
+{
+    "name": "devbox",
+    "image": "mcr.microsoft.com/devcontainers/base:noble",
+    "runArgs": [],
+    "mounts": [
+        // Share the "AWS" credentials with Windows or WSL2.
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.aws,target=/home/vscode/.aws,type=bind,consistency=cached",
+        // Share the "Azure" credentials with Windows or WSL2.
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.azure,target=/home/vscode/.azure,type=bind,consistency=cached",
+        // Share the "Claude Code" settings and credentials with Windows or WSL2.
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.claude,target=/home/vscode/.claude,type=bind,consistency=cached",
+        // Share the "Codex CLI" settings and credentials with Windows or WSL2.
+        "source=${localEnv:HOME}${localEnv:USERPROFILE}/.codex,target=/home/vscode/.codex,type=bind,consistency=cached"
+        // Store the "Serena" MCP server cache.
+        // "source=${localWorkspaceFolderBasename}-serena-cache,target=${containerWorkspaceFolder}/.serena/cache,type=volume",
+        // Store the "pnpm" cache as a Docker volume.
+        // "source=${localWorkspaceFolderBasename}-pnpm-cache,target=${containerWorkspaceFolder}/.pnpm-store,type=volume",
+        // Store the "uv" cache as a Docker volume.
+        // "source=${localWorkspaceFolderBasename}-uv-cache,target=/home/vscode/.cache/uv,type=volume"
+    ],
+    // Use 'forwardPorts' to make a list of ports inside the container available locally.
+    // "forwardPorts": [],
+    // Use 'postCreateCommand' to run commands after the container is created.
+    "initializeCommand": "echo $(powershell.exe -Command 'echo $env:UserName' | tr -d '\r')",
+    "postCreateCommand": "bash ./.devcontainer/postCreateCommand.sh",
+    "postStartCommand": "uname -a",
+    // Uncomment to connect as root instead. More info: https://aka.ms/dev-containers-non-root.
+    // "remoteUser": "root"
+    // Features to add to the dev container. More info: https://containers.dev/features.
+    "features": {
+        "ghcr.io/rocker-org/devcontainer-features/apt-packages:1": {
+            "packages": "curl,wget,git,jq,ca-certificates,build-essential,ripgrep"
+        },
+        // "ghcr.io/devcontainers/features/aws-cli:1": {},
+        // "ghcr.io/devcontainers-extra/features/aws-cdk:2": {},
+        // "ghcr.io/devcontainers/features/azure-cli:1": {},
+        "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+        "ghcr.io/devcontainers/features/node:1": {},
+        "ghcr.io/devcontainers/features/python:1": {},
+        "ghcr.io/devcontainers-extra/features/uv:1": {},
+        "ghcr.io/devcontainer-community/devcontainer-features/astral.sh-uv:1": {
+            "shellautocompletion": true
+        },
+        "ghcr.io/anthropics/devcontainer-features/claude-code:1.0": {}
+    },
+    // Configure tool-specific properties.
+    "customizations": {
+        "vscode": {
+            // Add the IDs of extensions you want installed when the container is created.
+            "extensions": [
+                // ------------------------------
+                // Coding Agents
+                // ------------------------------
+                "github.copilot", // GitHub Copilot
+                "github.copilot-chat", // GitHub Copilot Chat
+                "anthropic.claude-code", // Anthropic Claude Code
+                "openai.chatgpt", // OpenAI Codex CLI
+                // "saoudrizwan.claude-dev", // Cline
+                // "rooveterinaryinc.roo-cline", // Roo Code
+                // "continue.continue", // Continue
+                // "kilocode.kilo-code", // Kilo Code
+                // ------------------------------
+                // Utility
+                // ------------------------------
+                "foam.foam-vscode", // Foam; Note taking
+                // "github.remotehub", // GitHub Repositories
+                // "github.codespaces", // GitHub Codespaces
+                // "github.vscode-github-actions", // GitHub Actions
+                // "github.vscode-pull-request-github", // GitHub Pull Requests
+                "gitlab.gitlab-workflow", // GitLab Workflow
+                // ------------------------------
+                // Language support for Frontend Development
+                // ------------------------------
+                // "dbaeumer.vscode-eslint", // Linter
+                // "esbenp.prettier-vscode", // Formatter
+                // "biomejs.biome", // Linter/Formatter
+                // "xabikos.JavaScriptSnippets", // Code Snippets
+                // "yoavbls.pretty-ts-errors", // Pretty Error messages for Typescript
+                // "crystal-spider.jsdoc-generator", // JSDoc generator
+                // "formulahendry.auto-rename-tag", // Auto rename tag for HTML
+                // "formulahendry.auto-close-tag", // Auto close tag for HTML
+                // "dsznajder.es7-react-js-snippets", // Code Snippets for React.js
+                // "PulkitGangwar.nextjs-snippets", // Code Snippets for Next.js
+                // "nextnav.nextnav", // Route Visualizer for Next.js
+                // "wix.vscode-import-cost", // Package Size Checker for npm
+                // ------------------------------
+                // Language support
+                // ------------------------------
+                "davidanson.vscode-markdownlint", // Markdown Linter
+                "yzhang.markdown-all-in-one", // Markdown Completion
+                "bierner.markdown-mermaid", // Mermaid
+                "tamasfe.even-better-toml", // TOML
+                "redhat.vscode-yaml" // YAML
+                // "esbenp.prettier-vscode", // Javascript/Typescript
+            ],
+            "settings": {}
+        }
+    }
+}
