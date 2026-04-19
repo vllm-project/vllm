@@ -733,6 +733,9 @@ class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.sym:
+            # The tail-shard fallback dequantizes weights on demand, so keep
+            # only the effective symmetric zero point instead of the packed
+            # GPTQ qzeros tensor.
             layer.qzeros = Parameter(
                 torch.tensor([8], dtype=torch.int8, device=layer.qweight.device),
                 requires_grad=False,
@@ -762,6 +765,7 @@ class INCGPTQRowParallelTailLinearMethod(LinearMethodBase):
         scales = layer.scales.data.to(torch.float32)
         dequant = qweight * scales.index_select(0, g_idx)
         weight = dequant.t().contiguous()
+        # Cache the dequantized tail-shard weight after the first fallback use.
         layer._inc_tail_dequant_weight = weight
         return weight
 
