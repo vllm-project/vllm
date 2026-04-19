@@ -214,13 +214,9 @@ class TestGlm47Streaming:
         first_function = first_delta.function
         assert first_function.name == "get_weather"
         assert first_function.arguments == ""
-        assert json.loads(full.tool_calls[1].function.arguments) == {
-            "city": "Beijing"
-        }
+        assert json.loads(full.tool_calls[1].function.arguments) == {"city": "Beijing"}
 
-    def test_delays_prefix_only_tool_name_with_function_tools(
-        self, glm47_tokenizer
-    ):
+    def test_delays_prefix_only_tool_name_with_function_tools(self, glm47_tokenizer):
         parser = Glm47MoeModelToolParser(
             glm47_tokenizer,
             tools=[
@@ -276,6 +272,4 @@ class TestGlm47Streaming:
         assert full is not None
         assert full.tool_calls is not None
         assert full.tool_calls[0].function.name == "get_weather"
-        assert json.loads(full.tool_calls[1].function.arguments) == {
-            "city": "Beijing"
-        }
+        assert json.loads(full.tool_calls[1].function.arguments) == {"city": "Beijing"}
