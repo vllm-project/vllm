@@ -52,6 +52,7 @@ from vllm.model_executor.models.llava import (
     LlavaDummyInputsBuilder,
     init_vision_tower_for_llava,
 )
+from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.llava_next import (
     BaseLlavaNextMultiModalProcessor,
     LlavaNextProcessingInfo,
@@ -328,7 +329,7 @@ class Granite4VisionForConditionalGeneration(
             "model.layerwise_projectors.": "layerwise_projectors.",
             "model.spatial_projectors.": "spatial_projectors.",
             "model.image_newline": "image_newline",
-            "model.vision_tower.": "vision_tower.",
+            "model.vision_tower.": "vision_tower.vision_model.",
             "lm_head.": "language_model.lm_head.",
         }
     )
@@ -356,8 +357,12 @@ class Granite4VisionForConditionalGeneration(
 
         # ----- Vision tower + projectors (marked as tower) -----
         with self._mark_tower_model(vllm_config, "image"):
-            self.vision_tower = init_vision_tower_for_llava(
-                config,
+            # Do NOT use init_vision_tower_for_llava here — it truncates the
+            # encoder to vision_feature_layer depth. Deepstack needs ALL hidden
+            # states (deepstack_layer_map uses negative indices into the full
+            # encoder output list).
+            self.vision_tower = SiglipVisionModel(
+                config.vision_config,
                 quant_config=quant_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
@@ -549,11 +554,13 @@ class Granite4VisionForConditionalGeneration(
                 selected = selected[:, 1:]  # remove CLS
 
             projected = self.layerwise_projectors[proj_idx](selected)
+
             projected_split = torch.split(projected, image_num_patches, dim=0)
 
             packed = self._pack_and_unpad_image_features(
                 projected_split, image_sizes
             )
+
             all_features.append((llm_layer, packed))
 
         # ----- Spatial features -----
