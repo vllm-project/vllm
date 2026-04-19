@@ -1373,26 +1373,6 @@ class ShareGPTDataset(BenchmarkDataset):
         return samples
 
 
-class _ValidateDatasetArgs(argparse.Action):
-    """Argparse action to validate dataset name and path compatibility."""
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        setattr(namespace, self.dest, values)
-
-        # Get current values of both dataset_name and dataset_path
-        dataset_name = getattr(namespace, "dataset_name", "random")
-        dataset_path = getattr(namespace, "dataset_path", None)
-
-        # Validate the combination
-        if dataset_name == "random" and dataset_path is not None:
-            parser.error(
-                "Cannot use 'random' dataset with --dataset-path. "
-                "Please specify the appropriate --dataset-name (e.g., "
-                "'sharegpt', 'custom', 'sonnet') for your dataset file: "
-                f"{dataset_path}"
-            )
-
-
 def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--trust-remote-code",
@@ -1410,7 +1390,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--dataset-name",
         type=str,
         default="random",
-        action=_ValidateDatasetArgs,
         choices=[
             "sharegpt",
             "burstgpt",
@@ -1436,7 +1415,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--dataset-path",
         type=str,
         default=None,
-        action=_ValidateDatasetArgs,
         help="Path to the sharegpt/sonnet dataset or the HF dataset ID if "
         "using HF dataset.",
     )
@@ -1608,7 +1586,9 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "repetition dataset.",
     )
 
-    speed_bench_group = parser.add_argument_group("speed bench dataset options")
+    speed_bench_group = parser.add_argument_group(
+        "speed bench dataset options", description=SpeedBench.__doc__
+    )
     speed_bench_group.add_argument(
         "--speed-bench-dataset-subset",
         type=str,
