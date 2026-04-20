@@ -30,7 +30,6 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_reduce
 
@@ -52,7 +51,6 @@ from .eplb_utils import CpuGpuEvent
 from .policy import EPLB_POLICIES, AbstractEplbPolicy, DefaultEplbPolicy
 from .rebalance_execute import (
     AsyncEplbLayerResult,
-    TransferMetadata,
     move_from_buffer,
     rearrange_expert_weights_inplace,
 )
@@ -189,10 +187,6 @@ class EplbModelState:
     eplb_stats: EplbStats | None
     """
     EPLB stats for the model.
-    """
-    transfer_metadata: TransferMetadata
-    """
-    intermediate variable between `move_to_buffer` and `move_to_workspace`.
     """
     cuda_device_index: int | None
     """
@@ -470,14 +464,6 @@ class EplbState:
             expert_buffer=expert_buffer,
             rebalanced=False,
             eplb_stats=None,
-            transfer_metadata=TransferMetadata(
-                is_unchanged=np.array([]),
-                is_received_locally=np.array([]),
-                recv_primary_mask=np.array([]),
-                recv_count=0,
-                recv_expert_ids=np.array([]),
-                recv_dst_rows=np.array([]),
-            ),
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
         )
