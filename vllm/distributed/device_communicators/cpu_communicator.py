@@ -45,6 +45,9 @@ class CpuCommunicator(DeviceCommunicatorBase):
                 unique_name,
             )
 
+        # send/recv tensor_dict is only supported through the SHM communicator backend
+        self.supports_tensor_dict = isinstance(self.dist_module, _CPUSHMDistributed)
+
         if self.use_all2all:
             if self.all2all_backend != "naive":  # type: ignore[has-type]
                 logger.warning(
@@ -143,12 +146,22 @@ class CpuCommunicator(DeviceCommunicatorBase):
         tensor_dict: dict[str, torch.Tensor | Any],
         dst: int,
     ) -> None:
+        if not self.supports_tensor_dict:
+            raise NotImplementedError(
+                "CpuCommunicator does not support tensor dict fastpath with "
+                "torch.distributed backend."
+            )
         return self.dist_module.send_tensor_dict(tensor_dict, dst)
 
     def recv_tensor_dict(
         self,
         src: int,
     ) -> dict[str, torch.Tensor | Any]:
+        if not self.supports_tensor_dict:
+            raise NotImplementedError(
+                "CpuCommunicator does not support tensor dict fastpath with "
+                "torch.distributed backend."
+            )
         return self.dist_module.recv_tensor_dict(src)
 
     def dispatch_router_logits(
