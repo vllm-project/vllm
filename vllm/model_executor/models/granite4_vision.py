@@ -24,14 +24,16 @@ import torch.nn as nn
 from safetensors.torch import load_file
 from transformers import BatchFeature
 from transformers.models.blip_2.configuration_blip_2 import Blip2QFormerConfig
-from transformers.models.blip_2.modeling_blip_2 import Blip2QFormerModel
+
+from .blip2 import Blip2QFormerModel
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape,
     image_size_to_num_patches,
     unpad_image,
 )
 
-from vllm.config import VllmConfig
+from vllm.config import CacheConfig, VllmConfig
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -125,7 +127,14 @@ class SpatialOffsetDownsampler:
 class WindowQFormerDownsampler(nn.Module):
     """Window-based QFormer downsampler (matches HF downsampling.py exactly)."""
 
-    def __init__(self, config, spatial_offset=None):
+    def __init__(
+        self,
+        config,
+        quant_config: QuantizationConfig | None = None,
+        cache_config: CacheConfig | None = None,
+        spatial_offset: int | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         llm_hidden_size = config.text_config.hidden_size
         vision_hidden_size = config.vision_config.hidden_size
@@ -147,7 +156,12 @@ class WindowQFormerDownsampler(nn.Module):
             max_position_embeddings=2048,
             use_qformer_text_input=False,
         )
-        self.qformer = Blip2QFormerModel(qformer_config)
+        self.qformer = Blip2QFormerModel(
+            qformer_config,
+            quant_config=quant_config,
+            cache_config=cache_config,
+            prefix=f"{prefix}.qformer",
+        )
 
         self.image_side = (
             config.vision_config.image_size // config.vision_config.patch_size
@@ -208,8 +222,7 @@ class WindowQFormerDownsampler(nn.Module):
         out_w = self.qformer(
             query_embeds=query_embeds,
             encoder_hidden_states=encoder_embeds,
-            return_dict=True,
-        ).last_hidden_state
+        )
 
         out = self._unwin(out_w, n=n, win=self.query_side)
         out = self.dropout(out)
@@ -376,17 +389,30 @@ class Granite4VisionForConditionalGeneration(
             else:
                 self.image_newline = None
 
+            cache_config = vllm_config.cache_config
+
             # Deepstack projectors: one per (vision_layer, llm_layer) pair
             self.layerwise_projectors = nn.ModuleList([
-                WindowQFormerDownsampler(config)
-                for _ in range(len(config.deepstack_layer_map))
+                WindowQFormerDownsampler(
+                    config,
+                    quant_config=quant_config,
+                    cache_config=cache_config,
+                    prefix=maybe_prefix(prefix, f"layerwise_projectors.{i}"),
+                )
+                for i in range(len(config.deepstack_layer_map))
             ])
 
             # Spatial projectors: 4 offset groups
             self.spatial_projectors = None
             if config.use_spatial_sampling:
                 self.spatial_projectors = nn.ModuleList([
-                    WindowQFormerDownsampler(config, spatial_offset=i)
+                    WindowQFormerDownsampler(
+                        config,
+                        quant_config=quant_config,
+                        cache_config=cache_config,
+                        spatial_offset=i,
+                        prefix=maybe_prefix(prefix, f"spatial_projectors.{i}"),
+                    )
                     for i in range(4)
                 ])
 
