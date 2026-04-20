@@ -854,7 +854,8 @@ def get_num_blocks(
         num_layers: The number of layers
         available_memory: Memory available for KV cache in bytes.
         page_size: The page size of the KV cache.
-        suppress_log: Whether to suppress override log messages.
+        suppress_log: Whether to suppress override log messages. Used when creating a
+            temporary/dummy KV cache config, e.g. during CG memory profiling
     """
     num_blocks = int(available_memory // page_size // num_layers)
     num_blocks = max(num_blocks, 0)
