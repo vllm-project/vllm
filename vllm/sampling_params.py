@@ -153,6 +153,14 @@ class RequestOutputKind(Enum):
     FINAL_ONLY = 2
 
 
+def _is_non_tekken_mistral(tokenizer: TokenizerLike) -> bool:
+    return is_mistral_tokenizer(tokenizer) and not tokenizer.is_tekken
+
+
+def _get_llg_tokenizer(tokenizer: TokenizerLike) -> Any:
+    return tokenizer.llg_tokenizer if is_mistral_tokenizer(tokenizer) else None
+
+
 class SamplingParams(
     PydanticMsgspecMixin,
     msgspec.Struct,
@@ -801,17 +809,21 @@ class SamplingParams(
             # xgrammar with no fallback
             validate_xgrammar_grammar(self)
         elif backend.startswith("guidance"):
+            if _is_non_tekken_mistral(tokenizer=tokenizer):
+                raise ValueError(
+                    "Non-tekken Mistral tokenizers are not supported for the 'guidance'"
+                    " structured output backend. Please either use a more recent "
+                    "Mistral model, the ['xgrammar', 'outlines'] "
+                    "backends or tokenizer_mode='hf' instead."
+                )
             # TODO: ideally we would have the LLTokenizer here as Lark syntax
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if is_mistral_tokenizer(tokenizer):
-                raise ValueError(
-                    "Mistral tokenizer is not supported for the 'guidance' "
-                    "structured output backend. Please use ['xgrammar', 'outlines'] "
-                    "backends or tokenizer_mode='hf' instead."
-                )
-            validate_guidance_grammar(self, tokenizer=None)
+            validate_guidance_grammar(
+                self,
+                tokenizer=_get_llg_tokenizer(tokenizer),
+            )
         elif backend == "outlines":
             # outlines backend
             validate_structured_output_request_outlines(self)
@@ -839,24 +851,28 @@ class SamplingParams(
                 # or includes some jsonschema feature(s) that
                 # are not supported in xgrammar.
 
+                skip_guidance = _is_non_tekken_mistral(tokenizer)
+
                 # Check if schema has features unsupported by guidance
                 so_params = self.structured_outputs
-                skip_guidance = False
-                if so_params.json:
+                if not skip_guidance and so_params.json:
                     if isinstance(so_params.json, str):
                         schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if is_mistral_tokenizer(tokenizer) or skip_guidance:
-                    # Fall back to outlines if the tokenizer is Mistral
-                    # or if schema contains features unsupported by guidance
+                if skip_guidance:
+                    # Fall back to outlines if the tokenizer is non-tekken Mistral or
+                    # the schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)
                     self.structured_outputs._backend = "outlines"
                 else:
                     # Fall back to guidance by default.
-                    validate_guidance_grammar(self, tokenizer=None)
+                    validate_guidance_grammar(
+                        self,
+                        tokenizer=_get_llg_tokenizer(tokenizer),
+                    )
                     self.structured_outputs._backend = "guidance"
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True
