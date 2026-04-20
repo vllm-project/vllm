@@ -885,6 +885,7 @@ def make_mxfp4_moe_kernel(
         shared_experts=(
             shared_experts
             if moe_config.moe_parallel_config.use_deepep_ll_kernels
+            or moe_config.moe_parallel_config.use_nixl_ep_kernels
             else None
         ),
         inplace=(
