@@ -10,9 +10,10 @@ from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
 from enum import IntEnum
-from functools import partial
+from functools import partial, reduce
 from inspect import isclass, signature
 from logging import DEBUG
+from math import gcd
 from multiprocessing.queues import Queue
 from typing import Any, TypeVar, cast
 
@@ -272,8 +273,9 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         kv_cache_groups = scheduler_kv_cache_config.kv_cache_groups
         if kv_cache_groups:
-            vllm_config.cache_config.block_size = min(
-                g.kv_cache_spec.block_size for g in kv_cache_groups
+            vllm_config.cache_config.block_size = reduce(
+                gcd,
+                (group.kv_cache_spec.block_size for group in kv_cache_groups),
             )
 
         vllm_config.validate_block_size()

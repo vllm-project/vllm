@@ -4,10 +4,11 @@
 
 import copy
 import hashlib
+import math
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from functools import partial
 from typing import Any, NewType, TypeAlias, overload
 
@@ -931,22 +932,28 @@ def unify_kv_cache_spec_page_size(
         # All layers have the same page size, no need to unify.
         return kv_cache_spec
 
-    max_page_size = max(page_sizes)
+    unified_page_size = max(page_sizes)
+    if any(unified_page_size % page_size != 0 for page_size in page_sizes):
+        unified_page_size = math.lcm(*page_sizes)
+
     new_kv_cache_spec = {}
     for layer_name, layer_spec in kv_cache_spec.items():
-        if layer_spec.page_size_bytes == max_page_size:
+        if layer_spec.page_size_bytes == unified_page_size:
             new_kv_cache_spec[layer_name] = layer_spec
         else:
             layer_page_size = layer_spec.page_size_bytes
-            if max_page_size % layer_page_size != 0:
+            if unified_page_size % layer_page_size != 0:
                 raise NotImplementedError(
                     "The page size of the layer is not divisible by the "
-                    "maximum page size. Cannot unify by adjusting block_size."
+                    "unified page size. Cannot unify by adjusting block_size."
                 )
-            ratio = max_page_size // layer_page_size
+            ratio = unified_page_size // layer_page_size
             new_block_size = layer_spec.block_size * ratio
-            new_spec = replace(layer_spec, block_size=new_block_size)
-            assert new_spec.page_size_bytes == max_page_size
+            new_spec = layer_spec.copy_with_new_block_size(new_block_size)
+            if new_spec.page_size_bytes != unified_page_size:
+                raise NotImplementedError(
+                    "Failed to unify KV cache page size after adjusting block_size."
+                )
             new_kv_cache_spec[layer_name] = new_spec
     return new_kv_cache_spec
 
@@ -1196,6 +1203,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
+                    kv_quant_mode=spec.kv_quant_mode,
                     sliding_window=spec.sliding_window,
                     page_size_padded=spec.page_size_padded,
                 )
@@ -1205,6 +1213,7 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
                     num_kv_heads=spec.num_kv_heads,
                     head_size=spec.head_size,
                     dtype=spec.dtype,
+                    kv_quant_mode=spec.kv_quant_mode,
                     attention_chunk_size=spec.attention_chunk_size,
                     page_size_padded=spec.page_size_padded,
                 )
