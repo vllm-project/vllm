@@ -211,7 +211,7 @@ class Hf3fsClient:
         resv = self.ior_r.submit().wait(min_results=ionum)
 
         # results
-        with torch.cuda.stream(self.stream):
+        with self.stream:
             hf3fs_utils.read_shm(
                 self.shm_r_tensor, self.r_pinned, tensors, self.stream_ptr_int
             )
@@ -238,7 +238,7 @@ class Hf3fsClient:
         assert self.iov_w is not None
 
         # prepare
-        with torch.cuda.stream(self.stream):
+        with self.stream:
             self.stream.wait_event(event)
             hf3fs_utils.write_shm(
                 tensors, self.shm_w_tensor, self.w_pinned, self.stream_ptr_int

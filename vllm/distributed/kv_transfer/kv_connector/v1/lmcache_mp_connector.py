@@ -587,7 +587,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
+        with torch.cuda.current_stream():
             event = torch.cuda.Event(interprocess=True)
             event.record()
 
@@ -661,7 +661,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         if len(request_ids) == 0:
             return
 
-        with torch.cuda.stream(torch.cuda.current_stream()):
+        with torch.cuda.current_stream():
             event = torch.cuda.Event(interprocess=True)
             event.record()
 

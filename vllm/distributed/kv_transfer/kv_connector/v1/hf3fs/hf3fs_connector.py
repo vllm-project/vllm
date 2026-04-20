@@ -298,7 +298,7 @@ class AsyncOperationManager:
                 )
 
             # Synchronize streams and gather data
-            with torch.cuda.stream(self._save_stream):
+            with self._save_stream:
                 self._save_stream.wait_event(main_stream_event)  # Wait for main stream
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "gather"
@@ -401,7 +401,7 @@ class AsyncOperationManager:
                 )
 
             # Step3: Scatter data back to KV cache
-            with torch.cuda.stream(self._load_stream):
+            with self._load_stream:
                 self._connector._gather_or_scatter_kv_caches(
                     block_ids, buffers, "scatter"
                 )

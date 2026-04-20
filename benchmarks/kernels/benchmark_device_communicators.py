@@ -344,7 +344,7 @@ class CommunicatorBenchmark:
 
             torch.accelerator.synchronize()
             stream = torch.cuda.Stream()
-            with torch.cuda.stream(stream):
+            with stream:
                 graph_input = tensor.clone()
 
                 # Warmup before capture

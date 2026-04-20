@@ -663,7 +663,11 @@ def current_stream() -> torch.cuda.Stream:
     the underlying hypothesis is that we do not call `torch._C._cuda_setStream`
     from C/C++ code.
     """
+
     from vllm.platforms import current_platform
+
+    if current_platform.is_cuda():
+        return torch.cuda.current_stream()
 
     if not hasattr(_current_stream_tls, "value") or _current_stream_tls.value is None:
         # when this function is called before any stream is set,
