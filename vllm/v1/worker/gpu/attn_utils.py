@@ -21,7 +21,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.kv_cache_shape_utils import (
-    maybe_adjust_kv_cache_shape_for_padded_page_size,
+    adjust_kv_cache_shape_for_padded_page_size,
 )
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
@@ -172,7 +172,7 @@ def _reshape_kv_cache(
                     cache_dtype,
                 )
             )
-            kv_cache_shape = maybe_adjust_kv_cache_shape_for_padded_page_size(
+            kv_cache_shape = adjust_kv_cache_shape_for_padded_page_size(
                 kv_cache_shape=kv_cache_shape,
                 num_blocks=num_blocks,
                 padded_page_size_bytes=kv_cache_spec.page_size_padded,

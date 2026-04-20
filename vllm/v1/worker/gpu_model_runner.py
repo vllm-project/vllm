@@ -192,7 +192,7 @@ from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunne
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_cache_shape_utils import (
-    maybe_adjust_kv_cache_shape_for_padded_page_size,
+    adjust_kv_cache_shape_for_padded_page_size,
 )
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -6581,7 +6581,7 @@ class GPUModelRunner(
                             )
                         padded_page_size_bytes //= num_blocks_per_kv_block
 
-                    kv_cache_shape = maybe_adjust_kv_cache_shape_for_padded_page_size(
+                    kv_cache_shape = adjust_kv_cache_shape_for_padded_page_size(
                         kv_cache_shape=kv_cache_shape,
                         num_blocks=kernel_num_blocks,
                         padded_page_size_bytes=padded_page_size_bytes,

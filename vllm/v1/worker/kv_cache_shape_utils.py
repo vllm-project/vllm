@@ -10,7 +10,7 @@ import torch
 from vllm.utils.torch_utils import get_dtype_size
 
 
-def maybe_adjust_kv_cache_shape_for_padded_page_size(
+def adjust_kv_cache_shape_for_padded_page_size(
     kv_cache_shape: tuple[int, ...],
     *,
     num_blocks: int,

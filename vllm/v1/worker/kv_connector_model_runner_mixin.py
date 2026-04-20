@@ -25,7 +25,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.worker.kv_cache_shape_utils import (
-    maybe_adjust_kv_cache_shape_for_padded_page_size,
+    adjust_kv_cache_shape_for_padded_page_size,
 )
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -262,7 +262,7 @@ class KVConnectorModelRunnerMixin:
                 )
             padded_page_size_bytes //= num_blocks_per_kv_block
 
-        kv_cache_shape = maybe_adjust_kv_cache_shape_for_padded_page_size(
+        kv_cache_shape = adjust_kv_cache_shape_for_padded_page_size(
             kv_cache_shape=kv_cache_shape,
             num_blocks=kernel_num_blocks,
             padded_page_size_bytes=padded_page_size_bytes,
