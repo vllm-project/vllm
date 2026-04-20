@@ -134,8 +134,9 @@ _AUTO_CONFIG_KWARGS_OVERRIDES: dict[str, dict[str, Any]] = {
 }
 
 
-def _register_config_class(model_type: str,
-                           config_class: type[PretrainedConfig]) -> None:
+def _register_config_class(
+    model_type: str, config_class: type[PretrainedConfig]
+) -> None:
     config_class.model_type = model_type
     AutoConfig.register(model_type, config_class, exist_ok=True)
 

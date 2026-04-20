@@ -107,6 +107,7 @@ def test_cached_tokenizer_from_config_registers_local_config(tmp_path: Path):
     cached_resolve_tokenizer_args.cache_clear()
 
     try:
+
         def fake_from_pretrained(path_or_repo_id: str, *args, **kwargs):
             loaded_config = AutoConfig.from_pretrained(
                 path_or_repo_id,
