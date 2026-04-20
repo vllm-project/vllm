@@ -200,6 +200,34 @@ class TestLoweringUnit:
             if "_test_sig_op" in IrOp.registry:
                 del IrOp.registry["_test_sig_op"]
 
+    def test_dispatch_failure_no_matching_impl(self):
+        """
+        Test that dispatch raises RuntimeError when no implementation
+        matches (including native). This verifies the error handling
+        path when priority is set incorrectly.
+        """
+        @ir.register_op(name="_test_fail_op")
+        def _test_fail_op(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        # Register impl that never matches
+        @_test_fail_op.register_impl(
+            "never_matches",
+            supports_args=lambda x: False,  # never True
+        )
+        def never_matches_impl(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        try:
+            x = torch.randn(8, 16, dtype=torch.bfloat16)
+            # Set priority WITHOUT native - should fail
+            with _test_fail_op.set_priority(["never_matches"]):
+                with pytest.raises(RuntimeError, match="Priority set incorrectly"):
+                    _test_fail_op.dispatch(x)
+        finally:
+            if "_test_fail_op" in IrOp.registry:
+                del IrOp.registry["_test_fail_op"]
+
 
 # ============================================================
 # 3. E2E correctness tests
