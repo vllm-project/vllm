@@ -1180,12 +1180,9 @@ class LLM:
                     f"Supported tasks: {self.supported_tasks}"
                 )
             else:
-                logger.warning_once(
-                    "Pooling multitask support is deprecated and will "
-                    "be removed in v0.20. When the default pooling task is "
-                    "not what you want, you need to manually specify it "
-                    'via PoolerConfig(task="%s"). ',
-                    pooling_task,
+                raise ValueError(
+                    f"Try switching the model's pooling_task "
+                    f'via `PoolerConfig(task="{pooling_task}"`)'
                 )
 
         if pooling_task == "plugin" and "plugin" not in self.pooling_io_processors:

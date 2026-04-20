@@ -43,23 +43,24 @@ def init_pooling_io_processors(
 ) -> dict[str, PoolingIOProcessor]:
     model_config = vllm_config.model_config
     processors: dict[str, type[PoolingIOProcessor]] = {}
+    pooling_task = model_config.get_pooling_task(supported_tasks)
 
-    if "classify" in supported_tasks:
+    if pooling_task == "classify":
         from .classify.io_processor import ClassifyIOProcessor
 
         processors["classify"] = ClassifyIOProcessor
 
-    if "token_classify" in supported_tasks:
+    if pooling_task == "token_classify":
         from .classify.io_processor import TokenClassifyIOProcessor
 
         processors["token_classify"] = TokenClassifyIOProcessor
 
-    if "embed" in supported_tasks:
+    if pooling_task == "embed":
         from .embed.io_processor import EmbedIOProcessor
 
         processors["embed"] = EmbedIOProcessor
 
-    if "token_embed" in supported_tasks:
+    if pooling_task == "token_embed":
         from .embed.io_processor import TokenEmbedIOProcessor
 
         processors["token_embed"] = TokenEmbedIOProcessor
@@ -71,14 +72,21 @@ def init_pooling_io_processors(
         from .pooling.io_processor import PluginWithIOProcessorPlugins
 
         processors["plugin"] = PluginWithIOProcessorPlugins
-    elif "plugin" in supported_tasks:
+    elif pooling_task == "plugin":
         from .pooling.io_processor import PluginWithoutIOProcessorPlugins
 
         processors["plugin"] = PluginWithoutIOProcessorPlugins
 
     if enable_scoring_api(supported_tasks, model_config):
-        score_type = model_config.score_type
         from .scoring.io_processor import ScoringIOProcessors
+
+        score_type = None
+        if pooling_task == "embed":
+            score_type = "bi-encoder"
+        elif pooling_task == "token_embed":
+            score_type = "late-interaction"
+        elif pooling_task == "classify":
+            score_type = "cross-encoder"
 
         if score_type is not None and score_type in ScoringIOProcessors:
             processors[score_type] = ScoringIOProcessors[score_type]
@@ -150,6 +158,13 @@ def init_pooling_state(
 
     model_config = engine_client.model_config
     resolved_chat_template = load_chat_template(args.chat_template)
+    pooling_task = model_config.get_pooling_task(supported_tasks)
+
+    chat_template_config = ChatTemplateConfig(
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+    )
 
     state.serving_pooling = (
         (
@@ -158,9 +173,7 @@ def init_pooling_state(
                 state.openai_serving_models,
                 supported_tasks=supported_tasks,
                 request_logger=request_logger,
-                chat_template=resolved_chat_template,
-                chat_template_content_format=args.chat_template_content_format,
-                trust_request_chat_template=args.trust_request_chat_template,
+                chat_template_config=chat_template_config,
             )
         )
         if any(t in supported_tasks for t in POOLING_TASKS)
@@ -171,11 +184,9 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
+            chat_template_config=chat_template_config,
         )
-        if "embed" in supported_tasks
+        if pooling_task == "embed"
         else None
     )
     state.serving_classification = (
@@ -183,11 +194,9 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
+            chat_template_config=chat_template_config,
         )
-        if "classify" in supported_tasks
+        if pooling_task == "classify"
         else None
     )
     state.serving_scores = (
@@ -195,9 +204,7 @@ def init_pooling_state(
             engine_client,
             state.openai_serving_models,
             request_logger=request_logger,
-            chat_template=resolved_chat_template,
-            chat_template_content_format=args.chat_template_content_format,
-            trust_request_chat_template=args.trust_request_chat_template,
+            chat_template_config=chat_template_config,
             enable_flash_late_interaction=getattr(
                 args, "enable_flash_late_interaction", True
             ),
@@ -211,10 +218,12 @@ def get_pooling_invocation_types(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
+    pooling_task = model_config.get_pooling_task(supported_tasks)
+
     # NOTE: Items defined earlier take higher priority
     invocation_types: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = []
 
-    if "embed" in supported_tasks:
+    if pooling_task == "embed":
         from .embed.api_router import create_embedding, embedding
         from .embed.protocol import EmbeddingRequest
 
@@ -222,7 +231,7 @@ def get_pooling_invocation_types(
             (EmbeddingRequest, (embedding, create_embedding)),
         ]
 
-    if "classify" in supported_tasks:
+    if pooling_task == "classify":
         from .classify.api_router import classify, create_classify
         from .classify.protocol import ClassificationRequest
 

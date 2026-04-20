@@ -84,11 +84,9 @@ class ServingPooling(PoolingServingBase):
                     f"Supported tasks: {self.supported_tasks}"
                 )
             else:
-                logger.warning_once(
-                    "Pooling multitask support is deprecated and will be removed "
-                    "in v0.20. When the default pooling task is not what you want, you "
-                    "need to manually specify it via --pooler-config.task %s. ",
-                    pooling_task,
+                raise ValueError(
+                    "Try switching the model's pooling_task "
+                    f"via --pooler-config.task {request.task}."
                 )
 
         if pooling_task == "plugin" and "plugin" not in self.io_processors:
