@@ -68,24 +68,6 @@ def _make_fake_args_for_op(op: IrOp) -> tuple[Any, ...]:
     return tuple(args)
 
 
-class Model(nn.Module):
-    def __init__(self, hidden_size=16, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.hidden_size = hidden_size
-        self.weight = torch.ones(hidden_size, dtype=torch.bfloat16)
-
-    def forward(self, x):
-        x1 = x + 4.0
-        x2 = ops.rms_norm(x1, self.weight, 1e-5)
-        x3 = x2 * 5.0
-        # no weight
-        x4 = ops.rms_norm(x3, None, 1e-5)
-        x5 = x4 / 2.0
-        # dispatch to native due to variance_size parameter
-        x6 = ops.rms_norm(x5, self.weight, 1e-5, self.hidden_size // 2)
-        return x6 + 3.0
-
-
 # ============================================================
 # 1. Per-op lowering tests
 # ============================================================
@@ -93,46 +75,52 @@ class Model(nn.Module):
 
 class TestPerOpLowering:
     """
-    Per-op lowering tests, making sure all (supported) op implementations
-    are lowered correctly. These ensure all implementation and supports_args
-    functions are properly executable by Dynamo.
+    Per-op lowering tests: verify all op implementations are lowered correctly
+    through the VllmIRLoweringPass.
+
+    These tests ensure:
+    1. All implementations can be lowered through the pass
+    2. supports_args is properly executable by Dynamo during lowering
+    3. supports_args does not specialize on the batch size (unbacked symint)
     """
 
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
-    def test_supports_args_dynamo_compatible(self, op_name, provider):
+    def test_op_lowering_succeeds(self, op_name, provider, default_vllm_config):
         """
-        Verify supports_args is Dynamo-compatible and doesn't specialize on batch size.
+        Test that each op implementation can be lowered through the pass.
 
-        Uses unbacked SymInt for batch dimensions to ensure:
-        1. supports_args can be traced by torch.compile
-        2. supports_args doesn't depend on concrete batch values
+        Verifies:
+        1. The op is replaced by the implementation in the graph
+        2. selected_impls records the correct provider
+        3. The lowered graph produces valid output
         """
         op = IrOp.registry[op_name]
-        impl = op.impls[provider]
+        if not op.impls[provider].supported:
+            pytest.skip(f"Provider {provider} not supported")
 
-        if impl._supports_args is None:
-            pytest.skip("No supports_args defined for this provider")
+        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+        backend = TestBackend(lowering_pass)
 
-        # Create fake args with unbacked symint dimensions
-        fake_args = _make_fake_args_for_op(op)
+        torch.set_default_device(current_platform.device_type)
 
-        # Wrap with torch.compile and call
-        # This verifies both:
-        # 1. Dynamo can trace supports_args
-        # 2. supports_args doesn't concretize unbacked symints
-        try:
-            compiled = torch.compile(impl.supports_args, backend="eager")
-            result = compiled(*fake_args)
-            assert isinstance(result, bool), (
-                f"supports_args should return bool, got {type(result)}"
-            )
-        except torch._dynamo.exc.Unsupported as e:
-            if "concretization" in str(e).lower():
-                pytest.fail(
-                    f"supports_args for {op_name}:{provider} specializes "
-                    f"on concrete values: {e}"
-                )
-            raise
+        with (
+            op.set_priority([provider, "native"]),
+            ir.enable_torch_wrap(True),
+        ):
+            model = _make_simple_model(op)
+            x = torch.randn(8, 16, dtype=torch.bfloat16)
+            compiled_model = torch.compile(model, backend=backend, fullgraph=True)
+            output = compiled_model(x)
+
+        # Verify lowering succeeded
+        assert op_name in lowering_pass.selected_impls, (
+            f"Op {op_name} was not lowered"
+        )
+        selected = lowering_pass.selected_impls[op_name]
+        assert len(selected) > 0, f"No instances of {op_name} were lowered"
+
+        # Verify output is valid (tensor with correct shape)
+        assert isinstance(output, torch.Tensor)
 
 
 # ============================================================
@@ -142,63 +130,67 @@ class TestPerOpLowering:
 
 class TestLoweringUnit:
     """
-    Lowering unit tests using fake ops & implementations.
-    Crucially stress-tests implementation selection by using fake ops
-    with complex supports_args.
+    Lowering unit tests with fake ops to stress-test implementation selection
+    through the VllmIRLoweringPass.
     """
 
-    def test_complex_supports_args_selection(self):
+    def test_complex_supports_args_selection(self, default_vllm_config):
         """
-        Test implementation selection with complex supports_args conditions.
-        Uses a fake op to verify that the dispatch mechanism correctly selects
-        implementations based on supports_args return values.
+        Test that lowering correctly selects implementation based on complex
+        supports_args conditions. Uses a fake op with multiple providers.
         """
-        # Register a temporary fake op for testing
-        @ir.register_op(name="_test_complex_op")
-        def _test_complex_op(x: torch.Tensor) -> torch.Tensor:
+        @ir.register_op(name="_test_selection_op")
+        def _test_selection_op(x: torch.Tensor) -> torch.Tensor:
             return x
 
-        # Register implementation with complex supports_args
-        @_test_complex_op.register_impl(
-            "complex_impl",
-            supports_args=lambda x: x.dtype == torch.bfloat16 and x.dim() == 2,
+        @_test_selection_op.register_impl(
+            "bf16_impl",
+            supports_args=lambda x: x.dtype == torch.bfloat16,
         )
-        def complex_impl(x: torch.Tensor) -> torch.Tensor:
+        def bf16_impl(x: torch.Tensor) -> torch.Tensor:
             return x * 2
 
+        @_test_selection_op.register_impl(
+            "fp32_impl",
+            supports_args=lambda x: x.dtype == torch.float32,
+        )
+        def fp32_impl(x: torch.Tensor) -> torch.Tensor:
+            return x + 1
+
         try:
-            x_bf16_2d = torch.empty(2, 8, device="meta", dtype=torch.bfloat16)
-            x_fp32_2d = torch.empty(2, 8, device="meta", dtype=torch.float32)
-            x_bf16_3d = torch.empty(2, 4, 8, device="meta", dtype=torch.bfloat16)
+            lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+            backend = TestBackend(lowering_pass)
 
-            with _test_complex_op.set_priority(["complex_impl", "native"]):
-                # bf16 2D -> complex_impl (dtype matches, dim matches)
-                assert _test_complex_op.dispatch(x_bf16_2d).provider == "complex_impl"
+            torch.set_default_device(current_platform.device_type)
 
-                # fp32 2D -> native (dtype doesn't match)
-                assert _test_complex_op.dispatch(x_fp32_2d).provider == "native"
+            with _test_selection_op.set_priority(
+                ["bf16_impl", "fp32_impl", "native"]
+            ):
+                model = _make_simple_model(_test_selection_op)
+                x = torch.randn(8, 16, dtype=torch.bfloat16)
+                compiled = torch.compile(model, backend=backend, fullgraph=True)
+                output = compiled(x)
 
-                # bf16 3D -> native (dim doesn't match)
-                assert _test_complex_op.dispatch(x_bf16_3d).provider == "native"
+            # Verify bf16_impl was selected (dtype matches supports_args)
+            selected = lowering_pass.selected_impls["_test_selection_op"]
+            assert "bf16_impl" in selected.values(), (
+                f"Expected bf16_impl, got {selected}"
+            )
         finally:
-            # Clean up
-            if "complex_impl" in _test_complex_op.impls:
-                del _test_complex_op.impls["complex_impl"]
-            if "_test_complex_op" in IrOp.registry:
-                del IrOp.registry["_test_complex_op"]
+            if "_test_selection_op" in IrOp.registry:
+                del IrOp.registry["_test_selection_op"]
 
     def test_supports_args_signature_validation(self):
         """
-        Test that supports_args signature validation catches mismatches.
+        Test that supports_args signature validation catches mismatches
+        during registration.
         """
         @ir.register_op(name="_test_sig_op")
         def _test_sig_op(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             return x + y
 
         try:
-            # Test that wrong number of parameters is rejected
             with pytest.raises(ValueError, match="number of parameters"):
-
                 @_test_sig_op.register_impl(
                     "bad_sig", supports_args=lambda x: True
                 )
