@@ -25,26 +25,24 @@ import torch.nn as nn
 from safetensors.torch import load_file
 from transformers import BatchFeature
 from transformers.models.blip_2.configuration_blip_2 import Blip2QFormerConfig
-
-from .blip2 import Blip2QFormerModel
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape,
     image_size_to_num_patches,
     unpad_image,
 )
 
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalFieldConfig
-from vllm.sequence import IntermediateTensors
-
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.granite import GraniteForCausalLM, GraniteModel
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -52,25 +50,26 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
-from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.llava_next import (
     BaseLlavaNextMultiModalProcessor,
-    LlavaNextProcessingInfo,
-    LlavaNextImagePixelInputs,
     LlavaNextImageEmbeddingInputs,
     LlavaNextImageInputs,
+    LlavaNextImagePixelInputs,
+    LlavaNextProcessingInfo,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
-from vllm.model_executor.models.granite import GraniteForCausalLM, GraniteModel
-from vllm.compilation.decorators import support_torch_compile
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     maybe_prefix,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalFieldConfig
+from vllm.sequence import IntermediateTensors
+
+from .blip2 import Blip2QFormerModel
 
 logger = init_logger(__name__)
 
@@ -78,6 +77,7 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 # Downsampler modules (translated from HF downsampling.py)
 # ---------------------------------------------------------------------------
+
 
 class InterpolateDownsampler:
     """Spatial downsampling via area interpolation."""
@@ -208,7 +208,7 @@ class WindowQFormerDownsampler(nn.Module):
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
         B, HW, C = image_features.shape
-        assert HW == self.image_side * self.image_side
+        assert self.image_side * self.image_side == HW
         n = self.image_side // self.window_side
 
         image_features = self.norm(image_features)
@@ -233,6 +233,7 @@ class WindowQFormerDownsampler(nn.Module):
 # ---------------------------------------------------------------------------
 # LLM subclasses with deepstack injection in the layer loop
 # ---------------------------------------------------------------------------
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -266,9 +267,7 @@ class Granite4VisionLLMModel(GraniteModel):
             # Recover deepstack features forwarded from the previous PP rank.
             if deepstack_input_embeds is None:
                 ds_keys = [
-                    k
-                    for k in intermediate_tensors.tensors
-                    if k.startswith("ds_")
+                    k for k in intermediate_tensors.tensors if k.startswith("ds_")
                 ]
                 if ds_keys:
                     deepstack_input_embeds = IntermediateTensors(
@@ -298,7 +297,8 @@ class Granite4VisionLLMModel(GraniteModel):
             it = {"hidden_states": hidden_states}
             if deepstack_input_embeds is not None:
                 remaining = {
-                    k: v for k, v in deepstack_input_embeds.tensors.items()
+                    k: v
+                    for k, v in deepstack_input_embeds.tensors.items()
                     if int(k.split("_")[1]) >= self.end_layer
                 }
                 it.update(remaining)
@@ -332,8 +332,9 @@ class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
             logit_scale = getattr(config, "logit_scale", 1.0)
             if hasattr(config, "logits_scaling"):
                 logit_scale /= config.logits_scaling
-            self.logits_processor = LogitsProcessor(config.vocab_size,
-                                                    scale=logit_scale)
+            self.logits_processor = LogitsProcessor(
+                config.vocab_size, scale=logit_scale
+            )
         else:
             self.lm_head = PPMissingLayer()
 
@@ -354,8 +355,8 @@ class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
 # Processing info / processor (reuses LlavaNext patterns)
 # ---------------------------------------------------------------------------
 
-class Granite4VisionProcessingInfo(LlavaNextProcessingInfo):
 
+class Granite4VisionProcessingInfo(LlavaNextProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
@@ -416,6 +417,7 @@ class Granite4VisionMultiModalProcessor(
 # ---------------------------------------------------------------------------
 # Top-level model
 # ---------------------------------------------------------------------------
+
 
 @MULTIMODAL_REGISTRY.register_processor(
     Granite4VisionMultiModalProcessor,
@@ -513,29 +515,33 @@ class Granite4VisionForConditionalGeneration(
             cache_config = vllm_config.cache_config
 
             # Deepstack projectors: one per (vision_layer, llm_layer) pair
-            self.layerwise_projectors = nn.ModuleList([
-                WindowQFormerDownsampler(
-                    config,
-                    quant_config=quant_config,
-                    cache_config=cache_config,
-                    prefix=maybe_prefix(prefix, f"layerwise_projectors.{i}"),
-                )
-                for i in range(len(config.deepstack_layer_map))
-            ])
-
-            # Spatial projectors: 4 offset groups
-            self.spatial_projectors = None
-            if config.use_spatial_sampling:
-                self.spatial_projectors = nn.ModuleList([
+            self.layerwise_projectors = nn.ModuleList(
+                [
                     WindowQFormerDownsampler(
                         config,
                         quant_config=quant_config,
                         cache_config=cache_config,
-                        spatial_offset=i,
-                        prefix=maybe_prefix(prefix, f"spatial_projectors.{i}"),
+                        prefix=maybe_prefix(prefix, f"layerwise_projectors.{i}"),
                     )
-                    for i in range(4)
-                ])
+                    for i in range(len(config.deepstack_layer_map))
+                ]
+            )
+
+            # Spatial projectors: 4 offset groups
+            self.spatial_projectors = None
+            if config.use_spatial_sampling:
+                self.spatial_projectors = nn.ModuleList(
+                    [
+                        WindowQFormerDownsampler(
+                            config,
+                            quant_config=quant_config,
+                            cache_config=cache_config,
+                            spatial_offset=i,
+                            prefix=maybe_prefix(prefix, f"spatial_projectors.{i}"),
+                        )
+                        for i in range(4)
+                    ]
+                )
 
         # ----- Language model (marked as LM) -----
         with self._mark_language_model(vllm_config):
@@ -561,10 +567,9 @@ class Granite4VisionForConditionalGeneration(
         # Ordered list of LLM layer indices for each deepstack level.
         # Pre-populated from config so it's available during CUDA graph capture
         # (before any embed_multimodal call).
-        self._ds_layer_indices: list[int] = (
-            [llm_layer for _, llm_layer in config.deepstack_layer_map]
-            + list(getattr(config, "spatial_target_layers", []))
-        )
+        self._ds_layer_indices: list[int] = [
+            llm_layer for _, llm_layer in config.deepstack_layer_map
+        ] + list(getattr(config, "spatial_target_layers", []))
 
         # Share ds_layer_indices with the LLM causal model so
         # make_empty_intermediate_tensors includes the correct keys
@@ -583,8 +588,7 @@ class Granite4VisionForConditionalGeneration(
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         # Allocated on CPU first; moved to GPU in embed_input_ids on first use.
         self._ds_buffers: list[torch.Tensor] = [
-            torch.zeros(max_tokens, lm_hidden)
-            for _ in range(num_ds_levels)
+            torch.zeros(max_tokens, lm_hidden) for _ in range(num_ds_levels)
         ]
         self._ds_num_tokens: int = 0  # tokens written in last embed_input_ids call
 
@@ -628,8 +632,7 @@ class Granite4VisionForConditionalGeneration(
                 image_feature = image_feature[1:]
 
                 height = width = (
-                    config.vision_config.image_size
-                    // config.vision_config.patch_size
+                    config.vision_config.image_size // config.vision_config.patch_size
                 )
                 # After QFormer downsampling
                 height = int(height * ds_rate)
@@ -645,13 +648,12 @@ class Granite4VisionForConditionalGeneration(
                     num_patch_height, num_patch_width, height, width, -1
                 )
                 image_feature = (
-                    image_feature.permute(4, 0, 2, 1, 3).contiguous()
+                    image_feature.permute(4, 0, 2, 1, 3)
+                    .contiguous()
                     .flatten(1, 2)
                     .flatten(2, 3)
                 )
-                image_feature = unpad_image(
-                    image_feature, image_sizes[image_idx]
-                )
+                image_feature = unpad_image(image_feature, image_sizes[image_idx])
 
                 if self.image_newline is not None:
                     image_feature = torch.cat(
@@ -665,9 +667,7 @@ class Granite4VisionForConditionalGeneration(
                     )
 
                 image_feature = image_feature.flatten(1, 2).transpose(0, 1)
-                image_feature = torch.cat(
-                    (base_image_feature, image_feature), dim=0
-                )
+                image_feature = torch.cat((base_image_feature, image_feature), dim=0)
             else:
                 image_feature = image_feature[0]
                 if self.image_newline is not None:
@@ -718,9 +718,7 @@ class Granite4VisionForConditionalGeneration(
         # Collect per-level: (llm_layer, [per_image_tensor, ...])
         levels: list[tuple[int, list[torch.Tensor]]] = []
 
-        for proj_idx, (vision_layer, llm_layer) in enumerate(
-            self._deepstack_layer_map
-        ):
+        for proj_idx, (vision_layer, llm_layer) in enumerate(self._deepstack_layer_map):
             selected = all_hidden_states[vision_layer]
             if select_strategy == "default":
                 selected = selected[:, 1:]
@@ -744,9 +742,7 @@ class Granite4VisionForConditionalGeneration(
         llm_layer_indices = [llm_layer for llm_layer, _ in levels]
         num_images = len(image_sizes)
         per_image_packed = [
-            torch.cat(
-                [levels[lvl][1][img] for lvl in range(len(levels))], dim=-1
-            )
+            torch.cat([levels[lvl][1][img] for lvl in range(len(levels))], dim=-1)
             for img in range(num_images)
         ]
 
@@ -903,10 +899,12 @@ class Granite4VisionForConditionalGeneration(
             and get_pp_group().is_first_rank
             and self._ds_layer_indices
         ):
-            ds: IntermediateTensors | None = IntermediateTensors({
-                f"ds_{llm_layer}": self._ds_buffers[lvl]
-                for lvl, llm_layer in enumerate(self._ds_layer_indices)
-            })
+            ds: IntermediateTensors | None = IntermediateTensors(
+                {
+                    f"ds_{llm_layer}": self._ds_buffers[lvl]
+                    for lvl, llm_layer in enumerate(self._ds_layer_indices)
+                }
+            )
         else:
             ds = None
 
@@ -960,12 +958,13 @@ class Granite4VisionForConditionalGeneration(
         """Strip 'base_model.model.' and apply HF→vLLM prefix mapping."""
         name = peft_key
         if name.startswith("base_model.model."):
-            name = name[len("base_model.model."):]
-        for old_pfx, new_pfx in (
-            Granite4VisionForConditionalGeneration._ADAPTER_PREFIX_MAP
-        ):
+            name = name[len("base_model.model.") :]
+        for (
+            old_pfx,
+            new_pfx,
+        ) in Granite4VisionForConditionalGeneration._ADAPTER_PREFIX_MAP:
             if name.startswith(old_pfx):
-                name = new_pfx + name[len(old_pfx):]
+                name = new_pfx + name[len(old_pfx) :]
                 break
         return name
 
@@ -975,14 +974,14 @@ class Granite4VisionForConditionalGeneration(
         # Resolve HF hub IDs to local cache path
         if not os.path.isdir(adapter_path):
             from huggingface_hub import snapshot_download
+
             adapter_path = snapshot_download(adapter_path)
         config_path = os.path.join(adapter_path, "adapter_config.json")
         weights_path = os.path.join(adapter_path, "adapter_model.safetensors")
         if not os.path.exists(config_path):
             raise FileNotFoundError(f"No adapter_config.json in {adapter_path}")
         if not os.path.exists(weights_path):
-            raise FileNotFoundError(
-                f"No adapter_model.safetensors in {adapter_path}")
+            raise FileNotFoundError(f"No adapter_model.safetensors in {adapter_path}")
         with open(config_path) as f:
             config = json.load(f)
         weights = load_file(weights_path)
@@ -1007,12 +1006,10 @@ class Granite4VisionForConditionalGeneration(
         lora_b: dict[str, torch.Tensor] = {}
         for peft_key, tensor in adapter_weights.items():
             if ".lora_A." in peft_key:
-                module_key = self._peft_to_vllm(
-                    peft_key.replace(".lora_A.weight", ""))
+                module_key = self._peft_to_vllm(peft_key.replace(".lora_A.weight", ""))
                 lora_a[module_key] = tensor
             elif ".lora_B." in peft_key:
-                module_key = self._peft_to_vllm(
-                    peft_key.replace(".lora_B.weight", ""))
+                module_key = self._peft_to_vllm(peft_key.replace(".lora_B.weight", ""))
                 lora_b[module_key] = tensor
 
         params_dict = dict(self.named_parameters())
@@ -1040,10 +1037,9 @@ class Granite4VisionForConditionalGeneration(
                     shard_offset = module._get_shard_offset_mapping(shard_id)
                     if shard_offset is not None:
                         shard_size = delta.shape[0] // tp_size
-                        tp_delta = delta.narrow(
-                            0, tp_rank * shard_size, shard_size)
-                        shard = param.data[shard_offset:shard_offset + shard_size]
-                        param.data[shard_offset:shard_offset + shard_size] = (
+                        tp_delta = delta.narrow(0, tp_rank * shard_size, shard_size)
+                        shard = param.data[shard_offset : shard_offset + shard_size]
+                        param.data[shard_offset : shard_offset + shard_size] = (
                             shard.float() + tp_delta.to(shard.device)
                         ).to(shard.dtype)
                         return True
@@ -1054,10 +1050,12 @@ class Granite4VisionForConditionalGeneration(
                         s // tp_size for s in module.output_sizes[:shard_id]
                     )
                     tp_delta = delta.narrow(
-                        0, tp_rank * (delta.shape[0] // tp_size),
-                        delta.shape[0] // tp_size)
-                    shard = param.data[shard_offset:shard_offset + shard_size]
-                    param.data[shard_offset:shard_offset + shard_size] = (
+                        0,
+                        tp_rank * (delta.shape[0] // tp_size),
+                        delta.shape[0] // tp_size,
+                    )
+                    shard = param.data[shard_offset : shard_offset + shard_size]
+                    param.data[shard_offset : shard_offset + shard_size] = (
                         shard.float() + tp_delta.to(shard.device)
                     ).to(shard.dtype)
                     return True
@@ -1113,9 +1111,7 @@ class Granite4VisionForConditionalGeneration(
         n = self._merge_lora_deltas(adapter_config, adapter_weights)
         logger.info("Merged %d LoRA pairs into base weights", n)
 
-    def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
         self._apply_adapter()

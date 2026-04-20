@@ -86,6 +86,7 @@ COMMON_BROADCAST_SETTINGS = {
 # which cases would be selected and deselected by pytest. In general,
 # this is a good idea for checking your command first, since tests are slow.
 
+
 def _granite4_vision_vllm_to_hf_output(vllm_output, model):
     """Post-processor for granite4_vision vLLM output.
 
