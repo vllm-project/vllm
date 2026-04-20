@@ -267,6 +267,43 @@ class TestLoweringUnit:
             if "_test_fallback_op" in IrOp.registry:
                 del IrOp.registry["_test_fallback_op"]
 
+    def test_supports_args_batch_size_specialization_detected(self):
+        """
+        Negative test: verify that if supports_args depends on batch size,
+        the detection mechanism catches it.
+
+        This test intentionally writes a buggy supports_args that checks
+        batch size, then confirms the isinstance(result, bool) check fails.
+        """
+        @ir.register_op(name="_test_batch_dep_op")
+        def _test_batch_dep_op(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+        # Intentionally buggy: supports_args depends on batch size
+        @_test_batch_dep_op.register_impl(
+            "batch_dep_impl",
+            supports_args=lambda x: x.size(0) == 8,  # WRONG: depends on batch!
+        )
+        def batch_dep_impl(x: torch.Tensor) -> torch.Tensor:
+            return x * 2
+
+        try:
+            fake_args = _make_args_for_op(_test_batch_dep_op, use_fake=True)
+            impl = _test_batch_dep_op.impls["batch_dep_impl"]
+
+            # Call supports_args with unbacked symint
+            result = impl.supports_args(*fake_args)
+
+            # This should NOT be a bool - it's a SymBool (Eq(u0, 8))
+            # The assertion below proves our detection mechanism works
+            with pytest.raises(AssertionError, match="should return bool"):
+                assert isinstance(result, bool), (
+                    f"supports_args should return bool, got {type(result)}"
+                )
+        finally:
+            if "_test_batch_dep_op" in IrOp.registry:
+                del IrOp.registry["_test_batch_dep_op"]
+
 
 # ============================================================
 # 3. E2E correctness tests
