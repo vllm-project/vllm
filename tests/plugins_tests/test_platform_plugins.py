@@ -4,8 +4,6 @@
 import pytest
 import torch
 
-from vllm.plugins import load_general_plugins
-
 
 def test_platform_plugins():
     # simulate workload by running an example
@@ -32,9 +30,21 @@ def test_platform_plugins():
 
 
 def test_oot_custom_op(default_vllm_config, monkeypatch: pytest.MonkeyPatch):
-    # simulate workload by running an example
-    load_general_plugins()
+    from vllm.model_executor.custom_op import op_registry_oot
     from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+
+    # Define and register an OOT RotaryEmbedding inline so the test is
+    # self-contained (works with or without the plugin pip-installed).
+    # monkeypatch.setitem ensures op_registry_oot is restored after the test.
+    class DummyRotaryEmbedding(RotaryEmbedding):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.addition_config = True
+
+        def forward_oot(self, *args, **kwargs):
+            return super().forward_oot(*args, **kwargs)
+
+    monkeypatch.setitem(op_registry_oot, "RotaryEmbedding", DummyRotaryEmbedding)
 
     layer = RotaryEmbedding(16, 16, 16, 16, True, torch.float16)
     assert layer.__class__.__name__ == "DummyRotaryEmbedding", (
