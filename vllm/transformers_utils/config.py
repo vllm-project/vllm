@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import warnings
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import asdict
@@ -65,6 +66,15 @@ else:
 MISTRAL_CONFIG_NAME = "params.json"
 
 logger = init_logger(__name__)
+
+if Version(version("transformers")) < Version("5.0.0"):
+    warnings.warn(
+        "Support for Transformers v4 is deprecated and will be removed in "
+        "vLLM v0.22.0. Please upgrade to Transformers v5: "
+        "pip install --upgrade transformers",
+        DeprecationWarning,
+        stacklevel=2,
+    )
 
 
 class LazyConfigDict(dict):
