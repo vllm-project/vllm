@@ -12,9 +12,9 @@ if not current_platform.is_device_capability_family(120):
         allow_module_level=True,
     )
 
-from vllm.utils.flashinfer import has_flashinfer_cutedsl_sm12x_moe
+from vllm.utils.flashinfer import has_flashinfer_b12x_moe
 
-if not has_flashinfer_cutedsl_sm12x_moe():
+if not has_flashinfer_b12x_moe():
     pytest.skip(
         reason=(
             "FlashInfer cute_dsl_fused_moe_nvfp4 / convert_sf_to_mma_layout "
@@ -73,7 +73,7 @@ def _reorder_gate_up_to_up_gate(
 @pytest.mark.parametrize("topk", [1, 2, 4])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
-def test_flashinfer_cutedsl_sm12x_moe(
+def test_flashinfer_b12x_moe(
     m: int,
     n: int,
     k: int,
@@ -205,4 +205,4 @@ def test_flashinfer_cutedsl_sm12x_moe(
 
 
 if __name__ == "__main__":
-    test_flashinfer_cutedsl_sm12x_moe(16, 128, 256, 8, 2, torch.bfloat16)
+    test_flashinfer_b12x_moe(16, 128, 256, 8, 2, torch.bfloat16)
