@@ -38,6 +38,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_utils import token_capacity_kv_cache_groups
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -277,15 +278,12 @@ class Scheduler(SchedulerInterface):
                 if isinstance(group.kv_cache_spec, AttentionSpec):
                     self.routed_experts_attn_gid = gid
                     break
-            min_block_size = min(
-                [
-                    group.kv_cache_spec.block_size
-                    for group in kv_cache_config.kv_cache_groups
-                ]
+            capacity_groups = token_capacity_kv_cache_groups(
+                self.vllm_config, kv_cache_config
             )
-            num_groups = len(kv_cache_config.kv_cache_groups)
+            min_block_size = min(g.kv_cache_spec.block_size for g in capacity_groups)
             self.max_num_kv_tokens = (
-                kv_cache_config.num_blocks // num_groups
+                kv_cache_config.num_blocks // len(capacity_groups)
             ) * min_block_size
             dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
             pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
