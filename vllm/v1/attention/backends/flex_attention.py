@@ -36,7 +36,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, EncoderOnlyAttentionSpec
 
 logger = init_logger(__name__)
 
@@ -374,6 +374,7 @@ class FlexAttentionMetadata:
     block_mask: BlockMask | None = None
     score_mod: _score_mod_signature | None = None
     logical_mask_mod: _mask_mod_signature = causal_mask_mod
+    uses_paged_kv: bool = True
     doc_ids: torch.Tensor | None = None
     direct_build: bool = True
     q_block_size: int = 16
@@ -507,7 +508,7 @@ class FlexAttentionMetadata:
                 False,
             )
 
-        return final_mask_mod if self.causal else sliding_window_mask_mod
+        return final_mask_mod if self.uses_paged_kv else sliding_window_mask_mod
 
     def get_prefix_lm_mask_mod(self) -> _mask_mod_signature:
         """Creates the prefix LM mask_mod function for FlexAttention."""
@@ -551,8 +552,7 @@ class FlexAttentionMetadata:
     def get_mask_mod(self):
         # Stage-1: initialize the base mask_mod
         # (causal mask for decoder or bidirectional mask for encoder)
-        has_custom_mask = self.logical_mask_mod is not causal_mask_mod
-        if self.causal or has_custom_mask:
+        if self.uses_paged_kv:
             mask_mod = self.get_paged_mask_mod()
         else:
             mask_mod = self.get_bidirectional_mask_mod()
@@ -605,7 +605,7 @@ class FlexAttentionMetadata:
         return transformed_score_mod
 
     def _build_block_mask_direct(self) -> BlockMask:
-        """Direct block mask construction for standard causal attention.
+        """Direct block mask construction for paged KV cache attention.
 
         This method constructs the block mask directly using
         BlockMask.from_kv_blocks which is much more efficient than the
@@ -703,9 +703,9 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         mask_mod = self.get_mask_mod()
-        has_custom_mask = self.logical_mask_mod is not causal_mask_mod
-        uses_paged_kv = self.causal or has_custom_mask
-        kv_len = self.total_cache_tokens if uses_paged_kv else self.num_actual_tokens
+        kv_len = (
+            self.total_cache_tokens if self.uses_paged_kv else self.num_actual_tokens
+        )
         return create_block_mask_compiled(
             mask_mod,
             None,
@@ -854,9 +854,12 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
         offset_tensor = copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
 
-        logical_mask_mod = (bidirectional_mask_mod
-                            if not common_attn_metadata.causal
-                            else causal_mask_mod)
+        uses_paged_kv = not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
+        logical_mask_mod = (
+            bidirectional_mask_mod
+            if uses_paged_kv and not common_attn_metadata.causal
+            else causal_mask_mod
+        )
 
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
@@ -880,10 +883,11 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             total_cache_tokens=total_cache_tokens,
             decode_offset=offset_tensor,
             num_blocks_per_seq=num_blocks_per_seq,
+            uses_paged_kv=uses_paged_kv,
             # FIXME(Isotr0py): direct build has issue to build bidirectional
             # attention block mask for encoder-only models, disable it temporarily.
             # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
-            direct_build=(self.direct_build and common_attn_metadata.causal),
+            direct_build=self.direct_build and uses_paged_kv,
             q_block_size=self.q_block_size,
             kv_block_size=self.kv_block_size,
             persistent_kv_indices=self.persistent_kv_indices,
