@@ -182,6 +182,11 @@ def _quantize_dequantize_fp8_ds_mla(
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
+@pytest.mark.parametrize(
+    "skip_softmax_threshold",
+    [None, 0.0, 0.025],
+    ids=["skip_sm_off", "skip_sm_0.0", "skip_sm_0.025"],
+)
 def test_sparse_backend_decode_correctness(
     default_vllm_config,
     dist_init,
@@ -193,6 +198,7 @@ def test_sparse_backend_decode_correctness(
     workspace_init,
     q_scale: float,
     k_scale: float,
+    skip_softmax_threshold: float | None,
 ):
     if kv_cache_dtype not in backend_cls.supported_kv_cache_dtypes:
         pytest.skip(f"{backend_cls.get_name()} does not support {kv_cache_dtype}")
@@ -416,6 +422,11 @@ def test_sparse_backend_decode_correctness(
     sdpa_reference = torch.cat(reference_outputs, dim=0)
 
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    # Sparse MLA is decode-only, so bind the threshold to the decode field;
+    # leave the prefill field at its default (None).
+    vllm_config.attention_config.skip_softmax_threshold_scale_factor_decode = (
+        skip_softmax_threshold
+    )
     vllm_config.model_config.hf_config.index_topk = topk_tokens
 
     common_attn_metadata = create_common_attn_metadata(
@@ -462,6 +473,15 @@ def test_sparse_backend_decode_correctness(
 
     impl_cls = backend_cls.get_impl_cls()
     with set_current_vllm_config(vllm_config):
+        extra_impl_kwargs: dict = {}
+        if backend_cls.supports_skip_softmax():
+            ac = vllm_config.attention_config
+            extra_impl_kwargs["skip_softmax_threshold_scale_factor_prefill"] = (
+                ac.skip_softmax_threshold_scale_factor_prefill
+            )
+            extra_impl_kwargs["skip_softmax_threshold_scale_factor_decode"] = (
+                ac.skip_softmax_threshold_scale_factor_decode
+            )
         impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
@@ -481,6 +501,7 @@ def test_sparse_backend_decode_correctness(
             v_head_dim=v_head_dim,
             kv_b_proj=mock_kv_b_proj,
             indexer=mock_indexer,
+            **extra_impl_kwargs,
         )
 
         impl.process_weights_after_loading(dtype)

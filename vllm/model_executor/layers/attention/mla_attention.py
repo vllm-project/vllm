@@ -388,6 +388,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             cache_config.enable_prefix_caching = False
 
+        if self.attn_backend.supports_skip_softmax():
+            ac = get_current_vllm_config().attention_config
+            extra_impl_args["skip_softmax_threshold_scale_factor_prefill"] = (
+                ac.skip_softmax_threshold_scale_factor_prefill
+            )
+            extra_impl_args["skip_softmax_threshold_scale_factor_decode"] = (
+                ac.skip_softmax_threshold_scale_factor_decode
+            )
+
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
         self.impl = impl_cls(
             num_heads=self.num_heads,

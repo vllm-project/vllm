@@ -51,6 +51,24 @@ class AttentionConfig:
     use_prefill_query_quantization: bool = False
     """If set, quantize query for attention in prefill."""
 
+    skip_softmax_threshold_scale_factor_prefill: float | None = None
+    """Prefill-side threshold scale factor for skipping softmax in TRTLLM
+    attention kernels. Enables skip-softmax sparsity as described in
+    https://arxiv.org/abs/2512.12087. The actual threshold equals this
+    value divided by the context length. Higher values increase kernel
+    performance at the cost of accuracy. None (default) disables
+    skip-softmax and uses standard attention for the prefill path.
+    Only applied by backends that report supports_skip_softmax()."""
+
+    skip_softmax_threshold_scale_factor_decode: float | None = None
+    """Decode-side threshold scale factor for skipping softmax in TRTLLM
+    attention kernels. Enables skip-softmax sparsity as described in
+    https://arxiv.org/abs/2512.12087. The actual threshold equals this
+    value divided by the context length. Higher values increase kernel
+    performance at the cost of accuracy. None (default) disables
+    skip-softmax and uses standard attention for the decode path.
+    Only applied by backends that report supports_skip_softmax()."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs
