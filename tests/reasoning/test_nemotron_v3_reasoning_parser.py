@@ -170,3 +170,53 @@ def test_nemotron_v3_with_thinking_keeps_truncated_reasoning(
 
     assert reasoning == "This is truncated reasoning"
     assert content is None
+
+
+def test_nemotron_v3_no_kwargs_plain_output_returns_content(
+    tokenizer: FakeNemotronTokenizer,
+):
+    """When --reasoning-config is used without per-request enable_thinking and
+    the model emits plain content (no <think> marker), the output must land in
+    content, not reasoning_content (issue #39103)."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    # No chat_template_kwargs at all — simulates a plain API call made while
+    # the server has --reasoning-config set but the request omits enable_thinking.
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+    )
+
+    reasoning, content = run_reasoning_extraction(
+        parser,
+        ["The answer is 42."],
+        request=request,
+        streaming=False,
+    )
+
+    assert reasoning is None
+    assert content == "The answer is 42."
+
+
+def test_nemotron_v3_no_kwargs_truncated_reasoning_stays_in_reasoning(
+    tokenizer: FakeNemotronTokenizer,
+):
+    """When the model starts a <think> section but generation is truncated
+    before </think>, the partial reasoning must remain in reasoning_content
+    regardless of whether enable_thinking was supplied."""
+    parser_cls = ReasoningParserManager.get_reasoning_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[],
+    )
+
+    reasoning, content = run_reasoning_extraction(
+        parser,
+        ["<think>", "I am still thinking"],
+        request=request,
+        streaming=False,
+    )
+
+    assert reasoning == "I am still thinking"
+    assert content is None
