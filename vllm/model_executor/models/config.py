@@ -399,6 +399,19 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             hf_config=vllm_config.model_config.hf_config,
         )
 
+        cache_config = vllm_config.cache_config
+        speculative_config = vllm_config.speculative_config
+        if (
+            cache_config.enable_prefix_caching
+            and cache_config.mamba_cache_mode == "none"
+            and speculative_config is not None
+            and speculative_config.method == "mtp"
+        ):
+            cache_config.mamba_cache_mode = "align"
+            logger.info(
+                "Defaulting mamba_cache_mode to 'align' for NemotronH with MTP."
+            )
+
 
 class NemotronHNanoVLV2Config(VerifyAndUpdateConfig):
     @classmethod
