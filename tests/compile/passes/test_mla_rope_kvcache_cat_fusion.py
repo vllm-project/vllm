@@ -7,6 +7,7 @@ import torch
 import vllm.config
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
     MLARoPEKVCacheCatFusionPass,
 )
@@ -23,7 +24,10 @@ from vllm.config import (
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    DeepseekScalingRotaryEmbedding,
+    RotaryEmbedding,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import (
@@ -42,12 +46,14 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         self,
         vllm_config: VllmConfig,
         attn_backend: AttentionBackendEnum,
+        use_deepseek_scaling_rope: bool,
         num_heads: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         v_head_dim: int,
         q_lora_rank: int,
         kv_lora_rank: int,
+        is_neox: bool,
         dtype: torch.dtype,
         device: torch.device,
         prefix: str = "model.layers.0.self_attn.attn",
@@ -69,17 +75,25 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         self.block_size = vllm_config.cache_config.block_size
         self.scale = self.qk_head_dim**-0.5
 
-        self.rotary_emb = RotaryEmbedding(
-            head_size=qk_rope_head_dim,
-            rotary_dim=qk_rope_head_dim,
-            max_position_embeddings=4096,
-            base=10000,
-            is_neox_style=True,
-            dtype=dtype,
-        )
-
-        # Whether to check for the RoPE custom op or component index_select
-        self.enable_rope_custom_op = self.rotary_emb.enabled()
+        if use_deepseek_scaling_rope:
+            self.rotary_emb = DeepseekScalingRotaryEmbedding(
+                head_size=qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
+                max_position_embeddings=4096,
+                base=10000,
+                is_neox_style=is_neox,
+                scaling_factor=1.0,
+                dtype=dtype,
+            )
+        else:
+            self.rotary_emb = RotaryEmbedding(
+                head_size=qk_rope_head_dim,
+                rotary_dim=qk_rope_head_dim,
+                max_position_embeddings=4096,
+                base=10000,
+                is_neox_style=is_neox,
+                dtype=dtype,
+            )
 
         # Initialize intermediate mm layers for unit test
         # Use disable_tp=True to avoid requiring distributed initialization
@@ -158,13 +172,8 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
             kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
         ]
 
-        # Create dummy KV cache
-        # MLA uses a single combined KV cache (no separate K/V), so no 2x factor
-        import math
-
-        total_elements = math.prod(kv_cache_shape)
         raw_tensor = torch.zeros(
-            total_elements,
+            num_blocks * self.block_size * self.num_kv_heads * self.head_size,
             dtype=self.kv_cache_dtype,
             device=self.device,
         )
@@ -207,45 +216,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         )
         return q, kv_c, dummy
 
-    def forward_unfused(
-        self, qkv_lora: torch.Tensor, positions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Unfused baseline that calls ops directly with correct shapes."""
-        qkv_lora = qkv_lora.clone()
-        q_c, kv_lora = qkv_lora.split(
-            [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-            dim=-1,
-        )
-        q = self.q_b_proj(q_c)[0]
-        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-
-        q = q.view(-1, self.num_heads, self.qk_head_dim)
-        k_pe = k_pe.unsqueeze(1)
-
-        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim :], k_pe
-        )
-
-        num_tokens = positions.size(0)
-        k_pe = k_pe.reshape(num_tokens, 1, self.qk_rope_head_dim)
-
-        forward_context = get_forward_context()
-        layer_slot_mapping = forward_context.slot_mapping.get(self.layer_name)
-        if layer_slot_mapping is not None:
-            self.mla_attn.impl.do_kv_cache_update(
-                kv_c,
-                k_pe,
-                self.mla_attn.kv_cache,
-                layer_slot_mapping,
-                self.kv_cache_dtype_str,
-                self.mla_attn._k_scale,
-            )
-        return q, kv_c
-
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
-        # DeepseekScalingRotaryEmbedding on ROCm always uses forward_native
-        # (Python-decomposed), so index_select from cos_sin_cache lookup
-        # appears in the graph regardless of enabled() status.
         ops = [
             INDEX_SELECT_OP,
             torch.ops.vllm.unified_mla_kv_cache_update.default,
@@ -256,23 +227,37 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         return [torch.ops.vllm.fused_concat_and_cache_mla_rope.default]
 
 
-@pytest.mark.parametrize(
-    "attn_backend",
-    [
+if current_platform.is_cuda():
+    MLA_BACKENDS = [
+        AttentionBackendEnum.FLASH_ATTN_MLA,
+        AttentionBackendEnum.FLASHINFER_MLA,
+    ]
+    BLOCK_SIZES = [512]
+elif is_aiter_found_and_supported():
+    MLA_BACKENDS = [
+        AttentionBackendEnum.TRITON_ATTN,
         AttentionBackendEnum.ROCM_AITER_MLA,
-    ],
-)
+    ]
+    BLOCK_SIZES = [16]
+else:
+    MLA_BACKENDS = []
+
+
+@pytest.mark.parametrize("attn_backend", MLA_BACKENDS)
+@pytest.mark.parametrize("use_deepseek_scaling_rope", [True, False])
 @pytest.mark.parametrize("num_heads", [16])
 @pytest.mark.parametrize("qk_nope_head_dim", [128])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
 @pytest.mark.parametrize("v_head_dim", [128])
 @pytest.mark.parametrize("q_lora_rank", [1536])
 @pytest.mark.parametrize("kv_lora_rank", [512])
-@pytest.mark.parametrize("block_size", [1])
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("is_neox", [True, False])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_mla_rope_kvcache_cat_fusion(
     attn_backend: AttentionBackendEnum,
+    use_deepseek_scaling_rope: bool,
     num_heads: int,
     qk_nope_head_dim: int,
     qk_rope_head_dim: int,
@@ -280,8 +265,10 @@ def test_mla_rope_kvcache_cat_fusion(
     q_lora_rank: int,
     kv_lora_rank: int,
     block_size: int,
+    is_neox: bool,
     dtype: torch.dtype,
     kv_cache_dtype: str,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     torch.set_default_device("cuda")
     torch.set_default_dtype(dtype)
@@ -305,16 +292,41 @@ def test_mla_rope_kvcache_cat_fusion(
         ),
     )
 
-    with vllm.config.set_current_vllm_config(vllm_config):
+    with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
+        if not torch.distributed.is_initialized():
+            from vllm.distributed.parallel_state import (
+                init_distributed_environment,
+                initialize_model_parallel,
+            )
+            from vllm.utils.system_utils import update_environment_variables
+
+            update_environment_variables(
+                {
+                    "RANK": "0",
+                    "LOCAL_RANK": "0",
+                    "WORLD_SIZE": "1",
+                    "MASTER_ADDR": "localhost",
+                    "MASTER_PORT": "54321",
+                }
+            )
+            init_distributed_environment()
+            initialize_model_parallel()
+
+        if attn_backend == AttentionBackendEnum.ROCM_AITER_MLA:
+            m.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
+
         model = MLARoPEKVCacheCatTestModel(
             vllm_config=vllm_config,
             attn_backend=attn_backend,
+            use_deepseek_scaling_rope=use_deepseek_scaling_rope,
             num_heads=num_heads,
             qk_nope_head_dim=qk_nope_head_dim,
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
             q_lora_rank=q_lora_rank,
             kv_lora_rank=kv_lora_rank,
+            is_neox=is_neox,
             dtype=dtype,
             device=torch.get_default_device(),
         )
@@ -339,16 +351,17 @@ def test_mla_rope_kvcache_cat_fusion(
         qkv_unfused = qkv_lora.clone()
         pos_unfused = pos.clone()
 
-        # Run unfused version (baseline)
+        # Run unfused version
         with set_forward_context(None, vllm_config):
             forward_context = get_forward_context()
             attn_metadata = model.build_attn_metadata(T)
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_unfused, kv_c_unfused = model.forward_unfused(qkv_unfused, pos_unfused)
+            q_unfused, kv_c_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache.clone()
+        del dummy
 
         # Run fused version (compiled)
         torch._dynamo.mark_dynamic(qkv_lora, 0)
@@ -360,12 +373,7 @@ def test_mla_rope_kvcache_cat_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            try:
-                q_fused, kv_c_fused, dummy = model_fused(qkv_lora, pos)
-            except RuntimeError:
-                print(f"matched_count: {fusion_pass.matched_count}")
-                backend.print_graphs()
-                raise
+            q_fused, kv_c_fused, dummy = model_fused(qkv_lora, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_fused = attn_layer.kv_cache
         del dummy
@@ -373,27 +381,19 @@ def test_mla_rope_kvcache_cat_fusion(
         if fusion_pass.matched_count < 1:
             backend.print_graphs()
 
-        assert fusion_pass.matched_count >= 1, (
-            f"Expected at least 1 pattern match, got {fusion_pass.matched_count}"
-        )
+        assert fusion_pass.matched_count == 1
 
-        backend.check_before_ops([torch.ops.vllm.unified_mla_kv_cache_update.default])
+        backend.check_before_ops(model.ops_in_model_before())
         backend.check_after_ops(model.ops_in_model_after())
 
-        ATOL, RTOL = (1e-2, 1e-2)
+        if dtype == torch.float16:
+            ATOL, RTOL = (2e-3, 2e-3)
+        else:
+            ATOL, RTOL = (1e-2, 1e-2)
 
-        q_fused = q_fused.reshape_as(q_unfused)
-
-        nan_mask = torch.isnan(q_unfused) | torch.isnan(q_fused)
-        if nan_mask.any():
-            assert (
-                torch.isnan(q_unfused)[nan_mask].all()
-                and torch.isnan(q_fused)[nan_mask].all()
-            ), "NaN mismatch: NaN in one output but not the other"
-        torch.testing.assert_close(
-            q_unfused[~nan_mask], q_fused[~nan_mask], atol=ATOL, rtol=RTOL
-        )
-
+        torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(kv_c_unfused, kv_c_fused, atol=ATOL, rtol=RTOL)
+        # Cannot compare fp8_* directly here, cast to model dtype instead
         torch.testing.assert_close(
             kv_cache_unfused.view(dtype),
             kv_cache_fused.view(dtype),

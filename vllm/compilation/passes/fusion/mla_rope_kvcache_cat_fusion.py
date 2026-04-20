@@ -111,7 +111,7 @@ class MLARoPEKVCacheCatPattern:
                 head_size=self.qk_rope_head_dim,
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
-                mla_mode=True,
+                mla_mode=False,
             )
         else:
             self.rope_matcher = MatcherRotaryEmbedding(
@@ -120,7 +120,7 @@ class MLARoPEKVCacheCatPattern:
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 use_flashinfer=self.use_flashinfer,
-                mla_mode=True,
+                mla_mode=False,
             )
 
     def get_inputs(self) -> list:
@@ -267,25 +267,21 @@ class MLARoPEKVCacheCatFusionPass(VllmPatternMatcherPass):
 
         for _, layer in attn_layers.items():
             for is_neox in [False, True]:
-                if RotaryEmbedding.enabled():
-                    for use_flashinfer in [False, True]:
-                        for use_deepseek_scaling in [False, True]:
+                for use_deepseek_scaling in [False, True]:
+                    if RotaryEmbedding.enabled():
+                        for use_flashinfer in [False, True]:
                             MLARoPEKVCacheCatPattern(
                                 layer,
                                 is_neox,
                                 use_flashinfer,
                                 use_deepseek_scaling,
                             ).register(self.patterns)
-                else:
-                    MLARoPEKVCacheCatPattern(
-                        layer,
-                        is_neox,
-                    ).register(self.patterns)
-                    MLARoPEKVCacheCatPattern(
-                        layer,
-                        is_neox,
-                        use_deepseek_scaling=True,
-                    ).register(self.patterns)
+                    else:
+                        MLARoPEKVCacheCatPattern(
+                            layer,
+                            is_neox,
+                            use_deepseek_scaling=use_deepseek_scaling,
+                        ).register(self.patterns)
 
             if _USE_LAYERNAME:
                 break
