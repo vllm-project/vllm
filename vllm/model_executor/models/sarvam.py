@@ -341,7 +341,6 @@ class SarvamMLAMoE(nn.Module):
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=self.norm_expert_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -370,20 +369,7 @@ class SarvamMLAMoE(nn.Module):
             router_logits=router_logits,
         )
 
-        if self.shared_experts is not None:
-            shared_output, expert_output = final_hidden
-        else:
-            shared_output, expert_output = None, final_hidden
-
-        if shared_output is not None:
-            expert_output = expert_output + shared_output
-
-        if self.tp_size > 1:
-            expert_output = self.experts.maybe_all_reduce_tensor_model_parallel(
-                expert_output
-            )
-
-        return expert_output.view(num_tokens, hidden_dim)
+        return final_hidden.view(num_tokens, hidden_dim)
 
 
 class SarvamMLABlock(nn.Module):

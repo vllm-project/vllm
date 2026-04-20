@@ -39,7 +39,6 @@ from vllm.distributed import (
     get_ep_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
@@ -445,7 +444,6 @@ class HunYuanSparseMoeBlock(nn.Module):
             top_k=top_k,
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=False,
             renormalize=top_k > 1,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -464,11 +462,6 @@ class HunYuanSparseMoeBlock(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-        if self.shared_mlp is not None:
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
-
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
 
         return final_hidden_states.view(orig_shape)
 
