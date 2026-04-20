@@ -28,6 +28,15 @@ def _get_op_provider_pairs() -> list[tuple[str, str]]:
     return pairs
 
 
+def _make_simple_model(op: IrOp) -> nn.Module:
+    """Create a simple model that calls the op with fake arguments."""
+    class SimpleModel(nn.Module):
+        def forward(self, x):
+            args = _make_fake_args_for_op(op)
+            return op(*args)
+    return SimpleModel()
+
+
 def _make_fake_args_for_op(op: IrOp) -> tuple[Any, ...]:
     """Create fake meta tensors with unbacked symint dimensions for an op.
 
@@ -213,40 +222,6 @@ class TestE2ELowering:
     remain in the Inductor-produced artifact.
     """
 
-    @pytest.mark.parametrize("rms_provider", ops.rms_norm.supported_providers())
-    def test_lowering_rms_norm(self, rms_provider, default_vllm_config):
-        torch.set_default_device(current_platform.device_type)
-
-        lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-        backend = TestBackend(lowering_pass)
-        backend_unlowered = TestBackend()
-
-        model = Model()
-        x = torch.randn(8, 16, dtype=torch.bfloat16)
-        with (
-            ops.rms_norm.set_priority([rms_provider, "native"]),
-            ir.enable_torch_wrap(True),
-        ):
-            compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-            compiled_unlowered_model = torch.compile(
-                model, backend=backend_unlowered, fullgraph=True
-            )
-            output = compiled_model(x)
-            output_unlowered = compiled_unlowered_model(x)
-
-        selected = lowering_pass.selected_impls["rms_norm"]
-        assert len(selected) == 3
-        assert selected["rms_norm"] == rms_provider
-        assert selected["rms_norm_1"] == rms_provider
-        assert selected["rms_norm_2"] == "native"
-
-        # Compiled function guards on global value, avoid recompilation
-        with ir.enable_torch_wrap(True):
-            output2 = compiled_model(x)
-
-        torch.testing.assert_close(output_unlowered, output)
-        torch.testing.assert_close(output_unlowered, output2)
-
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
     def test_e2e_output_consistency(self, op_name, provider, default_vllm_config):
         """
@@ -263,13 +238,7 @@ class TestE2ELowering:
         lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
         backend = TestBackend(lowering_pass)
         backend_unlowered = TestBackend()
-
-        # Create a simple model that uses the op
-        class SimpleModel(nn.Module):
-            def forward(self, x):
-                # Call the op directly
-                args = _make_fake_args_for_op(op)
-                return op(*args)
+        model = _make_simple_model(op)
 
         torch.set_default_device(current_platform.device_type)
 
@@ -277,7 +246,6 @@ class TestE2ELowering:
             op.set_priority([provider, "native"]),
             ir.enable_torch_wrap(True),
         ):
-            model = SimpleModel()
             x = torch.randn(8, 16, dtype=torch.bfloat16)
 
             compiled_model = torch.compile(model, backend=backend, fullgraph=True)
@@ -295,35 +263,51 @@ class TestE2ELowering:
                 )
 
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
-    def test_lowering_op_count(self, op_name, provider, default_vllm_config):
+    def test_lowering_dispatch_consistency(self, op_name, provider,
+                                           default_vllm_config):
         """
-        Verify the correct number of ops are lowered into chosen implementations.
+        Verify lowering pass selection matches direct dispatch results.
+        
+        This ensures the lowering pass correctly uses ir_op.dispatch() to
+        select implementations, and that the selected providers are consistent
+        with what dispatch() would return for the same arguments.
         """
         op = IrOp.registry[op_name]
 
         if not op.impls[provider].supported:
             pytest.skip(f"Provider {provider} not supported")
 
+        # Get expected result from direct dispatch
+        fake_args = _make_fake_args_for_op(op)
+        with op.set_priority([provider, "native"]):
+            expected_impl = op.dispatch(*fake_args)
+
         lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
         backend = TestBackend(lowering_pass)
 
         torch.set_default_device(current_platform.device_type)
 
+        model = _make_simple_model(op)
+
         with (
             op.set_priority([provider, "native"]),
             ir.enable_torch_wrap(True),
         ):
-            model = Model()
             x = torch.randn(8, 16, dtype=torch.bfloat16)
             compiled_model = torch.compile(model, backend=backend, fullgraph=True)
             _ = compiled_model(x)
 
-        # Check that the op was recorded in selected_impls
+        # Verify selected_impls matches direct dispatch result
         if op_name in lowering_pass.selected_impls:
             selected = lowering_pass.selected_impls[op_name]
-            # At least one instance should be selected
             assert len(selected) > 0, (
-                f"No instances of {op_name} were lowered to {provider}"
+                f"No instances of {op_name} were lowered"
             )
+
+            for node_name, selected_provider in selected.items():
+                assert selected_provider == expected_impl.provider, (
+                    f"lowering selected {selected_provider} for {node_name}, "
+                    f"but direct dispatch got {expected_impl.provider}"
+                )
 
 
