@@ -28,32 +28,38 @@ def _get_op_provider_pairs() -> list[tuple[str, str]]:
     return pairs
 
 
-def _make_fake_args_for_op(op: IrOp) -> tuple[Any, ...]:
-    """Create fake meta tensors with unbacked symint dimensions for an op.
+def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
+    """Create arguments for an op, with optional unbacked symint dimensions.
 
-    Uses unbacked SymInt for the batch dimension to verify that supports_args
-    does not specialize on concrete tensor shapes.
-
-    NOTE: This must be called outside of torch.compile context.
+    Args:
+        op: The IrOp to create arguments for.
+        use_fake: If True, use unbacked SymInt for batch dimension to verify
+            supports_args does not specialize on concrete tensor shapes.
+            Must be called outside of torch.compile context.
+            If False, use concrete shapes for E2E lowering tests.
     """
-    from torch.fx.experimental.symbolic_shapes import ShapeEnv
-
     sig = op._py_signature
     args = []
     for param in sig.parameters.values():
         ann = param.annotation
         if ann == torch.Tensor:
-            # Use unbacked symint for batch dimension
-            batch = ShapeEnv().create_unbacked_symint()
-            args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
+            if use_fake:
+                from torch.fx.experimental.symbolic_shapes import ShapeEnv
+                batch = ShapeEnv().create_unbacked_symint()
+                args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
+            else:
+                args.append(torch.randn(8, 16, dtype=torch.bfloat16))
         elif ann in (int, "int"):
             args.append(16)
         elif ann in (float, "float"):
             args.append(1e-5)
         elif "Tensor | None" in str(ann) or "Optional[Tensor]" in str(ann):
-            # Tensor | None type - pass a fake tensor (supports_args checks attributes)
-            batch = ShapeEnv().create_unbacked_symint()
-            args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
+            if use_fake:
+                from torch.fx.experimental.symbolic_shapes import ShapeEnv
+                batch = ShapeEnv().create_unbacked_symint()
+                args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
+            else:
+                args.append(torch.randn(8, 16, dtype=torch.bfloat16))
         elif "int | None" in str(ann) or "Optional[int]" in str(ann):
             args.append(16)
         else:
@@ -62,31 +68,18 @@ def _make_fake_args_for_op(op: IrOp) -> tuple[Any, ...]:
 
 
 def _make_simple_model(op: IrOp) -> nn.Module:
-    """Create a simple model that calls the op with real arguments."""
-    # Create args once at model construction time (outside torch.compile)
-    sig = op._py_signature
-    args = []
-    for param in sig.parameters.values():
-        ann = param.annotation
-        if ann == torch.Tensor:
-            args.append(torch.randn(8, 16, dtype=torch.bfloat16))
-        elif ann in (int, "int"):
-            args.append(16)
-        elif ann in (float, "float"):
-            args.append(1e-5)
-        elif "Tensor | None" in str(ann) or "Optional[Tensor]" in str(ann):
-            args.append(torch.randn(8, 16, dtype=torch.bfloat16))
-        elif "int | None" in str(ann) or "Optional[int]" in str(ann):
-            args.append(16)
-        else:
-            args.append(None)
-    fake_args = tuple(args)
+    """Create a simple model that calls the op with pre-generated arguments.
+
+    Arguments are created once at model construction time and registered as
+    buffers to avoid Dynamo tracing issues.
+    """
+    real_args = _make_args_for_op(op, use_fake=False)
 
     class SimpleModel(nn.Module):
         def __init__(self):
             super().__init__()
             # Register tensors as buffers so they're visible to Dynamo
-            for i, arg in enumerate(fake_args):
+            for i, arg in enumerate(real_args):
                 if isinstance(arg, torch.Tensor):
                     self.register_buffer(f"_arg_{i}", arg)
 
@@ -94,7 +87,7 @@ def _make_simple_model(op: IrOp) -> nn.Module:
             # Reconstruct args from buffers
             reconstructed = []
             idx = 0
-            for param in sig.parameters.values():
+            for param in op._py_signature.parameters.values():
                 ann = param.annotation
                 if ann == torch.Tensor:
                     reconstructed.append(getattr(self, f"_arg_{idx}"))
@@ -136,20 +129,29 @@ class TestPerOpLowering:
         Test that each op implementation can be lowered through the pass.
 
         Verifies:
-        1. The op is replaced by the implementation in the graph
-        2. selected_impls records the correct provider
-        3. The lowered graph produces valid output
+        1. supports_args does not crash on unbacked symint (batch-agnostic)
+        2. The op is replaced by the implementation in the graph
+        3. selected_impls records the correct provider
+        4. The lowered graph produces valid output
         """
         op = IrOp.registry[op_name]
         if not op.impls[provider].supported:
             pytest.skip(f"Provider {provider} not supported")
 
+        # Step 1: Verify supports_args works with unbacked symint
+        fake_args = _make_args_for_op(op, use_fake=True)
+        impl = op.impls[provider]
+        # This should not raise - verifies supports_args is batch-agnostic
+        supports_result = impl.supports_args(*fake_args)
+        assert isinstance(supports_result, bool), (
+            f"supports_args should return bool, got {type(supports_result)}"
+        )
+
+        # Step 2: Perform lowering test with real tensors
         lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
         backend = TestBackend(lowering_pass)
 
         torch.set_default_device(current_platform.device_type)
-
-        fake_args = _make_fake_args_for_op(op)
 
         with (
             op.set_priority([provider, "native"]),
@@ -360,9 +362,9 @@ class TestE2ELowering:
             pytest.skip(f"Provider {provider} not supported")
 
         # Get expected result from direct dispatch
-        fake_args = _make_fake_args_for_op(op)
+        real_args = _make_args_for_op(op, use_fake=False)
         with op.set_priority([provider, "native"]):
-            expected_impl = op.dispatch(*fake_args)
+            expected_impl = op.dispatch(*real_args)
 
         lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
         backend = TestBackend(lowering_pass)
@@ -391,5 +393,3 @@ class TestE2ELowering:
                     f"lowering selected {selected_provider} for {node_name}, "
                     f"but direct dispatch got {expected_impl.provider}"
                 )
-
-
