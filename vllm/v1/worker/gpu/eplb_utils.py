@@ -8,6 +8,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 
+from vllm.config import ModelConfig
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import is_mixture_of_experts
@@ -77,6 +78,7 @@ class EPLBController:
             draft_model,
             speculative_config.draft_model_config,
         )
+        speculator.set_eplb_state(self.state)
         self._has_registered_models = True
         return True
 
@@ -122,6 +124,16 @@ class EPLBController:
             is_profile,
             log_stats=self.parallel_config.eplb_config.log_balancedness,
         )
+
+    def prepare_forward(
+        self,
+        model_config: ModelConfig,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        if self.state is None or not self.parallel_config.enable_eplb:
+            return
+        self.state.prepare_forward(model_config, num_unpadded_tokens, ubatch_slices)
 
     def setup_from_mapping(
         self,

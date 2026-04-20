@@ -735,3 +735,67 @@ def test_eplb_map_with_redundancy(
         torch.testing.assert_close(load, exp_load)
     else:
         assert load.sum().item() == 0
+
+
+@pytest.mark.parametrize(
+    "l2p_map, replica_count, num_physical, topk_ids, "
+    "num_unpadded, expected_out, expected_load",
+    [
+        pytest.param(
+            [[0], [1], [2], [3]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            2,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            # only rows 0,1 counted: expert 0→1, 1→1, 2→1, 3→1
+            [1, 1, 1, 1],
+            id="half_padded",
+        ),
+        pytest.param(
+            # record everything (None = no padding info)
+            [[0], [1], [2], [3]],
+            [1, 1, 1, 1],
+            4,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            None,
+            [[0, 1], [2, 3], [0, 2], [1, 3]],
+            [2, 2, 2, 2],
+            id="no_padding_info",
+        ),
+    ],
+)
+def test_eplb_map_num_unpadded_tokens(
+    l2p_map,
+    replica_count,
+    num_physical,
+    topk_ids,
+    num_unpadded,
+    expected_out,
+    expected_load,
+):
+    l2p = torch.tensor(l2p_map, dtype=torch.int64, device="cuda")
+    rc = torch.tensor(replica_count, dtype=torch.int64, device="cuda")
+    load = torch.zeros(num_physical, dtype=torch.int32, device="cuda")
+    rec = torch.tensor(True, dtype=torch.bool, device="cuda")
+    ids = torch.tensor(topk_ids, dtype=torch.int32, device="cuda")
+    num_unpadded_t = (
+        torch.tensor(num_unpadded, dtype=torch.int32, device="cuda")
+        if num_unpadded is not None
+        else None
+    )
+
+    out = eplb_map_to_physical_and_record(
+        topk_ids=ids,
+        expert_load_view=load,
+        logical_to_physical_map=l2p,
+        logical_replica_count=rc,
+        record_enabled=rec,
+        num_unpadded_tokens=num_unpadded_t,
+    )
+
+    exp_out = torch.tensor(expected_out, dtype=out.dtype, device="cuda")
+    torch.testing.assert_close(out, exp_out)
+
+    exp_load = torch.tensor(expected_load, dtype=torch.int32, device="cuda")
+    torch.testing.assert_close(load, exp_load)

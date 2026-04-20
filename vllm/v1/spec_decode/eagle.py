@@ -14,6 +14,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     replace,
 )
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -77,6 +78,8 @@ class SpecDecodeBaseProposer:
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+
+        self.eplb_state: EplbState | None = None
 
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -292,6 +295,10 @@ class SpecDecodeBaseProposer:
             1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
         ).repeat(self.max_batch_size, 1)
 
+    def set_eplb_state(self, eplb_state: EplbState) -> None:
+        """Inject EPLB state after construction."""
+        self.eplb_state = eplb_state
+
     def _raise_if_padded_drafter_batch_disabled(self):
         if self.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
@@ -460,6 +467,8 @@ class SpecDecodeBaseProposer:
             num_tokens, num_input_tokens, mm_embed_inputs
         )
 
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(self.draft_model_config, num_tokens)
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -522,6 +531,9 @@ class SpecDecodeBaseProposer:
         cudagraph_runtime_mode, input_batch_size, batch_size_across_dp = (
             self._determine_batch_execution_and_padding(batch_size)
         )
+
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(self.draft_model_config, batch_size)
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
@@ -1102,6 +1114,9 @@ class SpecDecodeBaseProposer:
                 num_tokens
             )
             num_input_tokens = batch_desc.num_tokens
+            if self.eplb_state is not None:
+                self.eplb_state.prepare_forward(self.draft_model_config, num_tokens)
+
             # Run the model.
             with set_forward_context(
                 per_layer_attn_metadata,

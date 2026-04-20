@@ -1063,6 +1063,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             del intermediate_tensors
 
+        # Update the EPLB meta.
+        self.eplb.prepare_forward(self.model_config, input_batch.num_tokens)
+
         # Run model.
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.

@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config import CUDAGraphMode, VllmConfig, get_layers_from_vllm_config
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.model_loader import get_model
@@ -37,6 +38,8 @@ class ExtractHiddenStatesProposer:
         self.device = device
         self.dtype = vllm_config.model_config.dtype
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+
+        self.eplb_state: EplbState | None = None
 
         # Model and attention layer tracking (initialized in load_model)
         self.model: nn.Module | None = None
@@ -68,6 +71,10 @@ class ExtractHiddenStatesProposer:
         self._slot_mapping_buffer = torch.zeros(
             self.max_num_tokens, dtype=torch.int64, device=device
         )
+
+    def set_eplb_state(self, eplb_state: EplbState) -> None:
+        """Inject EPLB state after construction."""
+        self.eplb_state = eplb_state
 
     def propose(
         self,
@@ -129,6 +136,12 @@ class ExtractHiddenStatesProposer:
         if num_tokens_across_dp is not None:
             num_tokens_across_dp[self.dp_rank] = num_input_tokens
 
+        if self.eplb_state is not None:
+            assert self.vllm_config.speculative_config is not None
+            self.eplb_state.prepare_forward(
+                self.vllm_config.speculative_config.draft_model_config,
+                num_tokens,
+            )
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,

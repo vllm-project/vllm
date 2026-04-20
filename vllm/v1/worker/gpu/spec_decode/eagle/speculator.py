@@ -7,6 +7,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -85,6 +86,8 @@ class EagleSpeculator:
             self.max_num_reqs, dtype=torch.int64, device=device
         )
 
+        self.eplb_state: EplbState | None = None
+
         self.supports_mm_inputs = MULTIMODAL_REGISTRY.supports_multimodal_inputs(
             self.draft_model_config
         )
@@ -151,6 +154,10 @@ class EagleSpeculator:
         self.draft_attn_layer_names = set(all_attn_layers) - set(
             target_attn_layer_names
         )
+
+    def set_eplb_state(self, eplb_state: EplbState) -> None:
+        """Inject EPLB state after construction."""
+        self.eplb_state = eplb_state
 
     def set_attn(
         self,
@@ -444,6 +451,9 @@ class EagleSpeculator:
         self.seeds.copy_(seeds)
         self.idx_mapping[:num_reqs].copy_(input_batch.idx_mapping)
 
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(self.draft_model_config, num_tokens)
+
         # Get the input ids and last token indices for the speculator.
         prepare_eagle_inputs(
             self.input_buffers,
@@ -455,7 +465,6 @@ class EagleSpeculator:
             next_prefill_tokens,
             self.max_num_reqs,
         )
-
         # When all requests are decoding (no true prefills), each has
         # num_speculative_steps + 1 tokens, enabling FULL graph replay.
         # Mixed or prefill-only batches fall back to PIECEWISE.
@@ -544,6 +553,11 @@ class EagleSpeculator:
                 num_tokens_padded=decode_batch_desc.num_tokens,
                 max_query_len=1,
             )
+
+        if self.eplb_state is not None:
+            # Decode generates exactly 1 token per request, so
+            # num_reqs == the actual unpadded token count.
+            self.eplb_state.prepare_forward(self.draft_model_config, num_reqs)
 
         if decode_batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Replay the full graph for draft generation.
