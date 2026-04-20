@@ -96,22 +96,17 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
             )
 
         # Initialize intermediate mm layers for unit test
-        # Use disable_tp=True to avoid requiring distributed initialization
         self.q_b_proj = ColumnParallelLinear(
             self.q_lora_rank,
             self.num_heads * self.qk_head_dim,
             bias=False,
-            quant_config=vllm_config.quant_config,
             prefix=f"{prefix}.q_b_proj",
-            disable_tp=True,
         ).to(device)
         self.kv_b_proj = ColumnParallelLinear(
             self.kv_lora_rank,
             self.num_heads * (self.qk_nope_head_dim + self.v_head_dim),
             bias=False,
-            quant_config=vllm_config.quant_config,
             prefix=f"{prefix}.kv_b_proj",
-            disable_tp=True,
         ).to(device)
 
         # Register layer metadata for the fusion pass via MLAAttention
