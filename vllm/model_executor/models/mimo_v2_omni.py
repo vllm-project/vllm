@@ -1134,12 +1134,8 @@ class MiMoV2OmniMultiModalProcessor(BaseMultiModalProcessor[MiMoV2OmniProcessing
         def get_audio_replacement(item_idx: int) -> PromptUpdateDetails:
             out_item = out_mm_kwargs["audio"][item_idx]
             tok_len = int(out_item["audio_token_lens"].data)
-            full = (
-                [audio_start_id]
-                + [audio_pad_id] * tok_len
-                + [audio_end_id]
-            )
-            embed_mask = [False] + [True] * tok_len + [False]
+            full = [audio_pad_id] * tok_len
+            embed_mask = [True] * tok_len
             embed_t = torch.tensor(embed_mask)
             return PromptUpdateDetails(
                 full=full,
