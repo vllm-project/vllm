@@ -213,7 +213,7 @@ class KimiK2ReasoningParser(ReasoningParser):
             return None
 
         delta_reasoning = (
-            delta_text.removeprefix(self._start_token)
+            delta_text.replace(self._start_token, "", 1)
             if (
                 self._start_token_id in delta_token_ids
                 and self._start_token_id not in previous_token_ids

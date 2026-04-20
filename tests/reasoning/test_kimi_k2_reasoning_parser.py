@@ -178,6 +178,43 @@ def test_streaming_same_delta_think_end_and_content(kimi_k2_tokenizer):
     assert result.content == "answer"
 
 
+def test_streaming_same_delta_with_prefix_before_think(kimi_k2_tokenizer):
+    """Prefixes before <think> stay in reasoning while the tag is removed."""
+    parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+
+    prefix = "lead "
+    think_id = parser._start_token_id
+    end_think_id = parser._end_token_id
+    prefix_ids = kimi_k2_tokenizer.encode(prefix, add_special_tokens=False)
+    reasoning_ids = kimi_k2_tokenizer.encode("step one", add_special_tokens=False)
+    content_ids = kimi_k2_tokenizer.encode("answer", add_special_tokens=False)
+
+    result = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text=f"{prefix}<think>step one</think>answer",
+        delta_text=f"{prefix}<think>step one</think>answer",
+        previous_token_ids=[],
+        current_token_ids=[
+            *prefix_ids,
+            think_id,
+            *reasoning_ids,
+            end_think_id,
+            *content_ids,
+        ],
+        delta_token_ids=[
+            *prefix_ids,
+            think_id,
+            *reasoning_ids,
+            end_think_id,
+            *content_ids,
+        ],
+    )
+
+    assert isinstance(result, DeltaMessage)
+    assert result.reasoning == "lead step one"
+    assert result.content == "answer"
+
+
 def test_streaming_same_delta_think_and_tool_section(kimi_k2_tokenizer):
     """Grouped <think>...tool-section deltas should not leak the start marker."""
     parser = KimiK2ReasoningParser(kimi_k2_tokenizer)

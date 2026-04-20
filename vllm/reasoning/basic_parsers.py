@@ -148,9 +148,12 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 )
             else:
                 # start token in delta, no end token in delta,
-                # reasoning content continues. Strip the leading start token when
-                # it is grouped with reasoning text in the same delta.
-                return DeltaMessage(reasoning=delta_text.removeprefix(self.start_token))
+                # reasoning content continues. Match the non-streaming parser by
+                # dropping any prefix before the start token along with the tag.
+                delta_parts = delta_text.partition(self.start_token)
+                return DeltaMessage(
+                    reasoning=delta_parts[2] if delta_parts[1] else delta_text
+                )
         else:
             # not find thinking start token
             return DeltaMessage(content=delta_text)
