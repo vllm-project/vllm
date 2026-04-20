@@ -6,8 +6,7 @@ from typing import Union
 
 import torch
 
-import vllm.envs as envs
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, SchedulerConfig
 from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -763,6 +762,25 @@ def nvfp4_moe_quant_config(
     )
 
 
+def mxfp4_moe_quant_config(
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+) -> FusedMoEQuantConfig:
+    """
+    Construct a quant config for MXFP4 x MXFP4 MoE.
+    MXFP4 uses block scaling only (E8M0 scales, 32-element groups), with no
+    separate alphas / global activation scales in this config.
+    """
+    return FusedMoEQuantConfig.make(
+        "mxfp4",
+        w1_scale=w1_scale,
+        w2_scale=w2_scale,
+        per_act_token_quant=False,
+        per_out_ch_quant=False,
+        block_shape=None,
+    )
+
+
 def nvfp4_w4a16_moe_quant_config(
     g1_alphas: torch.Tensor,
     g2_alphas: torch.Tensor,
@@ -936,15 +954,6 @@ class FusedMoEParallelConfig:
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
     enable_eplb: bool  # whether to enable expert load balancing
-
-    @property
-    def use_dp_chunking(self) -> bool:
-        return (
-            self.use_deepep_ll_kernels
-            or self.use_mori_kernels
-            or self.use_fi_nvl_two_sided_kernels
-            or self.use_nixl_ep_kernels
-        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
     @property
     def is_sequence_parallel(self) -> bool:
@@ -1184,7 +1193,7 @@ class FusedMoEConfig:
     intermediate_size_per_partition_unpadded: int | None = None
 
     moe_backend: str = "auto"
-    max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
+    max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_act_and_mul: bool = True
     is_lora_enabled: bool = False
