@@ -387,7 +387,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.query_quant = None
         if (
             self.impl.supports_quant_query_input
-            and self.kv_cache_dtype.startswith("fp8")
+            and (
+                self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
+            )
             and not self.kv_cache_dtype.endswith("per_token_head")
         ):
             is_per_head = (
@@ -404,33 +406,16 @@ class Attention(nn.Module, AttentionLayerBase):
     def _init_turboquant_buffers(
         self, cache_dtype: str, head_size: int, prefix: str
     ) -> None:
-        """Initialize TurboQuant rotation/projection matrices and centroids."""
+        """Initialize TurboQuant centroids for Lloyd-Max quantization."""
         from vllm.model_executor.layers.quantization.turboquant.centroids import (
             get_centroids,
         )
         from vllm.model_executor.layers.quantization.turboquant.config import (
             TurboQuantConfig,
         )
-        from vllm.model_executor.layers.quantization.turboquant.quantizer import (
-            generate_wht_signs,
-        )
 
         tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
 
-        # Each layer needs a unique rotation matrix so quantization errors
-        # don't correlate across layers. Stride must exceed max head_dim to
-        # ensure non-overlapping RNG streams between adjacent layers.
-        _TQ_LAYER_SEED_STRIDE = 1337
-
-        from vllm.model_executor.models.utils import extract_layer_index
-
-        layer_idx = extract_layer_index(prefix)
-        seed = tq_config.seed + layer_idx * _TQ_LAYER_SEED_STRIDE
-
-        self.register_buffer(
-            "_tq_signs",
-            generate_wht_signs(head_size, seed=seed),
-        )
         self.register_buffer(
             "_tq_centroids",
             get_centroids(head_size, tq_config.centroid_bits),
@@ -492,7 +477,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # which reduces overheads during decoding.
             # Otherwise queries are quantized using custom ops
             # which causes decoding overheads
-            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3"}
+            assert self.kv_cache_dtype in {"fp8", "fp8_e4m3", "nvfp4"}
 
             # check if query quantization is supported
             if self.impl.supports_quant_query_input:
