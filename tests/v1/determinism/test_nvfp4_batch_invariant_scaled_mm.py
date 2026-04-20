@@ -10,12 +10,6 @@ Do not share a session with ``tests/kernels/quantization/test_nvfp4_scaled_mm.py
 the native code caches whether batch invariance is enabled on the first GEMM, and
 if ``VLLM_BATCH_INVARIANT`` was not set at that moment, it stays disabled for the
 rest of the process.
-
-The reference correctness test is included here (not only in the default-path
-module) because ``VLLM_BATCH_INVARIANT=1`` potentially activates a different kernel.
-The two tests are complementary: the reference check catches absolute correctness
-bugs; the batch-invariance check catches schedule-dependent bugs that affect
-full-batch and single-row runs equally.
 """
 
 import os
@@ -63,7 +57,7 @@ def test_nvfp4_gemm_batch_invariance(
     For row ``i``, compares ``cutlass_scaled_fp4_mm`` run once over all ``M``
     rows against a separate call with ``A`` sliced to ``a_dtype[i : i+1]``.
     Catches kernels whose reduction or scheduling depends on ``M`` or adjacent
-    rows. Uses larger ``CONSISTENCY_SHAPES`` than the reference test.
+    rows.
     """
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     set_random_seed(seed)
