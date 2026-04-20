@@ -310,16 +310,17 @@ def _fwd_kernel(
         qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
         qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
         qk *= sm_scale
+
+        valid_kv = (start_n + offs_n[None, :]) < cur_batch_query_len
         if CAUSAL:
-            qk = tl.where(
-                offs_m[:, None] >= (start_n + offs_n[None, :]), qk, float("-inf")
-            )
+            attn_mask = valid_kv & (offs_m[:, None] >= (start_n + offs_n[None, :]))
+        else:
+            attn_mask = valid_kv
         if SLIDING_WINDOW > 0:
-            qk = tl.where(
-                offs_m[:, None] - (start_n + offs_n[None, :]) < SLIDING_WINDOW,
-                qk,
-                float("-inf"),
+            attn_mask = attn_mask & (
+                offs_m[:, None] - (start_n + offs_n[None, :]) < SLIDING_WINDOW
             )
+        qk = tl.where(attn_mask, qk, float("-inf"))
 
         # compute running maximum
         m_ij = tl.maximum(m_i, tl.max(qk, axis=1))
