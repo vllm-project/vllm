@@ -300,9 +300,9 @@ class OpenAIServingCompletion(OpenAIServing):
                     num_prompt_tokens[prompt_idx] += len(res.encoder_prompt_token_ids)
 
                 if getattr(request, "return_progress", False) and getattr(res, "num_computed_tokens", None) is not None and not res.outputs[0].token_ids:
-                    time_ms = int((time.time() - created_time) * 1000)
-                    if res.metrics and hasattr(res.metrics, "arrival_time"):
-                        time_ms = int((time.time() - res.metrics.arrival_time) * 1000)
+                    now = time.time()
+                    start_time = res.metrics.arrival_time if res.metrics and hasattr(res.metrics, "arrival_time") else created_time
+                    time_ms = int((now - start_time) * 1000)
                     
                     progress_chunk = CompletionStreamResponse(
                         id=request_id,
