@@ -265,6 +265,7 @@ class CompilerManager:
         compile_range: Range,
         graph_index: int = 0,
         num_graphs: int = 1,
+        is_encoder: bool = False,
     ) -> Any:
         if graph_index == 0:
             # before compiling the first graph, record the start time
@@ -282,7 +283,10 @@ class CompilerManager:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
                 elapsed = time.perf_counter() - compilation_start_time
-                compilation_config.compilation_time += elapsed
+                if is_encoder:
+                    compilation_config.encoder_compilation_time += elapsed
+                else:
+                    compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
                     "from the cache, took %.3f s",
@@ -387,7 +391,10 @@ class CompilerManager:
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
             elapsed = time.perf_counter() - compilation_start_time
-            compilation_config.compilation_time += elapsed
+            if is_encoder:
+                compilation_config.encoder_compilation_time += elapsed
+            else:
+                compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
@@ -1130,7 +1137,10 @@ class VllmBackend:
         logger.info_once(
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
-        self.compilation_config.compilation_time += dynamo_time
+        if self.is_encoder:
+            self.compilation_config.encoder_compilation_time += dynamo_time
+        else:
+            self.compilation_config.compilation_time += dynamo_time
 
         # Record Dynamo time in tracing if available
         start_time = int(torch_compile_start_time * 1e9)
@@ -1253,6 +1263,23 @@ class VllmBackend:
             original_split_gm if envs.VLLM_USE_MEGA_AOT_ARTIFACT else self.graph
         )
 
+        from vllm.compilation.codegen import (
+            compile_execution_fn,
+            generate_execution_code,
+        )
+
+        execution_code, submod_names = generate_execution_code(self.split_gm)
+        # Use getattr to get correct callables: __dict__ has PiecewiseBackend
+        # instances (from PiecewiseCompileInterpreter), _modules has originals.
+        # getattr checks __dict__ first, then falls back to _modules.
+        submod_callables = {
+            name: getattr(self.split_gm, name)
+            for name, _ in self.split_gm.named_children()
+        }
+        runtime_callable = compile_execution_fn(
+            execution_code, submod_callables, submod_names
+        )
+
         if (
             self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
             or not self.compilation_config.cudagraph_copy_inputs
@@ -1261,9 +1288,11 @@ class VllmBackend:
                 graph_to_serialize,
                 example_inputs,
                 self.prefix,
-                self.split_gm,
+                runtime_callable,
                 is_encoder=self.is_encoder,
                 vllm_backend=self,
+                execution_code=execution_code,
+                submod_names=submod_names,
             )
 
         # index of tensors that have symbolic shapes (batch size)
@@ -1284,7 +1313,7 @@ class VllmBackend:
         copy_and_call = make_copy_and_call(
             sym_tensor_indices,
             [example_inputs[x].clone() for x in sym_tensor_indices],
-            self.split_gm,
+            runtime_callable,
         )
 
         return VllmSerializableFunction(
@@ -1295,4 +1324,6 @@ class VllmBackend:
             is_encoder=self.is_encoder,
             vllm_backend=self,
             sym_tensor_indices=sym_tensor_indices,
+            execution_code=execution_code,
+            submod_names=submod_names,
         )
