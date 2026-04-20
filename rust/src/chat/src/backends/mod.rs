@@ -4,13 +4,15 @@ use serde_json::Value;
 use vllm_text::DynTextBackend;
 
 use crate::error::Result;
-use crate::{ChatTemplateContentFormatOption, DynChatBackend};
+use crate::{ChatTemplateContentFormatOption, DynChatBackend, RendererSelection};
 
 pub mod hf;
 
 /// Frontend-side chat backend loading options.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LoadModelBackendsOptions {
+    /// Which chat renderer implementation to use.
+    pub renderer: RendererSelection,
     /// How to serialize `message.content` when rendering the chat template.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional server-default chat template override, provided either as an inline template or

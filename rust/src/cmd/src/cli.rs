@@ -22,6 +22,7 @@ use uuid::Uuid;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
     ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
+    RendererSelection,
 };
 
 use crate::cli::unsupported::UnsupportedArgs;
@@ -105,6 +106,10 @@ pub struct SharedRuntimeArgs {
     #[arg(long, default_value_t)]
     #[serde(default)]
     pub reasoning_parser: ParserSelection,
+    /// Select the chat renderer implementation.
+    #[arg(long = "tokenizer-mode", default_value_t)]
+    #[serde(default, rename = "tokenizer_mode")]
+    pub renderer: RendererSelection,
     /// Override the maximum model context length. When set, the frontend uses this value
     /// instead of the model's `max_position_embeddings` from `config.json`.
     #[arg(long)]
@@ -188,6 +193,7 @@ impl SharedRuntimeArgs {
             listener_mode: HttpListenerMode::InheritedFd { fd: listen_fd },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,
@@ -222,6 +228,7 @@ impl SharedRuntimeArgs {
             listener_mode: HttpListenerMode::Bind { host, port },
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
+            renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
             chat_template_content_format: self.chat_template_content_format,

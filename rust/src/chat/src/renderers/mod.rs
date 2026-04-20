@@ -5,7 +5,10 @@ use crate::request::ChatRequest;
 
 pub mod deepseek_v32;
 pub mod hf;
+mod selection;
+
 pub use deepseek_v32::DeepSeekV32ChatRenderer;
+pub use selection::RendererSelection;
 
 /// Rendered chat prompt submitted to the text backend.
 #[derive(Debug, Clone, PartialEq, Eq)]

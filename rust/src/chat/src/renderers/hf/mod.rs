@@ -4,8 +4,10 @@ use openai_protocol::common::Tool as OpenAiTool;
 use serde::Serialize;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
-use tracing::trace;
-use vllm_text::backends::hf::HfSpecialTokens;
+use tracing::{info, trace, warn};
+use vllm_text::backends::hf::{
+    HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
+};
 
 use self::format::{
     ChatTemplateContentFormat, ChatTemplateContentFormatOption as ContentFormatOption,
@@ -14,7 +16,9 @@ use self::template::{CompiledChatTemplate, TemplateContext};
 use super::{ChatRenderer, RenderedPrompt};
 use crate::error::Result;
 use crate::request::{ChatContent, ChatMessage, ChatRequest};
-use crate::{AssistantContentBlock, AssistantMessageExt, ChatTool, Error};
+use crate::{
+    AssistantContentBlock, AssistantMessageExt, ChatTool, Error, LoadModelBackendsOptions,
+};
 
 mod error;
 mod format;
@@ -52,6 +56,50 @@ impl HfChatRenderer {
             content_format,
             special_tokens,
         })
+    }
+
+    /// Create a renderer from the given model files and loading options.
+    pub fn load(files: &ResolvedModelFiles, options: LoadModelBackendsOptions) -> Result<Self> {
+        let HfTokenizerConfig {
+            special_tokens,
+            chat_template,
+            ..
+        } = load_tokenizer_config(files.tokenizer_config_path.as_deref())?;
+        let mut template = chat_template;
+        let special_tokens = (!special_tokens.is_empty()).then_some(special_tokens);
+
+        if let Some(configured_template) = options.chat_template.as_deref() {
+            template = Some(
+                resolve_chat_template(configured_template)
+                    .map_err(|error| Error::ChatTemplate(error.to_report_string()))?,
+            );
+            info!("using configured chat template override");
+        } else if let Some(chat_template_path) = files.chat_template_path.as_deref() {
+            // If independent chat template file(s) exist and contain non-empty content, they take
+            // priority over template entries in the tokenizer config
+            let file_template = load_chat_template(chat_template_path)
+                .map_err(|error| Error::ChatTemplate(error.to_report_string()))?;
+
+            if file_template.as_ref().is_some_and(|t| !t.trim().is_empty()) {
+                info!(
+                    path = %chat_template_path.display(),
+                    "loaded dedicated chat template file, overriding tokenizer_config chat_template"
+                );
+                template = file_template;
+            } else {
+                warn!(
+                    path = %chat_template_path.display(),
+                    "ignoring empty dedicated chat template file and falling back to tokenizer_config chat_template"
+                );
+            }
+        }
+
+        Self::new(
+            template,
+            options.default_chat_template_kwargs,
+            options.chat_template_content_format,
+            special_tokens,
+        )
     }
 
     /// Apply the chat template to one chat request, rendering the prompt string to be tokenized

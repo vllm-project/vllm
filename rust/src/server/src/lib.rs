@@ -22,7 +22,7 @@ use socket2::Socket;
 use tokio::net::TcpListener;
 use tracing::{info, trace};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
-pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection};
+pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
@@ -36,6 +36,7 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let loaded = load_model_backends(
         &config.model,
         LoadModelBackendsOptions {
+            renderer: config.renderer,
             chat_template: config.chat_template.clone(),
             chat_template_content_format: config.chat_template_content_format,
             default_chat_template_kwargs: config

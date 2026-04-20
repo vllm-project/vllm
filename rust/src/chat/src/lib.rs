@@ -22,7 +22,9 @@ use futures::{StreamExt, TryStreamExt as _};
 pub use parser::ParserSelection;
 pub use reasoning::{ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory};
 pub use renderers::hf::ChatTemplateContentFormatOption;
-pub use renderers::{ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt};
+pub use renderers::{
+    ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt, RendererSelection,
+};
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
     ChatToolChoice, SamplingParams,

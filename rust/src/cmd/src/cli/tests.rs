@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, ParserSelection};
+use vllm_server::{Config, ParserSelection, RendererSelection};
 
 use super::{Cli, Command};
 
@@ -39,6 +39,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         engine_ready_timeout_secs: 300,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        renderer: Auto,
                         max_model_len: Some(
                             512,
                         ),
@@ -89,25 +90,35 @@ fn serve_args_auto_forward_python_multi_char_alias_without_separator() {
 }
 
 #[test]
-fn serve_args_keep_frontend_unsupported_args_before_separator() {
+fn serve_args_accept_explicit_deepseek_v32_renderer() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--tokenizer-mode",
+        "deepseek_v32",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
+}
+
+#[test]
+fn serve_args_reject_unknown_renderer_value() {
     let error = Cli::try_parse_from([
         "vllm-rs",
         "serve",
         "Qwen/Qwen3-0.6B",
         "--tokenizer-mode",
-        "auto",
-        "--dtype",
-        "float16",
+        "definitely_missing",
     ])
     .unwrap_err();
 
     expect![[r#"
-        error: invalid value 'auto' for '--tokenizer-mode <TOKENIZER_MODE>': argument is not implemented in Rust frontend yet
-
-        Remove this unsupported argument to continue.
-
-        Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-        This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
+        error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32)
 
         For more information, try '--help'.
     "#]]
@@ -213,6 +224,7 @@ fn frontend_args_accept_json() {
                         engine_ready_timeout_secs: 300,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        renderer: Auto,
                         max_model_len: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
@@ -250,6 +262,7 @@ fn frontend_args_json_applies_defaults() {
     assert_eq!(args.runtime.engine_ready_timeout_secs, 300);
     assert_eq!(args.runtime.tool_call_parser, ParserSelection::Auto);
     assert_eq!(args.runtime.reasoning_parser, ParserSelection::Auto);
+    assert_eq!(args.runtime.renderer, RendererSelection::Auto);
     assert_eq!(args.runtime.max_model_len, None);
 }
 
@@ -265,7 +278,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","max_model_len":8192}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","engine_ready_timeout_secs":42,"tool_call_parser":"hermes","reasoning_parser":"qwen3_thinking","tokenizer_mode":"deepseek_v32","max_model_len":8192}"#,
     ])
     .unwrap();
 
@@ -281,6 +294,7 @@ fn frontend_args_json_accepts_supported_non_default_fields() {
         args.runtime.reasoning_parser,
         ParserSelection::Explicit("qwen3_thinking".to_string())
     );
+    assert_eq!(args.runtime.renderer, RendererSelection::DeepSeekV32);
     assert_eq!(args.runtime.max_model_len, Some(8192));
 }
 
@@ -591,6 +605,7 @@ fn serve_args_accept_handshake_aliases() {
                         engine_ready_timeout_secs: 300,
                         tool_call_parser: Auto,
                         reasoning_parser: Auto,
+                        renderer: Auto,
                         max_model_len: None,
                         chat_template: None,
                         default_chat_template_kwargs: None,
@@ -698,6 +713,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            renderer: Auto,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
@@ -756,6 +772,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            renderer: Auto,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,
@@ -829,6 +846,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             },
             tool_call_parser: Auto,
             reasoning_parser: Auto,
+            renderer: Auto,
             chat_template: None,
             default_chat_template_kwargs: None,
             chat_template_content_format: Auto,

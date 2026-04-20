@@ -9,15 +9,14 @@ use crate::error::{Error, Result};
 
 /// Minimal subset of `tokenizer_config.json` needed by chat/EOS handling.
 #[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub struct HfTokenizerConfig {
     #[serde(flatten)]
     pub special_tokens: HfSpecialTokens,
-    #[serde(default)]
     pub chat_template: Option<String>,
     /// The `tokenizer_class` field from HuggingFace tokenizer configs. Some tiktoken-based models
     /// (e.g. DeepSeek, Kimi K2) set this to a value containing "Tiktoken" which can be used as a
     /// hint for backend selection.
-    #[serde(default)]
     pub tokenizer_class: Option<String>,
 }
 
@@ -86,41 +85,29 @@ impl HfSpecialTokens {
 ///
 /// We do not support additional entry points such as `decoder`, `generator`, or `text_encoder`.
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct ModelConfig {
-    #[serde(default)]
-    pub max_position_embeddings: Option<u32>,
-    #[serde(default)]
-    pub num_attention_heads: Option<u32>,
-    #[serde(default)]
-    pub num_experts: Option<OneOrManyExpertCount>,
-    #[serde(default)]
-    pub moe_num_experts: Option<OneOrManyExpertCount>,
-    #[serde(default)]
-    pub n_routed_experts: Option<OneOrManyExpertCount>,
-    #[serde(default)]
-    pub num_local_experts: Option<OneOrManyExpertCount>,
-    #[serde(default)]
-    pub block_configs: Vec<BlockConfig>,
-    #[serde(default)]
-    pub text_config: Option<Box<ModelConfig>>,
+#[serde(default)]
+pub struct ModelConfig {
+    model_type: Option<String>,
+    max_position_embeddings: Option<u32>,
+    num_attention_heads: Option<u32>,
+    num_experts: Option<OneOrManyExpertCount>,
+    moe_num_experts: Option<OneOrManyExpertCount>,
+    n_routed_experts: Option<OneOrManyExpertCount>,
+    num_local_experts: Option<OneOrManyExpertCount>,
+    block_configs: Vec<BlockConfig>,
+    text_config: Option<Box<ModelConfig>>,
 }
 
 /// Minimal subset of `generation_config.json`.
 #[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub(super) struct GenerationConfig {
-    #[serde(default)]
     pub eos_token_id: Option<OneOrManyTokenIds>,
-    #[serde(default)]
     pub temperature: Option<f32>,
-    #[serde(default)]
     pub top_p: Option<f32>,
-    #[serde(default)]
     pub top_k: Option<u32>,
-    #[serde(default)]
     pub min_p: Option<f32>,
-    #[serde(default)]
     pub repetition_penalty: Option<f32>,
-    #[serde(default)]
     pub max_new_tokens: Option<u32>,
 }
 
@@ -164,10 +151,9 @@ impl OneOrManyExpertCount {
 /// Heterogeneous block-level MoE metadata used as a fallback when no top-level
 /// expert-count field is available.
 #[derive(Debug, Default, Deserialize)]
+#[serde(default)]
 pub(super) struct BlockConfig {
-    #[serde(default)]
     pub block_type: String,
-    #[serde(default)]
     pub n_routed_experts: u32,
 }
 
@@ -178,6 +164,16 @@ impl ModelConfig {
     /// either the top-level config itself or a single nested `text_config`.
     fn effective_text_config(&self) -> &Self {
         self.text_config.as_deref().unwrap_or(self)
+    }
+
+    /// Return the effective Hugging Face `model_type` used by the Rust frontend.
+    ///
+    /// This follows the same simplified text-config selection as the rest of this type: the
+    /// top-level config wins, otherwise a single nested `text_config` may provide the value.
+    pub fn model_type(&self) -> Option<&str> {
+        self.model_type
+            .as_deref()
+            .or_else(|| self.text_config.as_deref()?.model_type())
     }
 
     /// Reject partially nested `text_config` payloads that are unlikely to be
@@ -238,7 +234,7 @@ impl ModelConfig {
         self.num_experts() > 0
     }
 
-    pub(super) fn effective_max_position_embeddings(&self) -> Option<u32> {
+    pub(super) fn max_position_embeddings(&self) -> Option<u32> {
         self.effective_text_config().max_position_embeddings
     }
 }
@@ -254,7 +250,7 @@ pub(super) fn load_generation_config(path: Option<&Path>) -> Result<GenerationCo
 }
 
 /// Load the model-side config (`config.json`) if present.
-pub(super) fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
+pub fn load_model_config(path: Option<&Path>) -> Result<ModelConfig> {
     let config: ModelConfig = read_json_file(path)?;
     config.validate_text_config_selection()?;
     Ok(config)
@@ -333,9 +329,11 @@ mod tests {
     fn model_config_prefers_nested_text_config_like_python_hf_text_config() {
         let config: ModelConfig = serde_json::from_str(
             r#"{
+                "model_type": "top_level",
                 "num_experts": 64,
                 "max_position_embeddings": 8192,
                 "text_config": {
+                    "model_type": "nested",
                     "num_attention_heads": 32,
                     "num_local_experts": 8,
                     "max_position_embeddings": 4096
@@ -345,7 +343,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(config.num_experts(), 8);
-        assert_eq!(config.effective_max_position_embeddings(), Some(4096));
+        assert_eq!(config.model_type(), Some("top_level"));
+        assert_eq!(config.max_position_embeddings(), Some(4096));
         assert!(config.is_moe());
     }
 
@@ -356,7 +355,7 @@ mod tests {
 
         assert_eq!(config.num_experts(), 0);
         assert!(!config.is_moe());
-        assert_eq!(config.effective_max_position_embeddings(), Some(4096));
+        assert_eq!(config.max_position_embeddings(), Some(4096));
     }
 
     #[test]

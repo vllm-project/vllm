@@ -176,25 +176,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub tokenizer: Option<Unsupported>,
 
-    /// Tokenizer mode:
-    ///
-    /// - "auto" will use the tokenizer from `mistral_common` for Mistral models if available,
-    ///   otherwise it will use the "hf" tokenizer.
-    ///
-    /// - "hf" will use the fast tokenizer if available.
-    ///
-    /// - "slow" will always use the slow tokenizer.
-    ///
-    /// - "mistral" will always use the tokenizer from `mistral_common`.
-    ///
-    /// - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
-    ///
-    /// - "qwen_vl" will always use the tokenizer from `qwen_vl`.
-    ///
-    /// - Other custom values can be supported via plugins.
-    #[arg(long)]
-    pub tokenizer_mode: Option<Unsupported>,
-
     /// Name or path of the Hugging Face config to use. If unspecified, model
     /// name or path will be used.
     #[arg(long)]

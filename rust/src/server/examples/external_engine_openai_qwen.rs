@@ -15,7 +15,7 @@ use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
     ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
-    serve,
+    RendererSelection, serve,
 };
 
 #[derive(Debug, Parser)]
@@ -62,6 +62,7 @@ async fn main() -> Result<()> {
         },
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
+        renderer: RendererSelection::Auto,
         chat_template: None,
         default_chat_template_kwargs: None,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
