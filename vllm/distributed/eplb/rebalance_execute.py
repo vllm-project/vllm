@@ -13,7 +13,11 @@ import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_gather
 
-from .eplb_communicator import EplbCommunicator
+from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -32,6 +36,34 @@ class RecvMetadata:
 
 # Type alias for the result of move_to_buffer or transfer_layer
 MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
+
+
+@dataclass
+class AsyncEplbLayerResult:
+    """
+    The result of one completed async EPLB layer transfer.
+    """
+
+    layer_idx: int
+    """Index of the MoE layer that was transferred."""
+    new_physical_to_logical_map: torch.Tensor
+    """
+    New physical→logical mapping for layers_idx, on CPU.
+    Shape: (num_physical_experts)
+    """
+    is_unchanged: np.ndarray
+    """Per-physical-expert flag: weight was not moved during transfer."""
+    is_received_locally: np.ndarray
+    """Per-physical-expert flag: weight was received on this rank."""
+    recv_metadata: RecvMetadata
+    """Metadata describing what was received during transfer_layer."""
+    consumed_event: CpuGpuEvent
+    """
+    Event used to synchronize access to the intermediate buffer. The async worker calls
+    wait() after it finishes transferring weights to the intermediate buffer. The main
+    thread calls record() after it finishes transferring weights out of the intermediate
+    buffer in _move_to_workspace()
+    """
 
 
 def get_ep_ranks_with_experts_batch(
@@ -541,23 +573,29 @@ def rearrange_expert_weights_inplace(
     assert num_physical_experts == ep_size * num_local_physical_experts
 
     first_layer_weights = list(expert_weights[0])
+
+    if is_profile:
+        if communicator.needs_profile_buffer_reservation:
+            # Reserve NCCL communication buffers via a dummy all_gather.
+            # Backends that pre-allocate their own transfer buffers
+            # skip this to avoid the extra memory spike during profiling.
+            weights_buffer: list[torch.Tensor] = [
+                torch.empty_like(w) for w in first_layer_weights
+            ]
+            for weight, buffer in zip(expert_weights[0], weights_buffer):
+                dummy_recv_buffer = [buffer for _ in range(ep_size)]
+                torch.distributed.barrier()
+                all_gather(
+                    dummy_recv_buffer,
+                    weight,
+                    group=ep_group,
+                )
+        return
+
     # Buffers to hold the expert weights during the exchange.
     # NOTE: Currently we assume the same weights across different layers
     # have the same shape.
-    weights_buffer: list[torch.Tensor] = [
-        torch.empty_like(w) for w in first_layer_weights
-    ]
-    if is_profile:
-        # Reserve communication buffers via a minimal dummy all_gather on first layer
-        for weight, buffer in zip(expert_weights[0], weights_buffer):
-            dummy_recv_buffer = [buffer for _ in range(ep_size)]
-            torch.distributed.barrier()
-            all_gather(
-                dummy_recv_buffer,
-                weight,
-                group=ep_group,
-            )
-        return
+    weights_buffer = [torch.empty_like(w) for w in first_layer_weights]
 
     # NOTE(bowen): We need this synchronize to run, but I don't know why.
     # If you figure out the reason, please let me know -- thank you!
