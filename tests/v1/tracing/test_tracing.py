@@ -5,7 +5,13 @@
 import pytest
 import time
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
-from opentelemetry.trace import NonRecordingSpan, SpanContext, TraceFlags, TraceState, use_span
+from opentelemetry.trace import (
+    NonRecordingSpan,
+    SpanContext,
+    TraceFlags,
+    TraceState,
+    use_span,
+)
 
 from vllm import LLM, SamplingParams
 from vllm.tracing import SpanAttributes, extract_trace_headers
