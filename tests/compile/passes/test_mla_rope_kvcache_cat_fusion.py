@@ -230,7 +230,7 @@ if current_platform.is_cuda():
     BLOCK_SIZES = [512]
 elif is_aiter_found_and_supported():
     MLA_BACKENDS = [
-        AttentionBackendEnum.TRITON_ATTN,
+        AttentionBackendEnum.TRITON_MLA,
         AttentionBackendEnum.ROCM_AITER_MLA,
     ]
     BLOCK_SIZES = [16]
