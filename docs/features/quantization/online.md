@@ -17,6 +17,9 @@ llm = LLM("meta-llama/Llama-3.1-8B", quantization="fp8_per_tensor")
 
 # Per-block FP8 quantization (128x128 block scaling for weights and 1x128 block scaling for activations)
 llm = LLM("meta-llama/Llama-3.1-8B", quantization="fp8_per_block")
+
+# MXFP8 quantization for weights and activations
+llm = LLM("meta-llama/Llama-3.1-8B", quantization="mxfp8")
 ```
 
 Or with the CLI:
@@ -24,6 +27,7 @@ Or with the CLI:
 ```bash
 vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_tensor
 vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_block
+vllm serve meta-llama/Llama-3.1-8B --quantization mxfp8
 ```
 
 ## Supported Schemes
@@ -32,8 +36,7 @@ vllm serve meta-llama/Llama-3.1-8B --quantization fp8_per_block
 | ------ | ------------- | ------------------ | ----- |
 | `fp8_per_tensor` | fp8_e4m3 data, fp32 per-tensor scale | fp8_e4m3 data, fp32 per-tensor scale | On some GPUs (Ada, Hopper) linear activations use per-token scaling for better performance |
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
-
-Support for additional schemes will be added in future versions of vllm.
+| `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 
 ## Advanced Configuration
 
