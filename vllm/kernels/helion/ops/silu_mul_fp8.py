@@ -22,39 +22,6 @@ from vllm.kernels.helion.register import register_kernel
 logger = init_logger(__name__)
 
 
-@register_kernel  # type: ignore[misc]
-def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    original_shape = input.shape
-    two_d = hl.specialize(original_shape[-1])
-    d = two_d // 2
-    output_shape = original_shape[:-1] + (d,)
-
-    input_2d = input.view(-1, original_shape[-1])
-    m = input_2d.shape[0]
-
-    # TODO(gmagogsfm): Support for more float8 subtypes (e4m3fnuz, e5m2) coming
-    out = torch.empty((m, d), device=input.device, dtype=torch.float8_e4m3fn)
-
-    input_part_a = input_2d[:, :d]
-    input_part_b = input_2d[:, d:]
-
-    assert scale.numel() == 1, "Scale must be a scalar Tensor"
-
-    for tile_m, tile_n in hl.tile([m, d]):
-        a_vals = input_part_a[tile_m, tile_n]
-        silu_result = torch.nn.functional.silu(a_vals)
-        b_vals = input_part_b[tile_m, tile_n]
-        result = silu_result * b_vals
-        result_f32 = result.to(torch.float32)
-        scale_val = hl.load(scale, [0])
-        inv_scale = 1.0 / scale_val
-        result_scaled = result_f32 * inv_scale
-        out[tile_m, tile_n] = result_scaled.to(out.dtype)
-
-    return out.view(output_shape)
-
-
-@silu_mul_fp8.register_input_generator  # type: ignore[misc]
 def generate_silu_mul_fp8_inputs() -> dict[str, tuple[Any, ...]]:
     intermediate_sizes = [2048, 2880, 4096, 8192, 11008, 14336]
 
@@ -65,8 +32,6 @@ def generate_silu_mul_fp8_inputs() -> dict[str, tuple[Any, ...]]:
     inputs = {}
     for num_tokens in num_tokens_list:
         for intermediate_size in intermediate_sizes:
-            # Input tensor has shape (num_tokens, 2 * intermediate_size)
-            # because silu_mul splits it into two halves
             input_tensor = torch.randn(
                 num_tokens,
                 2 * intermediate_size,
@@ -81,7 +46,6 @@ def generate_silu_mul_fp8_inputs() -> dict[str, tuple[Any, ...]]:
     return inputs
 
 
-@silu_mul_fp8.register_config_picker  # type: ignore[misc]
 def pick_silu_mul_fp8_config(
     args: tuple[Any, ...], config_keys: list[str]
 ) -> str | None:
@@ -126,6 +90,41 @@ def pick_silu_mul_fp8_config(
     )
 
     return f"intermediate_{best_isize}_numtokens_{best_ntokens}"
+
+
+@register_kernel(
+    config_picker=pick_silu_mul_fp8_config,
+    input_generator=generate_silu_mul_fp8_inputs,
+)
+def silu_mul_fp8(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    original_shape = input.shape
+    two_d = hl.specialize(original_shape[-1])
+    d = two_d // 2
+    output_shape = original_shape[:-1] + (d,)
+
+    input_2d = input.view(-1, original_shape[-1])
+    m = input_2d.shape[0]
+
+    # TODO(gmagogsfm): Support for more float8 subtypes (e4m3fnuz, e5m2) coming
+    out = torch.empty((m, d), device=input.device, dtype=torch.float8_e4m3fn)
+
+    input_part_a = input_2d[:, :d]
+    input_part_b = input_2d[:, d:]
+
+    assert scale.numel() == 1, "Scale must be a scalar Tensor"
+
+    for tile_m, tile_n in hl.tile([m, d]):
+        a_vals = input_part_a[tile_m, tile_n]
+        silu_result = torch.nn.functional.silu(a_vals)
+        b_vals = input_part_b[tile_m, tile_n]
+        result = silu_result * b_vals
+        result_f32 = result.to(torch.float32)
+        scale_val = hl.load(scale, [0])
+        inv_scale = 1.0 / scale_val
+        result_scaled = result_f32 * inv_scale
+        out[tile_m, tile_n] = result_scaled.to(out.dtype)
+
+    return out.view(output_shape)
 
 
 def silu_mul_fp8_baseline(input: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:

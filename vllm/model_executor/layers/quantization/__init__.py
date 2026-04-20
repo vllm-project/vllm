@@ -12,7 +12,6 @@ logger = init_logger(__name__)
 QuantizationMethods = Literal[
     "awq",
     "fp8",
-    "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
     "modelopt",
@@ -31,18 +30,24 @@ QuantizationMethods = Literal[
     "torchao",
     "inc",
     "mxfp4",
-    "petit_nvfp4",
+    "gpt_oss_mxfp4",
+    "mxfp8",
     "cpu_awq",
+    "online",
+    # Below are values of the OnlineQuantScheme enum, specified as strings to
+    # avoid circular import issues. This is here to provide a shortcut where
+    # the user can specify "LLM(..., quantization='fp8_per_tensor')" as
+    # shorthand for creating a more complicated online quant config object
+    "fp8_per_tensor",
+    "fp8_per_block",
+    "int8_per_channel_weight_only",
 ]
 QUANTIZATION_METHODS: list[str] = list(get_args(QuantizationMethods))
 
 DEPRECATED_QUANTIZATION_METHODS = [
     "tpu_int8",
-    "ptpc_fp8",
     "fbgemm_fp8",
     "fp_quant",
-    "experts_int8",
-    "petit_nvfp4",
 ]
 
 # The customized quantization methods which will be added to this dict.
@@ -104,6 +109,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         raise ValueError(f"Invalid quantization method: {quantization}")
 
     # lazy import to avoid triggering `torch.compile` too early
+    from vllm.config.quantization import OnlineQuantScheme
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
 
     from .awq import AWQConfig
@@ -128,9 +134,9 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         ModelOptNvFp4Config,
     )
     from .moe_wna16 import MoeWNA16Config
-    from .mxfp4 import Mxfp4Config
-    from .petit import PetitNvFp4Config
-    from .ptpc_fp8 import PTPCFp8Config
+    from .mxfp4 import GptOssMxfp4Config, Mxfp4Config
+    from .mxfp8 import Mxfp8Config
+    from .online.base import OnlineQuantizationConfig
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
@@ -148,7 +154,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "gptq": GPTQConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
-        "ptpc_fp8": PTPCFp8Config,
         "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
@@ -156,9 +161,23 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
-        "petit_nvfp4": PetitNvFp4Config,
+        "gpt_oss_mxfp4": GptOssMxfp4Config,
+        "mxfp8": Mxfp8Config,
         "cpu_awq": CPUAWQConfig,
+        "online": OnlineQuantizationConfig,
     }
+
+    # Below are values of the OnlineQuantScheme enum. This is here to provide
+    # a shortcut where the user can specify
+    # "LLM(..., quantization='fp8_per_tensor')" as shorthand for creating a
+    # more complicated online quant config object
+    for scheme in OnlineQuantScheme:
+        assert scheme.value not in method_to_config, (
+            f"Online quant scheme {scheme.value!r} conflicts with an "
+            f"existing quantization method"
+        )
+        method_to_config[scheme.value] = OnlineQuantizationConfig
+
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
 

@@ -199,7 +199,7 @@ class ParserManager:
         parser: type[ToolParser] | None = None
         if not enable_auto_tools or tool_parser_name is None:
             return parser
-        logger.info('"auto" tool choice has been enabled.')
+        logger.info_once('"auto" tool choice has been enabled.')
 
         try:
             if (

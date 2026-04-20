@@ -28,8 +28,9 @@ class ModelState(ABC):
     ) -> None:
         raise NotImplementedError
 
+    @abstractmethod
     def get_supported_generation_tasks(self) -> tuple[GenerationTask, ...]:
-        return ("generate",)
+        raise NotImplementedError
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         return None

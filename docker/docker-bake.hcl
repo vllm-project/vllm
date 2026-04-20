@@ -33,6 +33,10 @@ group "default" {
   targets = ["openai"]
 }
 
+group "all" {
+  targets = ["openai", "openai-ubuntu2404"]
+}
+
 # Base targets
 
 target "_common" {
@@ -73,4 +77,30 @@ target "openai" {
   target   = "vllm-openai"
   tags     = ["vllm:openai"]
   output   = ["type=docker"]
+}
+
+# Ubuntu 24.04 targets
+
+target "test-ubuntu2404" {
+  inherits = ["_common", "_labels"]
+  target   = "test"
+  tags     = ["vllm:test-ubuntu24.04"]
+  args = {
+    UBUNTU_VERSION          = "24.04"
+    GDRCOPY_OS_VERSION      = "Ubuntu24_04"
+    FLASHINFER_AOT_COMPILE  = "true"
+  }
+  output = ["type=docker"]
+}
+
+target "openai-ubuntu2404" {
+  inherits = ["_common", "_labels"]
+  target   = "vllm-openai"
+  tags     = ["vllm:openai-ubuntu24.04"]
+  args = {
+    UBUNTU_VERSION          = "24.04"
+    GDRCOPY_OS_VERSION      = "Ubuntu24_04"
+    FLASHINFER_AOT_COMPILE  = "true"
+  }
+  output = ["type=docker"]
 }
