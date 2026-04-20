@@ -206,7 +206,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         replace_parameter(layer, "w13_weight_packed", w13_weight_shuffled)
         convert_packed_uint4b8_to_signed_int4_inplace(layer.w2_weight_packed)
         # mirror the sync in CutlassW4A8LinearKernel; required for tp>1 correctness
-        torch.accelerator.synchronize()
+        torch.cuda.synchronize()
         w2_weight_shuffled, self.b_strides2 = (
             ops.cutlass_encode_and_reorder_int4b_grouped(layer.w2_weight_packed)
         )
