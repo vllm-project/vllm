@@ -421,6 +421,12 @@ class MoERunnerBase(MoERunner):
         router_logits: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> tuple[torch.Tensor | None, torch.Tensor]:
+        """Run expert routing and the fused MoE kernel via the quant method.
+
+        Orchestrates shared expert execution (before/after), expert selection
+        via the router, and the actual fused MoE computation. Returns
+        (shared_expert_output, fused_expert_output).
+        """
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
