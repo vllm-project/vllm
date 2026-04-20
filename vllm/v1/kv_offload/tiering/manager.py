@@ -404,7 +404,9 @@ class TieringOffloadingManager(OffloadingManager):
         for tier in self.secondary_tiers:
             # Get spec for reading from primary tier AND increment ref_cnt
             # TODO: pass the actual req_context instead of None
-            primary_blocks_spec = self.primary_tier.prepare_read(keys_list, None)
+            primary_blocks_spec = self.primary_tier.prepare_read(
+                keys_list, ReqContext()
+            )
 
             # Submit async store job: primary→secondary
             job_id = self._next_job_id()
