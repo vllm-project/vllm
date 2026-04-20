@@ -152,13 +152,14 @@ def test_read_blocks_for_req_expands_remote_ids(
 
     remote_engine_id = "remote-engine"
     if has_mamba:
-        worker._mamba_phys_ratio = {remote_engine_id: remote_ratio}
+        worker._physical_blocks_per_logical = {remote_engine_id: remote_ratio}
 
-    # Mock kv_topo: empty remote ranks skips the transfer machinery entirely,
-    # isolating the block-ID expansion logic.
-    worker.kv_topo = MagicMock()
-    worker.kv_topo.get_target_remote_ranks_from_engine_id.return_value = []
-    worker.kv_topo.tp_ratio_from_engine_id.return_value = 1
+    # Mock transfer_topo: empty remote ranks skips the transfer machinery
+    # entirely, isolating the block-ID expansion logic.
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.target_remote_ranks.return_value = []
+    worker.transfer_topo.get_engine_info.return_value = MagicMock(remote_tp_size=1)
+    worker.transfer_topo.tp_ratio.return_value = 1
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
@@ -317,7 +318,7 @@ def test_get_block_descs_ids_hybrid_ssm():
     worker._has_mamba = True
     worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = 1
-    worker._mamba_phys_ratio = {engine_id: 1}
+    worker._physical_blocks_per_logical = {engine_id: 1}
     worker.block_len_per_layer = [100]
     # num_descs = num_regions * num_blocks (no blocks_first doubling)
     worker.num_descs = 2 * num_blocks
@@ -355,7 +356,7 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     worker._has_mamba = True
     worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = ratio
-    worker._mamba_phys_ratio = {engine_id: ratio}
+    worker._physical_blocks_per_logical = {engine_id: ratio}
     worker.block_len_per_layer = [100]
     worker.num_descs = 2 * num_blocks  # 800
 
@@ -532,15 +533,15 @@ def test_has_mamba_init(
         ((9216, 524288), 4096, 131),
     ],
 )
-def test_compute_mamba_phys_ratio(ssm_sizes, block_len, expected_ratio):
-    """Verify that compute_mamba_phys_ratio is TP-dependent.
+def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_ratio):
+    """Verify that compute_physical_blocks_per_logical is TP-dependent.
 
     With dimension-sharded Mamba state, the ratio differs across TP sizes
     (e.g. TP=1 → 261, TP=4 → 131 for Nemotron 30B). This is why
-    _mamba_phys_ratio must be stored per-engine.
+    _physical_blocks_per_logical must be stored per-engine.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        compute_mamba_phys_ratio,
+        compute_physical_blocks_per_logical,
     )
 
-    assert compute_mamba_phys_ratio(ssm_sizes, block_len) == expected_ratio
+    assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
