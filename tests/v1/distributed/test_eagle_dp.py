@@ -95,9 +95,10 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
 
     async def engine_create_and_generate(engine_args: AsyncEngineArgs):
         logger.info(
-            "VLLM_BATCH_INVARIANT=%s (model=%s)",
+            "VLLM_BATCH_INVARIANT=%s (model=%s, speculative=%s)",
             os.environ.get("VLLM_BATCH_INVARIANT"),
             engine_args.model,
+            engine_args.speculative_config is not None,
         )
         async with AsyncExitStack() as after:
             engine = AsyncLLM.from_engine_args(engine_args)
