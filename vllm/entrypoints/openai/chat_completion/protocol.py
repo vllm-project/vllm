@@ -686,35 +686,41 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
-        tools = data.get("tools")
-        tool_choice = data.get("tool_choice")
-        has_tools = tools is not None
-        has_tool_choice = tool_choice is not None
-
-        if tools is not None and len(tools) == 0:
+        # Reject empty tools array, matching OpenAI API behavior
+        if data.get("tools") == []:
             raise ValueError(
                 "`tools` must not be an empty array. "
                 "Either provide at least one tool or omit the field entirely."
             )
 
-        if has_tool_choice and not has_tools:
-            raise ValueError(
-                "'tool_choice' is only allowed when 'tools' are specified."
-            )
-
-        if not has_tool_choice and tools:
+        # if "tool_choice" is not specified but tools are provided,
+        # default to "auto" tool_choice
+        if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
-        if has_tool_choice and tool_choice != "none":
-            if tool_choice not in ("auto", "required") and not isinstance(
-                tool_choice, dict
-            ):
+        # if "tool_choice" is specified -- validation
+        if "tool_choice" in data and data["tool_choice"] is not None:
+            # ensure that if "tool choice" is specified, tools are present
+            if "tools" not in data or data["tools"] is None:
                 raise ValueError(
-                    f"Invalid value for `tool_choice`: {tool_choice}! "
+                    "`tool_choice` is only allowed when 'tools' are specified."
+                )
+
+            # make sure that tool choice is either a named tool
+            # OR that it's set to "auto" or "required"
+            if data["tool_choice"] not in [
+                "none",
+                "auto",
+                "required",
+            ] and not isinstance(data["tool_choice"], dict):
+                raise ValueError(
+                    f"Invalid value for `tool_choice`: {data['tool_choice']}! "
                     'Only named tools, "none", "auto" or "required" '
                     "are supported."
                 )
 
+            # ensure that if "tool_choice" is specified as an object,
+            # it matches a valid tool
             correct_usage_message = (
                 'Correct usage: `{"type": "function",'
                 ' "function": {"name": "my_function"}}`'
@@ -744,8 +750,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         break
                 if not valid_tool:
                     raise ValueError(
-                        "The tool specified in `tool_choice` does not match any"
-                        " of the specified `tools`"
+                        "The tool specified in `tool_choice` does not match"
+                        " any of the specified `tools`"
                     )
         return data
 
