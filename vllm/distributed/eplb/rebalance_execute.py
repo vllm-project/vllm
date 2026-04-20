@@ -13,7 +13,11 @@ import numpy as np
 import torch
 from torch.distributed import ProcessGroup, all_gather
 
-from .eplb_communicator import EplbCommunicator
+from vllm.distributed.eplb.eplb_communicator import EplbCommunicator
+from vllm.distributed.eplb.eplb_utils import CpuGpuEvent
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 @dataclass
@@ -32,6 +36,34 @@ class RecvMetadata:
 
 # Type alias for the result of move_to_buffer or transfer_layer
 MoveToBufferResult = tuple[np.ndarray, np.ndarray, RecvMetadata]
+
+
+@dataclass
+class AsyncEplbLayerResult:
+    """
+    The result of one completed async EPLB layer transfer.
+    """
+
+    layer_idx: int
+    """Index of the MoE layer that was transferred."""
+    new_physical_to_logical_map: torch.Tensor
+    """
+    New physical→logical mapping for layers_idx, on CPU.
+    Shape: (num_physical_experts)
+    """
+    is_unchanged: np.ndarray
+    """Per-physical-expert flag: weight was not moved during transfer."""
+    is_received_locally: np.ndarray
+    """Per-physical-expert flag: weight was received on this rank."""
+    recv_metadata: RecvMetadata
+    """Metadata describing what was received during transfer_layer."""
+    consumed_event: CpuGpuEvent
+    """
+    Event used to synchronize access to the intermediate buffer. The async worker calls
+    wait() after it finishes transferring weights to the intermediate buffer. The main
+    thread calls record() after it finishes transferring weights out of the intermediate
+    buffer in _move_to_workspace()
+    """
 
 
 def get_ep_ranks_with_experts_batch(
