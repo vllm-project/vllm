@@ -6,6 +6,7 @@ import pytest
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
+    to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_events import BlockRemoved, BlockStored
@@ -32,7 +33,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     # blocks = [0, 1, 2], [3, 4, 5], [6, 7, 8]
     runner.new_request(token_ids=[0] * offloaded_block_size * 3)
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(list(block_hashes)[1:2])
+        lambda keys, req_context: generate_store_output(list(keys)[1:2])
     )
     runner.run(decoded_tokens=[0])
 
@@ -44,21 +45,21 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.manager.prepare_store.assert_not_called()
 
     # +1 token -> single block, fail prepare_store
-    runner.manager.prepare_store.side_effect = lambda block_hashes: None
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
     runner.run(decoded_tokens=[0])
     runner.manager.prepare_store.assert_called()
 
     # 1 more block (+ token for async scheduling)
     # now set block_hashes_to_store = []
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
+        lambda keys, req_context: generate_store_output([])
     )
     runner.run(decoded_tokens=[0] * (offloaded_block_size + 1))
 
     # 1 more block (+ token for kicking off offloading)
     # now check touch was called with all 6 blocks
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
+        lambda keys, req_context: generate_store_output(keys)
     )
     runner.run(
         decoded_tokens=[0] * (offloaded_block_size + 1),
@@ -93,7 +94,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
         token_ids=[0] * gpu_block_size + [1] * (offloaded_block_size - gpu_block_size)
     )
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
+        lambda keys, req_context: generate_store_output([])
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     runner.manager.lookup.assert_not_called()
@@ -101,7 +102,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     # single block lookup with no hits
     runner.new_request(token_ids=[1] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
+        lambda keys, req_context: generate_store_output([])
     )
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     runner.manager.lookup.assert_called()
@@ -111,7 +112,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     runner.scheduler.reset_prefix_cache()
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
+        lambda keys, req_context: generate_store_output([])
     )
     runner.manager.lookup.return_value = 1
     runner.run(
@@ -123,7 +124,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
         token_ids=[0] * offloaded_block_size * 2 + [1] * offloaded_block_size
     )
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
+        lambda keys, req_context: generate_store_output([])
     )
     runner.manager.lookup.return_value = 1
     runner.run(
@@ -135,12 +136,8 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
         return [BlockHash(str(i).encode()) for i in int_hashes]
 
     def take_events() -> Iterable[OffloadingEvent]:
-        yield OffloadingEvent(
-            block_hashes=to_hashes([1, 2, 3]), block_size=16, medium="A", removed=False
-        )
-        yield OffloadingEvent(
-            block_hashes=to_hashes([4, 5, 6]), block_size=32, medium="B", removed=True
-        )
+        yield OffloadingEvent(keys=to_keys([1, 2, 3]), medium="A", removed=False)
+        yield OffloadingEvent(keys=to_keys([4, 5, 6]), medium="B", removed=True)
 
     runner.manager.take_events.side_effect = take_events
     events = list(runner.scheduler_connector.take_events())
@@ -148,7 +145,7 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     event = events[0]
     assert isinstance(event, BlockStored)
     assert event.block_hashes == to_hashes([1, 2, 3])
-    assert event.block_size == 16
+    assert event.block_size == 0
     assert event.medium == "A"
     assert event.token_ids == []
     assert event.parent_block_hash is None
@@ -180,7 +177,7 @@ def test_request_preemption(request_runner, async_scheduling: bool):
     # blocks = [0, 1, 2], [3, 4, 5]
     runner.new_request(token_ids=[0] * offloaded_block_size * 2)
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
+        lambda keys, req_context: generate_store_output(keys)
     )
     runner.run(
         decoded_tokens=[0],
@@ -189,7 +186,7 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
     # decode 2 more blocks - 1 gpu block, storing [6, 7, 8] (no flush)
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
+        lambda keys, req_context: generate_store_output(keys)
     )
     runner.run(
         decoded_tokens=[0] * (2 * offloaded_block_size - gpu_block_size),
@@ -215,7 +212,7 @@ def test_request_preemption(request_runner, async_scheduling: bool):
     # re-load [0, ..., 8] from the CPU and store [9, 10, 11]
     runner.manager.lookup.return_value = 3
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
+        lambda keys, req_context: generate_store_output(keys)
     )
     runner.run(
         decoded_tokens=[0] * gpu_block_size,
@@ -244,7 +241,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
     # store 1 blocks
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
+        lambda keys, req_context: generate_store_output(keys)
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
@@ -277,7 +274,7 @@ def test_concurrent_lookups_of_the_same_prefix(request_runner, async_scheduling:
 
     # complete transfers
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output([])
+        lambda keys, req_context: generate_store_output([])
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],
@@ -304,7 +301,7 @@ def test_abort_loading_requests(request_runner, async_scheduling: bool):
     # store 1 blocks
     runner.new_request(token_ids=[0] * offloaded_block_size)
     runner.manager.prepare_store.side_effect = (
-        lambda block_hashes: generate_store_output(block_hashes)
+        lambda keys, req_context: generate_store_output(keys)
     )
     runner.run(
         decoded_tokens=[EOS_TOKEN_ID],

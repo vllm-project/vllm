@@ -73,7 +73,6 @@ def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
 
 
 class FlexAttentionBackend(AttentionBackend):
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [
         torch.float16,
         torch.bfloat16,
@@ -751,11 +750,11 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.max_model_len = self.model_config.max_model_len
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.max_num_q_block = (
-            self.max_model_len + self.q_block_size - 1
-        ) // self.q_block_size
+        self.max_num_query_groups = cdiv(max_num_batched_tokens, self.q_block_size)
+        max_num_pages_per_seq = cdiv(self.max_model_len, self.block_size)
+        self.max_num_kv_indices = self.q_block_size * max_num_pages_per_seq
         self.persistent_kv_num_blocks = torch.empty(
-            self.max_num_q_block, dtype=torch.int32, device=device
+            self.max_num_query_groups, dtype=torch.int32, device=device
         )
         self.persistent_offset_tensor = torch.empty(
             max_num_seqs, dtype=torch.int32, device=device
@@ -829,12 +828,9 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             )
 
         if self.persistent_kv_indices is None:
-            max_num_kv_block = (
-                self.max_model_len + self.kv_block_size - 1
-            ) // self.kv_block_size
             self.persistent_kv_indices = torch.empty(
-                self.max_model_len,
-                max_num_kv_block,
+                self.max_num_query_groups,
+                self.max_num_kv_indices,
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -992,7 +988,7 @@ class FlexAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlexAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -1008,7 +1004,6 @@ class FlexAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert output is not None, "Output tensor must be provided."
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError(
                 "fused output quantization is not yet supported for FlexAttentionImpl"

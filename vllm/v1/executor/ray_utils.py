@@ -7,6 +7,8 @@ from collections import defaultdict
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Union
 
+import numpy as np
+
 import vllm.platforms
 from vllm.config import ParallelConfig
 from vllm.distributed import get_pp_group
@@ -190,6 +192,48 @@ except ImportError as e:
     RayWorkerWrapper = None  # type: ignore
 
 
+def detach_zero_copy_from_model_runner_output(output: "ModelRunnerOutput") -> None:
+    """Detach Ray SHM-channel zero-copy buffers from a ModelRunnerOutput in-place.
+
+    Ray compiled DAG SHM channels may return zero-copy objects (e.g. `np.ndarray`)
+    backed by Ray's shared-memory object store. Ray's channel docs explicitly
+    warn that subsequent reads may block if such an object is still in scope.
+
+    vLLM can return numpy-backed logprobs in `ModelRunnerOutput.logprobs`. If
+    those arrays are backed by Ray SHM (commonly read-only), retaining them in
+    scope across scheduler iterations can stall the channel and eventually hit
+    `RAY_CGRAPH_get_timeout`.
+
+    Copy read-only numpy arrays so the returned output no longer retains
+    references to Ray's shared-memory buffers.
+
+    We intentionally do not touch `prompt_logprobs_dict`: those entries are
+    `LogprobsTensors` backed by PyTorch-owned CPU tensors (`to_cpu_nonblocking`
+    or `empty_cpu`), not NumPy views decoded from Ray channels.
+    """
+    if output.logprobs is None:
+        return
+
+    token_ids, logprobs, ranks, cu_num_generated_tokens = output.logprobs
+
+    def _copy_if_readonly(arr):
+        if isinstance(arr, np.ndarray) and not arr.flags.writeable:
+            return arr.copy()
+        return arr
+
+    # `cu_num_generated_tokens` is already a plain Python list (or None), so it
+    # never aliases Ray SHM buffers and can be reused as-is.
+    token_ids_c = _copy_if_readonly(token_ids)
+    logprobs_c = _copy_if_readonly(logprobs)
+    ranks_c = _copy_if_readonly(ranks)
+    if token_ids_c is token_ids and logprobs_c is logprobs and ranks_c is ranks:
+        return
+
+    output.logprobs = type(output.logprobs)(
+        token_ids_c, logprobs_c, ranks_c, cu_num_generated_tokens
+    )
+
+
 class FutureWrapper(Future):
     """A wrapper around Ray output reference to meet the interface
     of .execute_model(): The top level (core busy loop) expects .result() api
@@ -207,8 +251,11 @@ class FutureWrapper(Future):
     def result(self, timeout=None):
         outputs = ray.get(self.ref_or_refs, timeout=timeout)
         if self.aggregator is None:
+            detach_zero_copy_from_model_runner_output(outputs)
             return outputs
 
+        for output in outputs:
+            detach_zero_copy_from_model_runner_output(output)
         return self.aggregator.aggregate(outputs, output_rank=0)
 
 

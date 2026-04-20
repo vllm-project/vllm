@@ -35,14 +35,6 @@ class MultiModalFeatures(BaseModel):
     Carries hashes (for cache lookup / identification) and placeholder
     positions so the downstream `/generate` service knows *where* in
     the token sequence each multimodal item lives.
-
-    Note:
-        Phase 1 — metadata only.
-        Phase 2 should add `mm_kwargs` (processed tensor data) using a
-        binary transport so the ``/generate` side can skip re-processing.
-        The `/generate` endpoint must also be updated to inject these
-        features into `EngineInput` before passing to
-        `InputProcessor.process_inputs`.
     """
 
     mm_hashes: dict[str, list[str]]
@@ -50,6 +42,15 @@ class MultiModalFeatures(BaseModel):
 
     mm_placeholders: dict[str, list[PlaceholderRangeInfo]]
     """Per-modality placeholder ranges in the token sequence."""
+
+    kwargs_data: dict[str, list[str | None]] | None = None
+    """Per-modality serialized tensor data.
+
+    Each value is a list parallel to ``mm_hashes[modality]``.  A ``str``
+    entry is a base64-encoded ``MultiModalKwargsItem``; ``None`` means
+    the item should be resolved from cache.  The entire field is
+    ``None`` for metadata-only (cache-hit) responses.
+    """
 
 
 class GenerateRequest(BaseModel):

@@ -68,7 +68,7 @@ If your model is not in the above list, we will try to automatically convert the
     Forced alignment usage requires `--hf-overrides '{"architectures": ["Qwen3ASRForcedAlignerForTokenClassification"]}'`.
     Please refer to [examples/pooling/token_classify/forced_alignment_offline.py](../../../examples/pooling/token_classify/forced_alignment_offline.py).
 
-### As Reward Models
+### Reward Models
 
 Using token classification models as reward models. For details on reward models, see [Reward Models](reward.md).
 

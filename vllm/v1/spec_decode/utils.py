@@ -11,6 +11,20 @@ from vllm.v1.attention.backends.utils import (
 PADDING_SLOT_ID = -1
 
 
+def next_power_of_2(n: int) -> int:
+    """Return the smallest power of 2 >= n."""
+    if n <= 0:
+        return 1
+    n -= 1
+    n |= n >> 1
+    n |= n >> 2
+    n |= n >> 4
+    n |= n >> 8
+    n |= n >> 16
+    n |= n >> 32
+    return n + 1
+
+
 @triton.jit
 def eagle_step_slot_mapping_metadata_kernel(
     positions_ptr,  # [batch_size] - current positions (1D view for M-RoPE)
@@ -102,8 +116,8 @@ def eagle_step_update_slot_mapping_and_metadata(
     batch_size = positions_1d.shape[0]
     if input_batch_size is None:
         input_batch_size = batch_size
-    n_blocks_per_req = block_table_tensor.shape[1]
 
+    n_blocks_per_req = block_table_tensor.shape[1]
     eagle_step_slot_mapping_metadata_kernel[(input_batch_size,)](
         positions_1d,
         block_table_tensor,

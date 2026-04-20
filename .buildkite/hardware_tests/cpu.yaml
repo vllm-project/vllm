@@ -46,7 +46,7 @@ steps:
   - tests/models/language/pooling/
   commands:
     - |
-      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 30m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 40m "
       pytest -x -v -s tests/models/language/generation -m cpu_model
       pytest -x -v -s tests/models/language/pooling -m cpu_model"
 
@@ -99,7 +99,7 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 45m "
       pytest -x -v -s tests/models/multimodal/generation --ignore=tests/models/multimodal/generation/test_pixtral.py -m cpu_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
-  parallelism: 2
+  parallelism: 3
 
 - label: "Arm CPU Test"
   depends_on: []

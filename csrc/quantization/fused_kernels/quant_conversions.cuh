@@ -6,7 +6,7 @@
 
 #include "libtorch_stable/quantization/vectorization.cuh"
 // TODO(luka/varun):refactor common.cuh to use this file instead
-#include "quantization/w8a8/fp8/common.cuh"
+#include "../w8a8/fp8/common.cuh"
 
 namespace vllm {
 

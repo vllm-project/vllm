@@ -8,7 +8,13 @@ import pytest
 from ...utils import EmbedModelInfo
 
 MODELS = [
-    EmbedModelInfo("nomic-ai/nomic-embed-text-v1"),
+    EmbedModelInfo(
+        "nomic-ai/nomic-embed-text-v1",
+        # Fixme:
+        #  Update nomic-embed code to support the latest
+        #  HF version and remove revision set.
+        revision="720244025c1a7e15661a174c63cce63c8218e52b",
+    ),
     # EmbedModelInfo("nomic-ai/nomic-embed-text-v1.5"),
     # EmbedModelInfo("nomic-ai/CodeRankEmbed"),
     EmbedModelInfo("nomic-ai/nomic-embed-text-v2-moe"),
@@ -24,7 +30,10 @@ max_model_len = int(original_max_position_embeddings * factor)
 @pytest.mark.parametrize("model_info", MODELS)
 def test_default(model_info, vllm_runner):
     with vllm_runner(
-        model_info.name, runner="pooling", max_model_len=None
+        model_info.name,
+        revision=model_info.revision,
+        runner="pooling",
+        max_model_len=None,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         if model_info.name == "nomic-ai/nomic-embed-text-v2-moe":
@@ -39,7 +48,10 @@ def test_default(model_info, vllm_runner):
 def test_set_max_model_len_legal(model_info, vllm_runner):
     # set max_model_len <= 512
     with vllm_runner(
-        model_info.name, runner="pooling", max_model_len=256
+        model_info.name,
+        revision=model_info.revision,
+        runner="pooling",
+        max_model_len=256,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.max_model_len == 256
@@ -49,11 +61,19 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
         # For nomic-embed-text-v2-moe the length is set to 512
         # by sentence_bert_config.json.
         with pytest.raises(ValueError):
-            with vllm_runner(model_info.name, runner="pooling", max_model_len=1024):
+            with vllm_runner(
+                model_info.name,
+                revision=model_info.revision,
+                runner="pooling",
+                max_model_len=1024,
+            ):
                 pass
     else:
         with vllm_runner(
-            model_info.name, runner="pooling", max_model_len=1024
+            model_info.name,
+            revision=model_info.revision,
+            runner="pooling",
+            max_model_len=1024,
         ) as vllm_model:
             model_config = vllm_model.llm.llm_engine.model_config
             assert model_config.max_model_len == 1024
@@ -63,7 +83,12 @@ def test_set_max_model_len_legal(model_info, vllm_runner):
 def test_set_max_model_len_illegal(model_info, vllm_runner):
     # set max_model_len > 2048
     with pytest.raises(ValueError):
-        with vllm_runner(model_info.name, runner="pooling", max_model_len=4096):
+        with vllm_runner(
+            model_info.name,
+            revision=model_info.revision,
+            runner="pooling",
+            max_model_len=4096,
+        ):
             pass
 
     # set max_model_len > 2048 by hf_overrides
@@ -71,6 +96,7 @@ def test_set_max_model_len_illegal(model_info, vllm_runner):
     with pytest.raises(ValueError):
         with vllm_runner(
             model_info.name,
+            revision=model_info.revision,
             runner="pooling",
             max_model_len=None,
             hf_overrides=hf_overrides,
@@ -91,7 +117,11 @@ def test_use_rope_scaling_legal(model_info, vllm_runner):
     }
 
     with vllm_runner(
-        model_info.name, runner="pooling", max_model_len=None, hf_overrides=hf_overrides
+        model_info.name,
+        revision=model_info.revision,
+        runner="pooling",
+        max_model_len=None,
+        hf_overrides=hf_overrides,
     ):
         pass
 
@@ -110,6 +140,7 @@ def test_use_rope_scaling_illegal(model_info, vllm_runner):
     with pytest.raises(ValueError):
         with vllm_runner(
             model_info.name,
+            revision=model_info.revision,
             runner="pooling",
             max_model_len=max_model_len + 1,
             hf_overrides=hf_overrides,
@@ -129,6 +160,7 @@ def test_use_rope_scaling_illegal(model_info, vllm_runner):
     with pytest.raises(ValueError):
         with vllm_runner(
             model_info.name,
+            revision=model_info.revision,
             runner="pooling",
             max_model_len=None,
             hf_overrides=hf_overrides,

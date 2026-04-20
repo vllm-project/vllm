@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import random
 import time
+import uuid
 
 import pytest
 import torch
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.spec import (
     CanonicalKVCacheRef,
@@ -36,6 +38,7 @@ NUM_MAPPINGS = [3]
 @pytest.mark.parametrize("num_tensors", NUM_TENSORS)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("use_shared_memory", [False, True])
 @torch.inference_mode()
 def test_transfer(
     default_vllm_config,
@@ -48,6 +51,7 @@ def test_transfer(
     num_tensors: int,
     seed: int,
     device: str,
+    use_shared_memory: bool,
 ) -> None:
     set_random_seed(seed)
 
@@ -83,10 +87,24 @@ def test_transfer(
         tensors=kv_cache_tensors,
         group_data_refs=kv_cache_groups_data_refs,
     )
+
+    mmap_region: SharedOffloadRegion | None = None
+    if use_shared_memory:
+        cpu_page_size = gpu_page_size_bytes * num_tensors * block_size_factor
+        mmap_region = SharedOffloadRegion(
+            instance_id=str(uuid.uuid4()),
+            total_size_bytes=num_cpu_blocks * cpu_page_size,
+            num_blocks=num_cpu_blocks,
+            rank=0,
+            num_workers=1,
+            cpu_page_size=cpu_page_size,
+        )
+
     handlers = CpuGpuOffloadingHandlers(
         kv_caches=kv_caches,
         block_size_factor=block_size_factor,
         num_cpu_blocks=num_cpu_blocks,
+        mmap_region=mmap_region,
     )
 
     # select block mappings
@@ -137,10 +155,8 @@ def test_transfer(
         if finished:
             assert finished[0].job_id == 1
             assert finished[0].success
-            assert (
-                finished[0].transfer_type == ("GPU", "CPU")
-                if gpu_to_cpu
-                else ("CPU", "GPU")
+            assert finished[0].transfer_type == (
+                ("GPU", "CPU") if gpu_to_cpu else ("CPU", "GPU")
             )
             assert finished[0].transfer_size == (
                 len(gpu_blocks) * handler.group_block_size_in_bytes[0]
@@ -161,9 +177,9 @@ def test_transfer(
         orig_dst_tensors,
     ):
         # view both GPU and CPU tensors as (n, gpu_page_size_bytes) for comparison.
-        src_view = src_tensor.view(-1, gpu_page_size_bytes)
-        dst_view = dst_tensor.view(-1, gpu_page_size_bytes)
-        orig_dst_view = orig_dst_tensor.view(-1, gpu_page_size_bytes)
+        src_view = src_tensor.reshape(-1, gpu_page_size_bytes)
+        dst_view = dst_tensor.reshape(-1, gpu_page_size_bytes)
+        orig_dst_view = orig_dst_tensor.reshape(-1, gpu_page_size_bytes)
         for dst_sub_block in range(num_dst_sub_blocks):
             src_sub_block = dst_to_src.get(dst_sub_block)
             if src_sub_block is not None:
@@ -171,3 +187,12 @@ def test_transfer(
             else:
                 expected = orig_dst_view[dst_sub_block]
             torch.testing.assert_close(dst_view[dst_sub_block].cpu(), expected.cpu())
+
+    # Drop loop-variable refs so mmap_obj has no exported buffers at cleanup.
+    del orig_tensor, tensor, src_tensor, dst_tensor, orig_dst_tensor
+    del src_view, dst_view, orig_dst_view, expected
+
+    handlers.cpu_to_gpu_handler.shutdown()
+    handlers.gpu_to_cpu_handler.shutdown()
+    if mmap_region:
+        mmap_region.cleanup()

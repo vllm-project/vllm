@@ -7,8 +7,10 @@ import torch
 from pydantic import ConfigDict, Field, model_validator
 from typing_extensions import Self
 
+from vllm import envs
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.hashing import safe_hash
 
 if TYPE_CHECKING:
@@ -105,7 +107,14 @@ class LoRAConfig:
                 f"max_cpu_loras ({self.max_cpu_loras}) must be >= "
                 f"max_loras ({self.max_loras})."
             )
-
+        if envs.VLLM_LORA_ENABLE_DUAL_STREAM and not current_platform.is_cuda_alike():
+            raise ValueError("Dual CUDA streams are only supported on CUDA platforms.")
+        if envs.VLLM_LORA_ENABLE_DUAL_STREAM and self.fully_sharded_loras:
+            logger.warning_once(
+                "fully_sharded_loras isn't compatible with "
+                "VLLM_LORA_ENABLE_DUAL_STREAM, set VLLM_LORA_ENABLE_DUAL_STREAM=False"
+            )
+            envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
 
     def verify_with_model_config(self, model_config: ModelConfig):

@@ -26,6 +26,8 @@ from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.attention.backend import AttentionCGSupport
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 else:
     VllmConfig = object
 
@@ -132,6 +134,8 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
+    fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
+    """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
 
@@ -282,7 +286,7 @@ class PassConfig:
         """
         enabled_fusions = [
             f.name[len("fuse_") :]
-            for f in fields(self)
+            for f in fields(self)  # type: ignore[arg-type]
             if getattr(self, f.name) and f.name.startswith("fuse_")
         ]
 
@@ -515,12 +519,20 @@ class CompilationConfig:
     User-provided values override auto-inference.
     Example: [2048, 4096, 8192, 13824]"""
 
-    encoder_cudagraph_max_images_per_batch: int = 0
-    """Maximum number of images per batch for encoder CUDA graph capture.
+    encoder_cudagraph_max_vision_items_per_batch: int = 0
+    """Maximum number of images/videos per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
     If 0 (default), auto-inferred as max_budget // min_budget from the
     model's budget range. User-provided positive value overrides
     auto-inference."""
+
+    encoder_cudagraph_max_frames_per_batch: int = 0
+    """Maximum total video frames per batch for encoder CUDA graph capture.
+    Controls the cu_seqlens buffer size (one entry per attention sequence,
+    i.e. one per video frame). If 0 (default), auto-inferred per budget
+    level as token_budget (tight bound: packing guarantees
+    sum(T_i) <= token_budget). Positive value overrides auto-inference
+    and applies to all budget levels."""
 
     # Inductor capture
     compile_sizes: list[int | str] | None = None
@@ -698,6 +710,8 @@ class CompilationConfig:
     """files that are traced for compilation"""
     compilation_time: float = field(default=0.0, init=False)
     """time taken for compilation"""
+    encoder_compilation_time: float = field(default=0.0, init=False)
+    """time taken for multimodal encoder compilation"""
 
     static_forward_context: dict[str, Any] = field(default_factory=dict, init=False)
     """Per-model forward context
@@ -711,9 +725,7 @@ class CompilationConfig:
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
     _attention_ops: ClassVar[list[str]] = [
-        "vllm::unified_attention",
         "vllm::unified_attention_with_output",
-        "vllm::unified_mla_attention",
         "vllm::unified_mla_attention_with_output",
         "vllm::mamba_mixer2",
         "vllm::mamba_mixer",
@@ -746,6 +758,7 @@ class CompilationConfig:
             "local_cache_dir",
             "traced_files",
             "compilation_time",
+            "encoder_compilation_time",
             "static_forward_context",
             "pass_config",  # handled separately below
             "dynamic_shapes_config",  # handled separately below
@@ -765,6 +778,7 @@ class CompilationConfig:
             "enabled_custom_ops": True,
             "disabled_custom_ops": True,
             "compilation_time": True,
+            "encoder_compilation_time": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
@@ -962,10 +976,18 @@ class CompilationConfig:
         # Validate encoder CUDA graph configuration
         if (
             self.cudagraph_mm_encoder
-            and self.encoder_cudagraph_max_images_per_batch < 0
+            and self.encoder_cudagraph_max_vision_items_per_batch < 0
         ):
             raise ValueError(
-                "encoder_cudagraph_max_images_per_batch must be "
+                "encoder_cudagraph_max_vision_items_per_batch must be "
+                "non-negative (0 = auto-infer)"
+            )
+        if (
+            self.cudagraph_mm_encoder
+            and self.encoder_cudagraph_max_frames_per_batch < 0
+        ):
+            raise ValueError(
+                "encoder_cudagraph_max_frames_per_batch must be "
                 "non-negative (0 = auto-infer)"
             )
 
@@ -1242,6 +1264,152 @@ class CompilationConfig:
 
         assert "none" in self.custom_ops
         return f"+{op}" in self.custom_ops
+
+    def resolve_cudagraph_mode_and_sizes(
+        self,
+        min_cg_support: "AttentionCGSupport",
+        min_cg_attn_backend: str | None,
+        uniform_decode_query_len: int = 1,
+        tensor_parallel_size: int = 1,
+        kv_cache_config: "KVCacheConfig | None" = None,
+        max_num_reqs: int | None = None,
+        is_profiling: bool = False,
+    ) -> CUDAGraphMode:
+        from vllm.v1.attention.backend import AttentionCGSupport
+
+        cudagraph_mode = self.cudagraph_mode
+        if cudagraph_mode is None or cudagraph_mode == CUDAGraphMode.NONE:
+            self.cudagraph_mode = CUDAGraphMode.NONE
+            return CUDAGraphMode.NONE
+
+        # Check cudagraph for mixed batch is supported
+        if (
+            cudagraph_mode.mixed_mode() == CUDAGraphMode.FULL
+            and min_cg_support != AttentionCGSupport.ALWAYS
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                f"with {min_cg_attn_backend} backend (support: "
+                f"{min_cg_support})"
+            )
+            if min_cg_support == AttentionCGSupport.NEVER:
+                # if not supported any full cudagraphs, just raise it.
+                msg += (
+                    "; please try cudagraph_mode=PIECEWISE, and "
+                    "make sure compilation mode is VLLM_COMPILE"
+                )
+                raise ValueError(msg)
+
+            # attempt to resolve the full cudagraph related mode
+            if self.splitting_ops_contain_attention():
+                msg += "; setting cudagraph_mode=FULL_AND_PIECEWISE"
+                cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=FULL_DECODE_ONLY"
+                cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+            logger.warning(msg)
+
+        # check that if we are doing decode full-cudagraphs it is supported
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and min_cg_support == AttentionCGSupport.NEVER
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported "
+                f"with {min_cg_attn_backend} backend (support: "
+                f"{min_cg_support})"
+            )
+            if self.mode == CompilationMode.VLLM_COMPILE and (
+                self.splitting_ops_contain_attention()
+                or self.use_inductor_graph_partition
+            ):
+                msg += (
+                    "; setting cudagraph_mode=PIECEWISE because "
+                    "attention is compiled piecewise"
+                )
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+            else:
+                msg += (
+                    "; setting cudagraph_mode=NONE because "
+                    "attention is not compiled piecewise"
+                )
+                cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        # check that if we are doing spec-decode + decode full-cudagraphs it is
+        # supported
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and uniform_decode_query_len > 1
+            and min_cg_support.value < AttentionCGSupport.UNIFORM_BATCH.value
+        ):
+            msg = (
+                f"CUDAGraphMode.{cudagraph_mode.name} is not supported"
+                f" with spec-decode for attention backend "
+                f"{min_cg_attn_backend} (support: {min_cg_support})"
+            )
+            if self.splitting_ops_contain_attention():
+                msg += "; setting cudagraph_mode=PIECEWISE"
+                cudagraph_mode = CUDAGraphMode.PIECEWISE
+            else:
+                msg += "; setting cudagraph_mode=NONE"
+                cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(msg)
+
+        # double check that we can support full cudagraph if they are requested
+        # even after automatic downgrades
+        if (
+            cudagraph_mode.has_full_cudagraphs()
+            and min_cg_support == AttentionCGSupport.NEVER
+        ):
+            raise ValueError(
+                f"CUDAGraphMode.{cudagraph_mode.name} is not "
+                f"supported with {min_cg_attn_backend} backend ("
+                f"support:{min_cg_support}) "
+                "; please try cudagraph_mode=PIECEWISE, "
+                "and make sure compilation mode is VLLM_COMPILE"
+            )
+
+        # Adjust cudagraph sizes to be a multiple of uniform_decode_query_len
+        # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
+        # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
+        # Will be removed in the near future when we have separate cudagraph capture
+        # sizes for decode and mixed prefill-decode.
+        if (
+            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            and uniform_decode_query_len > 1
+        ):
+            self.adjust_cudagraph_sizes_for_spec_decode(
+                uniform_decode_query_len,
+                tensor_parallel_size,
+            )
+
+        # For Mamba models with FULL decode cudagraphs, each decode
+        # sequence needs one Mamba cache block. The decode cudagraph
+        # dispatcher already caps batch sizes at max_num_seqs, so we just
+        # need to verify that enough blocks exist. Raising here instead
+        # of silently capping cudagraph_capture_sizes avoids unintended
+        # restrictions on PIECEWISE (prefill) cudagraphs.
+        # See: https://github.com/vllm-project/vllm/issues/34094
+        if (
+            kv_cache_config is not None
+            and max_num_reqs is not None
+            and cudagraph_mode.has_full_cudagraphs()
+            and not is_profiling
+            and kv_cache_config.has_mamba_layers
+            and max_num_reqs > kv_cache_config.num_blocks
+        ):
+            raise ValueError(
+                f"max_num_seqs ({max_num_reqs}) exceeds available Mamba cache "
+                f"blocks ({kv_cache_config.num_blocks}). Each decode sequence "
+                "requires one Mamba cache block, so CUDA graph capture cannot "
+                "proceed. Please lower max_num_seqs to at most "
+                f"{kv_cache_config.num_blocks} or increase "
+                "gpu_memory_utilization."
+            )
+
+        self.cudagraph_mode = cudagraph_mode
+        return cudagraph_mode
 
     def adjust_cudagraph_sizes_for_spec_decode(
         self, uniform_decode_query_len: int, tensor_parallel_size: int

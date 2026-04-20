@@ -59,7 +59,6 @@ class FlashInferMLASparseBackend(AttentionBackend):
     for models like DeepSeek-V3.2 that use index-based sparse attention.
     """
 
-    accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",

@@ -9,7 +9,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
 )
-from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
     DeepGemmExperts,
     _valid_deep_gemm,
     _valid_deep_gemm_shape,

@@ -69,7 +69,6 @@ class SharedExperts:
         self._moe_config = moe_config
         self._quant_method = quant_method
         self._reduce_results = reduce_results
-        self._use_dp_chunking = moe_config.moe_parallel_config.use_dp_chunking
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
@@ -87,20 +86,6 @@ class SharedExperts:
                     "Enabled separate cuda stream for MoE shared_experts", scope="local"
                 )
 
-    @property
-    def _use_external_experts(self) -> bool:
-        if self._use_dp_chunking:
-            return False
-
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        backend = self._moe_config.moe_parallel_config.all2all_backend
-        return (
-            self._moe_config.moe_parallel_config.enable_eplb
-            and backend != "allgather_reducescatter"
-        ) or self._moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
-
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
@@ -110,7 +95,6 @@ class SharedExperts:
 
         should_run_shared_in_aux_stream = (
             current_platform.is_cuda()
-            and not self._use_dp_chunking
             and self._stream is not None
             and hidden_states.shape[0]
             <= envs.VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD

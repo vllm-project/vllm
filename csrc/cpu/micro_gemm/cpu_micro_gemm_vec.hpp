@@ -39,7 +39,7 @@ class TileGemm82 {
 
   template <int32_t M>
   static void gemm_micro(DEFINE_CPU_MICRO_GEMM_PARAMS) {
-    static_assert(0 < M <= 8);
+    static_assert(0 < M && M <= 8);
     using load_vec_t = typename cpu_utils::VecTypeTrait<scalar_t>::vec_t;
 
     scalar_t* __restrict__ curr_b_0 = b_ptr;

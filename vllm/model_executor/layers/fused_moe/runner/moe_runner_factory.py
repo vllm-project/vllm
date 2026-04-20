@@ -12,9 +12,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.layers.fused_moe.runner.chunking_moe_runner import (
-    ChunkingMoERunner,
-)
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
     DefaultMoERunner,
 )
@@ -35,7 +32,7 @@ def create_moe_runner(
     reduce_results: bool,
     enable_dbo: bool,
 ) -> MoERunner:
-    runner = DefaultMoERunner(
+    return DefaultMoERunner(
         layer_name,
         moe_config,
         router,
@@ -46,6 +43,3 @@ def create_moe_runner(
         reduce_results,
         enable_dbo,
     )
-    if moe_config.moe_parallel_config.use_dp_chunking:
-        return ChunkingMoERunner(runner)
-    return runner

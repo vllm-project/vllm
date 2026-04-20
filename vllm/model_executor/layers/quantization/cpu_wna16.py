@@ -104,7 +104,7 @@ class CPUAWQConfig(QuantizationConfig):
 
     @classmethod
     def override_quantization_method(
-        cls, hf_quant_cfg, user_quant
+        cls, hf_quant_cfg, user_quant, hf_config=None
     ) -> "QuantizationMethods | None":
         quant_method = hf_quant_cfg.get("quant_method", "").lower()
         if current_platform.is_cpu() and (quant_method == "awq"):

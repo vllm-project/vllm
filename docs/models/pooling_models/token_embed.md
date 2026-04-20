@@ -9,14 +9,14 @@
 - Online APIs:
     - Pooling API (`/pooling`)
 
-The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs a embedding for each token.
+The difference between the (sequence) embedding task and the token embedding task is that (sequence) embedding outputs one embedding for each sequence, while token embedding outputs an embedding for each token.
 
 Many embedding models support both (sequence) embedding and token embedding. For further details on (sequence) embedding, please refer to [this page](embed.md).
 
 !!! note
 
     Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task (embed) is not 
-    what you want, you need to manually specify it via via `PoolerConfig(task="token_embed")` offline or
+    what you want, you need to manually specify it via `PoolerConfig(task="token_embed")` offline or
     `--pooler-config.task token_embed` online.
 
 ## Typical Use Cases
@@ -70,6 +70,14 @@ Models of any architecture can be converted into embedding models using `--conve
 \* Feature support is the same as that of the original model.
 
 If your model is not in the above list, we will try to automatically convert the model using [as_embedding_model][vllm.model_executor.models.adapters.as_embedding_model].
+
+### Special models
+
+| Architecture | Models | Example HF Models | [LoRA](../../features/lora.md) | [PP](../../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `JinaForRanking` | Qwen3-based | `jinaai/jina-reranker-v3` | | |
+
+jina-reranker-v3 is a listwise document reranker model with a novel `last but not late interaction` architecture. More information can be found at: [examples/pooling/token_embed/jina_reranker_v3_offline.py](../../../examples/pooling/token_embed/jina_reranker_v3_offline.py)
 
 --8<-- [end:supported-token-embed-models]
 

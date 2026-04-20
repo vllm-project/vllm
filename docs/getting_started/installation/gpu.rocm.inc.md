@@ -240,7 +240,7 @@ uv pip install vllm==${VLLM_VERSION} \
         # Install dependencies
         pip install --upgrade numba \
             scipy \
-            huggingface-hub[cli,hf_transfer] \
+            huggingface-hub[cli] \
             setuptools_scm
         pip install -r requirements/rocm.txt
 

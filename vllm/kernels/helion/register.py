@@ -53,18 +53,21 @@ if not has_helion():
     )
 
 import helion
-from helion._compat import requires_torch_version
 from helion.autotuner.base_search import BaseAutotuner
 from helion.runtime.config import Config
 from helion.runtime.settings import default_autotuner_fn
 
 # TODO(gmagogsfm): Remove CustomOp fallback path (_get_or_register_custom_op,
 # vllm_helion_lib, direct_register_custom_op) once vLLM requires PyTorch >= 2.11.
-_HOP_AVAILABLE = requires_torch_version("2.11")
+# FIXME(gmagogsfm): Re-enable HOP path once performance regression is fixed.
+# _HOP_AVAILABLE = requires_torch_version("2.11")
+_HOP_AVAILABLE = False
 
 if _HOP_AVAILABLE:
+    from helion._compat import supports_torch_compile_fusion
     from helion._compiler._dynamo.higher_order_ops import helion_kernel_side_table
     from helion._compiler._dynamo.variables import HelionKernelVariable
+    from helion.runtime.kernel import Kernel
     from torch._dynamo.guards import GuardBuilder
     from torch._dynamo.variables.builder import VariableBuilder
 
@@ -475,19 +478,22 @@ if _HOP_AVAILABLE:
         """Register HelionKernelWrapper with Dynamo's VariableBuilder.
 
         When Dynamo encounters a HelionKernelWrapper during tracing, this
-        extracts the underlying Helion Kernel, registers it in the side table,
-        and returns Helion's own HelionKernelVariable to handle HOP emission.
+        extracts the underlying Helion Kernel and delegates to Helion's own
+        registered Kernel handler, which handles HOP emission, side table
+        registration, and inductor lowering setup.
         """
 
         def wrap_helion_kernel_wrapper(
             builder: VariableBuilder, value: HelionKernelWrapper
         ):
             kernel = value.get_configured_op()._decorated_kernel
+            if supports_torch_compile_fusion():
+                helion_handler = VariableBuilder._type_dispatch()[Kernel]
+                return helion_handler(builder, kernel)
             kernel_idx = helion_kernel_side_table.add_kernel(kernel)
             builder.install_guards(GuardBuilder.ID_MATCH)
             return HelionKernelVariable(kernel, kernel_idx, source=builder.source)
 
-        # Register with Dynamo's type dispatch system
         dispatch = VariableBuilder._type_dispatch()
         dispatch[HelionKernelWrapper] = wrap_helion_kernel_wrapper
 

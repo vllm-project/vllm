@@ -9,6 +9,7 @@ from vllm.config.quantization import (
     OnlineQuantizationConfigArgs,
     OnlineQuantScheme,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
 )
@@ -33,6 +34,11 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineLinearMethod,
     Fp8PerTensorOnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.int8 import (
+    Int8OnlineMoEMethod,
+)
+
+logger = init_logger(__name__)
 
 
 class OnlineQuantizationConfig(QuantizationConfig):
@@ -96,7 +102,13 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
 
             linear_scheme = self.args.linear_scheme_override or self.args.global_scheme
-            if linear_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
+            if linear_scheme == OnlineQuantScheme.INT8_PER_CHANNEL_WEIGHT_ONLY:
+                logger.warning_once(
+                    "INT8 online quantization only quantizes MoE expert "
+                    "weights. linear layers remain in full precision."
+                )
+                return UnquantizedLinearMethod()
+            elif linear_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
                 return Fp8PerBlockOnlineLinearMethod()
             else:
                 return Fp8PerTensorOnlineLinearMethod()
@@ -109,7 +121,9 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
 
             moe_scheme = self.args.moe_scheme_override or self.args.global_scheme
-            if moe_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
+            if moe_scheme == OnlineQuantScheme.INT8_PER_CHANNEL_WEIGHT_ONLY:
+                return Int8OnlineMoEMethod(layer=layer)
+            elif moe_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
                 return Fp8PerBlockOnlineMoEMethod(layer=layer)
             else:
                 return Fp8PerTensorOnlineMoEMethod(layer=layer)

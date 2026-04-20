@@ -41,6 +41,7 @@ def create_mock_parallel_config(
     config.rank = rank
     config.world_size = world_size
     config.data_parallel_rank = dp_rank
+    config.data_parallel_index = dp_rank
     return config
 
 
@@ -283,6 +284,7 @@ def inference_receive_tensor(
     parallel_config.rank = 0
     parallel_config.world_size = 1
     parallel_config.data_parallel_rank = 0
+    parallel_config.data_parallel_index = 0
 
     engine = NCCLWeightTransferEngine(config, parallel_config)
 
@@ -666,6 +668,7 @@ def inference_receive_ipc_tensor(
     parallel_config.rank = 0
     parallel_config.world_size = 1
     parallel_config.data_parallel_rank = 0
+    parallel_config.data_parallel_index = 0
 
     engine = IPCWeightTransferEngine(config, parallel_config)
 

@@ -421,6 +421,43 @@ def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# EXAONE-4.5
+def run_exaone4_5(questions: list[str], modality: str) -> ModelRequestData:
+    model_name = "LGAI-EXAONE/EXAONE-4.5-33B"
+
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=5,
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+            "fps": 1,
+        },
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        placeholder = "<|image_pad|>"
+    elif modality == "video":
+        placeholder = "<|video_pad|>"
+
+    prompts = [
+        (
+            "<|system|>\nYou are a helpful assistant.<|endofturn|>\n"
+            f"<|user|>\n<vision>{placeholder}</vision>"
+            f"{question}<|endofturn|>\n"
+            "<|assistant|>\n"
+        )
+        for question in questions
+    ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Fuyu
 def run_fuyu(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1741,6 +1778,27 @@ def run_phi4mm(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Phi-4-reasoning-vision
+def run_phi4siglip(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality == "image"
+    model_name = "microsoft/Phi-4-reasoning-vision-15B"
+    prompts = [
+        f"<|user|>\n<image>\n{question}<|end|>\n<|assistant|>\n"
+        for question in questions
+    ]
+    engine_args = EngineArgs(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # Pixtral HF-format
 def run_pixtral_hf(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2178,6 +2236,7 @@ model_example_map = {
     "dots_ocr": run_dots_ocr,
     "eagle2_5": run_eagle2_5,
     "ernie45_vl": run_ernie45_vl,
+    "exaone4_5": run_exaone4_5,
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
     "gemma3n": run_gemma3n,
@@ -2222,6 +2281,7 @@ model_example_map = {
     "paligemma2": run_paligemma2,
     "phi3_v": run_phi3v,
     "phi4_mm": run_phi4mm,
+    "phi4_siglip": run_phi4siglip,
     "pixtral_hf": run_pixtral_hf,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,

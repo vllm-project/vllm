@@ -103,6 +103,10 @@ def run_test(
         )
 
 
+@pytest.mark.skip(
+    reason="Model's custom MBart decoder has head count mismatch with "
+    "transformers v5's GQA-aware cross-attention (8 vs 16 heads)"
+)
 @pytest.mark.parametrize("model", ["nvidia/NVIDIA-Nemotron-Parse-v1.1"])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("num_logprobs", [5])

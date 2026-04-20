@@ -26,6 +26,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.utils import find_tool_properties
 
 logger = init_logger(__name__)
 
@@ -1000,33 +1001,11 @@ class StreamingXMLToolCallParser:
         if not self.tools or not self.current_function_name:
             return "string"
 
-        for tool in self.tools:
-            if not hasattr(tool, "type") or not (
-                hasattr(tool, "function") and hasattr(tool.function, "name")
-            ):
-                continue
-            if (
-                tool.type == "function"
-                and tool.function.name == self.current_function_name
-            ):
-                if not hasattr(tool.function, "parameters"):
-                    return "string"
-                params = tool.function.parameters
-                if isinstance(params, dict) and "properties" in params:
-                    properties = params["properties"]
-                    if param_name in properties and isinstance(
-                        properties[param_name], dict
-                    ):
-                        return self.repair_param_type(
-                            str(properties[param_name].get("type", "string"))
-                        )
-                elif isinstance(params, dict) and param_name in params:
-                    param_config = params[param_name]
-                    if isinstance(param_config, dict):
-                        return self.repair_param_type(
-                            str(param_config.get("type", "string"))
-                        )
-                break
+        properties = find_tool_properties(self.tools, self.current_function_name)
+        if param_name in properties and isinstance(properties[param_name], dict):
+            return self.repair_param_type(
+                str(properties[param_name].get("type", "string"))
+            )
         return "string"
 
     def repair_param_type(self, param_type: str) -> str:
@@ -1279,11 +1258,11 @@ class Qwen3XMLToolParser(ToolParser):
             return None
 
         # Parse the delta text and get the result
-        result = self.parser.parse_single_streaming_chunks(delta_text)
+        delta = self.parser.parse_single_streaming_chunks(delta_text)
 
         # Update tool call tracking arrays based on incremental parsing results
-        if result and result.tool_calls:
-            for tool_call in result.tool_calls:
+        if delta and delta.tool_calls:
+            for tool_call in delta.tool_calls:
                 if tool_call.function:
                     tool_index = (
                         tool_call.index
@@ -1313,4 +1292,7 @@ class Qwen3XMLToolParser(ToolParser):
                         self.streamed_args_for_tool[tool_index] += (
                             tool_call.function.arguments
                         )
-        return result
+        if delta.content is None and not delta.tool_calls and delta.reasoning is None:
+            # If no content and no tool calls, return None to indicate no update
+            return None
+        return delta

@@ -1,3 +1,5 @@
 lmcache >= 0.3.9
-nixl >= 0.7.1, < 0.10.0 # Required for disaggregated prefill
+nixl[cu13] >= 0.7.1, <= 0.10.1 # Required for disaggregated prefill
+nixl-cu12 >= 0.7.1, <= 0.10.1
+nixl-cu13 >= 0.7.1, <= 0.10.1
 mooncake-transfer-engine >= 0.3.8

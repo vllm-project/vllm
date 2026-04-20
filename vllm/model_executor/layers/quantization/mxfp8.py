@@ -9,6 +9,7 @@ import torch
 from torch.nn import Module
 
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
@@ -34,7 +35,6 @@ from vllm.model_executor.layers.quantization.fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
-    Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -126,8 +126,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
 
     def __init__(self, quant_config: "Mxfp8Config"):
         self.quant_config = quant_config
-        self.out_dtype = torch.get_default_dtype()
-        self.mxfp8_linear = Mxfp8LinearOp()
+        self.kernel = init_mxfp8_linear_kernel()
 
     def create_weights(
         self,
@@ -166,7 +165,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
         replace_parameter(layer, "weight", weight_fp8.data)
         replace_parameter(layer, "weight_scale", weight_scale.data)
 
-        self.mxfp8_linear.process_weights(layer)
+        self.kernel.process_weights_after_loading(layer)
 
         layer._already_called_process_weights_after_loading = True
 
@@ -176,16 +175,7 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return self.mxfp8_linear.apply(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            out_dtype=self.out_dtype,
-            bias=bias,
-            workspace=getattr(layer, "workspace", None),
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-        )
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):

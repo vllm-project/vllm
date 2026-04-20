@@ -300,12 +300,12 @@ Full example: [examples/offline_inference/audio_language.py](../../examples/offl
 Speech-to-text models like Whisper have a maximum audio length they can process (typically 30 seconds). For longer audio files, vLLM provides a utility to intelligently split audio into chunks at quiet points to minimize cutting through speech.
 
 ```python
-import librosa
 from vllm import LLM, SamplingParams
 from vllm.multimodal.audio import split_audio
+from vllm.multimodal.media.audio import load_audio
 
 # Load long audio file
-audio, sr = librosa.load("long_audio.wav", sr=16000)
+audio, sr = load_audio("long_audio.wav", sr=16000)
 
 # Split into chunks at low-energy (quiet) regions
 chunks = split_audio(
@@ -832,7 +832,7 @@ Then, you can use the OpenAI client as follows:
         base_url=openai_api_base,
     )
 
-    # Any format supported by librosa is supported
+    # Any format supported by soundfile/PyAV is supported
     audio_url = AudioAsset("winning_call").url
     audio_base64 = encode_base64_content_from_url(audio_url)
 

@@ -19,7 +19,7 @@ METRIC_SOURCE_FILES = [
         "output": "spec_decode.inc.md",
     },
     {
-        "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py",
+        "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl/stats.py",
         "output": "nixl_connector.inc.md",
     },
     {"path": "vllm/v1/metrics/perf.py", "output": "perf.inc.md"},

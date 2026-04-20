@@ -31,6 +31,8 @@ from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 # This import automatically registers `torch.ops.silly.attention`
 from . import silly_attention  # noqa: F401
 
+DEVICE_TYPE = current_platform.device_type
+
 
 def test_version():
     # Test the version comparison logic using the private function
@@ -216,12 +218,14 @@ def test_splitting_ops_dynamic():
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
-            splitting_ops=["vllm::unified_attention"],
+            splitting_ops=["vllm::unified_attention_with_output"],
         )
     )
     # with inductor partition we use splitting_ops directly for
     # partition rules
-    assert config.compilation_config.splitting_ops == ["vllm::unified_attention"]
+    assert config.compilation_config.splitting_ops == [
+        "vllm::unified_attention_with_output"
+    ]
 
     # When attn_fusion pass enabled.
     config = VllmConfig(
@@ -281,7 +285,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
             mode=CompilationMode.VLLM_COMPILE,
             use_inductor_graph_partition=True,
             splitting_ops=[
-                "vllm::unified_attention",
+                "vllm::unified_attention_with_output",
                 "vllm::moe_forward",
                 "vllm::moe_forward_shared",
             ],
@@ -289,7 +293,7 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     )
     splitting_ops = config.compilation_config.splitting_ops
     assert splitting_ops == [
-        "vllm::unified_attention",
+        "vllm::unified_attention_with_output",
         "vllm::moe_forward",
         "vllm::moe_forward_shared",
     ]
@@ -454,7 +458,7 @@ def test_cached_compilation_config(default_vllm_config):
     from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 
     dtype = torch.bfloat16
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     batch_size, num_qo_heads, head_size = 8, 16, 128
 
     # access and cache default compilation config
@@ -476,7 +480,7 @@ def test_cached_compilation_config(default_vllm_config):
         query_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
         query_quant = torch.compile(query_quant)
 
-        _q_scale = torch.tensor(1.0, dtype=torch.float32, device="cuda")
+        _q_scale = torch.tensor(1.0, dtype=torch.float32, device=DEVICE_TYPE)
         query = torch.randn(
             batch_size, num_qo_heads * head_size, dtype=dtype, device=device
         )

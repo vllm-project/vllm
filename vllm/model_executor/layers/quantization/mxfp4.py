@@ -19,11 +19,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     TRITON_BACKENDS,
     Mxfp4MoeBackend,
-    convert_to_mxfp4_moe_kernel_format,
+    convert_gpt_oss_weight_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
-    select_mxfp4_moe_backend,
+    select_gpt_oss_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -38,6 +38,12 @@ logger = init_logger(__name__)
 
 
 class Mxfp4Config(QuantizationConfig):
+    """Canonical base config for MXFP4 quantization.
+
+    Subclasses override get_name() and override_quantization_method() to
+    register themselves as the handler for a specific checkpoint format.
+    """
+
     def __init__(self, ignored_layers: list[str] | None = None):
         super().__init__()
         self.ignored_layers = ignored_layers
@@ -62,6 +68,8 @@ class Mxfp4Config(QuantizationConfig):
     def get_config_filenames(cls) -> list[str]:
         return []
 
+    # TODO (zyongye) This is only temporaty fallback.
+    # We should have `Mxfp4MoEMethod` after this migration is complete.
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
@@ -79,7 +87,7 @@ class Mxfp4Config(QuantizationConfig):
             )
             return UnquantizedLinearMethod()
         elif isinstance(layer, FusedMoE):
-            return Mxfp4MoEMethod(layer.moe_config)
+            return GptOssMxfp4MoEMethod(layer.moe_config)
         elif isinstance(layer, Attention):
             logger.debug_once(
                 "MXFP4 attention layer is not implemented. "
@@ -93,13 +101,46 @@ class Mxfp4Config(QuantizationConfig):
         return True
 
 
-class Mxfp4MoEMethod(FusedMoEMethodBase):
+class GptOssMxfp4Config(Mxfp4Config):
+    """MXFP4 config for GPT-OSS checkpoints.
+
+    Checkpoints carry ``"quant_method": "mxfp4"`` in their JSON config.
+    override_quantization_method() maps that to the canonical internal name
+    so that the rest of the loading path uses "gpt_oss_mxfp4" consistently.
+    """
+
+    @classmethod
+    def get_name(cls) -> QuantizationMethods:
+        return "gpt_oss_mxfp4"
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant, hf_config=None
+    ) -> QuantizationMethods | None:
+        # Match both "mxfp4" (original checkpoint value) and "gpt_oss_mxfp4"
+        # (already normalized by verify_and_update_model_config) so that
+        # explicit --quantization mxfp4 from the user doesn't cause a mismatch.
+        if not (
+            isinstance(hf_quant_cfg, dict)
+            and hf_quant_cfg.get("quant_method") in ("mxfp4", "gpt_oss_mxfp4")
+        ):
+            return None
+        # Require explicit confirmation that this is a GPT-OSS model.
+        # Do NOT fall back to returning the override when hf_config is None,
+        # as that would silently claim all mxfp4 checkpoints.
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type != "gpt_oss":
+            return None
+        return "gpt_oss_mxfp4"
+
+
+class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     """MXFP4 MoE quantization method."""
 
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
-        self.weight_dtype = "mxfp4"
-        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
+        self.weight_dtype = "gpt_oss_mxfp4"
+        self.mxfp4_backend, self.experts_cls = select_gpt_oss_mxfp4_moe_backend(moe)
 
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
@@ -281,7 +322,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # Convert weights to kernel format
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
-            convert_to_mxfp4_moe_kernel_format(
+            convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
                 layer=layer,
                 w13_weight=w13,

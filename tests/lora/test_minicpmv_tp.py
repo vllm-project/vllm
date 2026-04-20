@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from importlib.metadata import version
+
 import pytest
+from packaging.version import Version
 
 import vllm
 from vllm.assets.image import ImageAsset
@@ -9,6 +12,14 @@ from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
+
+pytestmark = pytest.mark.skipif(
+    Version("5.0") <= Version(version("transformers")),
+    reason=(
+        "MiniCPMV custom processor uses tokenizer.im_start_id which is not "
+        "available on TokenizersBackend in transformers v5.0+"
+    ),
+)
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 

@@ -951,6 +951,7 @@ class ModelConfig:
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
                 "mxfp4",
+                "gpt_oss_mxfp4",
                 "cpu_awq",
                 "gguf",
             ]
@@ -966,7 +967,7 @@ class ModelConfig:
             for name in quantization_methods:
                 method = me_quant.get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
-                    quant_cfg, self.quantization
+                    quant_cfg, self.quantization, hf_config=self.hf_config
                 )
                 if quantization_override is not None:
                     # Raise error if the override is not custom (custom would

@@ -22,7 +22,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
@@ -121,14 +121,19 @@ class Executor(ABC):
         underlying workers.
         """
         self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
-        compilation_times: list[float] = self.collective_rpc("compile_or_warm_up_model")
+        compilation_times: list[CompilationTimes] = self.collective_rpc(
+            "compile_or_warm_up_model"
+        )
         # Propagate compilation time from workers back to the main process.
         # With TP>1, compilation happens in worker processes, so the main
         # process config is never updated. Use max across workers since they
         # compile in parallel.
         if compilation_times:
             self.vllm_config.compilation_config.compilation_time = max(
-                compilation_times
+                t.language_model for t in compilation_times
+            )
+            self.vllm_config.compilation_config.encoder_compilation_time = max(
+                t.encoder for t in compilation_times
             )
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027

@@ -147,6 +147,9 @@ struct AttentionMetadata {
       case ISA::NEON:
         ss << "NEON, ";
         break;
+      case ISA::VXE:
+        ss << "VXE, ";
+        break;
     }
     ss << "workitem_group_num: " << workitem_group_num
        << ", reduction_item_num: " << reduction_item_num

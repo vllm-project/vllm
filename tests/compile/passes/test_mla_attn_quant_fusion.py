@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
+DEVICE_TYPE = current_platform.device_type
 
 
 class MLAAttentionQuantPatternModel(torch.nn.Module):
@@ -74,6 +75,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         self.kv_cache_dtype = kv_cache_dtype
         self.device = device
         self.vllm_config = vllm_config
+        self.dtype = vllm_config.model_config.dtype
 
         # Create kv_b_proj (ColumnParallelLinear) on device.
         # Reuse weights from prior model instance when available, because
@@ -190,6 +192,7 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
             activation_quant_key=self.quant_key,
             weight_quant_key=self.quant_key,
             device=self.device,
+            input_dtype=self.dtype,
         )
 
         w = kwargs.get("w")
@@ -354,7 +357,7 @@ def test_mla_attention_quant_pattern(
 
     custom_ops_list = custom_ops.split(",") if custom_ops else []
 
-    device = torch.device("cuda:0")
+    device = torch.device(f"{DEVICE_TYPE}:0")
     torch.set_default_dtype(dtype)
     torch.manual_seed(42)
 
