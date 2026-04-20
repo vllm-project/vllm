@@ -434,8 +434,9 @@ class Gemma4Attention(nn.Module):
 
         # Gemma4 has hybrid attention with global (512) and local (256) layers.
         # With per-token-head KV quantization, each head stores quantized data
-        # plus per-token scale metadata inline, so per-block page-size
-        # contributions differ between local/global layers.
+        # plus per-token scale metadata carved from the same raw KV allocation,
+        # so per-block page-size contributions differ between local/global
+        # layers.
         #  - Local: (256*1)*2 + 8 = 520 bytes
         #  - Global: (512*1)*2 + 8 = 1032 bytes
         # We pad global to 1040 so hybrid page-size unification can use an
