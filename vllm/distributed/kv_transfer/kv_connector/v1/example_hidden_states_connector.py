@@ -246,7 +246,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         # Usually used to handle allocation of new blocks for requests that are loading
         # tokens from connector's external kv cache. We never load from external cache

@@ -384,10 +384,11 @@ def test_kv_transfer_handshake(dist_init):
         decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
         expected_agent_metadata = decoder.decode(metadata.agent_metadata_bytes)
 
-        # The scheduler connector expects metadata to be keyed by
-        # (tp_rank, dcp_rank).
+        # The scheduler connector expects metadata keyed by flat_idx:
+        #   flat_idx = tp_rank * pcp_size + pcp_rank
+        # For single-rank (tp=0, pcp=0), flat_idx = 0.
         scheduler_connector = scheduler.get_kv_connector()
-        scheduler_connector.set_xfer_handshake_metadata({(0, 0): metadata})
+        scheduler_connector.set_xfer_handshake_metadata({0: metadata})
 
         # Simulate a request that finishes prefill, which returns
         # corresponding NixlConnectorMetadata for decode instance.
@@ -888,18 +889,37 @@ class TestNixlHandshake:
             do_remote_prefill=True,
             block_size=block_size,
         )
+
+        # With dcp_size=2 and block_size=16:
+        #   scheduler_block_size = 16 * 2 = 32
+        # 64 locally computed tokens = 2 hashed scheduler blocks.
+        # Set up 2 hashed + 2 unhashed blocks.
+        def _make_block(is_hashed: bool):
+            b = MagicMock()
+            b.block_hash = "hash" if is_hashed else None
+            b.is_null = False
+            return b
+
         blocks = MagicMock()
         blocks.get_unhashed_block_ids_all_groups.return_value = [[10, 11, 12]]
+        blocks.blocks = [
+            [
+                _make_block(True),
+                _make_block(True),
+                _make_block(False),
+                _make_block(False),
+            ]
+        ]
 
         scheduler.update_state_after_alloc(
             request,
             blocks,
             num_external_tokens=48,
-            num_computed_tokens=64,
         )
         metadata = scheduler.build_connector_meta(MagicMock())
 
         req_meta = metadata.reqs_to_recv[request.request_id]
+        # 2 hashed blocks * scheduler_block_size (32) = 64 tokens
         assert req_meta.local_num_computed_tokens == 64
         assert req_meta.local_block_ids == [[10, 11, 12]]
 

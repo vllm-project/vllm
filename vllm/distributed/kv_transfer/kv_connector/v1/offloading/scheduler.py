@@ -219,7 +219,6 @@ class OffloadingConnectorScheduler:
         request: Request,
         blocks: KVCacheBlocks,
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         if num_external_tokens == 0:
             return

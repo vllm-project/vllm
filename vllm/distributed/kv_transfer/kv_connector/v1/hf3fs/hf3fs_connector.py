@@ -760,7 +760,10 @@ class HF3FSKVConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
+<<<<<<< HEAD
         num_computed_tokens: int | None = None,
+=======
+>>>>>>> fdad6f07a (Implement flat_idx handshake key and revert update_state_after_alloc interface)
     ) -> None:
         """Update state after block allocation."""
         state = self._get_or_create_scheduling_state(request.request_id)

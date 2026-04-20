@@ -111,7 +111,6 @@ class LoadRecoveryExampleConnector(ExampleConnector):
         request: Request,
         blocks: KVCacheBlocks,
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         """
         Update KVConnector state after block allocation.
@@ -123,7 +122,6 @@ class LoadRecoveryExampleConnector(ExampleConnector):
             request,
             blocks,
             num_external_tokens,
-            num_computed_tokens,
         )
 
         if num_external_tokens > 0:

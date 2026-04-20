@@ -146,11 +146,10 @@ class DecodeBenchConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens, num_computed_tokens
+            request, blocks, num_external_tokens
         )
 
     def build_connector_meta(
@@ -224,7 +223,6 @@ class DecodeBenchConnectorScheduler:
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         """
         Called after blocks are allocated. Store the block IDs so we can

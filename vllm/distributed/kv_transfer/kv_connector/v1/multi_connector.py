@@ -373,7 +373,6 @@ class MultiConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         chosen_connector = self._requests_to_connector.get(request.request_id, -1)
         empty_blocks = blocks.new_empty()
@@ -384,11 +383,10 @@ class MultiConnector(KVConnectorBase_V1):
                     request,
                     blocks,
                     num_external_tokens,
-                    num_computed_tokens,
                 )
             else:
                 # Call with empty blocks for other connectors.
-                c.update_state_after_alloc(request, empty_blocks, 0, None)
+                c.update_state_after_alloc(request, empty_blocks, 0)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

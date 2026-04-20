@@ -32,7 +32,7 @@ from vllm.distributed.kv_transfer import (
 )
 from vllm.distributed.parallel_state import (
     Handle,
-    get_dcp_group,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -483,7 +483,16 @@ class Worker(WorkerBase):
         return int(self.available_kv_cache_memory_bytes)
 
     def get_kv_connector_handshake_metadata(self) -> dict | None:
-        """Get KV connector metadata from this worker if available."""
+        """Get KV connector metadata from this worker if available.
+
+        Returns a dict keyed by the worker's unified rank (flat_idx), which
+        encodes both TP rank and PCP rank as a single int:
+            flat_idx = tp_rank * pcp_size + pcp_rank
+
+        This encoding uniquely identifies each worker across the TP × PCP
+        space, and is used as the key in set_xfer_handshake_metadata on the
+        scheduler side.
+        """
 
         if not has_kv_transfer_group():
             return None
@@ -496,10 +505,14 @@ class Worker(WorkerBase):
 
         tp_rank = get_tp_group().rank_in_group
         try:
-            dcp_rank = get_dcp_group().rank_in_group
+            pcp_size = get_pcp_group().world_size
+            pcp_rank = get_pcp_group().rank_in_group
         except AssertionError:
-            dcp_rank = 0
-        return {(tp_rank, dcp_rank): metadata}
+            pcp_size = 1
+            pcp_rank = 0
+        # Encode (tp_rank, pcp_rank) as a single unified flat_idx.
+        flat_idx = tp_rank * pcp_size + pcp_rank
+        return {flat_idx: metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

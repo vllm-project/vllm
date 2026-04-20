@@ -487,7 +487,6 @@ class KVConnectorBase_V1(ABC):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         """
         Update KVConnector state after block allocation.
@@ -503,10 +502,6 @@ class KVConnectorBase_V1(ABC):
             blocks (KVCacheBlocks): the blocks allocated for the request.
             num_external_tokens (int): the number of tokens that will be
                 loaded from the external KV cache.
-            num_computed_tokens (int | None): the number of tokens already
-                satisfied locally before the external KV load. Connectors may
-                use this to recover the exact logical prefix offset for the
-                newly allocated blocks.
         """
         pass
 

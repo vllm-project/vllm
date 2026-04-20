@@ -52,7 +52,6 @@ class OldStyleTestConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         pass
 
@@ -104,7 +103,6 @@ class NewStyleTestConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         pass
 

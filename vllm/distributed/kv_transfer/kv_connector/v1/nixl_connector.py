@@ -439,11 +439,10 @@ class NixlConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
-            request, blocks, num_external_tokens, num_computed_tokens
+            request, blocks, num_external_tokens
         )
 
     def build_connector_meta(
@@ -689,10 +688,17 @@ class NixlConnectorScheduler:
         """
         Set the KV connector handshake metadata for this connector.
 
+        The metadata dict must be keyed by the worker's unified flat_idx:
+            flat_idx = tp_rank * pcp_size + pcp_rank
+
+        This single-int key uniquely identifies each worker across the
+        TP × PCP space and is set by gpu_worker.get_kv_connector_handshake_metadata.
+
         Args:
-            metadata (dict): the handshake metadata to set.
+            metadata (dict[int, KVConnectorHandshakeMetadata]): handshake
+                metadata to serve, keyed by flat_idx.
         """
-        encoded_data: dict[RemoteWorkerKey, bytes] = {}
+        encoded_data: dict[int, bytes] = {}
         encoder = msgspec.msgpack.Encoder()
         for worker_key, rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
@@ -700,18 +706,14 @@ class NixlConnectorScheduler:
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            if (
-                not isinstance(worker_key, tuple)
-                or len(worker_key) != 2
-                or not all(isinstance(rank, int) for rank in worker_key)
-            ):
+            if not isinstance(worker_key, int):
                 raise ValueError(
                     "NixlConnectorScheduler expects handshake metadata keyed by "
-                    "(tp_rank, dcp_rank)."
+                    "flat_idx (int), where flat_idx = tp_rank * pcp_size + pcp_rank."
                 )
             encoded_data[worker_key] = encoder.encode(rank_metadata)
             logger.debug(
-                "Worker key %s: encoded NixlHandshakePayload size: %s bytes",
+                "Worker flat_idx %s: encoded NixlHandshakePayload size: %s bytes",
                 worker_key,
                 str(len(encoded_data[worker_key])),
             )
@@ -735,7 +737,7 @@ class NixlConnectorScheduler:
 
     @staticmethod
     def _nixl_handshake_listener(
-        encoded_data: dict[RemoteWorkerKey, Any],
+        encoded_data: dict[int, Any],
         ready_event: threading.Event,
         stop_event: threading.Event,
         port: int,
@@ -758,18 +760,25 @@ class NixlConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode the message which contains
-                # (GET_META_MSG, tp_rank, dcp_rank)
-                msg, target_tp_rank, target_dcp_rank = msgspec.msgpack.decode(msg)
+                # Decode the message which contains (GET_META_MSG, flat_idx).
+                # flat_idx = tp_rank * pcp_size + pcp_rank uniquely identifies
+                # the requesting worker.
+                msg, target_flat_idx = msgspec.msgpack.decode(msg)
                 logger.debug(
-                    "Received message for worker key (%s, %s)",
-                    target_tp_rank,
-                    target_dcp_rank,
+                    "Received message for worker flat_idx %s",
+                    target_flat_idx,
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
-                target_worker_key = (target_tp_rank, target_dcp_rank)
-                sock.send_multipart((identity, b"", encoded_data[target_worker_key]))
+                if target_flat_idx not in encoded_data:
+                    logger.warning(
+                        "Received request for unknown worker flat_idx %s; "
+                        "known flat_indices: %s",
+                        target_flat_idx,
+                        list(encoded_data.keys()),
+                    )
+                    continue
+                sock.send_multipart((identity, b"", encoded_data[target_flat_idx]))
 
     def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
@@ -849,15 +858,24 @@ class NixlConnectorScheduler:
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         params = request.kv_transfer_params
+        # Compute the number of locally computed tokens from the hashed
+        # (APC-hit) blocks. Each hashed block covers scheduler_block_size
+        # tokens = kernel_block_size * dcp_size * pcp_size.
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        dcp_size = self.vllm_config.parallel_config.decode_context_parallel_size
+        scheduler_block_size = self.block_size * dcp_size * pcp_size
+        num_hashed_blocks = sum(
+            1 for b in blocks.blocks[0] if b.block_hash is not None and not b.is_null
+        ) if blocks.blocks else 0
+        local_num_computed_tokens = num_hashed_blocks * scheduler_block_size
         logger.debug(
             "NIXLConnector update_state_after_alloc: "
-            "num_external_tokens=%s num_computed_tokens=%s, "
+            "num_external_tokens=%s local_num_computed_tokens=%s, "
             "kv_transfer_params=%s",
             num_external_tokens,
-            num_computed_tokens,
+            local_num_computed_tokens,
             params,
         )
 
@@ -899,7 +917,7 @@ class NixlConnectorScheduler:
                     self._reqs_need_recv[request.request_id] = (
                         request,
                         local_block_ids,
-                        num_computed_tokens or 0,
+                        local_num_computed_tokens,
                     )
 
                 else:
@@ -1182,6 +1200,8 @@ class NixlConnectorWorker:
         except AssertionError:
             self.pcp_size = 1
             self.pcp_rank = 0
+        # flat_idx = tp_rank * pcp_size + pcp_rank uniquely identifies this
+        # worker across the TP × PCP space. It is used as the handshake key.
         self.local_worker_key: RemoteWorkerKey = (self.tp_rank, self.dcp_rank)
 
         self.num_blocks = kv_cache_config.num_blocks
@@ -1372,6 +1392,30 @@ class NixlConnectorWorker:
             self.block_size * self._physical_blocks_per_logical_kv_block * self.dcp_size
         )
 
+    @staticmethod
+    def _tp_dcp_to_flat_idx(
+        tp_rank: int,
+        dcp_rank: int,
+        pcp_size: int,
+        dcp_size: int,
+    ) -> int:
+        """Compute the canonical flat_idx for a (tp_rank, dcp_rank) pair.
+
+        flat_idx = tp_rank * pcp_size + pcp_rank, where pcp_rank is the
+        smallest value in [0, pcp_size) such that flat_idx % dcp_size == dcp_rank.
+
+        For pcp_size == 1 this simplifies to flat_idx = tp_rank, matching the
+        common non-PCP case where dcp_rank == tp_rank % dcp_size.
+        """
+        for pcp_rank in range(pcp_size):
+            flat_idx = tp_rank * pcp_size + pcp_rank
+            if flat_idx % dcp_size == dcp_rank:
+                return flat_idx
+        raise ValueError(
+            f"No valid flat_idx for tp_rank={tp_rank}, dcp_rank={dcp_rank}, "
+            f"pcp_size={pcp_size}, dcp_size={dcp_size}"
+        )
+
     def _nixl_handshake(
         self,
         host: str,
@@ -1420,15 +1464,25 @@ class NixlConnectorWorker:
 
         with zmq_ctx(zmq.REQ, path) as sock:
             for remote_worker_key in p_remote_ranks:
+                remote_tp_rank, remote_dcp_rank = remote_worker_key
+                # Compute the canonical flat_idx for this (tp_rank, dcp_rank) pair.
+                # flat_idx = tp_rank * pcp_size + pcp_rank, where pcp_rank is the
+                # smallest value that gives flat_idx % dcp_size == dcp_rank.
+                remote_flat_idx = self._tp_dcp_to_flat_idx(
+                    remote_tp_rank, remote_dcp_rank, remote_pcp_size, remote_dcp_size
+                )
                 logger.debug(
-                    "Querying metadata on path: %s at remote worker key %s",
+                    "Querying metadata on path: %s at remote flat_idx %s "
+                    "(tp=%s, dcp=%s)",
                     path,
-                    remote_worker_key,
+                    remote_flat_idx,
+                    remote_tp_rank,
+                    remote_dcp_rank,
                 )
 
                 start_time = time.perf_counter()
-                # Send query for the request.
-                msg = msgspec.msgpack.encode((GET_META_MSG, *remote_worker_key))
+                # Send query for the request using the flat_idx key.
+                msg = msgspec.msgpack.encode((GET_META_MSG, remote_flat_idx))
                 # Set receive timeout to 5 seconds to avoid hanging on dead server
                 sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
                 sock.send(msg)
@@ -1494,11 +1548,18 @@ class NixlConnectorWorker:
                         f"received {metadata.engine_id}."
                     )
 
-                if (metadata.tp_rank, metadata.dcp_rank) != remote_worker_key:
+                # Verify the received metadata's flat_idx matches what we requested.
+                # flat_idx = tp_rank * pcp_size + pcp_rank
+                received_flat_idx = (
+                    metadata.tp_rank * metadata.pcp_size + metadata.pcp_rank
+                )
+                if received_flat_idx != remote_flat_idx:
                     raise RuntimeError(
-                        "Remote handshake metadata worker key mismatch. "
-                        f"Expected {remote_worker_key}, got "
-                        f"({metadata.tp_rank}, {metadata.dcp_rank})."
+                        "Remote handshake metadata flat_idx mismatch. "
+                        f"Expected flat_idx={remote_flat_idx}, got "
+                        f"flat_idx={received_flat_idx} "
+                        f"(tp_rank={metadata.tp_rank}, pcp_rank={metadata.pcp_rank}, "
+                        f"pcp_size={metadata.pcp_size})."
                     )
 
                 if not self.kv_topo.has_kv_cache_overlap(
@@ -1515,7 +1576,6 @@ class NixlConnectorWorker:
                     continue
 
                 # Register Remote agent.
-                remote_tp_rank, remote_dcp_rank = remote_worker_key
                 remote_agent_name = self.add_remote_agent(
                     metadata,
                     remote_tp_rank,

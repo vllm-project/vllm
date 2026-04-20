@@ -84,7 +84,6 @@ class MockConnector(KVConnectorBase_V1):
         request,
         blocks,
         num_tokens,
-        num_computed_tokens=None,
     ) -> None:
         pass
 

@@ -151,7 +151,6 @@ class MoRIIOConnector(KVConnectorBase_V1):
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        num_computed_tokens: int | None = None,
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -159,7 +158,6 @@ class MoRIIOConnector(KVConnectorBase_V1):
             blocks,
             num_external_tokens,
             self.connector_worker,
-            num_computed_tokens,
         )
 
     def build_connector_meta(
@@ -373,7 +371,6 @@ class MoRIIOConnectorScheduler:
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
         connector_worker: "MoRIIOConnectorWorker | None" = None,
-        num_computed_tokens: int | None = None,
     ):
         params = request.kv_transfer_params
         if not params:
