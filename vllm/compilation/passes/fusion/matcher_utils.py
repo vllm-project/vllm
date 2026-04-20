@@ -24,6 +24,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding.common import (
+    ApplyRotaryEmb,
+    rotate_gptj,
+    rotate_neox,
+)
+from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
+    DeepseekScalingRotaryEmbedding,
+)
 from vllm.platforms import current_platform
 
 RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
@@ -90,6 +98,7 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         use_flashinfer: bool = False,
         match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
+        mla_mode: bool = False,
     ) -> None:
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
@@ -104,12 +113,16 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
+        self.mla_mode = mla_mode
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
         elif match_rocm_aiter:
             self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
         else:
             self.rotary_op = ROTARY_OP
+
+        if not enabled and mla_mode:
+            self.forward = self.forward_native_mla
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
@@ -157,6 +170,178 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
             )
         )
         return result
+
+    def forward_native_mla(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cos_sin = cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        query = ApplyRotaryEmb.forward_static(query, cos, sin, self.is_neox)
+        if key is not None:
+            key = ApplyRotaryEmb.forward_static(key, cos, sin, self.is_neox)
+        return query, key
+
+
+class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
+    def __init__(
+        self,
+        is_neox: bool,
+        head_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        use_flashinfer: bool = False,
+        enabled: bool | None = None,
+        mla_mode: bool = False,
+    ) -> None:
+        if enabled is None:
+            enabled = DeepseekScalingRotaryEmbedding.enabled()
+
+        super().__init__(enabled)
+        self.is_neox = is_neox
+        self.head_size = head_size
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.q_size = self.num_heads * self.head_size
+        self.kv_size = self.num_kv_heads * self.head_size
+        self.rotary_dim = head_size
+        self.mla_mode = mla_mode
+
+        if not enabled and mla_mode:
+            self.forward = self.forward_native_mla
+
+    def inputs(self) -> list[torch.Tensor]:
+        positions = self.empty_int64(5)
+        key = self.empty(5, self.num_kv_heads, self.head_size)
+        cos_sin_cache = self.empty(4096, self.rotary_dim)
+        return [positions, key, cos_sin_cache]
+
+    def forward_custom(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
+            DeepseekScalingRotaryEmbedding.forward_static(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox,
+            )
+        )
+        return result
+
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        result: tuple[torch.Tensor, torch.Tensor | None] = (
+            DeepseekScalingRotaryEmbedding.forward_static(
+                positions,
+                query,
+                key,
+                self.head_size,
+                self.rotary_dim,
+                cos_sin_cache,
+                self.is_neox,
+            )
+        )
+        return result
+
+    def forward_native_mla(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        cos_sin_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        cos_sin = cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        if self.is_neox:
+            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
+            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+        else:
+            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
+            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
+        rotate_fn = rotate_neox if self.is_neox else rotate_gptj
+        query = query * cos + rotate_fn(query) * sin
+        if key is not None:
+            key = key * cos + rotate_fn(key) * sin
+        return query, key
+
+
+class MatcherRMSNorm(MatcherCustomOp):
+    def __init__(
+        self,
+        epsilon: float,
+        enabled: bool | None = None,
+        match_rocm_aiter: bool = False,
+    ) -> None:
+        if enabled is None:
+            enabled = RMSNorm.enabled()
+
+        super().__init__(enabled)
+        self.epsilon = epsilon
+        self._rmsnorm_op = RMS_OP
+        self.match_rocm_aiter = match_rocm_aiter
+
+        if match_rocm_aiter:
+            self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_op()
+
+    def inputs(self) -> list[torch.Tensor]:
+        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
+        weight = self.empty(16)
+        return [input, weight]
+
+    def forward_rocm_aiter(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return self._rmsnorm_op(
+            x=input,
+            weight=weight,
+            variance_epsilon=self.epsilon,
+        )
+
+    def forward_custom(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.match_rocm_aiter:
+            return self.forward_rocm_aiter(input, weight)
+
+        result = torch.empty_like(input)
+        _, result = auto_functionalized(
+            self._rmsnorm_op,
+            result=result,
+            input=input,
+            weight=weight,
+            epsilon=self.epsilon,
+        )
+
+        return result
+
+    def forward_native(
+        self,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return RMSNorm.forward_static(
+            input, self.epsilon, input.size(-1), self.model_dtype, weight
+        )
 
 
 class MatcherFusedAddRMSNorm(MatcherCustomOp):

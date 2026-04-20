@@ -120,18 +120,41 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
-        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
-        query_rot = query[..., : self.rotary_dim]
-        key_rot = key[..., : self.rotary_dim]
-        if self.rotary_dim < self.head_size:
-            query_pass = query[..., self.rotary_dim :]
-            key_pass = key[..., self.rotary_dim :]
+        return self.forward_static(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.rotary_dim,
+            self.cos_sin_cache,
+            self.is_neox_style,
+            offsets,
+        )
+
+    @staticmethod
+    def forward_static(
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        head_size: int,
+        rotary_dim: int,
+        cos_sin_cache: torch.Tensor,
+        is_neox_style: bool,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """A static implementation of forward()."""
+        assert key is not None
+        query_rot = query[..., :rotary_dim]
+        key_rot = key[..., :rotary_dim]
+        if rotary_dim < head_size:
+            query_pass = query[..., rotary_dim:]
+            key_pass = key[..., rotary_dim:]
 
         cos_sin = cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox_style:
+        if is_neox_style:
             # NOTE(woosuk): Here we assume that the positions tensor has the
             # shape [batch_size, seq_len].
             cos = cos.repeat(1, 1, 2).unsqueeze(-2)
@@ -140,11 +163,11 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
 
-        rotate_fn = rotate_neox if self.is_neox_style else rotate_gptj
+        rotate_fn = rotate_neox if is_neox_style else rotate_gptj
         query_rot = query_rot * cos + rotate_fn(query_rot) * sin
         key_rot = key_rot * cos + rotate_fn(key_rot) * sin
 
-        if self.rotary_dim < self.head_size:
+        if rotary_dim < head_size:
             query = torch.cat((query_rot, query_pass), dim=-1)
             key = torch.cat((key_rot, key_pass), dim=-1)
         else:

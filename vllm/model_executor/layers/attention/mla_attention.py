@@ -304,6 +304,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        attn_backend: type[AttentionBackend] | None = None,
         use_sparse: bool = False,
         indexer: object | None = None,
         **extra_impl_args,
@@ -333,14 +334,21 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.quant_config = quant_config
 
         dtype = torch.get_default_dtype()
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            dtype,
-            kv_cache_dtype,
-            use_mla=True,
-            use_sparse=use_sparse,
-            num_heads=self.num_heads,
-        )
+        if attn_backend is not None:
+            assert attn_backend.is_mla(), (
+                f"MLAAttention: attn_backend must be an MLA backend, "
+                f"got {attn_backend.get_name()} instead"
+            )
+            self.attn_backend = attn_backend
+        else:
+            self.attn_backend = get_attn_backend(
+                self.head_size,
+                dtype,
+                kv_cache_dtype,
+                use_mla=True,
+                use_sparse=use_sparse,
+                num_heads=self.num_heads,
+            )
 
         # FlashMLA Sparse Attention fp8 backend uses "fp8_ds_mla" kv-cache format
         # Automatically convert fp8 kv-cache format to "fp8_ds_mla"
@@ -917,22 +925,7 @@ def unified_mla_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
-    layer_name = _resolve_layer_name(layer_name)
-    forward_context = get_forward_context()
-    attn_layer = forward_context.no_compile_layers[layer_name]
-    kv_cache = attn_layer.kv_cache
-
-    # This needs to run even when we don't have metadata yet, so that the op
-    # is correctly captured.
-    if kv_cache.numel() == 0:
-        # Can't update an empty KV cache.
-        return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
-
-    slot_mapping = forward_context.slot_mapping
-    assert isinstance(slot_mapping, dict), (
-        f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
-    )
-    layer_slot_mapping = slot_mapping.get(layer_name)
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
         attn_layer.impl.do_kv_cache_update(
             kv_c_normed,
