@@ -131,6 +131,10 @@ conda activate vllm
 VLLM_USE_NVFP4_CT_EMULATIONS=1 python scripts/eval_pairwise_fp4_gsm8k.py \
   --group A --num-samples 20
 
+# standard test(100 samples)
+VLLM_USE_NVFP4_CT_EMULATIONS=1 python scripts/eval_pairwise_fp4_gsm8k.py \
+  --group C --num-samples 100 --output results_C_100.json
+
 # 全部 5 组，100 samples
 VLLM_USE_NVFP4_CT_EMULATIONS=1 python scripts/eval_pairwise_fp4_gsm8k.py \
   --group all --num-samples 100 --output results_all.json
