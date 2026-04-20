@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import logging
 import os
 from contextlib import AsyncExitStack
 from dataclasses import replace
@@ -10,11 +9,12 @@ import pytest
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
