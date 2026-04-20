@@ -686,30 +686,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if not isinstance(data, dict):
             return data
 
-        # Reject empty tools array, matching OpenAI API behavior
-        if data.get("tools") == []:
+        # If tool_choice is explicitly specified, tools must also be specified
+        if (
+            "tool_choice" in data
+            and data["tool_choice"] is not None
+            and ("tools" not in data or data["tools"] is None)
+        ):
             raise ValueError(
-                "`tools` must not be an empty array. "
-                "Either provide at least one tool or omit the field entirely."
+                "`tool_choice` is only allowed when 'tools' are specified."
             )
 
-        # if "tool_choice" is not specified but tools are provided,
-        # default to "auto" tool_choice
+        # Default tool_choice to "auto" when tools are provided (non-empty)
+        # but tool_choice is not specified
         if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
-        # if "tool_choice" is "none" -- no validation is needed for tools
-        if "tool_choice" in data and data["tool_choice"] == "none":
-            return data
-
-        # if "tool_choice" is specified -- validation
-        if "tool_choice" in data and data["tool_choice"] is not None:
-            # ensure that if "tool choice" is specified, tools are present
-            if "tools" not in data or data["tools"] is None:
-                raise ValueError("When using `tool_choice`, `tools` must be set.")
-
-            # make sure that tool choice is either a named tool
-            # OR that it's set to "auto" or "required"
+        if "tool_choice" in data and data["tool_choice"] not in (None, "none"):
             if data["tool_choice"] not in ["auto", "required"] and not isinstance(
                 data["tool_choice"], dict
             ):
@@ -719,8 +711,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     "are supported."
                 )
 
-            # ensure that if "tool_choice" is specified as an object,
-            # it matches a valid tool
             correct_usage_message = (
                 'Correct usage: `{"type": "function",'
                 ' "function": {"name": "my_function"}}`'
