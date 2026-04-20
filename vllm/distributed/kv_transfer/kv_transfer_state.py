@@ -55,6 +55,7 @@ def _sync_engine_id_across_tp(vllm_config: "VllmConfig") -> None:
         get_tp_group,
     )
 
+    assert vllm_config.kv_transfer_config is not None
     synced_id = get_tp_group().broadcast_object(
         vllm_config.kv_transfer_config.engine_id, src=0
     )
