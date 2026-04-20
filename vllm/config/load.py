@@ -51,7 +51,7 @@ class LoadConfig:
     - "gguf" will load weights from GGUF format files (details specified in
       https://github.com/ggml-org/ggml/blob/master/docs/gguf.md).
     - "mistral" will load weights from consolidated safetensors files used by
-      Mistral models.\n
+      Mistral models.
     - Other custom values can be supported via plugins.
     """
     download_dir: str | None = None

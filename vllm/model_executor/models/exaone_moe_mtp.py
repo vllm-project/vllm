@@ -184,11 +184,6 @@ class ExaoneMoeMTP(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         self.vllm_config = vllm_config
-        cache_config = vllm_config.cache_config
-        assert not cache_config.enable_prefix_caching, (
-            "ExaoneMoeMTP currently does not support prefix caching"
-        )
-
         self.quant_config = vllm_config.quant_config
 
         super().__init__()

@@ -11,7 +11,7 @@ on:
     inputs:
       pytorch_index:
         description: 'PyTorch index URL for ROCm nightly wheels'
-        default: 'https://rocm.nightlies.amd.com/v2/gfx1151'
+        default: 'https://rocm.nightlies.amd.com/v2-staging/gfx1151'
         required: false
       rocm_arch:
         description: 'ROCm architecture (e.g., gfx1151, gfx1150;gfx1151)'
@@ -19,7 +19,7 @@ on:
         required: false
 
 env:
-  PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2/gfx1151' }}
+  PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
   PYTORCH_ROCM_ARCH: ${{ github.event.inputs.rocm_arch || 'gfx1103;gfx1150;gfx1151' }}
   CI_IMAGE: ghcr.io/rocm/vllm/gfx11-ci:latest
 
@@ -51,11 +51,25 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          uv pip install --system -r requirements/rocm-build.txt \
-            --extra-index-url ${{ env.PYTORCH_INDEX_URL }} \
-            --index-strategy unsafe-first-match
-          uv pip install --system -r requirements/build.txt \
-            --extra-index-url ${{ env.PYTORCH_INDEX_URL }} \
+          # 1) Install torch from the nightly ROCm index *only* (no
+          #    PyPI fallback) so we always get the ROCm wheel.
+          #    Use --upgrade-package to avoid upgrading heavy transitive
+          #    deps like rocm-sdk-libraries that exhaust disk space.
+          uv pip install --system \
+            --upgrade-package torch \
+            --upgrade-package torchvision \
+            --upgrade-package torchaudio \
+            torch torchvision torchaudio \
+            --index-url ${{ env.PYTORCH_INDEX_URL }}
+          # 2) Install the remaining build deps from the requirements
+          #    file with torch/torchvision/torchaudio lines and the
+          #    stable ROCm index stripped out.
+          grep -v -E '^(torch|torchvision|torchaudio)==' requirements/build/rocm.txt \
+            | grep -v 'download.pytorch.org' \
+            > requirements/build/rocm-ci.txt
+          uv pip install --system -r requirements/build/rocm-ci.txt \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-first-match
 
       - name: Expose GitHub Actions cache env vars
@@ -129,7 +143,7 @@ jobs:
       packages: read
 
     env:
-      PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2/gfx1151' }}
+      PYTORCH_INDEX_URL: ${{ github.event.inputs.pytorch_index || 'https://rocm.nightlies.amd.com/v2-staging/gfx1151' }}
 
     steps:
       - name: Checkout code
@@ -143,11 +157,17 @@ jobs:
 
       - name: Install wheel and test dependencies
         run: |
-          # PyTorch is pre-installed in the container image; install remaining deps.
+          # Pin torch from the nightly ROCm index *only* (no PyPI
+          # fallback) so we always get the ROCm wheel.
+          uv pip install --system \
+            --upgrade-package torch \
+            torch \
+            --index-url ${{ env.PYTORCH_INDEX_URL }}
           uv pip install --system dist/*.whl \
             pytest pytest-timeout numpy \
             tblib transformers huggingface_hub sentencepiece pillow \
-            --extra-index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --index-url ${{ env.PYTORCH_INDEX_URL }} \
+            --extra-index-url https://pypi.org/simple/ \
             --index-strategy unsafe-first-match
           # Nightly torchvision has operator ABI mismatch with nightly torch.
           # Our kernel tests don't need it; remove to prevent conftest crash.

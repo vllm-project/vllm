@@ -20,6 +20,10 @@ class Mamba1AttentionBackend(AttentionBackend):
     def get_builder_cls() -> type["Mamba1AttentionMetadataBuilder"]:
         return Mamba1AttentionMetadataBuilder
 
+    @classmethod
+    def is_ssm(cls) -> bool:
+        return True
+
 
 @dataclass
 class Mamba1AttentionMetadata(BaseMambaAttentionMetadata):
