@@ -12,7 +12,6 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import MLAAttention
-from vllm.model_executor.layers.attention.attention import get_attention_context
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -28,6 +27,7 @@ from .matcher_utils import MatcherDeepseekScalingRotaryEmbedding, MatcherRotaryE
 from .rms_quant_fusion import empty_bf16, empty_i64
 
 logger = init_logger(__name__)
+
 
 def fused_concat_and_cache_mla_rope_impl(
     positions: torch.Tensor,
@@ -158,9 +158,7 @@ class MLARoPEKVCacheCatPattern:
             layer_name: LayerNameType,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            query, key = self.rope_matcher(
-                positions, q, k_pe_unsqueezed, cos_sin_cache
-            )
+            query, key = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed, key, layer_name, self.kv_cache_dtype, k_scale
             )
@@ -205,9 +203,7 @@ class MLARoPEKVCacheCatPattern:
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            query, key = self.rope_matcher(
-                positions, q, k_pe_unsqueezed, cos_sin_cache
-            )
+            query, key = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed, key, _ln, self.kv_cache_dtype, k_scale
             )
@@ -257,6 +253,7 @@ class MLARoPEKVCacheCatPattern:
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
         )
+
 
 class MLARoPEKVCacheCatFusionPass(VllmPatternMatcherPass):
     @enable_fake_mode

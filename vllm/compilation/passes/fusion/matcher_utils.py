@@ -281,69 +281,6 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         return query, key
 
 
-class MatcherRMSNorm(MatcherCustomOp):
-    def __init__(
-        self,
-        epsilon: float,
-        enabled: bool | None = None,
-        match_rocm_aiter: bool = False,
-    ) -> None:
-        if enabled is None:
-            enabled = RMSNorm.enabled()
-
-        super().__init__(enabled)
-        self.epsilon = epsilon
-        self._rmsnorm_op = RMS_OP
-        self.match_rocm_aiter = match_rocm_aiter
-
-        if match_rocm_aiter:
-            self._rmsnorm_op = rocm_aiter_ops.get_rmsnorm_op()
-
-    def inputs(self) -> list[torch.Tensor]:
-        input = self.empty(5, 16) if self.enabled else self.empty_f32(5, 16)
-        weight = self.empty(16)
-        return [input, weight]
-
-    def forward_rocm_aiter(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return self._rmsnorm_op(
-            x=input,
-            weight=weight,
-            variance_epsilon=self.epsilon,
-        )
-
-    def forward_custom(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        if self.match_rocm_aiter:
-            return self.forward_rocm_aiter(input, weight)
-
-        result = torch.empty_like(input)
-        _, result = auto_functionalized(
-            self._rmsnorm_op,
-            result=result,
-            input=input,
-            weight=weight,
-            epsilon=self.epsilon,
-        )
-
-        return result
-
-    def forward_native(
-        self,
-        input: torch.Tensor,
-        weight: torch.Tensor,
-    ) -> torch.Tensor:
-        return RMSNorm.forward_static(
-            input, self.epsilon, input.size(-1), self.model_dtype, weight
-        )
-
-
 class MatcherFusedAddRMSNorm(MatcherCustomOp):
     def __init__(
         self,

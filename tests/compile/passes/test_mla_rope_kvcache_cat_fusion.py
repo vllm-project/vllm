@@ -5,13 +5,13 @@ import os
 
 import pytest
 import torch
+from vllm.vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
+    MLARoPEKVCacheCatFusionPass,
+)
 
 import vllm.config
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
-from vllm.vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
-    MLARoPEKVCacheCatFusionPass,
-)
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -163,6 +163,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         # Create dummy KV cache
         # MLA uses a single combined KV cache (no separate K/V), so no 2x factor
         import math
+
         total_elements = math.prod(kv_cache_shape)
         raw_tensor = torch.zeros(
             total_elements,
@@ -195,8 +196,8 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim:], k_pe
+        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+            positions, q[..., self.qk_nope_head_dim :], k_pe
         )
 
         dummy = torch.ops.vllm.unified_mla_kv_cache_update(
@@ -223,8 +224,8 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         q = q.view(-1, self.num_heads, self.qk_head_dim)
         k_pe = k_pe.unsqueeze(1)
 
-        q[..., self.qk_nope_head_dim:], k_pe = self.rotary_emb(
-            positions, q[..., self.qk_nope_head_dim:], k_pe
+        q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+            positions, q[..., self.qk_nope_head_dim :], k_pe
         )
 
         num_tokens = positions.size(0)
@@ -365,9 +366,7 @@ def test_mla_rope_kvcache_cat_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_unfused, kv_c_unfused = model.forward_unfused(
-                qkv_unfused, pos_unfused
-            )
+            q_unfused, kv_c_unfused = model.forward_unfused(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache.clone()
 
@@ -398,9 +397,7 @@ def test_mla_rope_kvcache_cat_fusion(
             f"Expected at least 1 pattern match, got {fusion_pass.matched_count}"
         )
 
-        backend.check_before_ops(
-            [torch.ops.vllm.unified_mla_kv_cache_update.default]
-        )
+        backend.check_before_ops([torch.ops.vllm.unified_mla_kv_cache_update.default])
         backend.check_after_ops(model.ops_in_model_after())
 
         ATOL, RTOL = (1e-2, 1e-2)
@@ -409,9 +406,10 @@ def test_mla_rope_kvcache_cat_fusion(
 
         nan_mask = torch.isnan(q_unfused) | torch.isnan(q_fused)
         if nan_mask.any():
-            assert torch.isnan(q_unfused)[nan_mask].all() and torch.isnan(q_fused)[nan_mask].all(), (
-                "NaN mismatch: NaN in one output but not the other"
-            )
+            assert (
+                torch.isnan(q_unfused)[nan_mask].all()
+                and torch.isnan(q_fused)[nan_mask].all()
+            ), "NaN mismatch: NaN in one output but not the other"
         torch.testing.assert_close(
             q_unfused[~nan_mask], q_fused[~nan_mask], atol=ATOL, rtol=RTOL
         )
