@@ -166,10 +166,10 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
-    """Enable MLA dual RMS norm fusion when AITer is available."""
-    from vllm._aiter_ops import rocm_aiter_ops
+    """Enable MLA dual RMS norm fusion when AITer has fused_qk_rmsnorm."""
+    from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
 
-    return rocm_aiter_ops.is_enabled()
+    return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
 
 
 OPTIMIZATION_LEVEL_00 = {
