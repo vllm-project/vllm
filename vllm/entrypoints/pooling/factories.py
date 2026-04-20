@@ -80,7 +80,7 @@ def init_pooling_io_processors(
     if enable_scoring_api(supported_tasks, model_config):
         from .scoring.io_processor import ScoringIOProcessors
 
-        score_type: str | None = SCORE_TYPE_MAP.get(pooling_task, None)
+        score_type: str | None = SCORE_TYPE_MAP.get(pooling_task, None)  # type: ignore[arg-type]
         if score_type is not None and score_type in ScoringIOProcessors:
             processors[score_type] = ScoringIOProcessors[score_type]
 

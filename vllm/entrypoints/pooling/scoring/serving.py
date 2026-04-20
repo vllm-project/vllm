@@ -44,7 +44,7 @@ class ServingScores(PoolingServing):
         **kwargs,
     ):
         pooling_task = engine_client.model_config.get_pooling_task(supported_tasks)
-        score_type = SCORE_TYPE_MAP.get(pooling_task, None)
+        score_type = SCORE_TYPE_MAP.get(pooling_task, None)  # type: ignore[arg-type]
         assert score_type is not None
 
         self.io_processor_name: str = score_type
