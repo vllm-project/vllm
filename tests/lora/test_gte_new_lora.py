@@ -114,6 +114,7 @@ def create_gte_llm(enable_lora: bool = True, max_loras: int = 4):
         enforce_eager=True,
         trust_remote_code=True,
         gpu_memory_utilization=0.8,
+        hf_overrides={"architectures": ["GteNewModel"]},
     )
 
 
