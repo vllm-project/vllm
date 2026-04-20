@@ -195,6 +195,7 @@ def rocm_aiter_fused_experts(
     a1q_scale: torch.Tensor | None = None,
     num_local_tokens: torch.Tensor | None = None,
     output_dtype: torch.dtype | None = None,
+    moe_buf: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -309,6 +310,7 @@ def rocm_aiter_fused_experts(
             intermediate_pad=intermediate_pad,
             bias1=quant_config.w1_bias if quant_config.use_mxfp4_w4a16 else None,
             bias2=quant_config.w2_bias if quant_config.use_mxfp4_w4a16 else None,
+            moe_buf=moe_buf,
         )
 
 
@@ -422,7 +424,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         else:
             num_local_tokens = None
 
-        result = rocm_aiter_fused_experts(
+        rocm_aiter_fused_experts(
             hidden_states=hidden_states,
             w1=w1,
             w2=w2,
@@ -436,5 +438,5 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             a1q_scale=a1q_scale,
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
+            moe_buf=output,
         )
-        output.copy_(result)
