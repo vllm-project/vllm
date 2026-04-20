@@ -263,6 +263,13 @@ class Granite4VisionLLMModel(GraniteModel):
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
+            # Recover deepstack features forwarded from the previous PP rank.
+            if deepstack_input_embeds is None:
+                ds_keys = [k for k in intermediate_tensors.tensors if k.startswith("ds_")]
+                if ds_keys:
+                    deepstack_input_embeds = IntermediateTensors(
+                        {k: intermediate_tensors[k] for k in ds_keys}
+                    )
 
         for layer_idx, layer in islice(
             enumerate(self.layers), self.start_layer, self.end_layer
@@ -283,7 +290,15 @@ class Granite4VisionLLMModel(GraniteModel):
             hidden_states = layer(positions, hidden_states)
 
         if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states})
+            # Forward hidden_states and any deepstack features for later ranks.
+            it = {"hidden_states": hidden_states}
+            if deepstack_input_embeds is not None:
+                remaining = {
+                    k: v for k, v in deepstack_input_embeds.tensors.items()
+                    if int(k.split("_")[1]) >= self.end_layer
+                }
+                it.update(remaining)
+            return IntermediateTensors(it)
 
         hidden_states = self.norm(hidden_states)
         return hidden_states
@@ -317,6 +332,18 @@ class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
                                                     scale=logit_scale)
         else:
             self.lm_head = PPMissingLayer()
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        tensors = super().make_empty_intermediate_tensors(batch_size, dtype, device)
+        # Include deepstack buffers so non-first PP ranks receive them.
+        # _ds_layer_indices is set directly on this instance by the outer model.
+        for llm_layer in getattr(self, "_ds_layer_indices", []):
+            tensors.tensors[f"ds_{llm_layer}"] = torch.zeros(
+                (batch_size, self.config.hidden_size), dtype=dtype, device=device
+            )
+        return tensors
 
 
 # ---------------------------------------------------------------------------
@@ -534,6 +561,10 @@ class Granite4VisionForConditionalGeneration(
             [llm_layer for _, llm_layer in config.deepstack_layer_map]
             + list(getattr(config, "spatial_target_layers", []))
         )
+
+        # Share ds_layer_indices with the LLM causal model so make_empty_intermediate_tensors
+        # includes the correct keys (its self.config is text_config, no deepstack_layer_map).
+        self.language_model._ds_layer_indices = self._ds_layer_indices
 
         # Pre-allocated persistent GPU buffers for deepstack features.
         # Written via .copy_() in embed_input_ids(), read by forward() via a
@@ -863,9 +894,8 @@ class Granite4VisionForConditionalGeneration(
         # including during CUDA graph capture (buffers are zero → no-op injection).
         # This ensures the graph captures the injection code path.
         if inputs_embeds is not None and get_pp_group().is_first_rank and self._ds_layer_indices:
-            n = self._ds_num_tokens if self._ds_num_tokens > 0 else inputs_embeds.size(0)
             ds: IntermediateTensors | None = IntermediateTensors({
-                f"ds_{llm_layer}": self._ds_buffers[lvl][:n]
+                f"ds_{llm_layer}": self._ds_buffers[lvl]
                 for lvl, llm_layer in enumerate(self._ds_layer_indices)
             })
         else:
@@ -1049,7 +1079,7 @@ class Granite4VisionForConditionalGeneration(
             if _add_delta(module_key + ".weight", delta):
                 merged += 1
             else:
-                logger.warning("LoRA target not found: %s", module_key)
+                logger.debug("LoRA target not found on this PP rank: %s", module_key)
 
         return merged
 
