@@ -353,6 +353,7 @@ class OffloadingConnectorWorker:
                 and transfer_result.transfer_type is not None
             ):
                 self.kv_connector_stats.record_transfer(
+                    spec_name=self.spec.__class__.__name__,
                     num_bytes=transfer_result.transfer_size,
                     time=transfer_result.transfer_time,
                     transfer_type=transfer_result.transfer_type,

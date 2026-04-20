@@ -36,7 +36,7 @@ class KVConnectorStats:
         """
         raise NotImplementedError
 
-    def reduce(self) -> dict[str, int | float]:
+    def reduce(self) -> dict[str, Any]:
         """
         Reduce the observations collected during a time interval to one or
         more representative values (eg avg/median/sum of the series).

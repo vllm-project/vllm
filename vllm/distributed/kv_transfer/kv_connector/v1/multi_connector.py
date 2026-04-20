@@ -560,9 +560,13 @@ class MultiConnector(KVConnectorBase_V1):
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         prom_metrics: dict[str, KVConnectorPromMetrics] = {}
+        seen_classes: set[type] = set()
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
             vllm_config
         ):
+            if connector_cls in seen_classes:
+                continue
+            seen_classes.add(connector_cls)
             connector_prom = connector_cls.build_prom_metrics(
                 temp_config, metric_types, labelnames, per_engine_labelvalues
             )
