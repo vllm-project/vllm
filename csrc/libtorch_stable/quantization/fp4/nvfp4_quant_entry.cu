@@ -173,3 +173,40 @@ void silu_and_mul_scaled_fp4_experts_quant(
   STD_TORCH_CHECK_NOT_IMPLEMENTED(
       false, "No compiled silu_and_mul nvfp4 experts quantization kernel");
 }
+
+// MXFP4 stubs for archs that don't have a compiled MXFP4 kernel
+// (`csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu` is gated to
+// SM 10.x in CMakeLists.txt). On other archs (e.g. A100 SM 8.0) the real
+// definition is absent but `torch_bindings.cpp:255-257` still references
+// `&mxfp4_experts_quant` / `&silu_and_mul_mxfp4_experts_quant` unconditionally,
+// causing the `_C_stable_libtorch.abi3.so` link to leave undefined symbols
+// (server crash on import: "undefined symbol: _Z19mxfp4_experts_quant…").
+//
+// Without these stubs, vLLM cannot import on SM 8.0 — irrespective of whether
+// MXFP4 is actually invoked at runtime. The stubs throw NOT_IMPLEMENTED so a
+// caller that tries to use MXFP4 on an unsupported arch gets a clear error
+// instead of a segfault.
+void mxfp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts,
+    int64_t n_experts) {
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false, "No compiled mxfp4 experts quantization kernel for SM ",
+      get_sm_version_num(),
+      ". Recompile with SM 10.x (Blackwell) for MXFP4 support.");
+}
+
+void silu_and_mul_mxfp4_experts_quant(
+    torch::stable::Tensor& output, torch::stable::Tensor& output_scale,
+    torch::stable::Tensor const& input,
+    torch::stable::Tensor const& input_offset_by_experts,
+    torch::stable::Tensor const& output_scale_offset_by_experts,
+    int64_t n_experts) {
+  STD_TORCH_CHECK_NOT_IMPLEMENTED(
+      false,
+      "No compiled silu_and_mul mxfp4 experts quantization kernel for SM ",
+      get_sm_version_num(),
+      ". Recompile with SM 10.x (Blackwell) for MXFP4 support.");
+}
