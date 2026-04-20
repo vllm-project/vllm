@@ -53,6 +53,10 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def supports_sink(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_non_causal(cls) -> bool:
+        return False
+
     forward_includes_kv_cache_update: bool = False
 
     @staticmethod
