@@ -693,7 +693,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             and ("tools" not in data or data["tools"] is None)
         ):
             raise ValueError(
-                "`tool_choice` is only allowed when 'tools' are specified."
+                "`tool_choice` is only allowed when `tools` are specified."
             )
 
         # Default tool_choice to "auto" when tools are provided (non-empty)
