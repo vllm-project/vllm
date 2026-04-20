@@ -91,6 +91,10 @@ class FlexAttentionBackend(AttentionBackend):
         return "FLEX_ATTENTION"
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """FlexAttention supports both decoder and encoder-only attention."""
         return attn_type in (AttentionType.DECODER, AttentionType.ENCODER_ONLY)
@@ -292,6 +296,12 @@ def causal_mask_mod(
     b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
 ):
     return q_idx >= kv_idx
+
+
+def bidirectional_mask_mod(
+    b: torch.Tensor, h: torch.Tensor, q_idx: torch.Tensor, kv_idx: torch.Tensor
+):
+    return q_idx >= 0
 
 
 # Type alias for the block sparsity hint callable signature.
@@ -693,7 +703,9 @@ class FlexAttentionMetadata:
 
     def build_block_mask(self) -> BlockMask:
         mask_mod = self.get_mask_mod()
-        kv_len = self.total_cache_tokens if self.causal else self.num_actual_tokens
+        has_custom_mask = self.logical_mask_mod is not causal_mask_mod
+        uses_paged_kv = self.causal or has_custom_mask
+        kv_len = self.total_cache_tokens if uses_paged_kv else self.num_actual_tokens
         return create_block_mask_compiled(
             mask_mod,
             None,
@@ -842,8 +854,13 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
         offset_tensor = copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
 
+        logical_mask_mod = (bidirectional_mask_mod
+                            if not common_attn_metadata.causal
+                            else causal_mask_mod)
+
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
+            logical_mask_mod=logical_mask_mod,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -1055,9 +1072,7 @@ class FlexAttentionImpl(AttentionImpl):
             else:
                 attn_metadata.block_mask = attn_metadata.build_block_mask()
 
-        if not attn_metadata.causal:
-            assert self.attn_type == AttentionType.ENCODER_ONLY
-
+        if self.attn_type == AttentionType.ENCODER_ONLY:
             query, key_tensor, value_tensor = map(
                 lambda x: self.view_as_4d(x).permute(0, 2, 1, 3),
                 (query, key, value),
