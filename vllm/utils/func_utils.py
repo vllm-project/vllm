@@ -48,6 +48,7 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
 def _supports_kw(
     callable: Callable[..., object],
     kw_name: str,
+    *,
     requires_kw_only: bool = False,
     allow_var_kwargs: bool = True,
 ) -> bool:
@@ -111,7 +112,12 @@ def supports_kw(
     # (and all its GPU tensors) for the lifetime of the cache.
     if hasattr(callable, "__func__"):
         callable = callable.__func__
-    return _supports_kw(callable, kw_name, requires_kw_only, allow_var_kwargs)
+    return _supports_kw(
+        callable,
+        kw_name,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs,
+    )
 
 
 def get_allowed_kwarg_only_overrides(

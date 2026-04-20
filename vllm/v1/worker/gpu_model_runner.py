@@ -5870,6 +5870,7 @@ class GPUModelRunner(
         from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
         from vllm.v1.worker.workspace import reset_workspace_manager
 
+        # Calls torch.accelerator.synchronize()
         self._cleanup_profiling_kv_cache()
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
