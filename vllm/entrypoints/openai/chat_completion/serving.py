@@ -557,6 +557,20 @@ class OpenAIServingChat(OpenAIServing):
             and self._should_stream_with_auto_tool_parsing(request)
         )
 
+        # Determine whether required/named tool_choice should fall back to
+        # the auto tool_parser path instead of the standard JSON-based parsing.
+        # This happens when the parser declares supports_required_and_named=False
+        # (e.g. GLM models that output XML instead of JSON).
+        tool_choice_uses_parser = (
+            self.tool_parser is not None
+            and not self.tool_parser.supports_required_and_named
+            and request.tools
+            and (
+                request.tool_choice == "required"
+                or isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            )
+        )
+
         all_previous_token_ids: list[list[int]] | None
         function_name_returned = [False] * num_choices
         if self.tool_call_id_type == "kimi_k2":
@@ -569,7 +583,12 @@ class OpenAIServingChat(OpenAIServing):
 
         # Only one of these will be used, thus previous_texts and
         # all_previous_token_ids will not be used twice in the same iteration.
-        if is_mistral_grammar_path or tool_choice_auto or reasoning_parser:
+        if (
+            is_mistral_grammar_path
+            or tool_choice_auto
+            or tool_choice_uses_parser
+            or reasoning_parser
+        ):
             # These are only required in "auto" tool choice case
             all_previous_token_ids = [[] for _ in range(num_choices)]
             reasoning_end_arr = [False] * num_choices
@@ -764,7 +783,12 @@ class OpenAIServingChat(OpenAIServing):
                     delta_message: DeltaMessage | None
 
                     # just update previous_texts and previous_token_ids
-                    if is_mistral_grammar_path or tool_choice_auto or reasoning_parser:
+                    if (
+                        is_mistral_grammar_path
+                        or tool_choice_auto
+                        or tool_choice_uses_parser
+                        or reasoning_parser
+                    ):
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
                         previous_text = previous_texts[i]
@@ -813,7 +837,9 @@ class OpenAIServingChat(OpenAIServing):
                         if result.tools_called:
                             tools_streamed[i] = True
                     # handle streaming deltas for tools with named tool_choice
-                    elif tool_choice_function_name:
+                    # Skip when tool_choice_uses_parser so it falls through
+                    # to the auto tool_parser branches below.
+                    elif tool_choice_function_name and not tool_choice_uses_parser:
                         # When encountering think end id in prompt_token_ids
                         # i.e {"enable_thinking": False},
                         # check BEFORE calling the parser to avoid a spurious
@@ -851,7 +877,6 @@ class OpenAIServingChat(OpenAIServing):
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
-                                    # This need to be added to next `delta_text`
                                     current_text = delta_message.content
                                     delta_message.content = None
                                 else:
@@ -896,7 +921,12 @@ class OpenAIServingChat(OpenAIServing):
                             )
                             tools_streamed[i] = True
 
-                    elif request.tool_choice == "required":
+                    # Skip when tool_choice_uses_parser so it falls through
+                    # to the auto tool_parser branches below.
+                    elif (
+                        request.tool_choice == "required"
+                        and not tool_choice_uses_parser
+                    ):
                         assert previous_texts is not None
                         previous_text = previous_texts[i]
                         current_text = previous_text + delta_text
@@ -966,7 +996,10 @@ class OpenAIServingChat(OpenAIServing):
 
                     # update the previous values for the next iteration
                     if (
-                        is_mistral_grammar_path or tool_choice_auto or reasoning_parser
+                        is_mistral_grammar_path
+                        or tool_choice_auto
+                        or tool_choice_uses_parser
+                        or reasoning_parser
                     ) and not self.use_harmony:
                         assert previous_texts is not None
                         assert all_previous_token_ids is not None
