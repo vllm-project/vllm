@@ -160,7 +160,6 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             assert len(self.gpu_block_size) == 1
             offloaded_block_size = self.gpu_block_size[0] * self.block_size_factor
             primary_tier = CPUPrimaryTierOffloadingManager(
-                block_size=offloaded_block_size,
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=enable_events,

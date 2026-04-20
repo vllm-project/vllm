@@ -53,14 +53,12 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
 
     def __init__(
         self,
-        block_size: int,
         num_blocks: int,
         cache_policy: str = "lru",
         enable_events: bool = False,
         mmap_region: SharedOffloadRegion | None = None,
     ):
         super().__init__(
-            block_size=block_size,
             num_blocks=num_blocks,
             cache_policy=cache_policy,  # type: ignore[arg-type]
             enable_events=enable_events,

@@ -139,7 +139,7 @@ class TestTieringOffloadingManager:
     @pytest.fixture
     def manager_setup(self):
         # Create primary tier (CPU-based)
-        self.primary_tier = CPUPrimaryTierOffloadingManager(block_size=16, num_blocks=5)
+        self.primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
 
         # Mock get_primary_kv_tensor to return test tensor
         # Create mock CPU tensor (5 blocks, 16 bytes per block)
@@ -335,7 +335,7 @@ class TestTieringOffloadingManager:
         )
 
         # Create a fresh primary tier for this test
-        primary_tier = CPUPrimaryTierOffloadingManager(block_size=16, num_blocks=10)
+        primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=10)
 
         # Mock get_primary_kv_tensor to return test tensor
         mock_cpu_tensor = torch.zeros((10, 16), dtype=torch.float32)
@@ -398,7 +398,7 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
     def test_works_without_secondary_tiers(self):
         """Test that manager works with empty secondary_tiers list."""
-        primary_tier = CPUPrimaryTierOffloadingManager(block_size=16, num_blocks=5)
+        primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
 
         # Mock get_primary_kv_tensor to return test tensor
         mock_cpu_tensor = torch.zeros((5, 16), dtype=torch.float32)
