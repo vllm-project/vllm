@@ -248,10 +248,6 @@ class FPQuantLinearMethod(LinearMethodBase):
         )
 
 
-def ceil_div(a, b):
-    return (a + b - 1) // b
-
-
 def fused_quantize_mx(
     x_flat: torch.Tensor, hadamard_matrix: torch.Tensor, forward_method: str
 ) -> tuple[torch.Tensor, torch.Tensor]:

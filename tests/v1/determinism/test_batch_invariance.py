@@ -8,14 +8,17 @@ import pytest
 import torch
 from utils import (
     BACKENDS,
+    TEST_MODEL,
     _extract_step_logprobs,
     _random_prompt,
-    resolve_model_name,
+    is_device_capability_below_90,
     skip_unsupported,
 )
 
-import vllm.model_executor.layers.batch_invariant as batch_invariant
+import vllm.envs as envs
 from vllm import LLM, SamplingParams
+
+IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
 
 
 @skip_unsupported
@@ -25,7 +28,7 @@ from vllm import LLM, SamplingParams
     BACKENDS,
 )
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
-    backend, monkeypatch: pytest.MonkeyPatch
+    backend,
 ):
     """
     Ensures that the same request (the 'needle' prompt) yields identical output
@@ -33,10 +36,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     using the high-level v1 LLM() API only (no manual batching).
 
     Strategy:
-    - Create two LLM engines with identical config except max_num_seqs: 1 vs N.
-    - Compute a baseline output for the needle prompt with the bs=1 engine.
-    - For many trials, generate a batch (size N) where the needle appears at a
-      random position among random filler prompts using the bs=N engine.
+    - Create a single LLM engine configured for the larger batch limit (N).
+    - Compute a baseline output for the needle prompt when it is run alone.
+    - For many trials, generate a mixed batch (size N) where the needle appears
+      at a random position among random filler prompts using the same engine.
     - Track how many trials match vs mismatch, and report totals at the end.
       The test fails if any mismatches occur, but we still dump pass/fail
       counts.
@@ -51,10 +54,10 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
+    attention_config = {"backend": backend}
     # Allow overrides from environment (useful for CI tuning)
     # "facebook/opt-125m" is too small, doesn't reliably test determinism
-    model = resolve_model_name(backend)
+    model = TEST_MODEL
     num_trials = int(os.getenv("VLLM_NEEDLE_TRIALS", "5"))
     max_batch_size = int(os.getenv("VLLM_NEEDLE_BATCH_SIZE", "128"))
     min_random_prompt = int(os.getenv("VLLM_MIN_PROMPT", "1024"))
@@ -80,30 +83,21 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
     needle_prompt = "There once was a "
 
-    llm_bs1 = None
-    llm_bsN = None
+    llm = None
     try:
-        # Engine with bs=1 behavior
-        llm_bs1 = LLM_with_max_seqs(
+        llm = LLM_with_max_seqs(
             model=model,
             max_num_seqs=max_batch_size,
             gpu_memory_utilization=gpu_mem_util,
             max_model_len=max_model_len,
+            attention_config=attention_config,
         )
 
         # Baseline generation for the needle prompt alone.
-        baseline_out = llm_bs1.generate([needle_prompt], sampling)
+        baseline_out = llm.generate([needle_prompt], sampling)
         assert len(baseline_out) == 1
         assert len(baseline_out[0].outputs) >= 1
         baseline_text = baseline_out[0].outputs[0].text
-
-        # Engine with larger batch limit (e.g., 64)
-        llm_bsN = LLM_with_max_seqs(
-            model=model,
-            max_num_seqs=max_batch_size,
-            gpu_memory_utilization=gpu_mem_util,
-            max_model_len=max_model_len,
-        )
 
         mismatches = 0
 
@@ -119,8 +113,8 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
                 else:
                     prompts.append(_random_prompt(min_random_prompt, max_random_prompt))
 
-            # Generate with the larger-batch engine
-            outputs = llm_bsN.generate(prompts, sampling)
+            # Generate with the same engine but in a larger batch.
+            outputs = llm.generate(prompts, sampling)
             # Find the needle output by position
             needle_output = outputs[needle_pos]
             assert needle_output.prompt == needle_prompt
@@ -146,12 +140,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
     finally:
         # Ensure engines are shutdown to free GPU/VRAM across test sessions
-        if llm_bs1 is not None:
+        if llm is not None:
             with contextlib.suppress(Exception):
-                llm_bs1.shutdown()
-        if llm_bsN is not None:
-            with contextlib.suppress(Exception):
-                llm_bsN.shutdown()
+                llm.shutdown()
 
 
 @skip_unsupported
@@ -159,24 +150,18 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     "backend",
     BACKENDS,
 )
-@pytest.mark.forked
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
-    backend, monkeypatch: pytest.MonkeyPatch
+    backend,
 ):
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
-
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     # For batch invariance, disable custom all-reduce to ensure deterministic
     # all-reduce operations (custom all-reduce may not be deterministic)
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -184,22 +169,31 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
-        max_num_seqs=32,
+        max_num_seqs=128,
         max_model_len=8192,
-        dtype="bfloat16",  # not everything is supported
+        dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
+        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        attention_config={"backend": backend},
     )
 
     # Use more realistic prompts for better token generation
-    prompts = [_random_prompt(10, 50) for i in range(32)]
+    prompts = [_random_prompt(10, 50) for _ in range(32)]
+
+    # TODO: Update prompts to have ragged lengths in order to test chunked prefill
+    #       The above tests are not currently long enough to exercise chunking.
+    # prompts = (
+    #     [_random_prompt(10, 50) for _ in range(28)]
+    #     + [_random_prompt(256, 512) for _ in range(50)]
+    #     + [_random_prompt(2048, 4096) for _ in range(50)]
+    # )
 
     sp = SamplingParams(
         temperature=0.6,
         top_p=1.0,
-        max_tokens=8,
+        max_tokens=16,
         seed=1234,
         logprobs=5,
     )
@@ -379,13 +373,12 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     "backend",
     BACKENDS,
 )
-def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
+def test_simple_generation(backend):
     """
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
-    model = resolve_model_name(backend)
+    model = TEST_MODEL
 
     llm = LLM(
         model=model,
@@ -393,8 +386,10 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         gpu_memory_utilization=0.9,
         max_model_len=2048,
-        dtype="bfloat16",
+        dtype="auto",
         enable_prefix_caching=False,
+        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        attention_config={"backend": backend},
     )
 
     prompt = "the capital of france is"
@@ -429,7 +424,6 @@ def test_simple_generation(backend, monkeypatch: pytest.MonkeyPatch):
     "backend",
     BACKENDS,
 )
-@pytest.mark.forked
 def test_logprobs_without_batch_invariance_should_fail(
     backend, monkeypatch: pytest.MonkeyPatch
 ):
@@ -442,14 +436,11 @@ def test_logprobs_without_batch_invariance_should_fail(
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
-
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
-    monkeypatch.setattr(batch_invariant, "VLLM_BATCH_INVARIANT", False)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
     print(f"\n{'=' * 80}")
@@ -457,12 +448,13 @@ def test_logprobs_without_batch_invariance_should_fail(
     print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
         max_num_seqs=32,
         max_model_len=8192,
-        dtype="bfloat16",
+        dtype="auto",
+        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        attention_config={"backend": backend},
     )
 
     # build ragged prompts to change shapes significantly across BS=1 vs BS=N
@@ -646,9 +638,8 @@ def test_logprobs_without_batch_invariance_should_fail(
 
 @skip_unsupported
 @pytest.mark.parametrize("backend", ["FLASH_ATTN"])
-@pytest.mark.forked
 def test_decode_logprobs_match_prefill_logprobs(
-    backend, monkeypatch: pytest.MonkeyPatch
+    backend,
 ):
     """
     Test that verifies decode logprobs match prefill logprobs.
@@ -663,18 +654,13 @@ def test_decode_logprobs_match_prefill_logprobs(
     This ensures that the logprobs from decode are consistent with what
     we would get if we ran prefill on each prefix.
     """
-    monkeypatch.setenv("VLLM_ATTENTION_BACKEND", backend)
-
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
-    model_name = resolve_model_name(backend)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
 
-    from vllm.model_executor.layers.batch_invariant import (
-        vllm_is_batch_invariant,
-    )
+    import vllm.envs as envs
 
-    disable_custom_ar = vllm_is_batch_invariant()
+    disable_custom_ar = envs.VLLM_BATCH_INVARIANT
 
     if disable_custom_ar:
         print(f"\n{'=' * 80}")
@@ -682,12 +668,13 @@ def test_decode_logprobs_match_prefill_logprobs(
         print(f"{'=' * 80}\n")
 
     llm = LLM(
-        model=model_name,
+        model=TEST_MODEL,
         tensor_parallel_size=tp_size,
-        enable_prefix_caching=False,
         max_num_seqs=32,
         max_model_len=8192,
-        dtype="bfloat16",
+        dtype="auto",
+        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        attention_config={"backend": backend},
     )
 
     # Use a few test prompts
@@ -919,6 +906,7 @@ def LLM_with_max_seqs(
     max_num_seqs: int,
     gpu_memory_utilization: float,
     max_model_len: int,
+    attention_config: dict | None = None,
 ) -> LLM:
     """
     Helper to construct an LLM with a specific max_num_seqs (batch-size limit)
@@ -929,9 +917,11 @@ def LLM_with_max_seqs(
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
-        dtype="bfloat16",
+        dtype="auto",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
+        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        attention_config=attention_config,
         # Enable for MOE models
         # enable_expert_parallel=True,
     )

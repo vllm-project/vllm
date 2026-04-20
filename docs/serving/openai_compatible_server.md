@@ -47,31 +47,41 @@ We currently support the following OpenAI APIs:
 - [Completions API](#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
+- [Responses API](#responses-api) (`/v1/responses`)
+    - Only applicable to [text generation models](../models/generative_models.md).
 - [Chat Completions API](#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../models/generative_models.md) with a [chat template](../serving/openai_compatible_server.md#chat-template).
-    - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
-- [Embeddings API](#embeddings-api) (`/v1/embeddings`)
-    - Only applicable to [embedding models](../models/pooling_models.md).
+    - *Note: `user` parameter is ignored.*
+    - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
+- [Embeddings API](../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
+    - Only applicable to [embedding models](../models/pooling_models/embed.md).
 - [Transcriptions API](#transcriptions-api) (`/v1/audio/transcriptions`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
 - [Translation API](#translations-api) (`/v1/audio/translations`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#transcription).
+- [Realtime API](#realtime-api) (`/v1/realtime`)
+    - Only applicable to [Automatic Speech Recognition (ASR) models](../models/supported_models.md#realtime-transcription).
 
 In addition, we have the following custom APIs:
 
 - [Tokenizer API](#tokenizer-api) (`/tokenize`, `/detokenize`)
     - Applicable to any model with a tokenizer.
-- [Pooling API](#pooling-api) (`/pooling`)
-    - Applicable to all [pooling models](../models/pooling_models.md).
-- [Classification API](#classification-api) (`/classify`)
-    - Only applicable to [classification models](../models/pooling_models.md).
-- [Score API](#score-api) (`/score`)
-    - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
-- [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
-    - Implements [Jina AI's v1 re-rank API](https://jina.ai/reranker/)
-    - Also compatible with [Cohere's v1 & v2 re-rank APIs](https://docs.cohere.com/v2/reference/rerank)
+- [pooling API](../models/pooling_models/README.md#pooling-api) (`/pooling`)
+    - Applicable to all [pooling models](../models/pooling_models/README.md).
+- [Classification API](../models/pooling_models/classify.md#classification-api) (`/classify`)
+    - Only applicable to [classification models](../models/pooling_models/classify.md).
+- [Cohere Embed API](../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
+    - Compatible with [Cohere's Embed API](https://docs.cohere.com/reference/embed)
+    - Works with any [embedding model](../models/pooling_models/embed.md#supported-models), including multimodal models.
+- [Score API](../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
+    - Applicable to [score models](../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
+- [Generative Scoring API](#generative-scoring-api) (`/generative_scoring`)
+    - Applicable to [CausalLM models](../models/generative_models.md) (task `"generate"`).
+    - Computes next-token probabilities for specified `label_token_ids`.
+- [Rerank API](../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
+    - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
+    - Also compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
     - Jina and Cohere's APIs are very similar; Jina's includes extra information in the rerank endpoint's response.
-    - Only applicable to [cross-encoder models](../models/pooling_models.md).
 
 ## Chat Template
 
@@ -79,7 +89,7 @@ In order for the language model to support chat protocol, vLLM requires the mode
 a chat template in its tokenizer configuration. The chat template is a Jinja2 template that
 specifies how roles, messages, and other chat-specific tokens are encoded in the input.
 
-An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://github.com/meta-llama/llama3?tab=readme-ov-file#instruction-tuned-models)
+An example chat template for `NousResearch/Meta-Llama-3-8B-Instruct` can be found [here](https://llama.com/docs/model-cards-and-prompt-formats/meta-llama-3/#prompt-template-for-meta-llama-3)
 
 Some models do not provide a chat template even though they are instruction/chat fine-tuned. For those models,
 you can manually specify their chat template in the `--chat-template` parameter with the file path to the chat
@@ -170,6 +180,14 @@ with `--enable-request-id-headers`.
     print(completion._request_id)
     ```
 
+## Offline API Documentation
+
+The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
+
+```bash
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
+```
+
 ## API Reference
 
 ### Completions API
@@ -177,7 +195,7 @@ with `--enable-request-id-headers`.
 Our Completions API is compatible with [OpenAI's Completions API](https://platform.openai.com/docs/api-reference/completions);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/openai_completion_client.py](../../examples/online_serving/openai_completion_client.py)
+Code example: [examples/basic/online_serving/openai_completion_client.py](../../examples/basic/online_serving/openai_completion_client.py)
 
 #### Extra parameters
 
@@ -186,7 +204,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:completion-sampling-params"
+    --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -194,7 +212,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:completion-extra-params"
+    --8<-- "vllm/entrypoints/openai/completion/protocol.py:completion-extra-params"
     ```
 
 ### Chat API
@@ -208,7 +226,7 @@ see our [Multimodal Inputs](../features/multimodal_inputs.md) guide for more inf
 
 - *Note: `image_url.detail` parameter is not supported.*
 
-Code example: [examples/online_serving/openai_chat_completion_client.py](../../examples/online_serving/openai_chat_completion_client.py)
+Code example: [examples/basic/online_serving/openai_chat_completion_client.py](../../examples/basic/online_serving/openai_chat_completion_client.py)
 
 #### Extra parameters
 
@@ -217,7 +235,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-sampling-params"
+    --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -225,140 +243,32 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-completion-extra-params"
+    --8<-- "vllm/entrypoints/openai/chat_completion/protocol.py:chat-completion-extra-params"
     ```
 
-### Embeddings API
+### Responses API
 
-Our Embeddings API is compatible with [OpenAI's Embeddings API](https://platform.openai.com/docs/api-reference/embeddings);
+Our Responses API is compatible with [OpenAI's Responses API](https://platform.openai.com/docs/api-reference/responses);
 you can use the [official OpenAI Python client](https://github.com/openai/openai-python) to interact with it.
 
-Code example: [examples/online_serving/pooling/openai_embedding_client.py](../../examples/online_serving/pooling/openai_embedding_client.py)
-
-If the model has a [chat template](../serving/openai_compatible_server.md#chat-template), you can replace `inputs` with a list of `messages` (same schema as [Chat API](#chat-api))
-which will be treated as a single prompt to the model. Here is a convenience function for calling the API while retaining OpenAI's type annotations:
-
-??? code
-
-    ```python
-    from openai import OpenAI
-    from openai._types import NOT_GIVEN, NotGiven
-    from openai.types.chat import ChatCompletionMessageParam
-    from openai.types.create_embedding_response import CreateEmbeddingResponse
-
-    def create_chat_embeddings(
-        client: OpenAI,
-        *,
-        messages: list[ChatCompletionMessageParam],
-        model: str,
-        encoding_format: Union[Literal["base64", "float"], NotGiven] = NOT_GIVEN,
-    ) -> CreateEmbeddingResponse:
-        return client.post(
-            "/embeddings",
-            cast_to=CreateEmbeddingResponse,
-            body={"messages": messages, "model": model, "encoding_format": encoding_format},
-        )
-    ```
-
-#### Multi-modal inputs
-
-You can pass multi-modal inputs to embedding models by defining a custom chat template for the server
-and passing a list of `messages` in the request. Refer to the examples below for illustration.
-
-=== "VLM2Vec"
-
-    To serve the model:
-
-    ```bash
-    vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
-      --trust-remote-code \
-      --max-model-len 4096 \
-      --chat-template examples/template_vlm2vec_phi3v.jinja
-    ```
-
-    !!! important
-        Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass `--runner pooling`
-        to run this model in embedding mode instead of text generation mode.
-
-        The custom chat template is completely different from the original one for this model,
-        and can be found here: [examples/template_vlm2vec_phi3v.jinja](../../examples/template_vlm2vec_phi3v.jinja)
-
-    Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
-
-    ??? code
-
-        ```python
-        from openai import OpenAI
-        client = OpenAI(
-            base_url="http://localhost:8000/v1",
-            api_key="EMPTY",
-        )
-        image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
-
-        response = create_chat_embeddings(
-            client,
-            model="TIGER-Lab/VLM2Vec-Full",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": image_url}},
-                        {"type": "text", "text": "Represent the given image."},
-                    ],
-                }
-            ],
-            encoding_format="float",
-        )
-
-        print("Image embedding output:", response.data[0].embedding)
-        ```
-
-=== "DSE-Qwen2-MRL"
-
-    To serve the model:
-
-    ```bash
-    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --runner pooling \
-      --trust-remote-code \
-      --max-model-len 8192 \
-      --chat-template examples/template_dse_qwen2_vl.jinja
-    ```
-
-    !!! important
-        Like with VLM2Vec, we have to explicitly pass `--runner pooling`.
-
-        Additionally, `MrLight/dse-qwen2-2b-mrl-v1` requires an EOS token for embeddings, which is handled
-        by a custom chat template: [examples/template_dse_qwen2_vl.jinja](../../examples/template_dse_qwen2_vl.jinja)
-
-    !!! important
-        `MrLight/dse-qwen2-2b-mrl-v1` requires a placeholder image of the minimum image size for text query embeddings. See the full code
-        example below for details.
-
-Full example: [examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py](../../examples/online_serving/pooling/openai_chat_embedding_client_for_multimodal.py)
+Code example: [examples/online_serving/openai_responses_client_with_tools.py](../../examples/online_serving/openai_responses_client_with_tools.py)
 
 #### Extra parameters
 
-The following [pooling parameters][vllm.PoolingParams] are supported.
-
-```python
---8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:embedding-pooling-params"
-```
-
-The following extra parameters are supported by default:
+The following extra parameters in the request object are supported:
 
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:embedding-extra-params"
+    --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-extra-params"
     ```
 
-For chat-like input (i.e. if `messages` is passed), these extra parameters are supported instead:
+The following extra parameters in the response object are supported:
 
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:chat-embedding-extra-params"
+    --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-response-extra-params"
     ```
 
 ### Transcriptions API
@@ -370,6 +280,8 @@ you can use the [official OpenAI Python client](https://github.com/openai/openai
     To use the Transcriptions API, please install with extra audio dependencies using `pip install vllm[audio]`.
 
 Code example: [examples/online_serving/openai_transcription_client.py](../../examples/online_serving/openai_transcription_client.py)
+
+NOTE: beam search is currently supported in the transcriptions endpoint for encoder-decoder multimodal models, e.g., whisper, but highly inefficient as work for handling the encoder/decoder cache is actively ongoing. This is an active point of ongoing optimization and will be handled properly in the very near future.
 
 #### API Enforced Limits
 
@@ -455,6 +367,7 @@ For `verbose_json` response format:
       ]
     }
     ```
+Currently “verbose_json” response format doesn’t support no_speech_prob.
 
 #### Extra Parameters
 
@@ -463,7 +376,7 @@ The following [sampling parameters](../api/README.md#inference-parameters) are s
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:transcription-sampling-params"
+    --8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:transcription-sampling-params"
     ```
 
 The following extra parameters are supported:
@@ -471,7 +384,7 @@ The following extra parameters are supported:
 ??? code
 
     ```python
-    --8<-- "vllm/entrypoints/openai/protocol.py:transcription-extra-params"
+    --8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:transcription-extra-params"
     ```
 
 ### Translations API
@@ -491,14 +404,60 @@ Code example: [examples/online_serving/openai_translation_client.py](../../examp
 The following [sampling parameters](../api/README.md#inference-parameters) are supported.
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:translation-sampling-params"
+--8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:translation-sampling-params"
 ```
 
 The following extra parameters are supported:
 
 ```python
---8<-- "vllm/entrypoints/openai/protocol.py:translation-extra-params"
+--8<-- "vllm/entrypoints/openai/speech_to_text/protocol.py:translation-extra-params"
 ```
+
+### Realtime API
+
+The Realtime API provides WebSocket-based streaming audio transcription, allowing real-time speech-to-text as audio is being recorded.
+
+!!! note
+    To use the Realtime API, please install with extra audio dependencies using `uv pip install vllm[audio]`.
+
+#### Audio Format
+
+Audio must be sent as base64-encoded PCM16 audio at 16kHz sample rate, mono channel.
+
+#### Protocol Overview
+
+1. Client connects to `ws://host/v1/realtime`
+2. Server sends `session.created` event
+3. Client optionally sends `session.update` with model/params
+4. Client sends `input_audio_buffer.commit` when ready
+5. Client sends `input_audio_buffer.append` events with base64 PCM16 chunks
+6. Server sends `transcription.delta` events with incremental text
+7. Server sends `transcription.done` with final text + usage
+8. Repeat from step 5 for next utterance
+9. Optionally, client sends input_audio_buffer.commit with final=True
+    to signal audio input is finished. Useful when streaming audio files
+
+#### Client → Server Events
+
+| Event | Description |
+| ----- | ----------- |
+| `input_audio_buffer.append` | Send base64-encoded audio chunk: `{"type": "input_audio_buffer.append", "audio": "<base64>"}` |
+| `input_audio_buffer.commit` | Trigger transcription processing or end: `{"type": "input_audio_buffer.commit", "final": bool}` |
+| `session.update` | Configure session: `{"type": "session.update", "model": "model-name"}` |
+
+#### Server → Client Events
+
+| Event | Description |
+| ----- | ----------- |
+| `session.created` | Connection established with session ID and timestamp |
+| `transcription.delta` | Incremental transcription text: `{"type": "transcription.delta", "delta": "text"}` |
+| `transcription.done` | Final transcription with usage stats |
+| `error` | Error notification with message and optional code |
+
+#### Example Clients
+
+- [openai_realtime_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_client.py) - Upload and transcribe an audio file
+- [openai_realtime_microphone_client.py](https://github.com/vllm-project/vllm/tree/main/examples/online_serving/openai_realtime_microphone_client.py) - Gradio demo for live microphone transcription
 
 ### Tokenizer API
 
@@ -508,413 +467,69 @@ It consists of two endpoints:
 - `/tokenize` corresponds to calling `tokenizer.encode()`.
 - `/detokenize` corresponds to calling `tokenizer.decode()`.
 
-### Pooling API
+### Generative Scoring API
 
-Our Pooling API encodes input prompts using a [pooling model](../models/pooling_models.md) and returns the corresponding hidden states.
+The `/generative_scoring` endpoint uses a CausalLM model (e.g., Llama, Qwen, Mistral) to compute the probability of specified token IDs appearing as the next token. Each item (document) is concatenated with the query to form a prompt, and the model predicts how likely each label token is as the next token after that prompt. This lets you score items against a query — for example, asking "Is this the capital of France?" and scoring each city by how likely the model is to answer "Yes".
 
-The input format is the same as [Embeddings API](#embeddings-api), but the output data can contain an arbitrary nested list, not just a 1-D list of floats.
+This endpoint is automatically available when the server is started with a generative model (task `"generate"`). It is separate from the pooling-based [Score API](../models/pooling_models/scoring.md#score-api), which uses cross-encoder, bi-encoder, or late-interaction models.
 
-Code example: [examples/online_serving/pooling/openai_pooling_client.py](../../examples/online_serving/pooling/openai_pooling_client.py)
+**Requirements:**
 
-### Classification API
+- The `label_token_ids` parameter is **required** and must contain **at least 1 token ID**.
+- When 2 label tokens are provided, the score equals `P(label_token_ids[0]) / (P(label_token_ids[0]) + P(label_token_ids[1]))` (softmax over the two labels).
+- When more labels are provided, the score is the softmax-normalized probability of the first label token across all label tokens.
 
-Our Classification API directly supports Hugging Face sequence-classification models such as [ai21labs/Jamba-tiny-reward-dev](https://huggingface.co/ai21labs/Jamba-tiny-reward-dev) and [jason9693/Qwen2.5-1.5B-apeach](https://huggingface.co/jason9693/Qwen2.5-1.5B-apeach).
-
-We automatically wrap any other transformer via `as_seq_cls_model()`, which pools on the last token, attaches a `RowParallelLinear` head, and applies a softmax to produce per-class probabilities.
-
-Code example: [examples/online_serving/pooling/openai_classification_client.py](../../examples/online_serving/pooling/openai_classification_client.py)
-
-#### Example Requests
-
-You can classify multiple texts by passing an array of strings:
+#### Example
 
 ```bash
-curl -v "http://127.0.0.1:8000/classify" \
+curl -X POST http://localhost:8000/generative_scoring \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "jason9693/Qwen2.5-1.5B-apeach",
-    "input": [
-      "Loved the new café—coffee was great.",
-      "This update broke everything. Frustrating."
-    ]
+    "model": "Qwen/Qwen3-0.6B",
+    "query": "Is this city the capital of France?",
+    "items": ["Paris", "London", "Berlin"],
+    "label_token_ids": [9454, 2753]
   }'
 ```
 
+Here, each item is appended to the query to form prompts like `"Is this city the capital of France? Paris"`, `"... London"`, etc. The model then predicts the next token, and the score reflects the probability of "Yes" (token 9454) vs "No" (token 2753).
+
 ??? console "Response"
 
     ```json
     {
-      "id": "classify-7c87cac407b749a6935d8c7ce2a8fba2",
+      "id": "generative-scoring-abc123",
       "object": "list",
-      "created": 1745383065,
-      "model": "jason9693/Qwen2.5-1.5B-apeach",
+      "created": 1234567890,
+      "model": "Qwen/Qwen3-0.6B",
       "data": [
-        {
-          "index": 0,
-          "label": "Default",
-          "probs": [
-            0.565970778465271,
-            0.4340292513370514
-          ],
-          "num_classes": 2
-        },
-        {
-          "index": 1,
-          "label": "Spoiled",
-          "probs": [
-            0.26448777318000793,
-            0.7355121970176697
-          ],
-          "num_classes": 2
-        }
+        {"index": 0, "object": "score", "score": 0.95},
+        {"index": 1, "object": "score", "score": 0.12},
+        {"index": 2, "object": "score", "score": 0.08}
       ],
-      "usage": {
-        "prompt_tokens": 20,
-        "total_tokens": 20,
-        "completion_tokens": 0,
-        "prompt_tokens_details": null
-      }
+      "usage": {"prompt_tokens": 45, "total_tokens": 48, "completion_tokens": 3}
     }
     ```
 
-You can also pass a string directly to the `input` field:
+#### How it works
 
-```bash
-curl -v "http://127.0.0.1:8000/classify" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "jason9693/Qwen2.5-1.5B-apeach",
-    "input": "Loved the new café—coffee was great."
-  }'
-```
+1. **Prompt Construction**: For each item, builds `prompt = query + item` (or `item + query` if `item_first=true`)
+2. **Forward Pass**: Runs the model on each prompt to get next-token logits
+3. **Probability Extraction**: Extracts logprobs for the specified `label_token_ids`
+4. **Softmax Normalization**: Applies softmax over only the label tokens (when `apply_softmax=true`)
+5. **Score**: Returns the normalized probability of the first label token
 
-??? console "Response"
+#### Finding Token IDs
 
-    ```json
-    {
-      "id": "classify-9bf17f2847b046c7b2d5495f4b4f9682",
-      "object": "list",
-      "created": 1745383213,
-      "model": "jason9693/Qwen2.5-1.5B-apeach",
-      "data": [
-        {
-          "index": 0,
-          "label": "Default",
-          "probs": [
-            0.565970778465271,
-            0.4340292513370514
-          ],
-          "num_classes": 2
-        }
-      ],
-      "usage": {
-        "prompt_tokens": 10,
-        "total_tokens": 10,
-        "completion_tokens": 0,
-        "prompt_tokens_details": null
-      }
-    }
-    ```
-
-#### Extra parameters
-
-The following [pooling parameters][vllm.PoolingParams] are supported.
+To find the token IDs for your labels, use the tokenizer:
 
 ```python
---8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
-```
+from transformers import AutoTokenizer
 
-The following extra parameters are supported:
-
-```python
---8<-- "vllm/entrypoints/openai/protocol.py:classification-extra-params"
-```
-
-### Score API
-
-Our Score API can apply a cross-encoder model or an embedding model to predict scores for sentence or multimodal pairs. When using an embedding model the score corresponds to the cosine similarity between each embedding pair.
-Usually, the score for a sentence pair refers to the similarity between two sentences, on a scale of 0 to 1.
-
-You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
-
-Code example: [examples/online_serving/pooling/openai_cross_encoder_score.py](../../examples/online_serving/pooling/openai_cross_encoder_score.py)
-
-#### Single inference
-
-You can pass a string to both `text_1` and `text_2`, forming a single sentence pair.
-
-```bash
-curl -X 'POST' \
-  'http://127.0.0.1:8000/score' \
-  -H 'accept: application/json' \
-  -H 'Content-Type: application/json' \
-  -d '{
-  "model": "BAAI/bge-reranker-v2-m3",
-  "encoding_format": "float",
-  "text_1": "What is the capital of France?",
-  "text_2": "The capital of France is Paris."
-}'
-```
-
-??? console "Response"
-
-    ```json
-    {
-      "id": "score-request-id",
-      "object": "list",
-      "created": 693447,
-      "model": "BAAI/bge-reranker-v2-m3",
-      "data": [
-        {
-          "index": 0,
-          "object": "score",
-          "score": 1
-        }
-      ],
-      "usage": {}
-    }
-    ```
-
-#### Batch inference
-
-You can pass a string to `text_1` and a list to `text_2`, forming multiple sentence pairs
-where each pair is built from `text_1` and a string in `text_2`.
-The total number of pairs is `len(text_2)`.
-
-??? console "Request"
-
-    ```bash
-    curl -X 'POST' \
-      'http://127.0.0.1:8000/score' \
-      -H 'accept: application/json' \
-      -H 'Content-Type: application/json' \
-      -d '{
-      "model": "BAAI/bge-reranker-v2-m3",
-      "text_1": "What is the capital of France?",
-      "text_2": [
-        "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris."
-      ]
-    }'
-    ```
-
-??? console "Response"
-
-    ```json
-    {
-      "id": "score-request-id",
-      "object": "list",
-      "created": 693570,
-      "model": "BAAI/bge-reranker-v2-m3",
-      "data": [
-        {
-          "index": 0,
-          "object": "score",
-          "score": 0.001094818115234375
-        },
-        {
-          "index": 1,
-          "object": "score",
-          "score": 1
-        }
-      ],
-      "usage": {}
-    }
-    ```
-
-You can pass a list to both `text_1` and `text_2`, forming multiple sentence pairs
-where each pair is built from a string in `text_1` and the corresponding string in `text_2` (similar to `zip()`).
-The total number of pairs is `len(text_2)`.
-
-??? console "Request"
-
-    ```bash
-    curl -X 'POST' \
-      'http://127.0.0.1:8000/score' \
-      -H 'accept: application/json' \
-      -H 'Content-Type: application/json' \
-      -d '{
-      "model": "BAAI/bge-reranker-v2-m3",
-      "encoding_format": "float",
-      "text_1": [
-        "What is the capital of Brazil?",
-        "What is the capital of France?"
-      ],
-      "text_2": [
-        "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris."
-      ]
-    }'
-    ```
-
-??? console "Response"
-
-    ```json
-    {
-      "id": "score-request-id",
-      "object": "list",
-      "created": 693447,
-      "model": "BAAI/bge-reranker-v2-m3",
-      "data": [
-        {
-          "index": 0,
-          "object": "score",
-          "score": 1
-        },
-        {
-          "index": 1,
-          "object": "score",
-          "score": 1
-        }
-      ],
-      "usage": {}
-    }
-    ```
-
-#### Multi-modal inputs
-
-You can pass multi-modal inputs to scoring models by passing `content` including a list of multi-modal input (image, etc.) in the request. Refer to the examples below for illustration.
-
-=== "JinaVL-Reranker"
-
-    To serve the model:
-
-    ```bash
-    vllm serve jinaai/jina-reranker-m0
-    ```
-
-    Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level `requests` library:
-
-    ??? Code
-
-        ```python
-        import requests
-
-        response = requests.post(
-            "http://localhost:8000/v1/score",
-            json={
-                "model": "jinaai/jina-reranker-m0",
-                "text_1": "slm markdown",
-                "text_2": {
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/handelsblatt-preview.png"
-                            },
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": "https://raw.githubusercontent.com/jina-ai/multimodal-reranker-test/main/paper-11.png"
-                            },
-                        },
-                    ],
-                },
-            },
-        )
-        response.raise_for_status()
-        response_json = response.json()
-        print("Scoring output:", response_json["data"][0]["score"])
-        print("Scoring output:", response_json["data"][1]["score"])
-        ```
-Full example: [examples/online_serving/pooling/openai_cross_encoder_score_for_multimodal.py](../../examples/online_serving/pooling/openai_cross_encoder_score_for_multimodal.py)
-
-#### Extra parameters
-
-The following [pooling parameters][vllm.PoolingParams] are supported.
-
-```python
---8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
-```
-
-The following extra parameters are supported:
-
-```python
---8<-- "vllm/entrypoints/openai/protocol.py:score-extra-params"
-```
-
-### Re-rank API
-
-Our Re-rank API can apply an embedding model or a cross-encoder model to predict relevant scores between a single query, and
-each of a list of documents. Usually, the score for a sentence pair refers to the similarity between two sentences or multi-modal inputs (image, etc.), on a scale of 0 to 1.
-
-You can find the documentation for cross encoder models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
-
-The rerank endpoints support popular re-rank models such as `BAAI/bge-reranker-base` and other models supporting the
-`score` task. Additionally, `/rerank`, `/v1/rerank`, and `/v2/rerank`
-endpoints are compatible with both [Jina AI's re-rank API interface](https://jina.ai/reranker/) and
-[Cohere's re-rank API interface](https://docs.cohere.com/v2/reference/rerank) to ensure compatibility with
-popular open-source tools.
-
-Code example: [examples/online_serving/pooling/jinaai_rerank_client.py](../../examples/online_serving/pooling/jinaai_rerank_client.py)
-
-#### Example Request
-
-Note that the `top_n` request parameter is optional and will default to the length of the `documents` field.
-Result documents will be sorted by relevance, and the `index` property can be used to determine original order.
-
-??? console "Request"
-
-    ```bash
-    curl -X 'POST' \
-      'http://127.0.0.1:8000/v1/rerank' \
-      -H 'accept: application/json' \
-      -H 'Content-Type: application/json' \
-      -d '{
-      "model": "BAAI/bge-reranker-base",
-      "query": "What is the capital of France?",
-      "documents": [
-        "The capital of Brazil is Brasilia.",
-        "The capital of France is Paris.",
-        "Horses and cows are both animals"
-      ]
-    }'
-    ```
-
-??? console "Response"
-
-    ```json
-    {
-      "id": "rerank-fae51b2b664d4ed38f5969b612edff77",
-      "model": "BAAI/bge-reranker-base",
-      "usage": {
-        "total_tokens": 56
-      },
-      "results": [
-        {
-          "index": 1,
-          "document": {
-            "text": "The capital of France is Paris."
-          },
-          "relevance_score": 0.99853515625
-        },
-        {
-          "index": 0,
-          "document": {
-            "text": "The capital of Brazil is Brasilia."
-          },
-          "relevance_score": 0.0005860328674316406
-        }
-      ]
-    }
-    ```
-
-#### Extra parameters
-
-The following [pooling parameters][vllm.PoolingParams] are supported.
-
-```python
---8<-- "vllm/pooling_params.py:common-pooling-params"
---8<-- "vllm/pooling_params.py:classification-pooling-params"
-```
-
-The following extra parameters are supported:
-
-```python
---8<-- "vllm/entrypoints/openai/protocol.py:rerank-extra-params"
+tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+yes_id = tokenizer.encode("Yes", add_special_tokens=False)[0]
+no_id = tokenizer.encode("No", add_special_tokens=False)[0]
+print(f"Yes: {yes_id}, No: {no_id}")
 ```
 
 ## Ray Serve LLM
@@ -929,4 +544,4 @@ Key capabilities:
 
 The following example shows how to deploy a large model like DeepSeek R1 with Ray Serve LLM: [examples/online_serving/ray_serve_deepseek.py](../../examples/online_serving/ray_serve_deepseek.py).
 
-Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/serving-llms.html).
+Learn more about Ray Serve LLM with the official [Ray Serve LLM documentation](https://docs.ray.io/en/latest/serve/llm/index.html).

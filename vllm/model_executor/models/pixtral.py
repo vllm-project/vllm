@@ -4,19 +4,14 @@
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, fields
-from functools import cached_property
 from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
-from mistral_common.tokens.tokenizers.multimodal import ImageEncoder
-from PIL import Image
-from transformers import BatchFeature, PixtralVisionConfig, TensorType
-from transformers.image_utils import ImageInput
+from transformers import BatchFeature, PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens as _get_pixtral_hf_num_image_tokens,
 )
@@ -25,51 +20,69 @@ from transformers.models.pixtral.modeling_pixtral import (
     apply_rotary_pos_emb,
     position_ids_in_meshgrid,
 )
-from transformers.tokenization_utils_base import TextInput
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.activation import get_act_and_mul_fn
+from vllm.inputs import MultiModalDataDict
+from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalUUIDDict,
     NestedTensors,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
-from vllm.multimodal.processing import (
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+)
+from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.tokenizer import (
-    MistralTokenizer,
-    cached_tokenizer_from_config,
+from vllm.tokenizers import cached_tokenizer_from_config
+from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.transformers_utils.processors.pixtral import (
+    MistralCommonImageProcessor,
+    MistralCommonPixtralProcessor,
 )
+from vllm.utils.collection_utils import is_list_of
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
-from .utils import init_vllm_registered_model, maybe_prefix
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    supports_eagle3,
+)
+from .module_mapping import MultiModelKeys
+from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
+    is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
 )
 
@@ -86,6 +99,10 @@ except ImportError:
     USE_XFORMERS_OPS = False
 
 PATCH_MERGE = "patch_merge"
+
+
+def _is_layer_none_or_staged(layer: nn.Module) -> bool:
+    return layer is None or isinstance(layer, StageMissingLayer)
 
 
 class PixtralImagePixelInputs(TensorSchema):
@@ -107,93 +124,6 @@ class PixtralImagePixelInputs(TensorSchema):
     ]
 
 
-class PixtralProcessorAdapter:
-    """
-    Provide a HF-compatible interface for
-    `mistral_common.tokens.tokenizers.multimodal.ImageEncoder`.
-    """
-
-    def __init__(self, tokenizer: MistralTokenizer) -> None:
-        super().__init__()
-
-        self.tokenizer = tokenizer
-
-    @property
-    def image_processor(self) -> ImageEncoder:
-        image_encoder = self.tokenizer.instruct.mm_encoder
-        assert isinstance(image_encoder, ImageEncoder)
-        return image_encoder
-
-    @cached_property
-    def image_break_id(self) -> int:
-        return self.image_processor.special_ids.img_break
-
-    @cached_property
-    def image_token_id(self) -> int:
-        return self.image_processor.special_ids.img
-
-    @cached_property
-    def image_end_id(self) -> int:
-        return self.image_processor.special_ids.img_end
-
-    @cached_property
-    def image_size(self) -> int:
-        return self.image_processor.mm_config.max_image_size
-
-    @cached_property
-    def patch_size(self) -> int:
-        return self.image_processor.mm_config.image_patch_size
-
-    def __call__(
-        self,
-        text: TextInput | list[TextInput] | None = None,
-        images: ImageInput | list[ImageInput] | None = None,
-        return_tensors: str | TensorType | None = None,
-        **kwargs,
-    ) -> Mapping[str, NestedTensors]:
-        if text is None:
-            text = []
-        if not isinstance(text, list):
-            text = [text]
-        if images is None:
-            images = []
-        if not isinstance(images, list):
-            images = [images]
-
-        if not images:
-            input_ids = self.tokenizer(text).input_ids
-
-            return {"input_ids": torch.tensor(input_ids)}
-
-        # Allow dummy text, which is used for profiling as well as token inputs
-        if any(len(t) > 0 for t in text):
-            raise ValueError(
-                "You've passed text inputs instead of token inputs. "
-                "Make sure to process your input via `mistral_common`'s "
-                "tokenizer or pass a chat completion request. "
-                "For more info, see: "
-                "https://github.com/vllm-project/vllm/issues/8411."
-            )
-
-        images_processed = list[torch.Tensor]()
-        images_tokens = list[torch.Tensor]()
-
-        for image in images:
-            image_inputs = self.image_processor(ImageChunk(image=image))
-            image_processed = torch.tensor(image_inputs.image)
-            image_tokens = torch.tensor(image_inputs.tokens)
-
-            images_processed.append(image_processed)
-            images_tokens.append(image_tokens)
-
-        return BatchFeature(
-            {
-                "input_ids": torch.cat(images_tokens)[None].expand(len(text), -1),
-                "images": images_processed,
-            }
-        )
-
-
 class PixtralProcessingInfo(BaseProcessingInfo):
     def get_tokenizer(self) -> MistralTokenizer:
         tokenizer = cached_tokenizer_from_config(self.ctx.model_config)
@@ -202,43 +132,21 @@ class PixtralProcessingInfo(BaseProcessingInfo):
 
         return tokenizer
 
-    def get_hf_processor(self) -> PixtralProcessorAdapter:
-        return PixtralProcessorAdapter(self.get_tokenizer())
+    def get_image_processor(self) -> MistralCommonImageProcessor:
+        return MistralCommonImageProcessor(self.get_tokenizer().instruct.mm_encoder)
+
+    def get_hf_processor(self, **kwargs) -> MistralCommonPixtralProcessor:
+        return MistralCommonPixtralProcessor(
+            tokenizer=self.get_tokenizer(),
+            image_processor=self.get_image_processor(),
+        )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_vision_config(
-        self,
-        processor: PixtralProcessorAdapter | None = None,
-    ):
-        if processor is None:
-            processor = self.get_hf_processor()
-
-        return PixtralVisionConfig(
-            image_size=processor.image_size,
-            patch_size=processor.patch_size,
-        )
-
-    def get_num_image_tokens(
-        self,
-        *,
-        image_width: int,
-        image_height: int,
-        processor: PixtralProcessorAdapter | None = None,
-    ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
-        ncols, nrows = processor.image_processor._image_to_num_tokens(
-            Image.new("RGB", (image_width, image_height))
-        )
-
-        return ncols * nrows
-
     def get_image_size_with_most_features(self) -> ImageSize:
-        image_processor = self.get_hf_processor().image_processor
-        max_image_size = image_processor.mm_config.max_image_size
+        image_processor = self.get_image_processor()
+        max_image_size = image_processor.mm_encoder.mm_config.max_image_size
 
         return ImageSize(width=max_image_size, height=max_image_size)
 
@@ -251,13 +159,13 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -272,14 +180,21 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
+        mm_data: MultiModalDataDict | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
         dummy_text = self.get_dummy_text(mm_counts)
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
-        dummy_images = dummy_mm_data.get("image", [])
-        tokenization_kwargs = {"truncation": False}
+        dummy_mm_data = (
+            self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+            if mm_data is None
+            else mm_data
+        )
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+        dummy_images = (
+            [] if "image" not in dummy_mm_data else dummy_mm_items["image"].get_all()
+        )
 
         request = ChatCompletionRequest(
             messages=[
@@ -294,11 +209,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
 
-        return ProcessorInputs(
-            prompt=dummy_tokens,
-            mm_data=dummy_mm_data,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_items)
 
 
 class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo]):
@@ -308,6 +219,27 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
         return dict(images=MultiModalFieldConfig.batched("image"))
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        outputs = super()._call_hf_processor(
+            prompt=prompt,
+            mm_data=mm_data,
+            mm_kwargs=mm_kwargs,
+            # Avoid padding issue
+            tok_kwargs={**tok_kwargs, "return_tensors": None},
+        )
+
+        # Missing batch dimension
+        if is_list_of(outputs["input_ids"], int):
+            outputs["input_ids"] = [outputs["input_ids"]]
+
+        return outputs
 
     def _get_prompt_updates(
         self,
@@ -325,8 +257,9 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
             images = mm_items.get_items("image", ImageProcessorItems)
             image_size = images.get_image_size(item_idx)
 
-            ncols, nrows = processor.image_processor._image_to_num_tokens(
-                Image.new("RGB", (image_size.width, image_size.height))
+            _, nrows, ncols = processor.image_processor.get_number_of_image_patches(
+                image_size.height,
+                image_size.width,
             )
 
             tokens = ([image_token_id] * ncols + [image_break_id]) * nrows
@@ -344,19 +277,10 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
-        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
-            prompt=prompt,
-            mm_data_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(inputs, timing_ctx)
 
         # NOTE: The tokens are already inserted by the chat template
         return prompt_ids, mm_info, True
@@ -367,8 +291,25 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
     info=PixtralProcessingInfo,
     dummy_inputs=PixtralDummyInputsBuilder,
 )
-class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
+class PixtralForConditionalGeneration(
+    nn.Module, SupportsLoRA, SupportsEagle3, SupportsMultiModal, SupportsPP
+):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "language_model.model.",
+            "model.vision_tower.": "vision_encoder.",
+            "model.multi_modal_projector.": "vision_language_adapter.",
+        },
+        orig_to_new_substr={
+            ".linear_1.": ".w_in.",
+            ".linear_2.": ".w_out.",
+        },
+    )
+
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -394,27 +335,35 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         self.vision_args = VisionEncoderArgs(**vision_args)
 
         # init MistralForCausalLM
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.vision_encoder = VisionTransformer(self.vision_args)
-
-        if self.vision_args.add_pre_mm_projector_layer_norm:
-            self.pre_mm_projector_norm = RMSNorm(self.vision_args.hidden_size, eps=1e-5)
-
-        if self.vision_args.mm_projector_id == PATCH_MERGE:
-            self.patch_merger = PatchMerger(
-                vision_encoder_dim=self.vision_args.hidden_size,
-                spatial_merge_size=self.vision_args.spatial_merge_size,
-                use_mlp_bias=False,
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
             )
 
-        self.vision_language_adapter = VisionLanguageAdapter(
-            self.vision_args, dim=config.text_config.hidden_size
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision_encoder = VisionTransformer(
+                self.vision_args,
+                prefix=maybe_prefix(prefix, "vision_encoder"),
+            )
+            self.pre_mm_projector_norm = (
+                RMSNorm(self.vision_args.hidden_size, eps=1e-5)
+                if self.vision_args.add_pre_mm_projector_layer_norm
+                else None
+            )
+            self.patch_merger = (
+                PatchMerger(
+                    vision_encoder_dim=self.vision_args.hidden_size,
+                    spatial_merge_size=self.vision_args.spatial_merge_size,
+                    use_mlp_bias=False,
+                )
+                if self.vision_args.mm_projector_id == PATCH_MERGE
+                else None
+            )
+            self.vision_language_adapter = VisionLanguageAdapter(
+                self.vision_args, dim=config.text_config.hidden_size
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -440,9 +389,9 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         image_features = self.vision_encoder(images)
         feature_sizes = [image_feature.shape[0] for image_feature in image_features]
         image_features = torch.cat(image_features)
-        if self.vision_args.add_pre_mm_projector_layer_norm:
+        if self.pre_mm_projector_norm is not None:
             image_features = self.pre_mm_projector_norm(image_features)
-        if self.vision_args.mm_projector_id == PATCH_MERGE:
+        if self.patch_merger is not None:
             patch_size = self.vision_args.patch_size
             spatial_merge_size_square = self.vision_args.spatial_merge_size**2
             img_patch_dims = [
@@ -460,9 +409,6 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         image_embeds = torch.split(image_embeds, feature_sizes)
         return image_embeds
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -472,7 +418,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -494,12 +440,52 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
+    def _require_language_model_eagle3(self) -> None:
+        if not supports_eagle3(self.language_model):
+            raise RuntimeError(
+                f"EAGLE-3 speculative decoding requires the language model to "
+                f"support EAGLE-3, but {type(self.language_model).__name__} does not."
+            )
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self._require_language_model_eagle3()
+        self.language_model.set_aux_hidden_state_layers(layers)
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        self._require_language_model_eagle3()
+        return self.language_model.get_eagle3_aux_hidden_state_layers()
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
+        _vision_encoder_stacked_params = [
+            # (param_name, shard_name, shard_id)
+            # HF format
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+            # Mistral native (consolidated) format
+            (".qkv_proj", ".wq", "q"),
+            (".qkv_proj", ".wk", "k"),
+            (".qkv_proj", ".wv", "v"),
+            (".gate_up_proj", ".w1", 0),
+            (".gate_up_proj", ".w3", 1),
+        ]
+
+        # Remap Mistral native names to HF-style names
+        # used by the vLLM vision encoder modules.
+        _vision_encoder_name_remap = {
+            ".wo.": ".o_proj.",
+            ".w2.": ".down_proj.",
+        }
+
         def is_vision_encoder_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_encoder")
+            return weight[0].startswith(("vision_encoder", "vision_tower"))
 
         def is_vision_lang_adapter_weights(weight: tuple[str, torch.Tensor]):
-            return weight[0].startswith("vision_language_adapter")
+            return weight[0].startswith(
+                ("vision_language_adapter", "multi_modal_projector")
+            )
 
         def is_patch_merger(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("patch_merger")
@@ -507,54 +493,106 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         def is_pre_mm_projector_norm(weight: tuple[str, torch.Tensor]):
             return weight[0].startswith("pre_mm_projector_norm")
 
-        # Get references to parameters for direct loading
-        vision_encoder_dict = dict(self.vision_encoder.named_parameters())
+        vision_encoder_dict = (
+            dict(self.vision_encoder.named_parameters())
+            if self.vision_encoder is not None
+            else {}
+        )
         patch_merger_dict = (
             dict(self.patch_merger.named_parameters())
-            if self.vision_args.mm_projector_id == PATCH_MERGE
-            else dict()
+            if self.patch_merger is not None
+            else {}
         )
         pre_mm_projector_norm_dict = (
             dict(self.pre_mm_projector_norm.named_parameters())
-            if self.vision_args.add_pre_mm_projector_layer_norm
-            else dict()
+            if self.pre_mm_projector_norm is not None
+            else {}
         )
-        vision_lang_adapter_dict = dict(self.vision_language_adapter.named_parameters())
+        vision_lang_adapter_dict = (
+            dict(self.vision_language_adapter.named_parameters())
+            if self.vision_language_adapter is not None
+            else {}
+        )
 
         def llm_weights_generator():
-            # Single pass over weights
             for name, w in weights:
                 if is_vision_encoder_weights((name, w)):
-                    # Load vision encoder weights directly
+                    if _is_layer_none_or_staged(self.vision_encoder):
+                        continue
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = vision_encoder_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    for (
+                        param_name,
+                        weight_name,
+                        shard_id,
+                    ) in _vision_encoder_stacked_params:
+                        if weight_name in trimmed_name:
+                            trimmed_name = trimmed_name.replace(weight_name, param_name)
+                            param = vision_encoder_dict[trimmed_name]
+                            weight_loader = param.weight_loader
+                            weight_loader(param, w, shard_id)
+                            break
+                    else:
+                        for old, new in _vision_encoder_name_remap.items():
+                            if old in trimmed_name:
+                                trimmed_name = trimmed_name.replace(old, new)
+                                break
+
+                        param = vision_encoder_dict.get(trimmed_name)
+                        if param is not None:
+                            weight_loader = getattr(
+                                param, "weight_loader", default_weight_loader
+                            )
+                            weight_loader(param, w)
                 elif is_patch_merger((name, w)):
-                    # Load vision patch merger weights directly
+                    if _is_layer_none_or_staged(self.patch_merger):
+                        continue
                     trimmed_name = ".".join(name.split(".")[1:])
                     param = patch_merger_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, w)
                 elif is_pre_mm_projector_norm((name, w)):
-                    # Load vision pre_mm_projector_norm weights directly
+                    if _is_layer_none_or_staged(self.pre_mm_projector_norm):
+                        continue
                     trimmed_name = ".".join(name.split(".")[1:])
                     param = pre_mm_projector_norm_dict[trimmed_name]
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
-                    # Load vision-language adapter weights directly
+                    if _is_layer_none_or_staged(self.vision_language_adapter):
+                        continue
                     trimmed_name = ".".join(name.split(".")[1:])
-                    param = vision_lang_adapter_dict[trimmed_name]
-                    with torch.no_grad():
-                        default_weight_loader(param, w)
+                    param = vision_lang_adapter_dict.get(trimmed_name)
+                    if param is not None:
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, w)
                 else:
-                    # LLM weights: yield them to be loaded
-                    # by language_model.load_weights
+                    name = name.removeprefix("language_model.")
                     yield (name, w)
 
-        # Now we call the language model load with the generator
         self.language_model.load_weights(llm_weights_generator())
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        return MultiModelKeys.from_string_field(
+            language_model="language_model.",
+            connector="vision_language_adapter.",
+            tower_model="vision_encoder",
+        )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        if getattr(self, "patch_merger", None) is None:
+            return num_image_tokens
+        merge_size = self.vision_args.spatial_merge_size
+        return num_image_tokens * (merge_size**2)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        if getattr(self, "patch_merger", None) is None:
+            return num_vision_tokens
+        merge_size = self.vision_args.spatial_merge_size
+        return num_vision_tokens // (merge_size**2)
 
 
 # Vision encoder
@@ -633,29 +671,78 @@ def apply_rotary_emb_vit(
 
 
 class FeedForward(nn.Module):
-    def __init__(self, args: VisionEncoderArgs):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        quant_config: QuantizationConfig | None = None,
+        bias: bool = False,
+        prefix: str = "",
+        reduce_results: bool = True,
+        disable_tp: bool = False,
+    ) -> None:
         super().__init__()
-        assert args.intermediate_size is not None
-        self.w1 = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
-        self.w2 = nn.Linear(args.intermediate_size, args.hidden_size, bias=False)
-        self.w3 = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+        self.gate_up_proj = MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[intermediate_size] * 2,
+            bias=bias,
+            quant_config=quant_config,
+            disable_tp=disable_tp,
+            prefix=f"{prefix}.w13",
+        )
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=bias,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            disable_tp=disable_tp,
+            prefix=f"{prefix}.w2",
+        )
+
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        x, _ = self.gate_up_proj(x)
+        x = self.act_fn(x)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class Attention(nn.Module):
-    def __init__(self, args: VisionEncoderArgs):
+    def __init__(
+        self,
+        args: VisionEncoderArgs,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        disable_tp: bool = False,
+    ):
         super().__init__()
         self.args = args
         assert not args.hidden_size % args.num_attention_heads
-        self.n_heads = args.num_attention_heads
         self.head_dim = args.hidden_size // args.num_attention_heads
 
-        self.wq = nn.Linear(args.hidden_size, args.hidden_size, bias=False)
-        self.wk = nn.Linear(args.hidden_size, args.hidden_size, bias=False)
-        self.wv = nn.Linear(args.hidden_size, args.hidden_size, bias=False)
-        self.wo = nn.Linear(args.hidden_size, args.hidden_size, bias=False)
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=args.hidden_size,
+            head_size=self.head_dim,
+            total_num_heads=args.num_attention_heads,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wqkv",
+            disable_tp=disable_tp,
+        )
+        self.o_proj = RowParallelLinear(
+            input_size=args.hidden_size,
+            output_size=args.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.wo",
+            disable_tp=disable_tp,
+        )
+
+        tp_size = 1 if disable_tp else get_tensor_model_parallel_world_size()
+        self.n_heads = divide(args.num_attention_heads, tp_size)
 
     def forward(
         self,
@@ -665,7 +752,8 @@ class Attention(nn.Module):
     ) -> torch.Tensor:
         batch, patches, _ = x.shape
 
-        q, k, v = self.wq(x), self.wk(x), self.wv(x)
+        qkv, _ = self.qkv_proj(x)
+        q, k, v = qkv.chunk(3, dim=-1)
         q = q.reshape(batch, patches, self.n_heads, self.head_dim)
         k = k.reshape(batch, patches, self.n_heads, self.head_dim)
         v = v.reshape(batch, patches, self.n_heads, self.head_dim)
@@ -682,14 +770,32 @@ class Attention(nn.Module):
             out = out.transpose(1, 2)
 
         out = out.reshape(batch, patches, self.n_heads * self.head_dim)
-        return self.wo(out)
+        out, _ = self.o_proj(out)
+        return out
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, args: VisionEncoderArgs):
+    def __init__(
+        self,
+        args: VisionEncoderArgs,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        disable_tp: bool = False,
+    ):
         super().__init__()
-        self.attention = Attention(args)
-        self.feed_forward = FeedForward(args)
+        self.attention = Attention(
+            args,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attention",
+            disable_tp=disable_tp,
+        )
+        self.feed_forward = FeedForward(
+            args.hidden_size,
+            args.intermediate_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.feed_forward",
+            disable_tp=disable_tp,
+        )
         self.attention_norm = RMSNorm(args.hidden_size, eps=1e-5)
         self.ffn_norm = RMSNorm(args.hidden_size, eps=1e-5)
 
@@ -709,11 +815,24 @@ class TransformerBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, args: VisionEncoderArgs):
+    def __init__(
+        self,
+        args: VisionEncoderArgs,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        disable_tp: bool = False,
+    ):
         super().__init__()
         self.layers = torch.nn.ModuleList()
-        for _ in range(args.num_hidden_layers):
-            self.layers.append(TransformerBlock(args))
+        for idx in range(args.num_hidden_layers):
+            self.layers.append(
+                TransformerBlock(
+                    args,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.layers.{idx}",
+                    disable_tp=disable_tp,
+                )
+            )
 
     def forward(
         self,
@@ -746,9 +865,15 @@ def position_meshgrid(
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, args: VisionEncoderArgs):
+    def __init__(
+        self,
+        args: VisionEncoderArgs,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.args = args
+        disable_tp = is_vit_use_data_parallel()
         self.patch_conv = Conv2dLayer(
             in_channels=args.num_channels,
             out_channels=args.hidden_size,
@@ -757,7 +882,12 @@ class VisionTransformer(nn.Module):
             bias=False,
         )
         self.ln_pre = RMSNorm(args.hidden_size, eps=1e-5)
-        self.transformer = Transformer(args)
+        self.transformer = Transformer(
+            args,
+            quant_config=quant_config,
+            prefix=f"{prefix}.transformer",
+            disable_tp=disable_tp,
+        )
 
         head_dim = self.args.hidden_size // self.args.num_attention_heads
         assert head_dim % 2 == 0, "ROPE requires even head_dim"
@@ -841,13 +971,16 @@ class VisionLanguageAdapter(nn.Module):
     def __init__(self, args: VisionEncoderArgs, dim: int):
         super().__init__()
         assert isinstance(args, VisionEncoderArgs)
-        self.w_in = nn.Linear(
+        self.w_in = ReplicatedLinear(
             args.hidden_size,
             dim,
             bias=args.adapter_bias,
+            return_bias=False,
         )
         self.gelu = nn.GELU()
-        self.w_out = nn.Linear(dim, dim, bias=args.adapter_bias)
+        self.w_out = ReplicatedLinear(
+            dim, dim, bias=args.adapter_bias, return_bias=False
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w_out(self.gelu(self.w_in(x)))
@@ -871,10 +1004,8 @@ class PatchMerger(nn.Module):
         self.spatial_merge_size = spatial_merge_size
         self.mlp_input_dim = mlp_input_dim
 
-        self.merging_layer = nn.Linear(
-            mlp_input_dim,
-            vision_encoder_dim,
-            bias=use_mlp_bias,
+        self.merging_layer = ReplicatedLinear(
+            mlp_input_dim, vision_encoder_dim, bias=use_mlp_bias, return_bias=False
         )
 
     def forward(
@@ -1023,6 +1154,8 @@ class PixtralHFMLP(nn.Module):
     ) -> None:
         super().__init__()
 
+        use_data_parallel = is_vit_use_data_parallel()
+
         assert config.intermediate_size is not None
         self.gate_up_proj = MergedColumnParallelLinear(
             input_size=config.hidden_size,
@@ -1030,6 +1163,7 @@ class PixtralHFMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
+            disable_tp=use_data_parallel,
         )
         self.down_proj = RowParallelLinear(
             input_size=config.intermediate_size,
@@ -1037,6 +1171,7 @@ class PixtralHFMLP(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
+            disable_tp=use_data_parallel,
         )
         self.act_and_mul = get_act_and_mul_fn(config.hidden_act)
 
@@ -1060,10 +1195,10 @@ class PixtralHFAttention(nn.Module):
         self.config = config
         assert not config.hidden_size % config.num_attention_heads
         self.total_num_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        self.n_heads = divide(config.num_attention_heads, tp_size)
         self.head_dim = config.hidden_size // config.num_attention_heads
+        assert self.total_num_heads * self.head_dim == config.hidden_size
 
+        use_data_parallel = is_vit_use_data_parallel()
         self.qkv_proj = QKVParallelLinear(
             hidden_size=config.hidden_size,
             head_size=self.head_dim,
@@ -1071,15 +1206,21 @@ class PixtralHFAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
         )
-        assert self.total_num_heads * self.head_dim == config.hidden_size
         self.o_proj = RowParallelLinear(
             input_size=config.hidden_size,
             output_size=config.hidden_size,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=use_data_parallel,
         )
+
+        self.tp_size = (
+            1 if use_data_parallel else get_tensor_model_parallel_world_size()
+        )
+        self.n_heads = divide(config.num_attention_heads, self.tp_size)
 
     def forward(
         self,
@@ -1129,10 +1270,14 @@ class PixtralHFTransformerBlock(nn.Module):
 
         self.attention_norm = RMSNorm(config.hidden_size, eps=1e-5)
         self.attention = PixtralHFAttention(
-            config, quant_config=quant_config, prefix=f"{prefix}.attention"
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attention",
         )
         self.feed_forward = PixtralHFMLP(
-            config, quant_config=quant_config, prefix=f"{prefix}.feed_forward"
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.feed_forward",
         )
         self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)
 
@@ -1224,7 +1369,7 @@ class PixtralHFVisionModel(nn.Module):
         self.ln_pre = RMSNorm(config.hidden_size, eps=1e-5)
         self.transformer = PixtralHFTransformer(
             config,
-            quant_config,
+            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.transformer",
         )

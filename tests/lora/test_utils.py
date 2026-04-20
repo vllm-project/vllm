@@ -3,7 +3,7 @@
 
 from collections import OrderedDict
 from typing import NamedTuple
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from huggingface_hub.utils import HfHubHTTPError
@@ -194,5 +194,8 @@ def test_get_adapter_absolute_path_huggingface_error(
     # Hugging Face model identifier with download error
     path = "org/repo"
     mock_exist.return_value = False
-    mock_snapshot_download.side_effect = HfHubHTTPError("failed to query model info")
+    mock_snapshot_download.side_effect = HfHubHTTPError(
+        "failed to query model info",
+        response=MagicMock(),
+    )
     assert get_adapter_absolute_path(path) == path

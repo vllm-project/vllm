@@ -1,15 +1,51 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal, TypeAlias
+
 import torch
 
+import vllm.envs as envs
 from vllm.config.cache import MambaDType
 from vllm.config.model import ModelDType
 from vllm.distributed import divide
+from vllm.logger import init_logger
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     get_kv_cache_torch_dtype,
 )
+
+logger = init_logger(__name__)
+
+ConvStateLayoutType = Literal["SD", "DS"]
+
+
+@functools.lru_cache
+def get_conv_state_layout() -> ConvStateLayoutType:
+    """Return the SSM conv state layout.
+
+    SD = (state_len, dim) — dim is the innermost contiguous dimension.
+    DS = (dim, state_len) — TP-sharded dim is on dim-1 (like HND for KV
+         cache), consistent with SSM temporal state layout.
+    """
+    layout: ConvStateLayoutType | None = envs.VLLM_SSM_CONV_STATE_LAYOUT
+    if layout is not None:
+        logger.info_once(
+            "VLLM_SSM_CONV_STATE_LAYOUT env detected. "
+            "Setting SSM conv state layout to %s.",
+            layout,
+        )
+        return layout
+
+    return "SD"
+
+
+def is_conv_state_dim_first() -> bool:
+    """True when the conv state is stored as (dim, state_len) per block."""
+    return get_conv_state_layout() == "DS"
 
 
 class MambaStateDtypeCalculator:
@@ -76,9 +112,11 @@ class MambaStateDtypeCalculator:
         cls,
         model_dtype: ModelDType | torch.dtype,
         mamba_cache_dtype: MambaDType,
+        mamba_ssm_cache_dtype: MambaDType = "auto",
     ) -> tuple[torch.dtype, torch.dtype]:
-        state_dtype = get_kv_cache_torch_dtype(mamba_cache_dtype, model_dtype)
-        return (state_dtype, state_dtype)
+        return cls._mamba_state_dtype(
+            model_dtype, mamba_cache_dtype, mamba_ssm_cache_dtype
+        )
 
     @classmethod
     def kda_state_dtype(
@@ -101,6 +139,13 @@ class MambaStateShapeCalculator:
         state_shape = (num_heads // tp_size, head_dim, head_dim)
         return (state_shape,)
 
+    @staticmethod
+    def _orient_conv_shape(dim: int, state_len: int) -> tuple[int, int]:
+        """Return (dim, state_len) for DS layout, (state_len, dim) for SD."""
+        if is_conv_state_dim_first():
+            return (dim, state_len)
+        return (state_len, dim)
+
     @classmethod
     def mamba1_state_shape(
         cls,
@@ -109,11 +154,10 @@ class MambaStateShapeCalculator:
         state_size: int,
         conv_kernel: int,
     ) -> tuple[tuple[int, int], tuple[int, int]]:
-        conv_state_shape = (divide(intermediate_size, tp_world_size), conv_kernel - 1)
+        conv_dim = divide(intermediate_size, tp_world_size)
+        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
 
         temporal_state_shape = (divide(intermediate_size, tp_world_size), state_size)
-
-        conv_state_shape = conv_state_shape[1], conv_state_shape[0]
 
         return conv_state_shape, temporal_state_shape
 
@@ -127,6 +171,7 @@ class MambaStateShapeCalculator:
         head_dim: int,
         state_size: int,
         conv_kernel: int,
+        num_spec: int = 0,
     ) -> tuple[tuple[int, int], tuple[int, int, int]]:
         # if n_groups is not divisible by world_size, need to extend the shards
         # to ensure all groups needed by a head is sharded along with it
@@ -134,8 +179,9 @@ class MambaStateShapeCalculator:
         # heads and n_groups are TP-ed
         conv_dim = intermediate_size + 2 * n_groups * state_size
 
-        # contiguous along 'dim' axis
-        conv_state_shape = (conv_kernel - 1, divide(conv_dim, tp_world_size))
+        conv_state_shape = cls._orient_conv_shape(
+            divide(conv_dim, tp_world_size), conv_kernel - 1 + num_spec
+        )
 
         # These are not TP-ed as they depend on A, dt_bias, D
         # - they are typically small
@@ -151,7 +197,7 @@ class MambaStateShapeCalculator:
         conv_kernel: int,
     ) -> tuple[tuple[int, int]]:
         conv_dim = divide(intermediate_size, tp_world_size)
-        conv_state_shape = (conv_kernel - 1, conv_dim)
+        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
         return (conv_state_shape,)
 
     @classmethod
@@ -178,17 +224,15 @@ class MambaStateShapeCalculator:
         num_spec: int = 0,
     ):
         conv_dim = head_k_dim * num_k_heads * 2 + head_v_dim * num_v_heads
-        conv_state_shape = (
+        conv_state_shape = cls._orient_conv_shape(
             divide(conv_dim, tp_world_size),
             conv_kernel_size - 1 + num_spec,
         )
 
-        conv_state_shape = conv_state_shape[1], conv_state_shape[0]
-
         temporal_state_shape = (
             divide(num_v_heads, tp_world_size),
-            head_k_dim,
             head_v_dim,
+            head_k_dim,
         )
         return conv_state_shape, temporal_state_shape
 
@@ -211,15 +255,122 @@ class MambaStateShapeCalculator:
         proj_size = num_heads * head_dim
         proj_k_size = num_k_heads * head_k_dim
 
-        conv_state_shape = (divide(proj_size, tp_world_size), conv_kernel_size - 1)
-        conv_state_k_shape = (divide(proj_k_size, tp_world_size), conv_kernel_size - 1)
+        conv_state_shape = cls._orient_conv_shape(
+            divide(proj_size, tp_world_size), conv_kernel_size - 1
+        )
+        conv_state_k_shape = cls._orient_conv_shape(
+            divide(proj_k_size, tp_world_size), conv_kernel_size - 1
+        )
         recurrent_state_shape = (divide(num_heads, tp_world_size), head_dim, head_dim)
-
-        conv_state_shape = conv_state_shape[1], conv_state_shape[0]
-        conv_state_k_shape = conv_state_k_shape[1], conv_state_k_shape[0]
         return (
             conv_state_shape,
             conv_state_k_shape,
             conv_state_k_shape,
             recurrent_state_shape,
+        )
+
+
+@dataclass
+class MambaCopySpec:
+    """
+    Data class specifying the memory-copy parameters for Mamba states used for
+    prefix caching in align mode.
+
+    Attributes:
+        start_addr (int): Starting address for the memory copy operation.
+        num_elements (int): Number of elements to copy from the starting address.
+    """
+
+    start_addr: int
+    num_elements: int
+
+
+MambaStateCopyFunc: TypeAlias = Callable[
+    [torch.Tensor, list[int], int, int], MambaCopySpec
+]
+"""
+Type alias for a function that computes a MambaCopySpec for copying state slices.
+Parameters:
+  state: torch.Tensor - the Mamba state tensor (e.g., conv or temporal states).
+  block_ids: list[int] - the list of block indices for the state to copy.
+  cur_block_idx: int - current block index within `block_ids` to copy from.
+  num_accepted_tokens: int - number of accepted tokens used to compute the copy offset.
+      Range: 1 .. 1 + num_speculative_tokens (inclusive).
+"""
+
+
+def get_conv_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    """Return a MambaCopySpec for copying a convolutional state slice.
+
+    Works for both SD layout ``(num_blocks, state_len, dim)`` and
+    DS layout ``(num_blocks, dim, state_len)``.
+    """
+    src_block_id = block_ids[cur_block_idx]
+    offset = num_accepted_tokens - 1
+    if is_conv_state_dim_first():
+        # DS layout: (num_blocks, dim, state_len) — state_len is last.
+        if offset > 0:
+            # Slicing along the last dim yields a non-contiguous view
+            # because features (dim) are strided by state_len.
+            raise NotImplementedError(
+                "DS conv state layout does not yet support speculative "
+                "decoding with mamba_cache_mode='align' "
+                "(num_accepted_tokens > 1)."
+            )
+        src_state = state[src_block_id]
+    else:
+        # SD layout: (num_blocks, state_len, dim) — dim contiguous.
+        src_state = state[src_block_id, offset:]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
+
+
+def get_temporal_copy_spec(
+    state: torch.Tensor,
+    block_ids: list[int],
+    cur_block_idx: int,
+    num_accepted_tokens: int,
+) -> MambaCopySpec:
+    """Return a MambaCopySpec for copying a temporal state slice."""
+    src_block_id = block_ids[cur_block_idx + num_accepted_tokens - 1]
+    src_state = state[src_block_id]
+    return MambaCopySpec(
+        start_addr=src_state.data_ptr(), num_elements=src_state.numel()
+    )
+
+
+class MambaStateCopyFuncCalculator:
+    @classmethod
+    def linear_attention_state_copy_func(cls):
+        return (get_temporal_copy_spec,)
+
+    @classmethod
+    def mamba1_state_copy_func(cls):
+        return (get_conv_copy_spec, get_temporal_copy_spec)
+
+    @classmethod
+    def mamba2_state_copy_func(cls):
+        return get_conv_copy_spec, get_temporal_copy_spec
+
+    @classmethod
+    def short_conv_state_copy_func(cls):
+        return (get_conv_copy_spec,)
+
+    @classmethod
+    def gated_delta_net_state_copy_func(cls):
+        return (get_conv_copy_spec, get_temporal_copy_spec)
+
+    @classmethod
+    def kda_state_copy_func(cls):
+        return (
+            get_conv_copy_spec,
+            get_conv_copy_spec,
+            get_conv_copy_spec,
+            get_temporal_copy_spec,
         )

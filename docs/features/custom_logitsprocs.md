@@ -180,7 +180,7 @@ The `DummyLogitsProcessor.update_state()` implementation maintains a "sparse" re
 
 ### Wrapping an Existing Request-Level Logits Processor
 
-Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here](https://docs.vllm.ai/en/v0.10.1.1/api/vllm/logits_process.html)) conforming to the following type annotation:
+Although the vLLM engine applies logits processors at batch granularity, some users may want to use vLLM with a "request-level" logits processor implementation - an implementation which operates on individual requests. This will be especially true if your logits processor was developed for vLLM version 0, which required it to be a `Callable` (as described [here][vllm.logits_process]) conforming to the following type annotation:
 
 ``` python
 RequestLogitsProcessor = Union[

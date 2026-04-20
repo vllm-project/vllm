@@ -3,7 +3,6 @@
 """Benchmark the latency of processing a single batch of requests."""
 
 import argparse
-import dataclasses
 import json
 import os
 import time
@@ -12,7 +11,6 @@ from typing import Any
 import numpy as np
 from tqdm import tqdm
 
-import vllm.envs as envs
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.engine.arg_utils import EngineArgs
 from vllm.inputs import PromptType
@@ -79,11 +77,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
-    if args.profile and not envs.VLLM_TORCH_PROFILER_DIR:
-        raise OSError(
-            "The environment variable 'VLLM_TORCH_PROFILER_DIR' is not set. "
-            "Please set it to a valid path to use torch profiler."
-        )
     engine_args = EngineArgs.from_cli_args(args)
 
     # Lazy import to avoid importing LLM when the bench command is not selected.
@@ -91,7 +84,7 @@ def main(args: argparse.Namespace):
 
     # NOTE(woosuk): If the request cannot be processed in a single batch,
     # the engine will automatically process the request in multiple batches.
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     assert llm.llm_engine.model_config.max_model_len >= (
         args.input_len + args.output_len
     ), (
@@ -127,8 +120,8 @@ def main(args: argparse.Namespace):
                 ),
             )
 
-    def run_to_completion(profile_dir: str | None = None):
-        if profile_dir:
+    def run_to_completion(do_profile: bool = False):
+        if do_profile:
             llm.start_profile()
             llm_generate()
             llm.stop_profile()
@@ -141,18 +134,24 @@ def main(args: argparse.Namespace):
 
     print("Warming up...")
     for _ in tqdm(range(args.num_iters_warmup), desc="Warmup iterations"):
-        run_to_completion(profile_dir=None)
+        run_to_completion(do_profile=False)
 
     if args.profile:
-        profile_dir = envs.VLLM_TORCH_PROFILER_DIR
-        print(f"Profiling (results will be saved to '{profile_dir}')...")
-        run_to_completion(profile_dir=profile_dir)
+        profiler_config = engine_args.profiler_config
+        if profiler_config.profiler == "torch":
+            print(
+                "Profiling with torch profiler (results will be saved to"
+                f" {profiler_config.torch_profiler_dir})..."
+            )
+        elif profiler_config.profiler == "cuda":
+            print("Profiling with cuda profiler ...")
+        run_to_completion(do_profile=True)
         return
 
     # Benchmark.
     latencies = []
-    for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        latencies.append(run_to_completion(profile_dir=None))
+    for _ in tqdm(range(args.num_iters), desc="Bench iterations"):
+        latencies.append(run_to_completion(do_profile=False))
     latencies = np.array(latencies)
     percentages = [10, 25, 50, 75, 90, 99]
     percentiles = np.percentile(latencies, percentages)

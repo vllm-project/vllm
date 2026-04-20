@@ -5,9 +5,11 @@ import dataclasses
 import pytest
 
 from vllm.config import CompilationMode
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.platforms import current_platform
 
 from ...utils import compare_all_settings
+
+ATTN_BACKEND = "FLASH_ATTN" if not current_platform.is_rocm() else "ROCM_ATTN"
 
 
 @dataclasses.dataclass
@@ -31,7 +33,7 @@ class TestSetting:
             model_args=["--max-model-len", "2048"],
             pp_size=2,
             tp_size=2,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # llama model with quantization
@@ -40,7 +42,7 @@ class TestSetting:
             model_args=["--quantization", "gptq", "--max-model-len", "2048"],
             pp_size=1,
             tp_size=1,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # MoE model
@@ -49,7 +51,7 @@ class TestSetting:
             model_args=["--max-model-len", "2048"],
             pp_size=1,
             tp_size=2,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="generate",
         ),
         # embedding model
@@ -65,16 +67,22 @@ class TestSetting:
             ],
             pp_size=1,
             tp_size=1,
-            attn_backend="FLASH_ATTN",
+            attn_backend=ATTN_BACKEND,
             method="encode",
         ),
-        TestSetting(
-            model="BAAI/bge-base-en-v1.5",
-            model_args=["--runner", "pooling"],
-            pp_size=1,
-            tp_size=1,
-            attn_backend="FLASH_ATTN",
-            method="encode",
+        pytest.param(
+            TestSetting(
+                model="BAAI/bge-base-en-v1.5",
+                model_args=["--runner", "pooling"],
+                pp_size=1,
+                tp_size=1,
+                attn_backend="FLASH_ATTN",
+                method="encode",
+            ),
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(),
+                reason="Encoder self-attention is not implemented for ROCm",
+            ),
         ),
         # vision language model
         # See https://github.com/vllm-project/vllm/issues/26716.
@@ -89,7 +97,6 @@ class TestSetting:
     ],
 )
 def test_compile_correctness(
-    monkeypatch: pytest.MonkeyPatch,
     test_setting: TestSetting,
 ):
     # this test is run under multiple suits, with different GPUs.
@@ -101,55 +108,54 @@ def test_compile_correctness(
     tp_size = test_setting.tp_size
     attn_backend = test_setting.attn_backend
     method = test_setting.method
-    if cuda_device_count_stateless() < pp_size * tp_size:
+    if current_platform.device_count() < pp_size * tp_size:
         pytest.skip(
             f"Need at least {pp_size}*{tp_size} CUDA gpus but got "
-            f"{cuda_device_count_stateless()}"
+            f"{current_platform.device_count()}"
         )
 
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_ATTENTION_BACKEND", attn_backend)
-        final_args = [
-            *model_args,
-            "-pp",
-            str(pp_size),
-            "-tp",
-            str(tp_size),
-            "-O.cudagraph_mode=none",
-        ]
+    final_args = [
+        *model_args,
+        "-pp",
+        str(pp_size),
+        "-tp",
+        str(tp_size),
+        "-cc.cudagraph_mode=none",
+        f"--attention-backend={attn_backend}",
+    ]
 
-        all_args: list[list[str]] = []
-        all_envs: list[dict[str, str] | None] = []
+    all_args: list[list[str]] = []
+    all_envs: list[dict[str, str] | None] = []
 
-        for comp_mode in [
-            CompilationMode.STOCK_TORCH_COMPILE,
-            CompilationMode.DYNAMO_TRACE_ONCE,
-            CompilationMode.VLLM_COMPILE,
-        ]:
-            for mode in [CompilationMode.NONE, comp_mode]:
-                all_args.append(
-                    final_args + [f"-O.mode={mode.name}", "-O.backend=inductor"]
-                )
-
-            # inductor will change the output, so we only compare if the output
-            # is close, not exactly the same.
-            compare_all_settings(
-                model,
-                all_args,
-                all_envs,
-                method=method if method != "generate" else "generate_close",
+    for comp_mode in [
+        CompilationMode.STOCK_TORCH_COMPILE,
+        CompilationMode.DYNAMO_TRACE_ONCE,
+        CompilationMode.VLLM_COMPILE,
+    ]:
+        for mode in [CompilationMode.NONE, comp_mode]:
+            all_args.append(
+                final_args + [f"-cc.mode={mode.name}", "-cc.backend=inductor"]
             )
-            all_envs.clear()
-            all_args.clear()
-
-        for mode in [
-            CompilationMode.NONE,
-            CompilationMode.STOCK_TORCH_COMPILE,
-            CompilationMode.DYNAMO_TRACE_ONCE,
-            CompilationMode.VLLM_COMPILE,
-        ]:
-            all_args.append(final_args + [f"-O.mode={mode.name}", "-O.backend=eager"])
-            all_envs.append({})
             all_envs.append({})
 
-        compare_all_settings(model, all_args * 3, all_envs, method=method)
+        # inductor will change the output, so we only compare if the output
+        # is close, not exactly the same.
+        compare_all_settings(
+            model,
+            all_args,
+            all_envs,
+            method=method if method != "generate" else "generate_close",
+        )
+        all_envs.clear()
+        all_args.clear()
+
+    for mode in [
+        CompilationMode.NONE,
+        CompilationMode.STOCK_TORCH_COMPILE,
+        CompilationMode.DYNAMO_TRACE_ONCE,
+        CompilationMode.VLLM_COMPILE,
+    ]:
+        all_args.append(final_args + [f"-cc.mode={mode.name}", "-cc.backend=eager"])
+        all_envs.append({})
+
+    compare_all_settings(model, all_args, all_envs, method=method)

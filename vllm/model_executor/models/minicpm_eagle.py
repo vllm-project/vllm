@@ -108,6 +108,7 @@ class EagleMiniCPMDecoderLayer(nn.Module):
                 top_k=self.config.num_experts_per_tok,
                 hidden_size=self.config.hidden_size,
                 intermediate_size=self.config.intermediate_size,
+                prefix=f"{self.prefix}.mlp",
             )
 
     def forward(
@@ -305,7 +306,6 @@ class EagleMiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, SupportsEagle
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

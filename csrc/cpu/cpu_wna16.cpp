@@ -1,6 +1,5 @@
-#include "cpu_types.hpp"
-#include "scratchpad_manager.h"
-#include "utils.hpp"
+#include "cpu/cpu_types.hpp"
+#include "cpu/utils.hpp"
 
 #ifdef CPU_CAPABILITY_AMXBF16
   #include "cpu/micro_gemm/cpu_micro_gemm_amx.hpp"
@@ -117,7 +116,7 @@ class Dequantizer4b {
       scalar_vec_t output_vec_0(wb_0);
       scalar_vec_t output_vec_1(wb_1);
 
-      // AMX needs to interlave K elements to pack as 32 bits
+      // AMX needs to interleave K elements to pack as 32 bits
       if constexpr (isa == ISA::AMX) {
         vec_op::interleave_save(output_vec_0, output_vec_1, curr_weight);
       } else {
@@ -158,7 +157,7 @@ void cpu_gemm_wna16_impl(
   // a simple schedule policy, just to hold more B tiles in L2 and make sure
   // each thread has tasks
   const int32_t n_partition_size = [&]() {
-    const int64_t cache_size = cpu_utils::get_l2_size();
+    const int64_t cache_size = cpu_utils::get_available_l2_size();
     int64_t ps_cache_limit = cache_size / (k_size * sizeof(scalar_t));
     int64_t ps_thread_limit = n_size / thread_num;
     ps_cache_limit =
@@ -179,8 +178,8 @@ void cpu_gemm_wna16_impl(
   const int64_t b_buffer_offset = 0;
   const int64_t c_buffer_offset = b_buffer_size;
   const int64_t buffer_size = b_buffer_size + c_buffer_size;
-  DNNLScratchPadManager::get_dnnl_scratchpad_manager()->realloc(buffer_size *
-                                                                thread_num);
+  cpu_utils::ScratchPadManager::get_scratchpad_manager()->realloc(buffer_size *
+                                                                  thread_num);
 
   alignas(64) cpu_utils::Counter counter;
   cpu_utils::Counter* counter_ptr = &counter;
@@ -190,9 +189,10 @@ void cpu_gemm_wna16_impl(
     scalar_t* __restrict__ b_buffer = nullptr;
     float* __restrict__ c_buffer = nullptr;
     {
-      uint8_t* buffer_ptr = DNNLScratchPadManager::get_dnnl_scratchpad_manager()
-                                ->get_data<uint8_t>() +
-                            thread_id * buffer_size;
+      uint8_t* buffer_ptr =
+          cpu_utils::ScratchPadManager::get_scratchpad_manager()
+              ->get_data<uint8_t>() +
+          thread_id * buffer_size;
       b_buffer = reinterpret_cast<scalar_t*>(buffer_ptr + b_buffer_offset);
       c_buffer = reinterpret_cast<float*>(buffer_ptr + c_buffer_offset);
     }

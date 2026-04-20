@@ -1,10 +1,13 @@
 name: macOS Apple Silicon Smoke Test
 
 on:
-  push:
-    branches:
-      - main
+  schedule:
+    # Daily at 2:30 AM UTC
+    - cron: '30 2 * * *'
   workflow_dispatch:  # Manual trigger
+
+permissions:
+  contents: read
 
 jobs:
   macos-m1-smoke-test:
@@ -12,7 +15,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.1
 
       - uses: astral-sh/setup-uv@v7
         with:
@@ -29,8 +32,9 @@ jobs:
 
       - name: Install dependencies and build vLLM
         run: |
+          uv pip install -r requirements/build/cpu.txt --index-strategy unsafe-best-match
           uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 
@@ -41,6 +45,7 @@ jobs:
       - name: Smoke test vllm serve
         run: |
           # Start server in background
+          VLLM_CPU_KVCACHE_SPACE=1 \
           vllm serve Qwen/Qwen3-0.6B \
             --max-model-len=2K \
             --load-format=dummy \

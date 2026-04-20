@@ -7,24 +7,17 @@ Define KV connector functionality mixin for model runners.
 import copy
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import (
-    TYPE_CHECKING,  # noqa: UP035
-)
+from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.attention import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed.kv_transfer import (
-    ensure_kv_transfer_shutdown,
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-)
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
@@ -41,42 +34,6 @@ logger = init_logger(__name__)
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
-    @staticmethod
-    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
-        # Update KVConnector with the KVConnector metadata forward().
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase)
-            assert scheduler_output.kv_connector_metadata is not None
-            kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
-
-            # Background KV cache transfers happen here.
-            # These transfers are designed to be async and the requests
-            # involved may be disjoint from the running requests.
-            # Do this here to save a collective_rpc.
-            kv_connector.start_load_kv(get_forward_context())
-
-    @staticmethod
-    def ensure_kv_transfer_shutdown() -> None:
-        # has_kv_transfer_group can be None during interpreter shutdown.
-        if has_kv_transfer_group and has_kv_transfer_group():  # type: ignore[truthy-function]
-            ensure_kv_transfer_shutdown()
-
-    @staticmethod
-    def maybe_wait_for_kv_save() -> None:
-        if has_kv_transfer_group():
-            get_kv_transfer_group().wait_for_save()
-
-    @staticmethod
-    def get_finished_kv_transfers(
-        scheduler_output: "SchedulerOutput",
-    ) -> tuple[set[str] | None, set[str] | None]:
-        if has_kv_transfer_group():
-            return get_kv_transfer_group().get_finished(
-                scheduler_output.finished_req_ids
-            )
-        return None, None
-
     @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
@@ -100,19 +57,35 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
+        defer_finalize: bool = False,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
-            KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
+            KVConnectorModelRunnerMixin._get_kv_connector_output(
+                scheduler_output, defer_finalize=defer_finalize
+            )
             if has_kv_transfer_group()
             else nullcontext()
         )
+
+    @staticmethod
+    def finalize_kv_connector() -> None:
+        """Finalize the KV connector: wait_for_save and clear metadata.
+
+        Call after draft model forward when defer_finalize=True was used.
+        """
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            kv_connector.wait_for_save()
+            kv_connector.clear_connector_metadata()
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
-        scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        scheduler_output: "SchedulerOutput",
+        wait_for_save: bool = True,
+        defer_finalize: bool = False,
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
 
@@ -130,7 +103,7 @@ class KVConnectorModelRunnerMixin:
         try:
             yield output
         finally:
-            if wait_for_save:
+            if wait_for_save and not defer_finalize:
                 kv_connector.wait_for_save()
 
             output.finished_sending, output.finished_recving = (
@@ -138,16 +111,12 @@ class KVConnectorModelRunnerMixin:
             )
             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
 
-            output.kv_connector_stats = (
-                KVConnectorModelRunnerMixin.get_kv_connector_stats()
-            )
-            kv_connector.clear_connector_metadata()
+            output.kv_connector_stats = kv_connector.get_kv_connector_stats()
+            output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+            output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
 
-    @staticmethod
-    def get_kv_connector_stats() -> KVConnectorStats | None:
-        if has_kv_transfer_group():
-            return get_kv_transfer_group().get_kv_connector_stats()
-        return None
+            if not defer_finalize:
+                kv_connector.clear_connector_metadata()
 
     @staticmethod
     def use_uniform_kv_cache(
@@ -212,8 +181,13 @@ class KVConnectorModelRunnerMixin:
         except (AttributeError, NotImplementedError):
             return False
 
-        # check that attention backend include a layers dimension
-        return len(kv_cache_stride_order) == len(kv_cache_shape) + 1
+        # check that attention backend includes a layers dimension
+        if len(kv_cache_stride_order) != len(kv_cache_shape) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so cross-layer is unsupported.
+        return kv_cache_stride_order[0] != 0
 
     @staticmethod
     def allocate_uniform_kv_caches(

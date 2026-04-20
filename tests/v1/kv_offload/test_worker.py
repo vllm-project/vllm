@@ -63,6 +63,12 @@ class OffloadingHandler1To2(OffloadingHandler):
                 del self.transfers[job_id]
         return finished
 
+    def wait(self, job_ids: set[int]) -> None:
+        for job_id in job_ids:
+            spec = self.transfers.get(job_id)
+            if spec:
+                assert spec.finished
+
 
 class OffloadingHandler2To1(OffloadingHandler):
     def __init__(self):
@@ -83,6 +89,12 @@ class OffloadingHandler2To1(OffloadingHandler):
                 finished.append((job_id, spec.async_success))
                 del self.transfers[job_id]
         return finished
+
+    def wait(self, job_ids: set[int]) -> None:
+        for job_id in job_ids:
+            spec = self.transfers.get(job_id)
+            if spec:
+                assert spec.finished
 
 
 def test_offloading_worker():

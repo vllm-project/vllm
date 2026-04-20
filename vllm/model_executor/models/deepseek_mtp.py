@@ -30,9 +30,9 @@ from .deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
+    _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .interfaces import SupportsPP
 from .utils import maybe_prefix
 
 logger = init_logger(__name__)
@@ -141,6 +141,7 @@ class DeepSeekMultiTokenPredictor(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
@@ -180,10 +181,11 @@ class DeepSeekMultiTokenPredictor(nn.Module):
 
 
 @support_torch_compile
-class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
+class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         self.model = DeepSeekMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -213,7 +215,7 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
@@ -243,7 +245,15 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
+        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        indexer_fused_mapping = [
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
+        ]
+        stacked_params_mapping.extend(indexer_fused_mapping)
+
         expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+            self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
@@ -257,6 +267,7 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        _pending_wk_fp8: dict = {}  # FP8 indexer wk dequant buffer
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -267,6 +278,12 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
+
+            if _try_load_fp8_indexer_wk(
+                name, loaded_weight, _pending_wk_fp8, params_dict, loaded_params
+            ):
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
@@ -315,7 +332,11 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     # Determine split axis based on op type
                     # gate/up: ColumnParallel → split along dim 0
                     # down: RowParallel → split along dim 1
-                    split_dim = 1 if "down_proj.weight" in name else 0
+                    split_dim = (
+                        1
+                        if ("down_proj.weight" in name and loaded_weight.ndim > 1)
+                        else 0
+                    )
                     total = loaded_weight.shape[split_dim]
                     assert total % num_chunks == 0, (
                         f"Shared expert weight dim {total} "
@@ -328,14 +349,13 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     weight_to_load = loaded_weight
 
                     if is_fusion_moe_shared_experts_layer:
-                        if split_dim == 0:
-                            weight_to_load = loaded_weight[
-                                j * chunk_size : (j + 1) * chunk_size, :
-                            ]
+                        chunk_slice = slice(j * chunk_size, (j + 1) * chunk_size)
+                        if loaded_weight.ndim == 1:
+                            weight_to_load = loaded_weight[chunk_slice]
+                        elif split_dim == 0:
+                            weight_to_load = loaded_weight[chunk_slice, :]
                         else:
-                            weight_to_load = loaded_weight[
-                                :, j * chunk_size : (j + 1) * chunk_size
-                            ]
+                            weight_to_load = loaded_weight[:, chunk_slice]
                         # Synthesize an expert-style name so expert mapping
                         # can route it
                         chunk_name = name.replace(
@@ -346,10 +366,15 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                     # Use expert_params_mapping to locate the destination
                     # param and delegate to its expert-aware weight_loader
                     # with expert_id.
+                    is_expert_weight = False
                     for mapping in expert_params_mapping:
                         param_name, weight_name, expert_id, shard_id = mapping
                         if weight_name not in chunk_name:
                             continue
+
+                        # Anyway, this is an expert weight and should not be
+                        # attempted to load as other weights later
+                        is_expert_weight = True
 
                         # Do not modify `name` since the loop may continue here
                         # Instead, create a new variable
@@ -377,6 +402,12 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                                 loaded_params.add(name_mapped)
                             break
                     else:
+                        if is_expert_weight:
+                            # We've checked that this is an expert weight
+                            # However it's not mapped locally to this rank
+                            # So we simply skip it
+                            continue
+
                         # Skip loading extra bias for GPTQ models.
                         if name.endswith(".bias") and name not in params_dict:
                             continue
@@ -400,6 +431,26 @@ class DeepSeekMTP(nn.Module, SupportsPP, DeepseekV2MixtureOfExperts):
                         weight_loader(param, loaded_weight)
             if not is_fusion_moe_shared_experts_layer:
                 loaded_params.add(name)
+
+        # Validate that weights were loaded for each expected MTP layer.
+        loaded_layers: set[int] = set()
+        for param_name in loaded_params:
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, param_name)
+            if spec_layer is not None:
+                loaded_layers.add(spec_layer)
+        for layer_idx in range(
+            self.model.mtp_start_layer_idx,
+            self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
+        ):
+            if layer_idx not in loaded_layers:
+                raise ValueError(
+                    f"MTP speculative decoding layer {layer_idx} weights "
+                    f"missing from checkpoint. The checkpoint may have "
+                    f"been quantized without including the MTP layers. "
+                    f"Use a checkpoint that includes MTP layer weights, "
+                    f"or disable speculative decoding."
+                )
+
         return loaded_params
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:

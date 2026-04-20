@@ -3,7 +3,7 @@
 
 import pytest
 
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 
 
 def test_chat_completion_request_with_no_tools():
@@ -26,15 +26,15 @@ def test_chat_completion_request_with_no_tools():
     )
     assert request.tool_choice == "none"
 
-    # tools key present but empty
-    request = ChatCompletionRequest.model_validate(
-        {
-            "messages": [{"role": "user", "content": "Hello"}],
-            "model": "facebook/opt-125m",
-            "tools": [],
-        }
-    )
-    assert request.tool_choice == "none"
+    # tools key present but empty -- should be rejected
+    with pytest.raises(ValueError, match="must not be an empty array"):
+        ChatCompletionRequest.model_validate(
+            {
+                "messages": [{"role": "user", "content": "Hello"}],
+                "model": "facebook/opt-125m",
+                "tools": [],
+            }
+        )
 
 
 @pytest.mark.parametrize("tool_choice", ["auto", "required"])

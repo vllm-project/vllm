@@ -6,32 +6,40 @@ import random
 import pytest
 import torch
 
-from vllm.attention.utils.fa_utils import flash_attn_supports_mla
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import get_config
+from vllm.transformers_utils.model_arch_config_convertor import (
+    ModelArchConfigConvertorBase,
+)
+from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
 skip_unsupported = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(90)),
-    reason="Requires CUDA and >= Hopper (SM90)",
+    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
+    # Supports testing on Ampere and Ada Lovelace devices.
+    # Note: For devices with SM < 90, batch invariance does not support CUDA Graphs.
+    reason="Requires CUDA and >= Ampere (SM80)",
 )
+
+DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
+TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 
 BACKENDS: list[str] = [
     "FLASH_ATTN",
-    "FLASHINFER",
+    "TRITON_ATTN",
 ]
 
-if flash_attn_supports_mla():
-    BACKENDS.append("FLASH_ATTN_MLA")
+# FlashInfer temporarily disabled due to invariant CTA sizes.
+# See FlashInfer issue #2424
+# if has_flashinfer():
+#     BACKENDS.append("FLASHINFER")
 
-DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
-MLA_MODEL = "deepseek-ai/DeepSeek-V2-Lite-Chat"
-
-
-def resolve_model_name(backend: str) -> str:
-    """Resolve the model name for the given backend."""
-    model = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
-    if backend.endswith("MLA") and model == DEFAULT_MODEL:
-        return MLA_MODEL
-    return model
+# only run MLA backends when the requested test model is itself an MLA model.
+if os.getenv("VLLM_TEST_MODEL"):
+    config = get_config(TEST_MODEL, trust_remote_code=False)
+    if ModelArchConfigConvertorBase(config, config.get_text_config()).is_deepseek_mla():
+        BACKENDS = ["TRITON_MLA"]
+        if flash_attn_supports_mla():
+            BACKENDS.append("FLASH_ATTN_MLA")
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
@@ -72,9 +80,10 @@ def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
         # For longer prompts, repeat context
         padding_text = (
             " This is an interesting topic that deserves more explanation. "
+            # TODO: Update to * (target_words // 10) to better align with word ratio
             * (target_words // 50)
         )
-        base_prompt = base_prompt + padding_text
+        base_prompt = padding_text + base_prompt
 
     return base_prompt
 
@@ -93,3 +102,7 @@ def _extract_step_logprobs(request_output):
             return t, inner.token_ids
 
     return None, None
+
+
+def is_device_capability_below_90() -> bool:
+    return not current_platform.has_device_capability(90)

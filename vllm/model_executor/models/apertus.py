@@ -32,12 +32,14 @@ import torch
 from torch import nn
 from transformers import ApertusConfig
 
-from vllm.attention import Attention, AttentionType
-from vllm.attention.layers.encoder_only_attention import EncoderOnlyAttention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import XIELU
+from vllm.model_executor.layers.attention import (
+    Attention,
+    EncoderOnlyAttention,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -56,8 +58,15 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
-from .interfaces import SupportsLoRA, SupportsPP
+from .interfaces import (
+    EagleModelMixin,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -147,8 +156,6 @@ class ApertusAttention(nn.Module):
         if head_dim is None:
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
-        # Phi models introduced a partial_rotary_factor parameter in the config
-        self.partial_rotary_factor = getattr(config, "partial_rotary_factor", 1)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -227,11 +234,9 @@ class ApertusAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=int(self.partial_rotary_factor * self.head_dim),
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=is_neox_style,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
 
 
@@ -314,7 +319,7 @@ class ApertusDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class ApertusModel(nn.Module):
+class ApertusModel(nn.Module, EagleModelMixin):
     def __init__(
         self,
         *,
@@ -358,8 +363,6 @@ class ApertusModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.aux_hidden_state_layers = tuple[int, ...]()
-
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -385,13 +388,14 @@ class ApertusModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        aux_hidden_states = []
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer)
         ):
-            if idx in self.aux_hidden_state_layers:
-                aux_hidden_states.append(hidden_states + residual)
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -438,7 +442,7 @@ class ApertusModel(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
@@ -473,7 +477,9 @@ class ApertusModel(nn.Module):
         return loaded_params
 
 
-class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class ApertusForCausalLM(
+    nn.Module, SupportsLoRA, SupportsPP, SupportsEagle, SupportsEagle3
+):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
 
     # LoRA specific attributes
@@ -481,7 +487,6 @@ class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(
         self,
@@ -522,13 +527,6 @@ class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors
         )
 
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.model.layers)
-        return (2, num_layers // 2, num_layers - 3)
-
     def _init_model(
         self,
         vllm_config: VllmConfig,
@@ -544,7 +542,7 @@ class ApertusForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

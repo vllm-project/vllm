@@ -1,0 +1,281 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from fastapi.responses import JSONResponse, Response
+
+from vllm import PoolingParams
+from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.logger import init_logger
+from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
+from vllm.v1.pool.late_interaction import (
+    build_late_interaction_doc_params,
+    build_late_interaction_query_params,
+)
+
+from ..base.io_processor import PoolingIOProcessor
+from ..base.serving import PoolingServing
+from .io_processor import ScoringIOProcessors, ScoringServeContext
+from .protocol import (
+    RerankDocument,
+    RerankRequest,
+    RerankResponse,
+    RerankResult,
+    RerankUsage,
+    ScoreRequest,
+    ScoreResponse,
+    ScoreResponseData,
+)
+from .typing import ScoreInput
+
+logger = init_logger(__name__)
+
+
+class ServingScores(PoolingServing):
+    request_id_prefix = "score"
+
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        *args,
+        enable_flash_late_interaction: bool = True,
+        **kwargs,
+    ):
+        self.io_processor_name: str = engine_client.model_config.score_type
+        self.enable_flash_late_interaction = (
+            self.io_processor_name == "late-interaction"
+            and enable_flash_late_interaction
+        )
+
+        if self.enable_flash_late_interaction:
+            self.io_processor_name = "flash-late-interaction"
+
+        if engine_client.model_config.architecture == "JinaForRanking":
+            self.io_processor_name = "jina-reranking-scoring"
+            self.enable_flash_late_interaction = False
+
+        super().__init__(engine_client, *args, **kwargs)
+
+    def init_io_processor(self, *args, **kwargs) -> PoolingIOProcessor:
+        return ScoringIOProcessors[self.io_processor_name](*args, **kwargs)
+
+    async def __call__(self, *args, **kwargs) -> Response:
+        if not self.enable_flash_late_interaction:
+            return await super().__call__(*args, **kwargs)
+
+        return await self.flash_late_interaction(*args, **kwargs)
+
+    def _build_response(
+        self,
+        ctx: ScoringServeContext,
+    ) -> JSONResponse:
+        final_res_batch = ctx.final_res_batch
+        request_id = ctx.request_id
+        created_time = ctx.created_time
+        model_name = self.models.model_name()
+
+        if isinstance(ctx.request, ScoreRequest):
+            return self._request_output_to_score_response(
+                final_res_batch,
+                request_id,
+                created_time,
+                model_name,
+            )
+        elif isinstance(ctx.request, RerankRequest):
+            return self._request_output_to_rerank_response(
+                final_res_batch,
+                request_id,
+                model_name,
+                ctx.request.documents,
+                ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
+            )
+        else:
+            raise ValueError(f"Invalid {self.request_id_prefix} request type")
+
+    def _request_output_to_score_response(
+        self,
+        final_res_batch: list[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+    ) -> JSONResponse:
+        items: list[ScoreResponseData] = []
+        num_prompt_tokens = 0
+
+        for idx, final_res in enumerate(final_res_batch):
+            classify_res = ScoringRequestOutput.from_base(final_res)
+
+            item = ScoreResponseData(
+                index=idx,
+                score=classify_res.outputs.score,
+            )
+            prompt_token_ids = final_res.prompt_token_ids
+
+            items.append(item)
+            num_prompt_tokens += len(prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            total_tokens=num_prompt_tokens,
+        )
+
+        response = ScoreResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            data=items,
+            usage=usage,
+        )
+
+        return JSONResponse(content=response.model_dump())
+
+    def _request_output_to_rerank_response(
+        self,
+        final_res_batch: list[PoolingRequestOutput],
+        request_id: str,
+        model_name: str,
+        documents: ScoreInput | list[ScoreInput],
+        top_n: int,
+    ) -> JSONResponse:
+        if not isinstance(documents, list):
+            documents = [documents]
+
+        results: list[RerankResult] = []
+        num_prompt_tokens = 0
+        for idx, final_res in enumerate(final_res_batch):
+            classify_res = ScoringRequestOutput.from_base(final_res)
+
+            document = documents[idx]
+            if isinstance(document, str):
+                rerank_document = RerankDocument(text=document)
+            else:
+                rerank_document = RerankDocument(
+                    multi_modal=document.get("content", [])
+                )
+
+            result = RerankResult(
+                index=idx,
+                document=rerank_document,
+                relevance_score=classify_res.outputs.score,
+            )
+            results.append(result)
+            prompt_token_ids = final_res.prompt_token_ids
+            num_prompt_tokens += len(prompt_token_ids)
+
+        # sort by relevance, then return the top n if set
+        results.sort(key=lambda x: x.relevance_score, reverse=True)
+        if top_n < len(documents):
+            results = results[:top_n]
+
+        response = RerankResponse(
+            id=request_id,
+            model=model_name,
+            results=results,
+            usage=RerankUsage(
+                total_tokens=num_prompt_tokens, prompt_tokens=num_prompt_tokens
+            ),
+        )
+
+        return JSONResponse(content=response.model_dump())
+
+    ###################################################################################
+    ### Run pooling score MaxSim on worker side (GPU) in the API server process
+    ### Can significantly improve late-interaction scoring performance.
+
+    async def flash_late_interaction(self, *args, **kwargs) -> Response:
+        ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
+        await self._preprocessing_async(self.io_processor, ctx)
+
+        # stage 1: encode queries and cache token embeddings on workers.
+        await self._flash_late_interaction_encode_queries(ctx)
+        # stage 2: encode docs and return scalar scores from workers.
+        await self._flash_late_interaction_encode_docs(ctx)
+
+        return await self._postprocessing_async(self.io_processor, ctx)
+
+    async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
+        assert ctx.n_queries is not None
+        assert ctx.engine_inputs is not None
+        assert isinstance(ctx.pooling_params, PoolingParams)
+
+        n_queries = ctx.n_queries
+        n_docs = len(ctx.engine_inputs) - n_queries
+        query_engine_inputs = ctx.engine_inputs[:n_queries]
+
+        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        query_uses = [n_docs if n_queries == 1 else 1] * n_queries
+
+        query_pooling_params_list = []
+        for i in range(n_queries):
+            pooling_params = ctx.pooling_params.clone()
+            pooling_params.late_interaction_params = (
+                build_late_interaction_query_params(
+                    query_key=query_keys[i],
+                    query_uses=query_uses[i],
+                )
+            )
+            query_pooling_params_list.append(pooling_params)
+
+        assert (
+            n_queries
+            == len(query_pooling_params_list)
+            == len(query_engine_inputs)
+            == len(query_keys)
+        )
+
+        query_ctx = ScoringServeContext(
+            request=ctx.request,
+            raw_request=ctx.raw_request,
+            model_name=ctx.model_name,
+            request_id=ctx.request_id,
+            pooling_params=query_pooling_params_list,
+            prompt_request_ids=query_keys,
+            engine_inputs=query_engine_inputs,
+        )
+
+        await self._prepare_generators(query_ctx)
+        await self._collect_batch(query_ctx)
+        ctx.query_final_res_batch = query_ctx.final_res_batch
+
+    async def _flash_late_interaction_encode_docs(self, ctx: ScoringServeContext):
+        assert ctx.n_queries is not None
+        assert ctx.engine_inputs is not None
+        assert isinstance(ctx.pooling_params, PoolingParams)
+
+        n_queries = ctx.n_queries
+        n_docs = len(ctx.engine_inputs) - n_queries
+        doc_engine_inputs = ctx.engine_inputs[n_queries:]
+
+        query_keys = [f"{ctx.request_id}-query-{i}" for i in range(n_queries)]
+        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+
+        doc_pooling_params_list = []
+        for i in range(n_docs):
+            query_idx = 0 if n_queries == 1 else i
+            pooling_params = ctx.pooling_params.clone()
+            pooling_params.late_interaction_params = build_late_interaction_doc_params(
+                query_key=query_keys[query_idx]
+            )
+            doc_pooling_params_list.append(pooling_params)
+
+        assert (
+            n_docs
+            == len(doc_pooling_params_list)
+            == len(doc_engine_inputs)
+            == len(doc_keys)
+        )
+
+        doc_ctx = ScoringServeContext(
+            request=ctx.request,
+            raw_request=ctx.raw_request,
+            model_name=ctx.model_name,
+            request_id=ctx.request_id,
+            pooling_params=doc_pooling_params_list,
+            prompt_request_ids=doc_keys,
+            engine_inputs=doc_engine_inputs,
+        )
+
+        await self._prepare_generators(doc_ctx)
+        await self._collect_batch(doc_ctx)
+
+        ctx.final_res_batch = doc_ctx.final_res_batch

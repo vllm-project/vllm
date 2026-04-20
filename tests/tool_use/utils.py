@@ -42,6 +42,8 @@ def ensure_system_prompt(
 
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
+SEED = 42
+
 ARGS: list[str] = [
     "--enable-auto-tool-choice",
     "--max-model-len",
@@ -123,7 +125,7 @@ CONFIGS: dict[str, ServerConfig] = {
         "supports_parallel": True,
         "extended": True,
     },
-    "mistral": {
+    "mistral-7b": {
         "model": "mistralai/Mistral-7B-Instruct-v0.3",
         "arguments": [
             "--enforce-eager",
@@ -145,6 +147,32 @@ CONFIGS: dict[str, ServerConfig] = {
         "call the tool. Otherwise, answer the user's query directly "
         "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
         "to the user's question - just respond to it normally.",
+        "supports_parallel": True,
+    },
+    "mistral-small-3.2": {
+        "model": "mistralai/Mistral-Small-3.2-24B-Instruct-2506",
+        "arguments": [
+            "--enforce-eager",
+            "--no-enable-prefix-caching",
+            "--tool-call-parser",
+            "mistral",
+            "--tokenizer-mode",
+            "mistral",
+            "--config-format",
+            "mistral",
+            "--load-format",
+            "mistral",
+            "--tensor-parallel-size",
+            "4",
+            '--ignore-patterns="consolidated.safetensors"',
+        ],
+        "system_prompt": "You are a helpful assistant with access to tools. If a tool"
+        " that you have would be helpful to answer a user query, "
+        "call the tool. Otherwise, answer the user's query directly "
+        "without calling a tool. DO NOT CALL A TOOL THAT IS IRRELEVANT "
+        "to the user's question - just respond to it normally.",
+        "supports_parallel": True,
+        "extended": True,
     },
     # FIXME: This test currently fails, need to debug why.
     # "granite20b": {

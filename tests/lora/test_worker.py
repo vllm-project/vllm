@@ -13,15 +13,19 @@ from vllm.config import (
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
+    set_current_vllm_config,
 )
 from vllm.config.load import LoadConfig
 from vllm.config.lora import LoRAConfig
-from vllm.lora.models import LoRAMapping
+from vllm.lora.model_manager import LoRAMapping
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu_worker import Worker
 
 MODEL_PATH = "Qwen/Qwen3-0.6B"
 NUM_LORAS = 16
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @patch.dict(os.environ, {"RANK": "0"})
@@ -33,14 +37,16 @@ def test_worker_apply_lora(qwen3_lora_files):
             lora_requests, lora_mapping
         )
 
+    model_config = ModelConfig(
+        MODEL_PATH,
+        seed=0,
+        dtype="float16",
+        max_model_len=127,
+        enforce_eager=True,
+    )
+
     vllm_config = VllmConfig(
-        model_config=ModelConfig(
-            MODEL_PATH,
-            seed=0,
-            dtype="float16",
-            max_model_len=127,
-            enforce_eager=True,
-        ),
+        model_config=model_config,
         load_config=LoadConfig(
             download_dir=None,
             load_format="dummy",
@@ -50,11 +56,17 @@ def test_worker_apply_lora(qwen3_lora_files):
             tensor_parallel_size=1,
             data_parallel_size=1,
         ),
-        scheduler_config=SchedulerConfig("generate", 32, 32, 32),
-        device_config=DeviceConfig("cuda"),
+        scheduler_config=SchedulerConfig(
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+            runner_type="generate",
+            max_num_batched_tokens=32,
+            max_num_seqs=32,
+            max_num_partial_prefills=32,
+        ),
+        device_config=DeviceConfig(DEVICE_TYPE),
         cache_config=CacheConfig(
             block_size=16,
-            swap_space=0,
             cache_dtype="auto",
         ),
         lora_config=LoRAConfig(
@@ -68,8 +80,9 @@ def test_worker_apply_lora(qwen3_lora_files):
         distributed_init_method=f"file://{tempfile.mkstemp()[1]}",
     )
 
-    worker.init_device()
-    worker.load_model()
+    with set_current_vllm_config(vllm_config):
+        worker.init_device()
+        worker.load_model()
 
     set_active_loras(worker, [])
     assert worker.list_loras() == set()

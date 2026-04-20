@@ -7,7 +7,8 @@ import json
 import logging
 import os
 import sys
-from collections.abc import Hashable
+from collections.abc import Generator, Hashable
+from contextlib import contextmanager
 from functools import lru_cache, partial
 from logging import Logger
 from logging.config import dictConfig
@@ -16,6 +17,7 @@ from types import MethodType
 from typing import Any, Literal, cast
 
 import vllm.envs as envs
+from vllm.logging_utils import ColoredFormatter, NewLineFormatter
 
 _FORMAT = (
     f"{envs.VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
@@ -36,7 +38,7 @@ def _use_color() -> bool:
     return False
 
 
-DEFAULT_LOGGING_CONFIG = {
+DEFAULT_LOGGING_CONFIG: dict[str, dict[str, Any] | Any] = {
     "formatters": {
         "vllm": {
             "class": "vllm.logging_utils.NewLineFormatter",
@@ -61,7 +63,7 @@ DEFAULT_LOGGING_CONFIG = {
     "loggers": {
         "vllm": {
             "handlers": ["vllm"],
-            "level": "DEBUG",
+            "level": envs.VLLM_LOGGING_LEVEL,
             "propagate": False,
         },
     },
@@ -101,7 +103,6 @@ def _should_log_with_scope(scope: LogScope) -> bool:
         from vllm.distributed.parallel_state import is_local_first_rank
 
         return is_local_first_rank()
-    # default "process" scope: always log
     return True
 
 
@@ -114,9 +115,7 @@ class _VllmLogger(Logger):
         `intel_extension_for_pytorch.utils._logger`.
     """
 
-    def debug_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
-    ) -> None:
+    def debug_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
         """
         As [`debug`][logging.Logger.debug], but subsequent calls with
         the same message are silently dropped.
@@ -125,7 +124,7 @@ class _VllmLogger(Logger):
             return
         _print_debug_once(self, msg, *args)
 
-    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "process") -> None:
+    def info_once(self, msg: str, *args: Hashable, scope: LogScope = "local") -> None:
         """
         As [`info`][logging.Logger.info], but subsequent calls with
         the same message are silently dropped.
@@ -135,7 +134,7 @@ class _VllmLogger(Logger):
         _print_info_once(self, msg, *args)
 
     def warning_once(
-        self, msg: str, *args: Hashable, scope: LogScope = "process"
+        self, msg: str, *args: Hashable, scope: LogScope = "local"
     ) -> None:
         """
         As [`warning`][logging.Logger.warning], but subsequent calls with
@@ -155,7 +154,7 @@ _METHODS_TO_PATCH = {
 
 
 def _configure_vllm_root_logger() -> None:
-    logging_config = dict[str, Any]()
+    logging_config: dict[str, dict[str, Any] | Any] = {}
 
     if not envs.VLLM_CONFIGURE_LOGGING and envs.VLLM_LOGGING_CONFIG_PATH:
         raise RuntimeError(
@@ -173,6 +172,9 @@ def _configure_vllm_root_logger() -> None:
         vllm_handler["level"] = envs.VLLM_LOGGING_LEVEL
         vllm_handler["stream"] = envs.VLLM_LOGGING_STREAM
         vllm_handler["formatter"] = "vllm_color" if _use_color() else "vllm"
+
+        vllm_loggers = logging_config["loggers"]["vllm"]
+        vllm_loggers["level"] = envs.VLLM_LOGGING_LEVEL
 
     if envs.VLLM_LOGGING_CONFIG_PATH:
         if not path.exists(envs.VLLM_LOGGING_CONFIG_PATH):
@@ -212,10 +214,36 @@ def init_logger(name: str) -> _VllmLogger:
     return cast(_VllmLogger, logger)
 
 
+@contextmanager
+def suppress_logging(level: int = logging.INFO) -> Generator[None, Any, None]:
+    current_level = logging.root.manager.disable
+    logging.disable(level)
+    yield
+    logging.disable(current_level)
+
+
+def current_formatter_type(logger: Logger) -> Literal["color", "newline", None]:
+    lgr: Logger | None = logger
+    while lgr is not None:
+        if lgr.handlers and len(lgr.handlers) == 1 and lgr.handlers[0].name == "vllm":
+            formatter = lgr.handlers[0].formatter
+            if isinstance(formatter, ColoredFormatter):
+                return "color"
+            if isinstance(formatter, NewLineFormatter):
+                return "newline"
+        lgr = lgr.parent
+    return None
+
+
 # The root logger is initialized when the module is imported.
 # This is thread-safe as the module is only imported once,
 # guaranteed by the Python GIL.
 _configure_vllm_root_logger()
+
+# Transformers uses httpx to access the Hugging Face Hub. httpx is quite verbose,
+# so we set its logging level to WARNING when vLLM's logging level is INFO.
+if envs.VLLM_LOGGING_LEVEL == "INFO":
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 logger = init_logger(__name__)
 

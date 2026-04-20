@@ -24,7 +24,7 @@ import torch.nn as nn
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_dp_group, get_ep_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.models.interfaces import MixtureOfExperts
 from vllm.model_executor.models.utils import maybe_prefix
@@ -37,12 +37,14 @@ if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
 
-@CustomOp.register("transformers_fused_moe")
+# --8<-- [start:transformers_fused_moe]
+@PluggableLayer.register("transformers_fused_moe")
 class TransformersFusedMoE(FusedMoE):
     """Custom FusedMoE for the Transformers modeling backend."""
 
+    # --8<-- [end:transformers_fused_moe]
+
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
         self._topk_ids: torch.Tensor = None
 
         def custom_routing_function(hidden_states, gating_output, topk, renormalize):
@@ -60,7 +62,8 @@ class TransformersFusedMoE(FusedMoE):
                 (topk_ids,) = dist_group.all_gatherv([topk_ids], 0, sizes)
             return topk_weights, topk_ids
 
-        self.custom_routing_function = custom_routing_function
+        kwargs["custom_routing_function"] = custom_routing_function
+        super().__init__(*args, **kwargs)
 
     def forward(
         self,
@@ -91,7 +94,9 @@ def transformers_moe_forward(
     self = forward_context.no_compile_layers[layer_name]
     self._topk_ids = topk_ids
     # Clone hidden_states because it will be mutated in-place in FusedMoE
-    return self.forward_impl(hidden_states.clone(), topk_weights)
+    # TODO(bnell): figure out a way to avoid calling runner directly.
+    # it is a hack that the weight are being passed via logits.
+    return self.runner.forward(hidden_states.clone(), topk_weights)
 
 
 def transformers_moe_forward_fake(
@@ -115,7 +120,7 @@ direct_register_custom_op(
 
 class MoEMixin(MixtureOfExperts):
     def __init__(self, *, vllm_config: "VllmConfig", prefix: str = ""):
-        self.check_version("5.0.0.dev0", "MoE models support")
+        self.check_version("5.0.0", "MoE models support")
         # Skip MixtureOfExperts.__init__ and call the next class in MRO
         super(MixtureOfExperts, self).__init__(vllm_config=vllm_config, prefix=prefix)
 
@@ -153,6 +158,17 @@ class MoEMixin(MixtureOfExperts):
         Params for weights, fp8 weight scales, fp8 activation scales
         (param_name, weight_name, expert_id, shard_id)
         """
+        # Models saved with fused experts. These are checkpoints released:
+        # - After Transformers v5
+        # - Before Transformers v5, but re-saved with save_original_format=False
+        # In the fused experts case, we repurpose the expert_id as shard_idx for
+        # deconcatenating w1 and w3 in FusedMoE.load_weights.
+        expert_mapping = [
+            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
+            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
+            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
+        ]
+        # Models saved with ModuleList experts
         ckpt_names = [
             # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
             ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
@@ -161,10 +177,10 @@ class MoEMixin(MixtureOfExperts):
         ]
         num_experts = self.model_config.get_num_experts()
         num_redundant_experts = self.parallel_config.eplb_config.num_redundant_experts
-        expert_mapping = []
         for gate_proj, down_proj, up_proj in ckpt_names:
             expert_mapping.extend(
                 FusedMoE.make_expert_params_mapping(
+                    self,
                     ckpt_gate_proj_name=gate_proj,
                     ckpt_down_proj_name=down_proj,
                     ckpt_up_proj_name=up_proj,

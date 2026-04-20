@@ -28,13 +28,28 @@ class BlockStored(KVCacheEvent):
     parent_block_hash: ExternalBlockHash | None
     token_ids: list[int]
     block_size: int
+
     lora_id: int | None
+    """Deprecated: use `lora_name` for KV block key hash.
+    Retained for backward compatibility.
+    """
+
     medium: str | None
+    lora_name: str | None
+
+    extra_keys: list[tuple[Any, ...] | None] | None = None
+    """Extra keys used in block hash computation, one entry per block in
+    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
+    prompt embeddings data, etc. for that specific block.
+    """
+
+    group_idx: int | None = None
 
 
 class BlockRemoved(KVCacheEvent):
     block_hashes: list[ExternalBlockHash]
     medium: str | None
+    group_idx: int | None = None
 
 
 class AllBlocksCleared(KVCacheEvent):

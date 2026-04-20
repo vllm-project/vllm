@@ -1,22 +1,80 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from unittest.mock import patch
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
-import numpy as np
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
-from vllm.forward_context import set_forward_context
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    graph_capture,
+    is_global_first_rank,
+)
+from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.logger import init_logger
+from vllm.model_executor.offloader.base import get_offloader
+from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.utils import AttentionGroup
+
+logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class BatchExecutionDescriptor:
+    """Describes the shape of the batch and CG mode to run; this is used to make shape
+    matches between the capture and runtime."""
+
+    cg_mode: CUDAGraphMode
+    num_tokens: int
+    num_reqs: int | None  # None means no request padding is needed (PIECEWISE graphs)
+    uniform_token_count: int | None = None
+
+
+def _is_compatible(
+    desc: BatchExecutionDescriptor,
+    num_reqs: int,
+    num_tokens: int,
+    uniform_token_count: int | None,
+) -> bool:
+    # desc.uniform_token_count=None (PIECEWISE) can handle any uniform_token_count
+    # desc.num_reqs=None means no request padding needed (PIECEWISE)
+    return (
+        (
+            desc.uniform_token_count is None
+            or desc.uniform_token_count == uniform_token_count
+        )
+        and (desc.num_reqs is None or desc.num_reqs >= num_reqs)
+        and desc.num_tokens >= num_tokens
+    )
+
+
+def get_uniform_token_count(
+    num_reqs: int,
+    num_tokens: int,
+    max_query_len: int,
+) -> int | None:
+    """
+    Return the uniform token count if batch is uniform, else None.
+    A batch is uniform if all requests have the same number of tokens.
+    """
+    if (max_query_len == num_tokens // num_reqs) and (
+        num_tokens == max_query_len * num_reqs
+    ):
+        return max_query_len
+    return None
 
 
 class CudaGraphManager:
@@ -24,182 +82,354 @@ class CudaGraphManager:
         self,
         vllm_config: VllmConfig,
         device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
     ):
         self.vllm_config = vllm_config
-        self.scheduler_config = vllm_config.scheduler_config
         self.device = device
-
-        self.max_model_len = vllm_config.model_config.max_model_len
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
+        self.cudagraph_mode = cudagraph_mode
+        self.decode_query_len = decode_query_len
 
-        if self.compilation_config.cudagraph_mode is None:
-            self.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            self.cudagraph_mode = self.compilation_config.cudagraph_mode
-        if self.compilation_config.cudagraph_capture_sizes is not None:
-            cudagraph_sizes = sorted(self.compilation_config.cudagraph_capture_sizes)
-            # Limit the cudagraph sizes to the max decode batch size.
-            self.cudagraph_sizes = [
-                x for x in cudagraph_sizes if x <= self.max_num_reqs
-            ]
-        else:
-            self.cudagraph_sizes = []
-        self.padded_sizes = self._init_padded_sizes()
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.is_first_pp_rank = get_pp_group().is_first_rank
+        self.is_last_pp_rank = get_pp_group().is_last_rank
 
-        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.pool = torch.cuda.graph_pool_handle()
-        self.hidden_states: torch.Tensor | None = None
+        self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
+        self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
 
-    def _init_padded_sizes(self) -> dict[int, int]:
-        if not self.cudagraph_mode.has_full_cudagraphs():
-            # Full cuda graphs are not used.
-            return {}
-        if not self.cudagraph_sizes:
-            return {}
+        self._graphs_captured = False
+        self._candidates: list[list[BatchExecutionDescriptor]] = []
+        self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
+        self._init_candidates()
 
-        padded_sizes: dict[int, int] = {}
-        for i in range(1, self.cudagraph_sizes[-1] + 1):
-            for x in self.cudagraph_sizes:
-                if i <= x:
-                    padded_sizes[i] = x
-                    break
-        return padded_sizes
+    def _init_candidates(self) -> None:
+        """Build priority-ordered candidate lists for each token count."""
+        capture_sizes = self.compilation_config.cudagraph_capture_sizes
+        if not (self.cudagraph_mode and capture_sizes):
+            return
+
+        capture_sizes = sorted(capture_sizes)
+        max_decode_tokens = self.max_num_reqs * self.decode_query_len
+        decode_mode = self.cudagraph_mode.decode_mode()
+        mixed_mode = self.cudagraph_mode.mixed_mode()
+        separate_decode_routine = self.cudagraph_mode.separate_routine()
+
+        descs_by_token_count = defaultdict(list)
+        descs_by_mode = defaultdict(list)
+
+        for num_tokens in capture_sizes:
+            # Capture uniform decode specfifc graphs if required
+            #  (i.e. separate decode routine)
+            if (
+                separate_decode_routine
+                and decode_mode
+                and self.decode_query_len <= num_tokens <= max_decode_tokens
+            ):
+                desc = BatchExecutionDescriptor(
+                    cg_mode=decode_mode,
+                    num_tokens=num_tokens,
+                    num_reqs=num_tokens // self.decode_query_len,
+                    uniform_token_count=self.decode_query_len,
+                )
+                descs_by_mode[decode_mode].append(desc)
+                descs_by_token_count[num_tokens].append(desc)
+
+            if mixed_mode:
+                # for PIECEWISE graphs there is no limit on requests when replaying
+                # i.e. no request padding is needed
+                # so we leave it as None
+                num_reqs = (
+                    min(num_tokens, self.max_num_reqs)
+                    if mixed_mode == CUDAGraphMode.FULL
+                    else None
+                )
+                desc = BatchExecutionDescriptor(
+                    cg_mode=mixed_mode,
+                    num_tokens=num_tokens,
+                    num_reqs=num_reqs,
+                )
+                descs_by_mode[mixed_mode].append(desc)
+                descs_by_token_count[num_tokens].append(desc)
+
+        if not descs_by_token_count:
+            return
+
+        sorted_padded = sorted(descs_by_token_count.keys())
+        self._candidates = [[] for _ in range(sorted_padded[-1] + 1)]
+
+        current_range_start = 0
+        for cg_size in sorted_padded:
+            for i in range(current_range_start, cg_size + 1):
+                self._candidates[i] = descs_by_token_count[cg_size]
+            current_range_start = cg_size + 1
+
+        for mode, descs in descs_by_mode.items():
+            descs.sort(key=lambda d: d.num_tokens, reverse=True)
+            self._capture_descs[mode] = descs
 
     def needs_capture(self) -> bool:
-        return len(self.padded_sizes) > 0
-
-    def get_cudagraph_size(
-        self,
-        scheduler_output: SchedulerOutput,
-        num_tokens_after_padding: int,
-    ) -> int | None:
-        if not self.cudagraph_mode.has_full_cudagraphs():
-            return None
-        if self.cudagraph_mode != CUDAGraphMode.FULL:
-            # TODO(woosuk): Support uniform decode with multiple tokens (spec decoding).
-            all_decode = all(
-                x == 1 for x in scheduler_output.num_scheduled_tokens.values()
-            )
-            if not all_decode:
-                # Prefill is included.
-                return None
-        return self.padded_sizes.get(num_tokens_after_padding)
-
-    def capture_graph(
-        self,
-        batch_size: int,
-        model: nn.Module,
-        input_buffers: InputBuffers,
-        block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
-        kv_cache_config: KVCacheConfig,
-    ) -> None:
-        assert batch_size not in self.graphs
-
-        # Prepare dummy inputs.
-        input_ids = input_buffers.input_ids.gpu[:batch_size]
-        positions = input_buffers.positions[:batch_size]
-
-        input_buffers.query_start_loc.np[: batch_size + 1] = np.arange(batch_size + 1)
-        input_buffers.query_start_loc.np[batch_size:] = batch_size
-        input_buffers.query_start_loc.copy_to_gpu()
-        # HACK(woosuk): To optimize warmup time, we use 1 (instead of max_model_len)
-        # for seq_lens. This leads to a mismatch between seq_lens (GPU) and
-        # seq_lens_np (CPU), which might cause issues in some attention backends.
-        input_buffers.seq_lens[:batch_size] = 1
-        input_buffers.seq_lens[batch_size:] = 0
-
-        input_block_tables = [x[:batch_size] for x in block_tables.input_block_tables]
-        slot_mappings = block_tables.slot_mappings[:, :batch_size]
-
-        attn_metadata = build_attn_metadata(
-            attn_metadata_builders=attn_metadata_builders,
-            num_reqs=batch_size,
-            num_tokens=batch_size,
-            query_start_loc=input_buffers.query_start_loc,
-            seq_lens=input_buffers.seq_lens,
-            seq_lens_np=np.full(batch_size, self.max_model_len, dtype=np.int32),
-            num_computed_tokens_cpu=None,  # FIXME
-            block_tables=input_block_tables,
-            slot_mappings=slot_mappings,
-            kv_cache_config=kv_cache_config,
-        )
-        if self.dp_size > 1:
-            num_tokens_across_dp = torch.full(
-                (self.dp_size,),
-                batch_size,
-                dtype=torch.int32,
-                device="cpu",
-            )
-        else:
-            num_tokens_across_dp = None
-
-        # Warm up.
-        with set_forward_context(
-            attn_metadata,
-            self.vllm_config,
-            num_tokens=batch_size,
-            cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            num_tokens_across_dp=num_tokens_across_dp,
-        ):
-            hidden_states = model(
-                input_ids=input_ids,
-                positions=positions,
-            )
-            if self.hidden_states is None:
-                self.hidden_states = torch.empty_like(hidden_states)
-
-        # Capture the graph.
-        graph = torch.cuda.CUDAGraph()
-        with (
-            patch("torch.cuda.empty_cache", lambda: None),
-            set_forward_context(
-                attn_metadata,
-                self.vllm_config,
-                num_tokens=batch_size,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-                num_tokens_across_dp=num_tokens_across_dp,
-            ),
-            torch.cuda.graph(graph, self.pool),
-        ):
-            hidden_states = model(
-                input_ids=input_ids,
-                positions=positions,
-            )
-            self.hidden_states[:batch_size] = hidden_states
-        self.graphs[batch_size] = graph
+        return len(self._capture_descs) > 0
 
     @torch.inference_mode()
     def capture(
         self,
-        model: nn.Module,
-        input_buffers: InputBuffers,
-        block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
-        kv_cache_config: KVCacheConfig,
+        create_forward_fn: Callable[
+            [BatchExecutionDescriptor], Callable[[CUDAGraphMode], None]
+        ],
+        progress_bar_desc: str = "Capturing CUDA graphs",
     ) -> None:
-        assert self.needs_capture()
-        # Capture larger graphs first.
-        sizes_to_capture = sorted(self.cudagraph_sizes, reverse=True)
-        if is_global_first_rank():
-            sizes_to_capture = tqdm(sizes_to_capture, desc="Capturing CUDA graphs")
+        """Capture CUDA graphs.
 
+        Args:
+            create_forward_fn: Factory that prepares inputs (OUTSIDE graph) and
+                returns a function that runs forward with a given CUDAGraphMode.
+        """
         with graph_capture(device=self.device):
-            for batch_size in sizes_to_capture:
-                self.capture_graph(
-                    batch_size,
-                    model,
-                    input_buffers,
-                    block_tables,
-                    attn_metadata_builders,
-                    kv_cache_config,
-                )
+            # Capture in order: PIECEWISE first, then FULL. PIECEWISE has larger
+            # activations so FULL activations should fit in already allocated
+            # buffers in the graph pool.
+            for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
+                if mode not in self._capture_descs:
+                    continue
 
-    def run(self, batch_size: int) -> torch.Tensor:
-        assert batch_size in self.graphs
-        self.graphs[batch_size].replay()
+                descs = self._capture_descs[mode]
+                if is_global_first_rank():
+                    descs = tqdm(descs, desc=f"{progress_bar_desc} ({mode.name})")
+                for desc in descs:
+                    # Prepare inputs and get forward function
+                    forward_fn = create_forward_fn(desc)
+
+                    # Warmup
+                    forward_fn(CUDAGraphMode.NONE)
+
+                    # Capture
+                    logger.debug(
+                        "CG Capture: mode=%s, batch_desc=%s", desc.cg_mode.name, desc
+                    )
+                    if desc.cg_mode == CUDAGraphMode.PIECEWISE:
+                        forward_fn(CUDAGraphMode.PIECEWISE)
+                    else:
+                        assert desc not in self.graphs, (
+                            f"Graph already captured for {desc}"
+                        )
+                        graph = torch.cuda.CUDAGraph()
+                        # Sync offloader's copy stream before capture.
+                        # Ensure any pre-capture prefetches from offloader are complete.
+                        get_offloader().sync_prev_onload()
+                        with torch.cuda.graph(graph, self.pool):
+                            forward_fn(CUDAGraphMode.NONE)
+                            # Join offloader's copy stream after forward to avoid
+                            # unjoined stream error. The last layer's start_prefetch
+                            # forks copy_stream, but wait_prefetch only happens in
+                            # the next forward pass.
+                            get_offloader().join_after_forward()
+                        self.graphs[desc] = graph
+        self._graphs_captured = True
+
+    def dispatch(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        uniform_token_count: int | None,
+    ) -> BatchExecutionDescriptor:
+        """Find matching cudagraph descriptor from priority-ordered candidates."""
+        if self._graphs_captured and 0 < num_tokens < len(self._candidates):
+            for desc in self._candidates[num_tokens]:
+                if _is_compatible(desc, num_reqs, num_tokens, uniform_token_count):
+                    return desc
+        return BatchExecutionDescriptor(
+            cg_mode=CUDAGraphMode.NONE, num_tokens=num_tokens, num_reqs=num_reqs
+        )
+
+    def run_fullgraph(self, desc: BatchExecutionDescriptor):
+        """Replay a captured FULL cudagraph."""
+        assert desc.cg_mode == CUDAGraphMode.FULL, (
+            f"Expected FULL mode, got {desc.cg_mode}"
+        )
+        assert desc in self.graphs, f"No cudagraph for {desc}"
+        # Sync offloader before replay - needed when transitioning from
+        # eager/piecewise to full cudagraph (e.g., prefill → decode).
+        # The previous eager iteration's start_prefetch may have queued
+        # H2D copies on copy_stream that the graph's captured events
+        # cannot see. Without this, replay could overwrite static buffers
+        # while those copies are still in flight.
+        get_offloader().sync_prev_onload()
+        self.graphs[desc].replay()
+
+
+class ModelCudaGraphManager(CudaGraphManager):
+    """CudaGraphManager with model-specific capture and hidden state management."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        cudagraph_mode: CUDAGraphMode,
+        decode_query_len: int,
+    ):
+        super().__init__(vllm_config, device, cudagraph_mode, decode_query_len)
+        # Used for FULL CUDA graphs. PW CUDA graphs do not use these.
+        self.hidden_states: torch.Tensor | None = None
+        self.aux_hidden_states: list[torch.Tensor] = []
+        self.use_aux_hidden_state_outputs = False
+        self.intermediate_tensors: IntermediateTensors | None = None
+
+    def capture(
+        self,
+        model: nn.Module,
+        model_state: ModelState,
+        input_buffers: InputBuffers,
+        intermediate_tensors: IntermediateTensors | None,
+        block_tables: BlockTables,
+        attn_groups: list[list[AttentionGroup]],
+        kv_cache_config: KVCacheConfig,
+        has_lora: bool = False,
+        use_aux_hidden_state_outputs: bool = False,
+        progress_bar_desc: str = "Capturing CUDA graphs",
+    ) -> None:
+        """Capture CUDA graphs for model forward pass."""
+        self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
+
+        def create_forward_fn(
+            desc: BatchExecutionDescriptor,
+        ) -> Callable[[CUDAGraphMode], None]:
+            num_tokens = desc.num_tokens
+            num_reqs = desc.num_reqs or min(num_tokens, self.max_num_reqs)
+            num_tokens_across_dp = (
+                torch.full((self.dp_size,), num_tokens, dtype=torch.int32, device="cpu")
+                if self.dp_size > 1
+                else None
+            )
+
+            model_inputs = {
+                "input_ids": input_buffers.input_ids[:num_tokens],
+                "positions": input_buffers.positions[:num_tokens],
+                **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
+            }
+            if not self.is_first_pp_rank:
+                # Update for non-first PP ranks.
+                model_inputs["input_ids"] = None
+                model_inputs["inputs_embeds"] = None
+                assert intermediate_tensors is not None
+                model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
+
+            attn_metadata, slot_mappings = prepare_inputs_to_capture(
+                num_reqs,
+                num_tokens,
+                model_state,
+                input_buffers,
+                block_tables,
+                attn_groups,
+                kv_cache_config,
+            )
+
+            def forward_fn(cg_mode: CUDAGraphMode) -> None:
+                batch_descriptor = (
+                    BatchDescriptor(num_tokens=num_tokens)
+                    if cg_mode == CUDAGraphMode.PIECEWISE
+                    else None
+                )
+                with set_forward_context(
+                    attn_metadata if cg_mode != CUDAGraphMode.PIECEWISE else None,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    cudagraph_runtime_mode=cg_mode,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    slot_mapping=slot_mappings,
+                    batch_descriptor=batch_descriptor,
+                ):
+                    model_output = model(**model_inputs)
+
+                if cg_mode == CUDAGraphMode.PIECEWISE:
+                    # PW CUDA graph internally handles the model outputs.
+                    # No need to keep track of the hidden states.
+                    return None
+
+                if self.is_last_pp_rank:
+                    # Last PP rank (common case).
+                    if self.use_aux_hidden_state_outputs:
+                        hidden_states, aux_hidden_states = model_output
+                    else:
+                        hidden_states = model_output
+                        aux_hidden_states = []
+                    if self.hidden_states is None:
+                        self.hidden_states = torch.empty_like(hidden_states)
+                    self.hidden_states[:num_tokens] = hidden_states
+                    if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
+                        self.aux_hidden_states = [
+                            torch.empty_like(x) for x in aux_hidden_states
+                        ]
+                    for i, aux in enumerate(aux_hidden_states):
+                        self.aux_hidden_states[i][:num_tokens] = aux
+                else:
+                    # Non-last PP rank.
+                    assert isinstance(model_output, IntermediateTensors)
+                    intermediate_tensors = model_output
+                    if self.intermediate_tensors is None:
+                        self.intermediate_tensors = IntermediateTensors.empty_like(
+                            intermediate_tensors
+                        )
+                    for k, v in intermediate_tensors.tensors.items():
+                        self.intermediate_tensors[k][:num_tokens] = v
+
+            return forward_fn
+
+        super().capture(create_forward_fn, progress_bar_desc)
+
+    def run_fullgraph(
+        self, desc: BatchExecutionDescriptor
+    ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]] | IntermediateTensors:
+        """Replay a captured FULL cudagraph and return hidden states."""
+        super().run_fullgraph(desc)
+        if not self.is_last_pp_rank:
+            assert self.intermediate_tensors is not None
+            return self.intermediate_tensors[: desc.num_tokens]
+
         assert self.hidden_states is not None
-        return self.hidden_states[:batch_size]
+        hidden_states = self.hidden_states[: desc.num_tokens]
+        if not self.use_aux_hidden_state_outputs:
+            return hidden_states
+        return hidden_states, [x[: desc.num_tokens] for x in self.aux_hidden_states]
+
+
+def prepare_inputs_to_capture(
+    num_reqs: int,
+    num_tokens: int,
+    model_state: ModelState,
+    input_buffers: InputBuffers,
+    block_tables: BlockTables,
+    attn_groups: list[list[AttentionGroup]],
+    kv_cache_config: KVCacheConfig,
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+    input_batch = InputBatch.make_dummy(num_reqs, num_tokens, input_buffers)
+    input_block_tables = block_tables.get_dummy_block_tables(num_reqs)
+    slot_mappings = block_tables.get_dummy_slot_mappings(num_tokens)
+    slot_mappings_by_layer = build_slot_mappings_by_layer(
+        slot_mappings, kv_cache_config
+    )
+
+    # HACK(woosuk): Special handling for DCP.
+    if block_tables.cp_size > 1:
+        prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_batch.seq_lens,
+            num_reqs,
+            block_tables.cp_size,
+            block_tables.cp_rank,
+            block_tables.cp_interleave,
+        )
+        input_batch.dcp_local_seq_lens = input_buffers.dcp_local_seq_lens[:num_reqs]
+
+    attn_metadata = model_state.prepare_attn(
+        input_batch,
+        CUDAGraphMode.NONE,
+        input_block_tables,
+        slot_mappings,
+        attn_groups,
+        kv_cache_config,
+        for_capture=True,
+    )
+    return attn_metadata, slot_mappings_by_layer

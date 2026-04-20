@@ -13,6 +13,7 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import (
     STR_DTYPE_TO_TORCH_DTYPE,
     create_kv_caches_with_random,
+    set_random_seed,
 )
 
 logger = init_logger(__name__)
@@ -38,7 +39,7 @@ def main(
     device: str = "cuda",
     kv_cache_dtype: str | None = None,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     scale = float(1.0 / (head_size**0.5))
     query = torch.empty(
@@ -102,7 +103,7 @@ def main(
         max_logits = torch.empty_like(exp_sums)
 
     def run_cuda_benchmark(num_iters: int, profile: bool = False) -> float:
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
@@ -172,7 +173,7 @@ def main(
                     )
             else:
                 raise ValueError(f"Invalid version: {version}")
-        torch.cuda.synchronize()
+        torch.accelerator.synchronize()
 
         end_time = time.perf_counter()
         if profile:

@@ -3,9 +3,9 @@
 import contextlib
 import importlib.metadata
 import os
+import random
 import threading
 from collections.abc import Callable, Collection
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any, TypeVar
 
 import numpy as np
@@ -13,9 +13,10 @@ import numpy.typing as npt
 import torch
 from packaging import version
 from packaging.version import Version
-from torch.library import Library
+from torch.library import Library, infer_schema
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -24,18 +25,28 @@ else:
     ModelConfig = object
     IntermediateTensors = object
 
+logger = init_logger(__name__)
+
 
 STR_DTYPE_TO_TORCH_DTYPE = {
     "float32": torch.float32,
     "half": torch.half,
+    "float16": torch.float16,
     "bfloat16": torch.bfloat16,
     "float": torch.float,
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
     "int8": torch.int8,
+    "int8_per_token_head": torch.int8,
+    "fp8_per_token_head": torch.uint8,
     "fp8_inc": torch.float8_e4m3fn,
     "fp8_ds_mla": torch.uint8,
+    "turboquant_k8v4": torch.uint8,
+    "turboquant_4bit_nc": torch.uint8,
+    "turboquant_k3v4_nc": torch.uint8,
+    "turboquant_3bit_nc": torch.uint8,
+    "nvfp4": torch.uint8,
 }
 
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
@@ -48,7 +59,55 @@ TORCH_DTYPE_TO_NUMPY_DTYPE = {
 }
 
 
+MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP = {
+    "fp8": "fp8_e4m3",
+    "nvfp4": "nvfp4",
+}
+
 T = TypeVar("T")
+
+
+def is_quantized_kv_cache(kv_cache_dtype: str) -> bool:
+    return (
+        kv_cache_dtype.startswith("fp8")
+        or kv_cache_dtype.endswith("per_token_head")
+        or kv_cache_dtype == "nvfp4"
+    )
+
+
+def kv_cache_uses_per_token_head_scales(kv_cache_dtype: str) -> bool:
+    """Return True if *kv_cache_dtype* needs per-token-head scales."""
+    return kv_cache_dtype.endswith("per_token_head")
+
+
+def is_strictly_contiguous(t: torch.Tensor) -> bool:
+    """
+    Check if tensor is contiguous AND has no degenerate strides.
+
+    A degenerate stride occurs when a dimension has size 1 but the stride
+    doesn't match the canonical contiguous layout. This can cause issues
+    in some CUDA kernels that rely on stride values for memory access.
+
+    For a C-contiguous tensor of shape (d0, d1, ..., dn), the expected
+    strides are: stride[i] = product(shape[i+1:]) for all i, with stride[-1]=1.
+
+    Example with torch.Size([16, 1, 8, 32]):
+        - Canonical strides: (256, 256, 32, 1)
+        - Degenerate strides: (256, 1, 32, 1)  # dim=1 has size=1, allowing
+                                                  # non-canonical stride in dim=0
+    """
+    if not t.is_contiguous():
+        return False
+
+    # Check that strides match canonical contiguous layout
+    shape = t.shape
+    strides = t.stride()
+    expected_stride = 1
+    for i in range(len(shape) - 1, -1, -1):
+        if strides[i] != expected_stride:
+            return False
+        expected_stride *= shape[i]
+    return True
 
 
 @contextlib.contextmanager
@@ -61,12 +120,36 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 @contextlib.contextmanager
-def set_default_torch_num_threads(num_threads: int):
-    """Sets the default number of threads for PyTorch to the given value."""
+def set_default_torch_num_threads(num_threads: int | None = None):
+    """
+    Sets the default number of threads for PyTorch to the given value.
+
+    `None` means using the value of the environment variable `OMP_NUM_THREADS`
+    (or `1` if that is not available).
+    """
+    if num_threads is None:
+        num_threads = 1
+
+        try:
+            num_threads = int(os.environ["OMP_NUM_THREADS"])
+        except KeyError:
+            logger.debug_once(
+                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d.",
+                num_threads,
+            )
+        except ValueError:
+            logger.warning_once(
+                "OMP_NUM_THREADS is invalid; defaulting Torch threads to %d.",
+                num_threads,
+            )
+
     old_num_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads)
-    yield
-    torch.set_num_threads(old_num_threads)
+
+    try:
+        yield
+    finally:
+        torch.set_num_threads(old_num_threads)
 
 
 @contextlib.contextmanager
@@ -78,7 +161,6 @@ def guard_cuda_initialization():
         yield
         return
 
-    had_key = "CUDA_VISIBLE_DEVICES" in os.environ
     old_value = os.environ.get("CUDA_VISIBLE_DEVICES")
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     try:
@@ -90,10 +172,10 @@ def guard_cuda_initialization():
             err_msg = str(e)
         raise RuntimeError(err_msg) from e
     finally:
-        if had_key:
-            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
+        if old_value is None:
+            del os.environ["CUDA_VISIBLE_DEVICES"]
         else:
-            os.environ.pop("CUDA_VISIBLE_DEVICES")
+            os.environ["CUDA_VISIBLE_DEVICES"] = old_value
 
 
 def get_dtype_size(dtype: torch.dtype) -> int:
@@ -194,6 +276,91 @@ def get_kv_cache_torch_dtype(
     return torch_dtype
 
 
+def get_kv_cache_quant_algo_string(quant_cfg: dict[str, Any]) -> str | None:
+    """Get the KV cache quantization algorithm string from the quantization config.
+
+    Maps various FP8 format names to vLLM's standard cache dtype strings.
+    Returns None if no kv_cache_quant_algo is specified.
+    Returns "auto" if the value is not recognized/supported.
+    """
+    # Mapping from model config values to vLLM cache_dtype strings
+
+    quant_method = quant_cfg.get("quant_method", "")
+    if quant_method.startswith("modelopt"):
+        quantization_inner = quant_cfg.get("quantization", quant_cfg)
+        # Check if quant config is specified and use kv cache quant algo
+        kv_algo = (
+            quantization_inner.get("kv_cache_scheme")
+            or quant_cfg.get("kv_cache_scheme")
+            or quantization_inner.get("kv_cache_quant_algo")
+            or quant_cfg.get("kv_cache_quant_algo")
+        )
+        if isinstance(kv_algo, dict):
+            if (
+                kv_algo.get("dynamic") is False
+                and kv_algo.get("num_bits") == 8
+                and kv_algo.get("type") == "float"
+            ):
+                kv_algo = "fp8"
+            elif kv_algo.get("num_bits") == 4 and kv_algo.get("type") == "float":
+                kv_algo = "nvfp4"
+            else:
+                # Unknown/unsupported format - return "auto" as safe fallback
+                logger.warning(
+                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to 'auto'.",
+                    f"{kv_algo}",
+                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+                )
+                return "auto"
+        if isinstance(kv_algo, str):
+            kv_algo_lower = kv_algo.lower()
+
+            # Try to map to vLLM's standard format
+            if kv_algo_lower in MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP:
+                return MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP[kv_algo_lower]
+            else:
+                # Unknown/unsupported format - return "auto" as safe fallback
+                logger.warning(
+                    "WARNING: Unknown kv_cache_quant_algo '%s' in model "
+                    "config. Supported values: %s. Falling back to 'auto'.",
+                    kv_algo,
+                    list(MODELOPT_TO_VLLM_KV_CACHE_DTYPE_MAP.keys()),
+                )
+                return "auto"
+    return None
+
+
+def get_kv_cache_quant_algo_dtype(quant_cfg: dict[str, Any]) -> torch.dtype | None:
+    """Get the KV cache quantization algorithm dtype from the quantization config."""
+    kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
+    if kv_algo_str is not None and kv_algo_str != "auto":
+        # Only convert if we have a valid dtype string (not "auto" fallback)
+        return STR_DTYPE_TO_TORCH_DTYPE[kv_algo_str]
+    return None
+
+
+def resolve_kv_cache_dtype_string(
+    kv_cache_dtype: str, model_config: ModelConfig
+) -> str:
+    """Resolve 'auto' kv_cache_dtype to the actual string value from model config.
+    Returns the resolved cache_dtype string.
+    """
+    if kv_cache_dtype != "auto":
+        return kv_cache_dtype
+
+    hf_cfg = getattr(model_config, "hf_config", None)
+    if hf_cfg is not None:
+        quant_cfg = getattr(hf_cfg, "quantization_config", None)
+        if quant_cfg is not None:
+            kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
+            if kv_algo_str is not None:
+                return kv_algo_str
+
+    # Default to auto (will be handled by downstream code)
+    return "auto"
+
+
 def kv_cache_dtype_str_to_dtype(
     kv_cache_dtype: str, model_config: ModelConfig
 ) -> torch.dtype:
@@ -201,6 +368,105 @@ def kv_cache_dtype_str_to_dtype(
         # Model config may not be specified for unit tests, default to float16
         return model_config.dtype if model_config else torch.half
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
+
+
+def set_random_seed(seed: int | None) -> None:
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        from vllm.platforms import current_platform
+
+        current_platform.manual_seed_all(seed)
+
+
+def nvfp4_kv_cache_full_dim(head_size: int) -> int:
+    """Packed last dim for NVFP4 KV cache: fp4 data + fp8 block scales."""
+    return head_size // 2 + head_size // 16
+
+
+def _nvfp4_split_data_scale(
+    kv_side: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a single NVFP4 KV-side buffer into data and scale views.
+
+    The input is a 4D tensor for one KV side (K or V) whose last
+    dimension is ``full_dim = data_dim + scale_dim``.  The physical
+    layout within each side is [data | scale], both packed contiguously.
+
+    Args:
+        kv_side: 4D uint8 tensor with shape
+            ``(num_pages, dim_1, dim_2, full_dim)``.
+            May be in any permutation order (NHD or HND).
+
+    Returns:
+        ``(data, scale)`` where
+        ``data`` is a uint8 view with shape
+        ``(num_pages, dim_1, dim_2, data_dim)``.
+        ``scale`` is a float8_e4m3fn view with shape
+        ``(num_pages, dim_1, dim_2, scale_dim)``.
+    """
+    num_pages = kv_side.shape[0]
+    dim_1, dim_2 = kv_side.shape[1], kv_side.shape[2]
+    full_dim = kv_side.shape[3]
+    data_dim = full_dim * 8 // 9
+    scale_dim = full_dim - data_dim
+
+    data_per_kv = dim_1 * dim_2 * data_dim
+    page_bytes = kv_side.stride(0)
+
+    # Derive inner strides from the kv_side strides, scaling by the
+    # ratio of the target dim to full_dim.  This preserves the physical
+    # layout (NHD vs HND) encoded in the input tensor's strides.
+    s1 = kv_side.stride(1) * data_dim // full_dim
+    s2 = kv_side.stride(2) * data_dim // full_dim
+    data_shape = (num_pages, dim_1, dim_2, data_dim)
+    data_strides = (page_bytes, s1, s2, 1)
+
+    s1_s = kv_side.stride(1) * scale_dim // full_dim
+    s2_s = kv_side.stride(2) * scale_dim // full_dim
+    scale_shape = (num_pages, dim_1, dim_2, scale_dim)
+    scale_strides = (page_bytes, s1_s, s2_s, 1)
+
+    base = kv_side.storage_offset()
+    data = torch.as_strided(kv_side, data_shape, data_strides, storage_offset=base)
+    scale = torch.as_strided(
+        kv_side, scale_shape, scale_strides, storage_offset=base + data_per_kv
+    ).view(torch.float8_e4m3fn)
+
+    return data, scale
+
+
+def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
+    """Split an NVFP4 KV cache tensor into data and scale views.
+
+    Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
+    or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
+
+    Per-page layout: [K_data | K_scale | V_data | V_scale].
+    Each KV side is self-contained (data followed by its scale), so the
+    5D case simply splits each side independently.
+
+    The returned views are in the same dim order as the input (NHD or
+    HND), so callers get views matching whichever order they passed in.
+
+    Args:
+        kv_cache: 5D or 4D uint8 tensor where the last dimension is
+            ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
+
+    Returns:
+        For 5D input:
+            ``(k_data, v_data), (k_scale, v_scale)``
+        For 4D input (single KV side):
+            ``(data,), (scale,)``
+    """
+    if kv_cache.dim() == 4:
+        data, scale = _nvfp4_split_data_scale(kv_cache)
+        return (data,), (scale,)
+
+    k_data, k_scale = _nvfp4_split_data_scale(kv_cache[:, 0])
+    v_data, v_scale = _nvfp4_split_data_scale(kv_cache[:, 1])
+    return (k_data, v_data), (k_scale, v_scale)
 
 
 def create_kv_caches_with_random_flash(
@@ -215,9 +481,7 @@ def create_kv_caches_with_random_flash(
     device: str | None = "cuda",
     cache_layout: str | None = "NHD",
 ) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-    from vllm.platforms import current_platform
-
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     generic_kv_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -231,15 +495,31 @@ def create_kv_caches_with_random_flash(
     value_caches: list[torch.Tensor] = []
 
     for _ in range(num_layers):
-        key_value_cache = torch.empty(
-            size=kv_cache_allocation_shape, dtype=dtype, device=device
-        ).permute(*stride_order)
-        if cache_dtype in ["auto", "half", "bfloat16", "float"]:
-            key_value_cache.uniform_(-scale, scale)
-        elif cache_dtype == "fp8":
-            _generate_random_fp8(key_value_cache, -scale, scale)
+        if cache_dtype == "nvfp4":
+            # Full page dim: fp4 data + fp8 block scales per head.
+            # Per page layout: [K_data | K_scale | V_data | V_scale]
+            # Returns [:, 0] and [:, 1] like all other dtypes.
+            full_dim = nvfp4_kv_cache_full_dim(head_size)
+            nvfp4_shape = (num_blocks, 2, block_size, num_heads, full_dim)
+            nvfp4_phys = tuple(nvfp4_shape[i] for i in stride_order)
+            inv = [stride_order.index(i) for i in range(len(stride_order))]
+            key_value_cache = torch.randint(
+                0,
+                256,
+                nvfp4_phys,
+                dtype=dtype,
+                device=device,
+            ).permute(*inv)
         else:
-            raise ValueError(f"Does not support key cache of type {cache_dtype}")
+            key_value_cache = torch.empty(
+                size=kv_cache_allocation_shape, dtype=dtype, device=device
+            ).permute(*stride_order)
+            if cache_dtype in ["auto", "half", "bfloat16", "float"]:
+                key_value_cache.uniform_(-scale, scale)
+            elif cache_dtype == "fp8":
+                _generate_random_fp8(key_value_cache, -scale, scale)
+            else:
+                raise ValueError(f"Does not support key cache of type {cache_dtype}")
         key_caches.append(key_value_cache[:, 0])
         value_caches.append(key_value_cache[:, 1])
     return key_caches, value_caches
@@ -260,9 +540,8 @@ def create_kv_caches_with_random(
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
-    from vllm.platforms import current_platform
 
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
 
     dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -390,9 +669,13 @@ def current_stream() -> torch.cuda.Stream:
         # when this function is called before any stream is set,
         # we return the default stream.
         # On ROCm using the default 0 stream in combination with RCCL
-        # is hurting performance. Therefore creating a dedicated stream
-        # per process
-        if current_platform.is_rocm():
+        # is hurting performance.
+        # On CUDA, we capture and replay cudagraph on the same stream,
+        # so we need to avoid using the default stream as well. The default
+        # stream cannot be used for cudagraph capture, see
+        # https://github.com/pytorch/pytorch/blob/42ad9edfb754743fdae3276ade43de000beb4f60/aten/src/ATen/cuda/CUDAGraph.cpp#L77
+        # for more details. Therefore, we create a dedicated stream per process.
+        if current_platform.is_rocm() or current_platform.is_cuda():
             # torch.cuda.set_stream here is the alias of _pathed_set_stream
             torch.cuda.set_stream(torch.cuda.Stream())
         elif current_platform.is_cpu():
@@ -409,8 +692,8 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream_tls.value
 
 
-# Global auxilary stream for running operations in background streams.
-# We have single global auxilary stream to avoid an explosion of streams
+# Global auxiliary stream for running operations in background streams.
+# We have single global auxiliary stream to avoid an explosion of streams
 # for every layer (and make profiling look sane).
 #
 # aux_stream() is currently used for:
@@ -432,56 +715,14 @@ def aux_stream() -> torch.cuda.Stream | None:
     return _aux_stream
 
 
-@lru_cache(maxsize=8)
-def _cuda_device_count_stateless(cuda_visible_devices: str | None = None) -> int:
-    # Note: cuda_visible_devices is not used, but we keep it as an argument for
-    # LRU Cache purposes.
-
-    # Code below is based on
-    # https://github.com/pytorch/pytorch/blob/
-    # c1cd946818442aca8c7f812b16d187ce1586c3bc/
-    # torch/cuda/__init__.py#L831C1-L831C17
-    import torch.cuda
-    import torch.version
-
-    from vllm.platforms import current_platform
-
-    if not torch.cuda._is_compiled():
-        return 0
-    if current_platform.is_rocm():
-        # ROCm uses amdsmi instead of nvml for stateless device count
-        # This requires a sufficiently modern version of Torch 2.4.0
-        raw_count = (
-            torch.cuda._device_count_amdsmi()
-            if (hasattr(torch.cuda, "_device_count_amdsmi"))
-            else -1
-        )
-    else:
-        raw_count = torch.cuda._device_count_nvml()
-    r = torch._C._cuda_getDeviceCount() if raw_count < 0 else raw_count
-    return r
-
-
-def cuda_device_count_stateless() -> int:
-    """Get number of CUDA devices, caching based on the value of
-    CUDA_VISIBLE_DEVICES at the time of call.
-
-    This should be used instead of torch.cuda.device_count()
-    unless CUDA_VISIBLE_DEVICES has already been set to the desired
-    value."""
-
-    # This can be removed and simply replaced with torch.cuda.get_device_count
-    # after https://github.com/pytorch/pytorch/pull/122815 is released.
-    return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
-
-
 def weak_ref_tensor(tensor: Any) -> Any:
     """
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
+    This ignores 0-size tensors as those don't allocate any memory.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
         return torch.ops._C.weak_ref_tensor(tensor)
     else:
         return tensor
@@ -515,18 +756,27 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
-    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
-    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
-    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+        return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
+    elif current_platform.is_cuda_alike():
+        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    else:
+        raise ValueError(
+            f"`get_accelerator_view_from_cpu_tensor` is currently "
+            f"not supported in: {current_platform.device_name}"
+        )
 
 
 # Helper function used in testing.
 def _is_torch_equal_or_newer(torch_version: str, target: str) -> bool:
-    torch_version = version.parse(torch_version)
-    return torch_version >= version.parse(target)
+    return version.parse(torch_version) >= version.parse(target)
 
 
 def is_torch_equal_or_newer(target: str) -> bool:
@@ -572,24 +822,74 @@ def is_torch_equal(target: str) -> bool:
         return Version(importlib.metadata.version("torch")) == Version(target)
 
 
-# Using dynamo with vLLM doesn't really work well with PyTorch versions < 2.4.0.
-# In particular, the FakeScalarType is not supported for earlier versions of
-# PyTorch which breaks dynamo for any ops registered using ScalarType.
-def supports_dynamo() -> bool:
-    return is_torch_equal_or_newer("2.4.0")
+HAS_OPAQUE_TYPE = is_torch_equal_or_newer("2.11.0.dev")
+
+# Allow toggling LayerName usage via environment variable.
+# Defaults to True on torch >= 2.11, False otherwise.
+# Set VLLM_USE_LAYERNAME=0 to disable even on torch >= 2.11.
+_USE_LAYERNAME = HAS_OPAQUE_TYPE and envs.VLLM_USE_LAYERNAME
+
+if HAS_OPAQUE_TYPE:
+    from torch._opaque_base import OpaqueBase
+else:
+    OpaqueBase = object  # type: ignore[misc, assignment]
+
+
+class LayerName(OpaqueBase):  # type: ignore[misc]
+    """Wraps a module name string for use as a torch opaque type.
+
+    When torch >= 2.11, this is registered as a hoisted value-type opaque
+    object so that torch.compile lifts it as a graph input instead of baking
+    it as a constant.  This avoids per-layer recompilation for custom ops
+    that accept layer name strings (attention, MOE, KV cache, etc.).
+    """
+
+    def __init__(self, value: str):
+        self.value = value
+
+    def __eq__(self, other):
+        return isinstance(other, LayerName) and self.value == other.value
+
+    def __hash__(self):
+        return hash(self.value)
+
+    def __fx_repr__(self):
+        return (f"LayerName({self.value!r})", {"LayerName": LayerName})
+
+
+if HAS_OPAQUE_TYPE:
+    from torch._library.opaque_object import register_opaque_type
+
+    register_opaque_type(LayerName, typ="value", hoist=True)
+
+# On torch >= 2.11 (with VLLM_USE_LAYERNAME enabled), custom op
+# layer_name parameters use LayerName; otherwise they remain plain str.
+if TYPE_CHECKING:
+    from typing import TypeAlias
+
+    LayerNameType: TypeAlias = str | LayerName
+else:
+    LayerNameType = LayerName if _USE_LAYERNAME else str
+
+
+def _resolve_layer_name(layer_name: str | LayerName) -> str:
+    """Unwrap a LayerName to str, or return str unchanged."""
+    return layer_name.value if isinstance(layer_name, LayerName) else layer_name
+
+
+def _encode_layer_name(layer_name: str) -> str | LayerName:
+    """Wrap a str layer name as LayerName when enabled."""
+    return LayerName(layer_name) if _USE_LAYERNAME else layer_name
 
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
-    return (
-        is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
-    )
+    return torch.distributed.is_xccl_available()
 
 
-# Some backends use pytorch version < 2.4.0 which doesn't
-# support `torch.library.custom_op`.
-def supports_custom_op() -> bool:
-    return hasattr(torch.library, "custom_op")
+# Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform
+def supports_xpu_graph() -> bool:
+    return is_torch_equal_or_newer("2.11.0.dev")
 
 
 # create a library to hold the custom op
@@ -620,18 +920,6 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
-    if not supports_custom_op():
-        from vllm.platforms import current_platform
-
-        assert not current_platform.is_cuda_alike(), (
-            "cuda platform needs torch>=2.4 to support custom op, "
-            "chances are you are using an old version of pytorch "
-            "or a custom build of pytorch. It is recommended to "
-            "use vLLM in a fresh new environment and let it install "
-            "the required dependencies."
-        )
-        return
-
     if mutates_args is None:
         mutates_args = []
 
@@ -640,15 +928,8 @@ def direct_register_custom_op(
 
         dispatch_key = current_platform.dispatch_key
 
-    import torch.library
+    schema_str = infer_schema(op_func, mutates_args=mutates_args)
 
-    if hasattr(torch.library, "infer_schema"):
-        schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    else:
-        # for pytorch 2.4
-        import torch._custom_op.impl
-
-        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str, tags=tags)
     my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)

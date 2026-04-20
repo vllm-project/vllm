@@ -8,6 +8,7 @@ from transformers import AutoModelForSpeechSeq2Seq
 
 from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ....conftest import AudioTestAssets, HfRunner, PromptAudioInput, VllmRunner
 from ...registry import HF_EXAMPLE_MODELS
@@ -28,10 +29,25 @@ def vllm_to_hf_output(
 
 
 MODEL_NAME = "ibm-granite/granite-speech-3.3-2b"
-# Audio lora co-exists directly in the model directory, but
-# currently still needs to be passed directly to vLLM.
-audio_lora_path = MODEL_NAME
-models = [MODEL_NAME]
+MODEL_NAME_4_0 = "ibm-granite/granite-4.0-1b-speech"
+# Audio lora co-exists directly in the 3.3 model directory,
+# the 4.0 model has adapters merged into the weights.
+models: dict[str, str | None] = {
+    MODEL_NAME: MODEL_NAME,
+    MODEL_NAME_4_0: None,
+}
+
+
+@pytest.fixture
+def granite_speech_attention_config():
+    """Return attention config for Granite Speech tests on ROCm."""
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_mi3xx
+
+        if on_mi3xx():
+            return {"backend": "ROCM_AITER_FA"}
+        return {"backend": "TRITON_ATTN"}
+    return None
 
 
 def run_test(
@@ -46,6 +62,8 @@ def run_test(
     num_logprobs: int,
     tensor_parallel_size: int,
     distributed_executor_backend: str | None = None,
+    attention_config: dict | None = None,
+    audio_lora_path: str | None = None,
 ):
     """Inference result should be the same between hf and vllm.
 
@@ -70,11 +88,14 @@ def run_test(
         limit_mm_per_prompt={"audio": 1},
         tensor_parallel_size=tensor_parallel_size,
         distributed_executor_backend=distributed_executor_backend,
-        enable_lora=True,
+        enable_lora=audio_lora_path is not None,
         max_lora_rank=64,
         enforce_eager=True,
+        attention_config=attention_config,
     ) as vllm_model:
-        lora_request = LoRARequest("audio", 1, audio_lora_path)
+        lora_request = (
+            LoRARequest("audio", 1, audio_lora_path) if audio_lora_path else None
+        )
         vllm_outputs_per_case = [
             vllm_model.generate_greedy_logprobs(
                 prompts,
@@ -110,16 +131,22 @@ def run_test(
         )
 
 
-@pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_model_len", [2048])
+@pytest.mark.parametrize("model,audio_lora_path", models.items())
+@pytest.mark.parametrize(
+    "dtype", ["float16"] if current_platform.is_rocm() else ["bfloat16"]
+)
+@pytest.mark.parametrize(
+    "max_model_len", [512] if current_platform.is_rocm() else [2048]
+)
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
 def test_models(
     hf_runner,
     vllm_runner,
     model: str,
+    audio_lora_path: str | None,
     audio_assets: AudioTestAssets,
+    granite_speech_attention_config,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
@@ -146,4 +173,6 @@ def test_models(
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
+        attention_config=granite_speech_attention_config,
+        audio_lora_path=audio_lora_path,
     )

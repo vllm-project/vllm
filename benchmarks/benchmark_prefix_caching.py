@@ -40,7 +40,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 try:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
+    from vllm.tokenizers import get_tokenizer
 except ImportError:
     from backend_request_func import get_tokenizer
 
@@ -196,7 +196,7 @@ def main(args):
 
     engine_args = EngineArgs.from_cli_args(args)
 
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
         temperature=0,

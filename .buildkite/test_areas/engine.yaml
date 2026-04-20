@@ -1,0 +1,86 @@
+group: Engine
+depends_on:
+  - image-build
+steps:
+- label: Engine
+  timeout_in_minutes: 15
+  device: h200_18gb
+  source_file_dependencies:
+  - vllm/
+  - tests/engine
+  - tests/test_sequence
+  - tests/test_config
+  - tests/test_logger
+  - tests/test_vllm_port
+  commands:
+  - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
+
+- label: Engine (1 GPU)
+  timeout_in_minutes: 30
+  source_file_dependencies:
+    - vllm/v1/engine/
+    - tests/v1/engine/
+  commands:
+    - pytest -v -s v1/engine/test_preprocess_error_handling.py
+    - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+
+- label: e2e Scheduling (1 GPU)
+  timeout_in_minutes: 30
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/
+    - tests/v1/e2e/general/
+  commands:
+    - pytest -v -s v1/e2e/general/test_async_scheduling.py
+
+- label: e2e Core (1 GPU)
+  timeout_in_minutes: 30
+  source_file_dependencies:
+    - vllm/v1/
+    - tests/v1/e2e/general/
+  commands:
+    - pytest -v -s v1/e2e/general --ignore v1/e2e/general/test_async_scheduling.py
+
+- label: V1 e2e (2 GPUs)
+  timeout_in_minutes: 60 # TODO: Fix timeout after we have more confidence in the test stability
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/e2e
+  commands:
+    # Only run tests that need exactly 2 GPUs
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "tensor_parallelism"
+  mirror:
+    amd:
+      device: mi325_2
+      depends_on:
+      - image-build-amd
+
+- label: V1 e2e (4 GPUs)
+  timeout_in_minutes: 60 # TODO: Fix timeout after we have more confidence in the test stability
+  optional: true
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/
+    - tests/v1/e2e
+  commands:
+    # Only run tests that need 4 GPUs
+    - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle_correctness_heavy"
+  mirror:
+    amd:
+      device: mi325_4
+      depends_on:
+      - image-build-amd
+
+- label: V1 e2e (4xH100)
+  timeout_in_minutes: 60
+  device: h100
+  num_devices: 4
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/attention/backends/utils.py
+    - vllm/v1/worker/gpu_model_runner.py
+    - tests/v1/e2e/test_hybrid_chunked_prefill.py
+  commands:
+    - pytest -v -s v1/e2e/test_hybrid_chunked_prefill.py

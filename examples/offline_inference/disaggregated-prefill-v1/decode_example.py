@@ -30,7 +30,7 @@ def main():
         max_num_batched_tokens=64,
         max_num_seqs=16,
         kv_transfer_config=KVTransferConfig(
-            kv_connector="SharedStorageConnector",
+            kv_connector="ExampleConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"shared_storage_path": "local_storage"},
         ),

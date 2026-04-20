@@ -6,6 +6,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.torch_utils import set_random_seed
 
 if not current_platform.has_device_capability(100):
     pytest.skip(
@@ -26,6 +27,12 @@ PAD_SHAPES = [
     (150, 128),
     (150, 48),
     (90, 80),
+    (128, 512),
+    (128, 1024),
+    (128, 2048),
+    (64, 7168),
+    (64, 7152),
+    (32, 14336),
 ]
 SEEDS = [42]
 CUDA_DEVICES = ["cuda:0"]
@@ -134,7 +141,7 @@ def test_quantize_to_fp4(
     seed: int,
     device: str,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
 
     m, n = shape
@@ -152,11 +159,57 @@ def test_quantize_to_fp4(
     torch.testing.assert_close(scale_ans, scale_ref)
 
 
+@pytest.mark.parametrize(
+    "shape",
+    [(32, 4096), (128, 4096), (1, 64), (127, 1024), (256, 16384)],
+)
+@pytest.mark.parametrize("is_sf_swizzled_layout", [True, False])
+@torch.inference_mode()
+def test_python_util_matches_cpp_allocation(
+    shape: tuple[int, int],
+    is_sf_swizzled_layout: bool,
+) -> None:
+    """
+    Verify that the Python utility (create_fp4_output_tensors) allocates
+    tensors with the same shapes and dtypes as the C++ functional variant
+    (scaled_fp4_quant_func).
+    """
+    from vllm._custom_ops import create_fp4_output_tensors
+
+    torch.set_default_device("cuda:0")
+    m, n = shape
+    input_tensor = torch.randn((m, n), dtype=torch.bfloat16)
+    input_scale = torch.tensor([1.0], dtype=torch.float32, device="cuda:0")
+
+    # C++ functional variant allocates internally
+    cpp_out, cpp_scale = torch.ops._C.scaled_fp4_quant(
+        input_tensor, input_scale, is_sf_swizzled_layout
+    )
+
+    # Python utility
+    py_out, py_scale = create_fp4_output_tensors(
+        m, n, torch.device("cuda:0"), is_sf_swizzled_layout
+    )
+
+    assert py_out.shape == cpp_out.shape, (
+        f"Output shape mismatch: Python {py_out.shape} vs C++ {cpp_out.shape}"
+    )
+    assert py_out.dtype == cpp_out.dtype, (
+        f"Output dtype mismatch: Python {py_out.dtype} vs C++ {cpp_out.dtype}"
+    )
+    assert py_scale.shape == cpp_scale.shape, (
+        f"Scale shape mismatch: Python {py_scale.shape} vs C++ {cpp_scale.shape}"
+    )
+    assert py_scale.dtype == cpp_scale.dtype, (
+        f"Scale dtype mismatch: Python {py_scale.dtype} vs C++ {cpp_scale.dtype}"
+    )
+
+
 @pytest.mark.parametrize("pad_shape", PAD_SHAPES)
 @torch.inference_mode()
 def test_quantize_to_fp4_padded(pad_shape: tuple[int, int]) -> None:
     dtype = torch.float16
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     torch.set_default_device("cuda:0")
 
     m, n = pad_shape
@@ -169,6 +222,28 @@ def test_quantize_to_fp4_padded(pad_shape: tuple[int, int]) -> None:
 
     out, out_scale = ops.scaled_fp4_quant(x, global_scale)
     scale_ans = recover_swizzled_scales(out_scale, m, n)
+    out_ans = cast_from_fp4(out, m, n)
+    torch.testing.assert_close(out_ans, out_ref)
+    torch.testing.assert_close(scale_ans, scale_ref)
+
+
+@pytest.mark.parametrize("pad_shape", PAD_SHAPES)
+@torch.inference_mode()
+def test_quantize_to_fp4_padded_no_sf_swizzled(pad_shape: tuple[int, int]) -> None:
+    dtype = torch.float16
+    set_random_seed(42)
+    torch.set_default_device("cuda:0")
+
+    m, n = pad_shape
+
+    x = torch.randn((m, n), dtype=dtype)
+
+    tensor_amax = torch.abs(x).max().to(torch.float32)
+    global_scale = FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / tensor_amax
+    out_ref, scale_ref = ref_nvfp4_quant(x, global_scale)
+
+    out, out_scale = ops.scaled_fp4_quant(x, global_scale, is_sf_swizzled_layout=False)
+    scale_ans = out_scale.to(torch.float32)
     out_ans = cast_from_fp4(out, m, n)
     torch.testing.assert_close(out_ans, out_ref)
     torch.testing.assert_close(scale_ans, scale_ref)

@@ -26,7 +26,12 @@ MODEL="Qwen/Qwen2.5-VL-3B-Instruct" bash disagg_1e1p1d_example.sh
 
 # Use specific storage path
 EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash disagg_1e1p1d_example.sh
+
+# Run on XPU; scripts switch from CUDA_VISIBLE_DEVICES to ZE_AFFINITY_MASK
+DEVICE_PLATFORM=xpu GPU_E=0 GPU_PD=1 bash disagg_1e1pd_example.sh
 ```
+
+`DEVICE_PLATFORM` defaults to `cuda`. Set `DEVICE_PLATFORM=xpu` when running these examples on Intel GPUs so the scripts use `ZE_AFFINITY_MASK` instead of `CUDA_VISIBLE_DEVICES` for device selection.
 
 ## Encoder Instances
 
@@ -37,6 +42,8 @@ Encoder engines should be launched with the following flags:
 - `--no-enable-prefix-caching` **(required)** – Encoder instances do not consume KV cache; prefix caching is disabled to avoid conflicts with other features.
 
 - `--max-num-batched-tokens=<large value>` **(default: 2048)** – This flag controls the token scheduling budget per decoding step and is irrelevant to encoder-only instances. **Set it to a very high value (effectively unlimited) to bypass scheduler limitations.** The actual token budget is managed by the encoder cache manager.
+
+- `--mm-encoder-only` **(Optional)** - If possible, skips the language model during initialization to reduce device memory usage.
 
 ## Local media inputs
 
@@ -50,12 +57,12 @@ The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url"
 
 ## EC connector and KV transfer
 
-The `ECSharedStorageConnector` is used to store the encoder cache on local disk and facilitate transfer. To enable the encoder disaggregation feature, add the following configuration:
+The `ECExampleonnector` is used to store the encoder cache on local disk and facilitate transfer. To enable the encoder disaggregation feature, add the following configuration:
 
 ```bash
 # Add to encoder instance: 
 --ec-transfer-config '{
-    "ec_connector": "ECSharedStorageConnector",
+    "ec_connector": "ECExampleConnector",
     "ec_role": "ec_producer",
     "ec_connector_extra_config": {
         "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
@@ -64,7 +71,7 @@ The `ECSharedStorageConnector` is used to store the encoder cache on local disk 
 
 # Add to prefill/prefill+decode instance: 
 --ec-transfer-config '{
-    "ec_connector": "ECSharedStorageConnector",
+    "ec_connector": "ECExampleConnector",
     "ec_role": "ec_consumer",
     "ec_connector_extra_config": {
         "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
@@ -93,7 +100,7 @@ If you enable prefill instance (`--prefill-servers-urls` not disabled), you will
 ## Proxy Instance Flags (`disagg_epd_proxy.py`)
 
 | Flag | Description |
-|------|-------------|
+| ---- | ----------- |
 | `--encode-servers-urls` | Comma-separated list of encoder endpoints. Every multimodal item extracted from the request is fanned out to one of these URLs in a round-robin fashion. |
 | `--prefill-servers-urls` | Comma-separated list of prefill endpoints. Set to `disable`, `none`, or `""` to skip the dedicated prefill phase and run E+PD (encoder + combined prefill/decode). |
 | `--decode-servers-urls` | Comma-separated list of decode endpoints. Non-stream and stream paths both round-robin over this list. |

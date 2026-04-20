@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for HF_HUB_OFFLINE mode"""
 
-import dataclasses
 import importlib
 import sys
 
 import pytest
+import regex as re
 import urllib3
 
 from vllm import LLM
 from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.engine.arg_utils import EngineArgs
 
 MODEL_CONFIGS = [
     {
@@ -22,6 +21,16 @@ MODEL_CONFIGS = [
         "max_num_batched_tokens": 64,
         "max_num_seqs": 64,
         "tensor_parallel_size": 1,
+    },
+    {
+        "model": "Qwen/Qwen3-0.6B",
+        "enforce_eager": True,
+        "gpu_memory_utilization": 0.50,
+        "max_model_len": 64,
+        "max_num_batched_tokens": 64,
+        "max_num_seqs": 64,
+        "tensor_parallel_size": 1,
+        "tokenizer": "Qwen/Qwen3-4B",
     },
     {
         "model": "mistralai/Mistral-7B-Instruct-v0.1",
@@ -99,8 +108,20 @@ def _re_import_modules():
         if k.startswith("transformers") and not k.startswith("transformers_modules")
     ]
 
+    # These modules are aliased in Transformers v5 and so cannot be reloaded directly
+    aliased_module_patterns = [
+        r".+\.tokenization_utils$",
+        r".+\.tokenization_utils_fast$",
+        r".+\.image_processing_utils_fast$",
+        r".+\.models\..+\.image_processing_.+_fast$",
+    ]
+
     reload_exception = None
     for module_name in hf_hub_module_names + transformers_module_names:
+        if any(re.match(pattern, module_name) for pattern in aliased_module_patterns):
+            # Remove from sys.modules so they are re-aliased on next import
+            del sys.modules[module_name]
+            continue
         try:
             importlib.reload(sys.modules[module_name])
         except Exception as e:
@@ -138,8 +159,7 @@ def test_model_from_huggingface_offline(monkeypatch: pytest.MonkeyPatch):
             # Need to re-import huggingface_hub
             # and friends to set up offline mode
             _re_import_modules()
-            engine_args = EngineArgs(model="facebook/opt-125m")
-            LLM(**dataclasses.asdict(engine_args))
+            LLM(model="facebook/opt-125m")
         finally:
             # Reset the environment after the test
             # NB: Assuming tests are run in online mode

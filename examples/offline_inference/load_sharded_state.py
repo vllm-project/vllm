@@ -9,20 +9,16 @@ Example usage:
 
 python save_sharded_state.py \
     --model /path/to/load \
-    --quantization deepspeedfp \
     --tensor-parallel-size 8 \
     --output /path/to/save/sharded/model
 
 python load_sharded_state.py \
     --model /path/to/saved/sharded/model \
     --load-format sharded_state \
-    --quantization deepspeedfp \
     --tensor-parallel-size 8 \
     --prompt "Hello, my name is" \
     --max-tokens 50
 """
-
-import dataclasses
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -66,7 +62,7 @@ def main():
     print(f"Tensor parallel size: {engine_args.tensor_parallel_size}")
 
     # Load the model using engine args
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
 
     # Prepare sampling parameters
     sampling_params = SamplingParams(

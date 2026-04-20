@@ -6,9 +6,7 @@ Define EC connector functionality mixin for model runners.
 
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import (
-    TYPE_CHECKING,  # noqa: UP035
-)
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -37,14 +35,6 @@ class ECConnectorModelRunnerMixin:
         connector.save_caches(encoder_cache=encoder_cache, mm_hash=mm_hash)
 
     @staticmethod
-    def get_finished_ec_transfers(
-        scheduler_output: "SchedulerOutput",
-    ) -> tuple[set[str] | None, set[str] | None]:
-        if has_ec_transfer():
-            return get_ec_transfer().get_finished(scheduler_output.finished_req_ids)
-        return None, None
-
-    @staticmethod
     def maybe_get_ec_connector_output(
         scheduler_output: "SchedulerOutput",
         encoder_cache: dict[str, torch.Tensor],
@@ -59,7 +49,7 @@ class ECConnectorModelRunnerMixin:
         )
 
     # This context manager must be used within an active forward context.
-    # It encapsulates the entire EC conector lifecycle within execute_model
+    # It encapsulates the entire EC connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_ec_connector_output(
@@ -74,7 +64,8 @@ class ECConnectorModelRunnerMixin:
         assert scheduler_output.ec_connector_metadata is not None
         ec_connector.bind_connector_metadata(scheduler_output.ec_connector_metadata)
 
-        if not ec_connector.is_producer:
+        # Load caches for consumer or both roles
+        if ec_connector.is_consumer:
             ec_connector.start_load_caches(encoder_cache, **kwargs)
 
         try:

@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import hashlib
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from pydantic import Field, field_validator
-from pydantic.dataclasses import dataclass
-from typing_extensions import Self, deprecated
+from typing_extensions import Self
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
+from vllm.utils.hashing import safe_hash
 from vllm.utils.import_utils import resolve_obj_by_qualname
 
 if TYPE_CHECKING:
@@ -24,22 +23,42 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 
 
 @config
-@dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
 
+    max_model_len: InitVar[int]
+    """Maximum length of a sequence (including prompt and generated text).
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    provide fallbacks and validate other attributes."""
+
+    is_encoder_decoder: InitVar[bool]
+    """True if the model is an encoder-decoder model.
+
+    Note: This is stored in the ModelConfig, and is used only here to
+    disable chunked prefill and prefix caching for encoder-decoder models.
+    """
+
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
+    DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP: ClassVar[int] = 256
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
 
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
     max_num_batched_tokens: int = Field(default=DEFAULT_MAX_NUM_BATCHED_TOKENS, ge=1)
-    """Maximum number of tokens to be processed in a single iteration.
+    """Maximum number of tokens that can be processed in a single iteration.
 
     The default value here is mainly for convenience when testing.
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
+
+    max_num_scheduled_tokens: int | None = None
+    """Maximum number of tokens that the scheduler may issue in a single iteration.
+    
+    This is usually equal to max_num_batched_tokens, but can be smaller in cases
+    when the model might append tokens into the batch (such as speculative decoding).
+    Defaults to max_num_batched_tokens."""
 
     max_num_seqs: int = Field(default=DEFAULT_MAX_NUM_SEQS, ge=1)
     """Maximum number of sequences to be processed in a single iteration.
@@ -73,19 +92,6 @@ class SchedulerConfig:
     is_multimodal_model: bool = False
     """True if the model is multimodal."""
 
-    max_model_len: InitVar[int] = 8192
-    """Maximum length of a sequence (including prompt and generated text).
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    provide fallbacks and validate other attributes."""
-
-    is_encoder_decoder: InitVar[bool] = False
-    """True if the model is an encoder-decoder model.
-
-    Note: This is stored in the ModelConfig, and is used only here to
-    disable chunked prefill and prefix caching for encoder-decoder models.
-    """
-
     # TODO (ywang96): Make this configurable.
     max_num_encoder_input_tokens: int = Field(init=False)
     """Multimodal encoder compute budget, only used in V1.
@@ -101,11 +107,12 @@ class SchedulerConfig:
     max_num_batched_tokens in case max multimodal embedding size is larger."""
 
     policy: SchedulerPolicy = "fcfs"
-    """The scheduling policy to use:\n
-    - "fcfs" means first come first served, i.e. requests are handled in order
-    of arrival.\n
+    """The scheduling policy to use:
+
+    - "fcfs" means first come first served, i.e. requests are handled in order 
+      of arrival.
     - "priority" means requests are handled based on given priority (lower
-    value means earlier handling) and time of arrival deciding any ties)."""
+      value means earlier handling) and time of arrival deciding any ties)."""
 
     disable_chunked_mm_input: bool = False
     """If set to true and chunked prefill is enabled, we do not want to
@@ -117,22 +124,28 @@ class SchedulerConfig:
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
-    scheduler_cls: str | type[object] = Field(default=None)
+    scheduler_cls: str | type[object] | None = None
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
 
-    disable_hybrid_kv_cache_manager: bool = False
+    disable_hybrid_kv_cache_manager: bool | None = None
     """If set to True, KV cache manager will allocate the same size of KV cache
     for all attention layers even if there are multiple type of attention layers
     like full attention and sliding window attention.
+    If set to None, the default value will be determined based on the environment
+    and starting configuration.
     """
 
-    async_scheduling: bool = False
-    """If set to True, perform async scheduling. This helps to avoid gaps in
-    GPU utilization, leading to better latency and throughput.
-    Async scheduling is currently not supported with some features such as
-    speculative decoding and pipeline parallelism.
+    scheduler_reserve_full_isl: bool = True
+    """If True, the scheduler checks whether the full input sequence length
+    fits in the KV cache before admitting a new request, rather than only
+    checking the first chunk. Prevents over-admission and KV cache thrashing
+    with chunked prefill."""
+
+    async_scheduling: bool | None = None
+    """If set to False, disable async scheduling. Async scheduling helps to
+    avoid gaps in GPU utilization, leading to better latency and throughput.
     """
 
     stream_interval: int = Field(default=1, ge=1)
@@ -140,6 +153,17 @@ class SchedulerConfig:
     A smaller value (1) makes streaming smoother by sending each token immediately,
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
+
+    @staticmethod
+    def default_factory(**kwargs):
+        """
+        Factory method to create `SchedulerConfig` with default values for `InitVar`s.
+        """
+        if "max_model_len" not in kwargs:
+            kwargs["max_model_len"] = 8192
+        if "is_encoder_decoder" not in kwargs:
+            kwargs["is_encoder_decoder"] = False
+        return SchedulerConfig(**kwargs)
 
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
@@ -157,7 +181,7 @@ class SchedulerConfig:
         logger.warning_once(
             "Using custom scheduler class %s. This scheduler interface is "
             "not public and compatibility may not be maintained.",
-            self.scheduler_cls,
+            self.scheduler_cls,  # type: ignore[arg-type]
         )
         if not isinstance(self.scheduler_cls, str):
             return cast(type["SchedulerInterface"], self.scheduler_cls)
@@ -175,19 +199,27 @@ class SchedulerConfig:
         excluding anything before input ids/embeddings and after
         the final hidden states.
         """
-        # no factors to consider.
-        # this config will not affect the computation graph.
         factors: list[Any] = []
-        hash_str = hashlib.md5(str(factors).encode(), usedforsecurity=False).hexdigest()
+
+        # max_num_batched_tokens need to be included in the hash due
+        # to two reasons:
+        # 1. LoRA creates static buffers based on max_num_batched_tokens.
+        #   The tensor sizes and strides get captured in the torch.compile
+        #   graph explicitly.
+        # 2. Inductor decides whether using 32-bit or 64-bit indexing integer
+        #   based on the data sizes. `max_num_batched_tokens` has an
+        #   impact on that. For more details, please check
+        #   https://github.com/vllm-project/vllm/issues/29585
+        factors.append(self.max_num_batched_tokens)
+
+        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
-        if value is None:
-            return value
-        return handler(value)
+        return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
@@ -204,9 +236,10 @@ class SchedulerConfig:
         self.encoder_cache_size = self.max_num_batched_tokens
 
         if self.enable_chunked_prefill:
-            logger.info(
+            logger.info_once(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens,
+                scope="local",
             )
 
         if self.max_num_partial_prefills > 1:
@@ -223,19 +256,6 @@ class SchedulerConfig:
             )
 
         self.verify_max_model_len(max_model_len)
-
-    @property
-    @deprecated(
-        "`SchedulerConfig.chunked_prefill_enabled` has been renamed to "
-        "`SchedulerConfig.enable_chunked_prefill`. "
-        "The old name will be removed in v0.12."
-    )
-    def chunked_prefill_enabled(self) -> bool:
-        return self.enable_chunked_prefill
-
-    @chunked_prefill_enabled.setter
-    def chunked_prefill_enabled(self, value: bool):
-        self.enable_chunked_prefill = value
 
     def verify_max_model_len(self, max_model_len: int) -> Self:
         if (

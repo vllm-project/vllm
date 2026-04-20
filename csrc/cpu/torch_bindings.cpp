@@ -4,7 +4,9 @@
 
 #include <torch/library.h>
 
-std::string init_cpu_threads_env(const std::string& cpu_ids);
+// Note: overwrite the external definition for sharing same name between
+// libraries use different ISAs.
+#define TORCH_EXTENSION_NAME _C
 
 void release_dnnl_matmul_handler(int64_t handler);
 
@@ -19,13 +21,14 @@ void onednn_scaled_mm(torch::Tensor& c, const torch::Tensor& a,
                       const std::optional<torch::Tensor>& azp,
                       const std::optional<torch::Tensor>& azp_adj,
                       const std::optional<torch::Tensor>& bias,
-                      int64_t handler);
+                      const torch::Tensor& handler_tensor);
 
 int64_t create_onednn_mm_handler(const torch::Tensor& b,
                                  int64_t primitive_cache_size);
 
 void onednn_mm(torch::Tensor& c, const torch::Tensor& a,
-               const std::optional<torch::Tensor>& bias, int64_t handler);
+               const std::optional<torch::Tensor>& bias,
+               const torch::Tensor& handler_tensor);
 
 bool is_onednn_acl_supported();
 
@@ -34,7 +37,7 @@ void mla_decode_kvcache(torch::Tensor& out, torch::Tensor& query,
                         torch::Tensor& block_tables, torch::Tensor& seq_lens);
 
 int64_t init_shm_manager(const std::string& name, const int64_t group_size,
-                         const int64_t rank);
+                         const int64_t rank, const int64_t thread_num);
 
 std::string join_shm_manager(int64_t handle, const std::string& name);
 
@@ -74,6 +77,17 @@ at::Tensor int8_scaled_mm_with_quant(at::Tensor& mat1, at::Tensor& mat2,
                                      const std::optional<at::Tensor>& bias,
                                      at::ScalarType out_dtype, bool is_vnni);
 
+// Adapted from sglang: INT4 W4A8 kernels
+std::tuple<at::Tensor, at::Tensor, at::Tensor> convert_weight_packed_scale_zp(
+    at::Tensor qweight, at::Tensor qzeros, at::Tensor scales);
+
+at::Tensor int4_scaled_mm_cpu(at::Tensor& x, at::Tensor& w, at::Tensor& w_zeros,
+                              at::Tensor& w_scales,
+                              std::optional<at::Tensor> bias);
+
+void activation_lut_bf16(torch::Tensor& out, torch::Tensor& input,
+                         const std::string& activation);
+
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -109,6 +123,80 @@ void cpu_gemm_wna16(const torch::Tensor& input, const torch::Tensor& q_weight,
                     const std::optional<torch::Tensor>& g_idx,
                     const std::optional<torch::Tensor>& bias,
                     const int64_t pack_factor, const std::string& isa_hint);
+
+void prepack_moe_weight(const torch::Tensor& weight,
+                        torch::Tensor& packed_weight, const std::string& isa);
+
+void cpu_fused_moe(torch::Tensor& output, const torch::Tensor& input,
+                   const torch::Tensor& w13, const torch::Tensor& w2,
+                   const std::optional<torch::Tensor>& w13_bias,
+                   const std::optional<torch::Tensor>& w2_bias,
+                   const torch::Tensor& topk_weights,
+                   const torch::Tensor& topk_id, const bool skip_weighted,
+                   const std::string& act, const std::string& isa);
+
+void compute_slot_mapping_kernel_impl(const torch::Tensor query_start_loc,
+                                      const torch::Tensor positions,
+                                      const torch::Tensor block_table,
+                                      torch::Tensor slot_mapping,
+                                      const int64_t block_size);
+
+void init_cpu_memory_env(std::vector<int64_t> node_ids);
+
+namespace cpu_utils {
+void eagle_prepare_inputs_padded_kernel_impl(
+    const torch::Tensor& cu_num_draft_tokens,
+    const torch::Tensor& valid_sampled_tokens_count,
+    const torch::Tensor& query_start_loc_gpu,
+    torch::Tensor& token_indices_to_sample,
+    torch::Tensor& num_rejected_tokens_gpu, const int64_t num_reqs);
+void eagle_prepare_next_token_padded_kernel_impl(
+    const torch::Tensor& sampled_token_ids,
+    const torch::Tensor& discard_request_mask,
+    const torch::Tensor& backup_next_token_ids, torch::Tensor& next_token_ids,
+    torch::Tensor& valid_sampled_tokens_count, const int64_t vocab_size,
+    const int64_t num_sampled_tokens_per_req, const int64_t num_reqs);
+void eagle_step_slot_mapping_metadata_kernel_impl(
+    const torch::Tensor& positions, const torch::Tensor& block_table,
+    torch::Tensor& seq_lens, torch::Tensor& out_clamped_positions,
+    torch::Tensor& out_slot_mapping, const int64_t block_size,
+    const int64_t max_model_len, const int64_t PAD_ID);
+void copy_and_expand_eagle_inputs_kernel_impl(
+    const torch::Tensor& target_token_ids,
+    const torch::Tensor& target_positions, const torch::Tensor& next_token_ids,
+    torch::Tensor& out_input_ids, torch::Tensor& out_positions,
+    torch::Tensor& out_is_rejected_token_mask,
+    torch::Tensor& out_is_masked_token_mask,
+    torch::Tensor& out_new_token_indices,
+    torch::Tensor& out_hidden_state_mapping,
+    const torch::Tensor& query_start_loc, const torch::Tensor& query_end_loc,
+    const int64_t padding_token_id, const int64_t parallel_drafting_token_id,
+    const int64_t total_input_tokens,
+    const int64_t num_padding_slots_per_request, const bool shift_input_ids);
+void rejection_greedy_sample_kernel_impl(
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
+    const torch::Tensor& draft_token_ids, const torch::Tensor& target_argmax,
+    const torch::Tensor& bonus_token_ids,
+    const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len);
+void rejection_random_sample_kernel_impl(
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
+    const torch::Tensor& draft_token_ids,
+    const std::optional<torch::Tensor>& draft_probs,
+    const torch::Tensor& target_probs, const torch::Tensor& bonus_token_ids,
+    const torch::Tensor& recovered_token_ids,
+    const torch::Tensor& uniform_probs,
+    const std::optional<torch::Tensor>& is_greedy, const int64_t max_spec_len,
+    const int64_t vocab_size, const bool no_draft_probs);
+void expand_kernel_impl(torch::Tensor& output, const torch::Tensor& input,
+                        const torch::Tensor& cu_num_tokens,
+                        const int64_t replace_from, const int64_t replace_to);
+void sample_recovered_tokens_kernel_impl(
+    torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
+    const torch::Tensor& draft_token_ids,
+    const std::optional<torch::Tensor>& draft_probs,
+    const torch::Tensor& target_probs, const torch::Tensor& inv_q,
+    const int64_t vocab_size, const bool no_draft_probs);
+}  // namespace cpu_utils
 
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
@@ -148,6 +236,15 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_quick", torch::kCPU, &gelu_quick);
 
+#if (defined(__aarch64__) && !defined(__APPLE__))
+
+  ops.def(
+      "activation_lut_bf16(Tensor! out, Tensor input, str activation)"
+      " -> ()");
+  ops.impl("activation_lut_bf16", torch::kCPU, &activation_lut_bf16);
+
+#endif  // (defined(__aarch64__) && !defined(__APPLE__))
+
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
@@ -185,7 +282,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN GEMM
   ops.def(
       "onednn_mm(Tensor! c, Tensor a, Tensor? bias, "
-      "int handler) -> ()");
+      "Tensor handler_tensor) -> ()");
   ops.impl("onednn_mm", torch::kCPU, &onednn_mm);
 
   // Check if oneDNN was built with ACL backend
@@ -201,7 +298,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // oneDNN scaled_mm for W8A8 with static per-tensor activation quantization
   ops.def(
       "onednn_scaled_mm(Tensor! c, Tensor a, Tensor a_scales, Tensor? azp, "
-      "Tensor? azp_adj, Tensor? bias, int handler) -> ()");
+      "Tensor? azp_adj, Tensor? bias, Tensor handler_tensor) -> ()");
   ops.impl("onednn_scaled_mm", torch::kCPU, &onednn_scaled_mm);
 
   // Compute int8 quantized tensor for given scaling factor.
@@ -219,9 +316,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #endif
 
 // SHM CCL
-#ifdef __AVX512F__
-  ops.def("init_shm_manager(str name, int group_size, int rank) -> int",
-          &init_shm_manager);
+#if defined(__AVX512F__) || (defined(__aarch64__) && !defined(__APPLE__))
+  ops.def(
+      "init_shm_manager(str name, int group_size, int rank, int thread_num) -> "
+      "int",
+      &init_shm_manager);
   ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
   ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
   ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
@@ -239,7 +338,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("shm_send_tensor_list", torch::kCPU, &shm_send_tensor_list);
   ops.def("shm_recv_tensor_list(int handle, int src) -> Tensor[](a)",
           &shm_recv_tensor_list);
-#endif
+#endif  // #if defined(__AVX512F__) || defined(__aarch64__)
 
   // sgl-kernels
 #if defined(__AVX512BF16__) && defined(__AVX512F__) && defined(__AVX512VNNI__)
@@ -261,6 +360,18 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? bias, ScalarType out_dtype, bool is_vnni) -> Tensor");
   ops.impl("int8_scaled_mm_with_quant", torch::kCPU,
            &int8_scaled_mm_with_quant);
+
+  // Adapted from sglang: INT4 W4A8 kernels
+  ops.def(
+      "convert_weight_packed_scale_zp(Tensor qweight, Tensor qzeros, "
+      "Tensor scales) -> (Tensor, Tensor, Tensor)");
+  ops.impl("convert_weight_packed_scale_zp", torch::kCPU,
+           &convert_weight_packed_scale_zp);
+
+  ops.def(
+      "int4_scaled_mm_cpu(Tensor(a0!) x, Tensor(a1!) w, Tensor(a2!) w_zeros, "
+      "Tensor(a3!) w_scales, Tensor? bias) -> Tensor");
+  ops.impl("int4_scaled_mm_cpu", torch::kCPU, &int4_scaled_mm_cpu);
 #endif
 
   // CPU attention kernels
@@ -280,7 +391,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor sheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
       &cpu_attention_with_kv_cache);
 
   // placeholders
@@ -296,19 +407,97 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "pack_factor, str isa_hint) -> ()");
   ops.impl("cpu_gemm_wna16", torch::kCPU, &cpu_gemm_wna16);
 #endif
-}
 
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _utils), utils) {
-  // CPU utils
-  utils.def("init_cpu_threads_env(str cpu_ids) -> str", &init_cpu_threads_env);
-}
-
-TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cpu), cpu_ops) {
-  cpu_ops.def(
+  // fused moe
+#if defined(__AVX512F__)
+  ops.def(
+      "prepack_moe_weight(Tensor weight, Tensor(a1!) packed_weight, str isa) "
+      "-> ()");
+  ops.impl("prepack_moe_weight", torch::kCPU, &prepack_moe_weight);
+  ops.def(
+      "cpu_fused_moe(Tensor(a0!) output, Tensor input, Tensor w13, Tensor w2, "
+      "Tensor? w13_bias, Tensor? w2_bias, Tensor topk_weights, Tensor topk_id, "
+      "bool skip_weighted, "
+      "str act, str isa) -> ()");
+  ops.impl("cpu_fused_moe", torch::kCPU, &cpu_fused_moe);
+#endif
+  ops.def(
       "mla_decode_kvcache("
       "   Tensor! out, Tensor query, Tensor kv_cache,"
       "   float scale, Tensor block_tables, Tensor seq_lens) -> ()");
-  cpu_ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
+  ops.impl("mla_decode_kvcache", torch::kCPU, &mla_decode_kvcache);
+
+  ops.def(
+      "compute_slot_mapping_kernel_impl(Tensor query_start_loc, Tensor "
+      "positions, Tensor block_table, Tensor(a3!) slot_mapping, SymInt "
+      "block_size) -> ()",
+      &compute_slot_mapping_kernel_impl);
+
+  ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
+
+  // Speculative decoding kernels
+  ops.def(
+      "eagle_prepare_inputs_padded_kernel_impl(Tensor cu_num_draft_tokens, "
+      "Tensor valid_sampled_tokens_count, Tensor query_start_loc_gpu, "
+      "Tensor(a3!) token_indices_to_sample, "
+      "Tensor(a4!) num_rejected_tokens_gpu, "
+      "SymInt num_reqs) -> ()",
+      &cpu_utils::eagle_prepare_inputs_padded_kernel_impl);
+  ops.def(
+      "eagle_prepare_next_token_padded_kernel_impl("
+      "Tensor sampled_token_ids, Tensor discard_request_mask, "
+      "Tensor backup_next_token_ids, Tensor(a3!) next_token_ids, "
+      "Tensor(a4!) valid_sampled_tokens_count, SymInt vocab_size, "
+      "SymInt num_sampled_tokens_per_req, SymInt num_reqs) -> ()",
+      &cpu_utils::eagle_prepare_next_token_padded_kernel_impl);
+  ops.def(
+      "eagle_step_slot_mapping_metadata_kernel_impl("
+      "Tensor positions, Tensor block_table, Tensor(a2!) seq_lens, "
+      "Tensor(a3!) out_clamped_positions, Tensor(a4!) out_slot_mapping, "
+      "SymInt block_size, SymInt max_model_len, SymInt PAD_ID) -> ()",
+      &cpu_utils::eagle_step_slot_mapping_metadata_kernel_impl);
+  ops.def(
+      "copy_and_expand_eagle_inputs_kernel_impl("
+      "Tensor target_token_ids, Tensor target_positions, "
+      "Tensor next_token_ids, Tensor(a3!) out_input_ids, "
+      "Tensor(a4!) out_positions, "
+      "Tensor(a5!) out_is_rejected_token_mask, "
+      "Tensor(a6!) out_is_masked_token_mask, "
+      "Tensor(a7!) out_new_token_indices, "
+      "Tensor(a8!) out_hidden_state_mapping, "
+      "Tensor query_start_loc, Tensor query_end_loc, "
+      "SymInt padding_token_id, SymInt parallel_drafting_token_id, "
+      "SymInt total_input_tokens, SymInt num_padding_slots_per_request, "
+      "bool shift_input_ids) -> ()",
+      &cpu_utils::copy_and_expand_eagle_inputs_kernel_impl);
+  ops.def(
+      "rejection_greedy_sample_kernel_impl("
+      "Tensor(a0!) output_token_ids, Tensor cu_num_draft_tokens, "
+      "Tensor draft_token_ids, Tensor target_argmax, "
+      "Tensor bonus_token_ids, Tensor? is_greedy, "
+      "SymInt max_spec_len) -> ()",
+      &cpu_utils::rejection_greedy_sample_kernel_impl);
+  ops.def(
+      "rejection_random_sample_kernel_impl("
+      "Tensor(a0!) output_token_ids, Tensor cu_num_draft_tokens, "
+      "Tensor draft_token_ids, Tensor? draft_probs, "
+      "Tensor target_probs, Tensor bonus_token_ids, "
+      "Tensor recovered_token_ids, Tensor uniform_probs, "
+      "Tensor? is_greedy, SymInt max_spec_len, SymInt vocab_size, "
+      "bool no_draft_probs) -> ()",
+      &cpu_utils::rejection_random_sample_kernel_impl);
+  ops.def(
+      "expand_kernel_impl(Tensor(a0!) output, Tensor input, "
+      "Tensor cu_num_tokens, SymInt replace_from, "
+      "SymInt replace_to) -> ()",
+      &cpu_utils::expand_kernel_impl);
+  ops.def(
+      "sample_recovered_tokens_kernel_impl("
+      "Tensor(a0!) output_token_ids, Tensor cu_num_draft_tokens, "
+      "Tensor draft_token_ids, Tensor? draft_probs, "
+      "Tensor target_probs, Tensor inv_q, SymInt vocab_size, "
+      "bool no_draft_probs) -> ()",
+      &cpu_utils::sample_recovered_tokens_kernel_impl);
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)

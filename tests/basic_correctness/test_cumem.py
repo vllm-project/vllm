@@ -11,7 +11,9 @@ from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
 
-from ..utils import create_new_process_for_each_test
+from ..utils import create_new_process_for_each_test, requires_fp8
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @create_new_process_for_each_test("fork" if not current_platform.is_rocm() else "spawn")
@@ -26,13 +28,13 @@ def test_python_error():
     tensors = []
     with allocator.use_memory_pool():
         # allocate 70% of the total memory
-        x = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+        x = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
         tensors.append(x)
     # release the memory
     allocator.sleep()
 
     # allocate more memory than the total memory
-    y = torch.empty(alloc_bytes, dtype=torch.uint8, device="cuda")
+    y = torch.empty(alloc_bytes, dtype=torch.uint8, device=DEVICE_TYPE)
     tensors.append(y)
     with pytest.raises(RuntimeError):
         # when the allocator is woken up, it should raise an error
@@ -44,17 +46,17 @@ def test_python_error():
 def test_basic_cumem():
     # some tensors from default memory pool
     shape = (1024, 1024)
-    x = torch.empty(shape, device="cuda")
+    x = torch.empty(shape, device=DEVICE_TYPE)
     x.zero_()
 
     # some tensors from custom memory pool
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
         # custom memory pool
-        y = torch.empty(shape, device="cuda")
+        y = torch.empty(shape, device=DEVICE_TYPE)
         y.zero_()
         y += 1
-        z = torch.empty(shape, device="cuda")
+        z = torch.empty(shape, device=DEVICE_TYPE)
         z.zero_()
         z += 2
 
@@ -77,16 +79,16 @@ def test_basic_cumem():
 def test_cumem_with_cudagraph():
     allocator = CuMemAllocator.get_instance()
     with allocator.use_memory_pool():
-        weight = torch.eye(1024, device="cuda")
+        weight = torch.eye(1024, device=DEVICE_TYPE)
     with allocator.use_memory_pool(tag="discard"):
-        cache = torch.empty(1024, 1024, device="cuda")
+        cache = torch.empty(1024, 1024, device=DEVICE_TYPE)
 
     def model(x):
         out = x @ weight
         cache[: out.size(0)].copy_(out)
         return out + 1
 
-    x = torch.empty(128, 1024, device="cuda")
+    x = torch.empty(128, 1024, device=DEVICE_TYPE)
 
     # warmup
     model(x)
@@ -243,3 +245,38 @@ def test_deep_sleep_async():
         assert output.outputs[0].text == output2.outputs[0].text
 
     asyncio.run(test())
+
+
+@requires_fp8
+def test_deep_sleep_fp8_kvcache():
+    model = "Qwen/Qwen2-0.5B"
+    used_bytes_baseline = current_platform.get_current_memory_usage()
+
+    llm = LLM(model, enable_sleep_mode=True, kv_cache_dtype="fp8")
+    prompt = "How are you?"
+    sampling_params = SamplingParams(temperature=0, max_tokens=10)
+    output = llm.generate(prompt, sampling_params)
+
+    # Put the engine to deep sleep
+    llm.sleep(level=2)
+
+    used_bytes = current_platform.get_current_memory_usage() - used_bytes_baseline
+
+    # Rocm uses more memory for CudaGraphs, so we add 2 GiB more for the threshold
+    rocm_extra_mem_bytes = 2 * GiB_bytes if current_platform.is_rocm() else 0
+    mem_threshold_after_sleep = 3 * GiB_bytes + rocm_extra_mem_bytes
+    assert used_bytes < mem_threshold_after_sleep
+
+    llm.wake_up(tags=["weights"])
+    llm.collective_rpc("reload_weights")
+
+    used_bytes = current_platform.get_current_memory_usage() - used_bytes_baseline
+    mem_threshold_after_wake_up = 4 * GiB_bytes + rocm_extra_mem_bytes
+    assert used_bytes < mem_threshold_after_wake_up
+
+    # now allocate kv cache and cuda graph memory
+    llm.wake_up(tags=["kv_cache"])
+    output2 = llm.generate(prompt, sampling_params)
+
+    # cmp output
+    assert output[0].outputs[0].text == output2[0].outputs[0].text

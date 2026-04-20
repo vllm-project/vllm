@@ -23,12 +23,12 @@ import torch
 from torch import nn
 from transformers import Gemma2Config
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -63,7 +63,6 @@ class Gemma2MLP(nn.Module):
         self,
         hidden_size: int,
         intermediate_size: int,
-        hidden_act: str,
         hidden_activation: str,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -83,11 +82,10 @@ class Gemma2MLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
-        if not (hidden_act == hidden_activation == "gelu_pytorch_tanh"):
+        if not (hidden_activation == "gelu_pytorch_tanh"):
             raise ValueError(
                 "Gemma2 uses `gelu_pytorch_tanh` as the hidden activation "
-                "function. Please set `hidden_act` and `hidden_activation` to "
-                "`gelu_pytorch_tanh`."
+                "function. Please set `hidden_activation` to `gelu_pytorch_tanh`."
             )
         self.act_fn = GeluAndMul(approximate="tanh")
 
@@ -152,7 +150,6 @@ class Gemma2Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
@@ -213,7 +210,6 @@ class Gemma2DecoderLayer(nn.Module):
         self.mlp = Gemma2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
-            hidden_act=config.hidden_act,
             hidden_activation=config.hidden_activation,
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
@@ -288,7 +284,7 @@ class Gemma2Model(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.embed_tokens(input_ids)
+        return self.embed_tokens(input_ids) * self.normalizer
 
     def forward(
         self,
@@ -302,7 +298,6 @@ class Gemma2Model(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
-            hidden_states *= self.normalizer
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -411,7 +406,7 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

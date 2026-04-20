@@ -12,6 +12,7 @@ import torch
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
@@ -44,6 +45,32 @@ def _walk_json_for_additional_properties(data: object):
             _walk_json_for_additional_properties(item)
 
 
+def has_guidance_unsupported_json_features(schema: dict[str, Any]) -> bool:
+    """Check if JSON schema contains features unsupported by guidance/llguidance."""
+
+    def check_object(obj: dict[str, Any]) -> bool:
+        if not isinstance(obj, dict):
+            return False
+
+        # patternProperties is not supported by llguidance
+        if "patternProperties" in obj:
+            return True
+
+        # Recursively check all nested objects and arrays
+        for value in obj.values():
+            if isinstance(value, dict):
+                if check_object(value):
+                    return True
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, dict) and check_object(item):
+                        return True
+
+        return False
+
+    return check_object(schema)
+
+
 def process_for_additional_properties(
     guide_json: str | dict[str, Any],
 ) -> dict[str, Any]:
@@ -66,9 +93,12 @@ class GuidanceBackend(StructuredOutputBackend):
             self.vllm_config.structured_outputs_config.disable_additional_properties
         )
 
-        self.ll_tokenizer = llguidance_hf.from_tokenizer(
-            self.tokenizer, self.vocab_size
-        )
+        if is_mistral_tokenizer(self.tokenizer):
+            self.ll_tokenizer = self.tokenizer.llg_tokenizer
+        else:
+            self.ll_tokenizer = llguidance_hf.from_tokenizer(
+                self.tokenizer, max(self.vocab_size, len(self.tokenizer))
+            )
 
     def compile_grammar(
         self, request_type: StructuredOutputOptions, grammar_spec: str
@@ -258,6 +288,9 @@ def serialize_guidance_grammar(
 def validate_guidance_grammar(
     sampling_params: SamplingParams, tokenizer: llguidance.LLTokenizer | None = None
 ) -> None:
+    # if structured output is not enabled, there is nothing to validate
+    if sampling_params.structured_outputs is None:
+        return
     tp, grm = get_structured_output_key(sampling_params.structured_outputs)
     guidance_grm = serialize_guidance_grammar(tp, grm)
     err = llguidance.LLMatcher.validate_grammar(guidance_grm, tokenizer)
