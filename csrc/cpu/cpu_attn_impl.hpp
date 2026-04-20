@@ -1152,7 +1152,9 @@ class AttentionMainLoop {
                        bool use_sink) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
-      bool constexpr IsReducedPrecision = std::is_same_v<query_t, c10::BFloat16> || std::is_same_v<query_t, c10::Half>;
+      bool constexpr IsReducedPrecision =
+          std::is_same_v<query_t, c10::BFloat16> ||
+          std::is_same_v<query_t, c10::Half>;
 #endif
 
       using prob_buffer_vec_t = typename VecTypeTrait<prob_buffer_t>::vec_t;
@@ -1207,11 +1209,10 @@ class AttentionMainLoop {
 #if defined(DEFINE_FAST_EXP)
             if constexpr (IsReducedPrecision) {
               vec = fast_exp_f16(vec);
-            }
-            else {
+            } else {
               vec = fast_exp(vec);
             }
-            
+
             prob_buffer_vec_t output_vec(vec);
             output_vec.save(curr_prob_buffer_iter);
 #else
@@ -1267,7 +1268,9 @@ class AttentionMainLoop {
                        int32_t kv_tile_token_num, float softcap_scale) {
 #ifdef DEFINE_FAST_EXP
       DEFINE_FAST_EXP
-      bool constexpr IsReducedPrecision = std::is_same_v<query_t, c10::BFloat16> || std::is_same_v<query_t, c10::Half>;
+      bool constexpr IsReducedPrecision =
+          std::is_same_v<query_t, c10::BFloat16> ||
+          std::is_same_v<query_t, c10::Half>;
 #endif
 
       float inv_softcap_scale = 1.0 / softcap_scale;
@@ -1286,8 +1289,7 @@ class AttentionMainLoop {
 #if defined(DEFINE_FAST_EXP)
           if constexpr (IsReducedPrecision) {
             vec = fast_exp_f16(vec);
-          }
-          else {
+          } else {
             vec = fast_exp(vec);
           }
           vec_op::FP32Vec16 inv_vec = ones_vec / vec;
