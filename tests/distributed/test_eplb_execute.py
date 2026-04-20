@@ -9,7 +9,10 @@ import torch
 import torch.distributed
 
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
+from vllm.distributed.eplb.eplb_communicator import (
+    create_eplb_communicator,
+    has_nixl,
+)
 from vllm.distributed.eplb.rebalance_execute import (
     move_from_buffer,
     rearrange_expert_weights_inplace,
@@ -527,7 +530,9 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
+@pytest.mark.parametrize(
+    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
+)
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
     num_layers,
@@ -537,6 +542,8 @@ def test_rearrange_expert_weights_with_redundancy(
 ):
     """Test the functionality of rearranging expert weights with redundancy."""
 
+    if eplb_communicator == "nixl" and not has_nixl():
+        pytest.skip("NIXL is not available")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
     distributed_run(
@@ -633,7 +640,9 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl"])
+@pytest.mark.parametrize(
+    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
+)
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -643,6 +652,8 @@ def test_async_transfer_layer_without_mtp(
 ):
     """Exercise async EPLB transfer path without MTP/spec decode."""
 
+    if eplb_communicator == "nixl" and not has_nixl():
+        pytest.skip("NIXL is not available")
     if torch.accelerator.device_count() < world_size:
         pytest.skip(f"Need at least {world_size} GPUs to run the test")
 
