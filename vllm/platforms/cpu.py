@@ -239,7 +239,12 @@ class CpuPlatform(Platform):
         if (
             platform.system() == "Linux"
             and cpu_architecture
-            in (CpuArchEnum.ARM, CpuArchEnum.POWERPC, CpuArchEnum.X86)
+            in (
+                CpuArchEnum.ARM,
+                CpuArchEnum.POWERPC,
+                CpuArchEnum.X86,
+                CpuArchEnum.S390X,
+            )
             and not (
                 "libomp" in ld_preload_str
                 or "libgomp" in ld_preload_str
