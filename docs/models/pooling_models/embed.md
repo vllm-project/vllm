@@ -45,6 +45,7 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 | `GritLM` | GritLM | `parasail-ai/GritLM-7B-vllm`. | ✅︎ | ✅︎ |
 | `GteModel` | Arctic-Embed-2.0-M | `Snowflake/snowflake-arctic-embed-m-v2.0`. | | |
 | `GteNewModel` | mGTE-TRM (see note) | `Alibaba-NLP/gte-multilingual-base`, etc. | | |
+| `JinaEmbeddingsV5Model`<sup>C</sup> | Qwen3-based with task-specific LoRA adapters | `jinaai/jina-embeddings-v5-text-small` (see note) | ✅︎ | ✅︎ |
 | `LlamaBidirectionalModel`<sup>C</sup> | Llama-based with bidirectional attention | `nvidia/llama-nemotron-embed-1b-v2`, etc. | ✅︎ | ✅︎ |
 | `LlamaModel`<sup>C</sup>, `LlamaForCausalLM`<sup>C</sup>, `MistralModel`<sup>C</sup>, etc. | Llama-based | `intfloat/e5-mistral-7b-instruct`, etc. | ✅︎ | ✅︎ |
 | `ModernBertModel` | ModernBERT-based | `Alibaba-NLP/gte-modernbert-base`, etc. | | |
@@ -72,6 +73,12 @@ You can compute pairwise similarity scores to build a similarity matrix using th
 
 !!! note
     `jinaai/jina-embeddings-v3` supports multiple tasks through LoRA, while vllm temporarily only supports text-matching tasks by merging LoRA weights.
+
+!!! note
+    `jinaai/jina-embeddings-v5-text-small` ships with four task-specific LoRA adapters
+    (`retrieval`, `text-matching`, `classification`, `clustering`). vLLM merges the
+    selected adapter into the base weights at load time. Choose the task with
+    `--hf-overrides '{"jina_task": "<task>"}'`; the default is `retrieval`.
 
 ### Multimodal Models
 
