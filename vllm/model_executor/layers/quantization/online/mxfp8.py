@@ -1,131 +1,47 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Online MXFP8 (microscaling FP8, block-32) quantization config and methods."""
+"""Online MXFP8 (microscaling FP8, block-32) quantization methods."""
 
-from typing import Any
+from typing import TYPE_CHECKING
 
 import torch
 from torch.nn import Module
 
-from vllm.logger import init_logger
+if TYPE_CHECKING:
+    import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+    from vllm.model_executor.layers.fused_moe import FusedMoE
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEQuantConfig,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.fp8 import Fp8MoeBackend
+
 from vllm.model_executor.kernels.linear import init_mxfp8_linear_kernel
-from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
-    FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
-from vllm.model_executor.layers.linear import (
-    LinearBase,
-    UnquantizedLinearMethod,
+from vllm.model_executor.layers.quantization.online.fp8 import (
+    _Fp8OnlineLinearBase,
 )
-from vllm.model_executor.layers.quantization import QuantizationMethods
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.fp8 import (
-    Fp8Config,
-    Fp8KVCacheMethod,
-    Fp8OnlineLinearMethod,
-    Fp8OnlineMoEMethod,
+from vllm.model_executor.layers.quantization.online.moe_base import (
+    OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     mxfp8_e4m3_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    is_layer_skipped,
-)
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
-logger = init_logger(__name__)
 
-
-class Mxfp8Config(Fp8Config):
-    """Config class for online MXFP8 MoE quantization."""
-
-    def __init__(
-        self,
-        activation_scheme: str = "dynamic",
-        ignored_layers: list[str] | None = None,
-    ) -> None:
-        if activation_scheme != "dynamic":
-            raise ValueError("mxfp8 only supports dynamic activation scheme.")
-        super().__init__(
-            is_checkpoint_fp8_serialized=False,
-            activation_scheme=activation_scheme,
-            ignored_layers=ignored_layers,
-            weight_block_size=None,
-        )
-
-    @classmethod
-    def get_name(cls) -> QuantizationMethods:
-        return "mxfp8"
-
-    @classmethod
-    def get_min_capability(cls) -> int:
-        # Marlin kernel supports MXFP8 on SM80+
-        return 80
-
-    @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "Mxfp8Config":
-        activation_scheme = cls.get_from_keys_or(
-            config, ["activation_scheme"], "dynamic"
-        )
-        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
-        if not ignored_layers:
-            ignored_layers = cls.get_from_keys_or(
-                config, ["modules_to_not_convert"], None
-            )
-        return cls(
-            activation_scheme=activation_scheme,
-            ignored_layers=ignored_layers,
-        )
-
-    def get_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
-        if isinstance(layer, LinearBase):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-                skip_with_substr=True,
-            ):
-                return UnquantizedLinearMethod()
-            return Mxfp8OnlineLinearMethod(self)
-        elif isinstance(layer, FusedMoE):
-            if is_layer_skipped(
-                prefix=prefix,
-                ignored_layers=self.ignored_layers,
-                fused_mapping=self.packed_modules_mapping,
-                skip_with_substr=True,
-            ):
-                return UnquantizedFusedMoEMethod(layer.moe_config)
-            return Mxfp8OnlineMoEMethod(self, layer)
-        elif isinstance(layer, Attention):
-            return Fp8KVCacheMethod(self)
-        return None
-
-
-class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
+class Mxfp8OnlineLinearMethod(_Fp8OnlineLinearBase):
     """Online MXFP8 linear method.
     Loads bf16/fp16 checkpoints and quantizes weights to MXFP8 (microscaling
     FP8 with block-32 scales) during weight loading.
-
-    Args:
-        quant_config: The MXFP8 quantization config.
     """
 
-    uses_meta_device: bool = True
-
-    def __init__(self, quant_config: "Mxfp8Config"):
-        self.quant_config = quant_config
+    def __init__(self):
+        super().__init__()
         self.kernel = init_mxfp8_linear_kernel()
 
     def create_weights(
@@ -178,19 +94,15 @@ class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
         return self.kernel.apply_weights(layer, x, bias)
 
 
-class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
+class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
     """MoE method for online MXFP8 (block) quantization."""
 
-    uses_meta_device: bool = True
+    fp8_backend: "Fp8MoeBackend"
+    experts_cls: "type[mk.FusedMoEExperts] | None"
 
-    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
-        FusedMoEMethodBase.__init__(self, layer.moe_config)
-        self.quant_config = quant_config
-        assert not quant_config.is_checkpoint_fp8_serialized
-        assert quant_config.activation_scheme == "dynamic"
-
-        self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
-        self.block_quant = True
+    def __init__(self, *, layer: torch.nn.Module):
+        super().__init__(layer.moe_config)
+        self.weight_block_size: list[int] = [1, MXFP8_BLOCK_SIZE]
         self.weight_scale_name = "weight_scale"
 
         self.fp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
@@ -246,6 +158,74 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
             )
 
         return w_quant, w_scales
+
+    def _setup_kernel(
+        self,
+        layer: "FusedMoE",
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+        w13_input_scale: torch.Tensor | None,
+        w2_input_scale: torch.Tensor | None,
+    ) -> None:
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+            convert_to_fp8_moe_kernel_format,
+            make_fp8_moe_kernel,
+        )
+
+        # Shuffle weights to runtime format.
+        w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
+            fp8_backend=self.fp8_backend,
+            layer=layer,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
+            w13_input_scale=w13_input_scale,
+            w2_input_scale=w2_input_scale,
+        )
+
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, f"w13_{self.weight_scale_name}", w13_scale)
+        replace_parameter(layer, f"w2_{self.weight_scale_name}", w2_scale)
+
+        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        if self.moe_quant_config:
+            assert self.experts_cls is not None
+            self.moe_kernel = make_fp8_moe_kernel(
+                moe_quant_config=self.moe_quant_config,
+                moe_config=self.moe,
+                fp8_backend=self.fp8_backend,
+                experts_cls=self.experts_cls,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                shared_experts=layer.shared_experts,
+            )
+
+    def get_fused_moe_quant_config(
+        self, layer: torch.nn.Module
+    ) -> "FusedMoEQuantConfig":
+        from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
+            make_fp8_moe_quant_config,
+        )
+
+        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
+
+        quant_config = make_fp8_moe_quant_config(
+            fp8_backend=self.fp8_backend,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+            block_shape=self.weight_block_size,
+        )
+
+        self._maybe_inject_biases(quant_config, layer)
+        return quant_config
 
     def process_weights_after_loading(self, layer: Module) -> None:
         if getattr(layer, "_already_called_process_weights_after_loading", False):
