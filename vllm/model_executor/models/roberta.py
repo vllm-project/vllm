@@ -129,7 +129,8 @@ class RobertaEmbeddingModel(BertEmbeddingModel, SupportsLoRA):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.padding_idx: int = vllm_config.model_config.hf_config.pad_token_id
+        self.config = vllm_config.model_config.hf_config
+        self.padding_idx: int = self.config.pad_token_id
 
     def forward(
         self,
