@@ -24,6 +24,12 @@ class MPLinearLayerConfig:
 
 
 class MPLinearKernel(ABC):
+    config: MPLinearLayerConfig
+    w_q_name: str
+    w_s_name: str
+    w_zp_name: str | None
+    w_gidx_name: str | None
+
     @classmethod
     @abstractmethod
     def get_min_capability(cls) -> int:

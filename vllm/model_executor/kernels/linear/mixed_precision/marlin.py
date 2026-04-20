@@ -2,10 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import dataclasses
+
 import torch
+import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MIN_THREAD_N,
     MARLIN_SUPPORTED_GROUP_SIZES,
     apply_gptq_marlin_linear,
     check_marlin_supports_shape,
@@ -23,8 +28,11 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
+
+logger = init_logger(__name__)
 
 
 class MarlinLinearKernel(MPLinearKernel):
@@ -54,17 +62,87 @@ class MarlinLinearKernel(MPLinearKernel):
                 f"{MARLIN_SUPPORTED_GROUP_SIZES}",
             )
 
+        # Allow shapes where out_features is not divisible by the Marlin
+        # tile (GPTQ_MARLIN_MIN_THREAD_N). We pad the weight/scales/zeros
+        # at load time inside `process_weights_after_loading` and mask the
+        # extra columns by slicing the output in `apply_weights`. The
+        # runtime cost is zero — padding is a one-time load-time operation.
+        padded_n = round_up(c.partition_weight_shape[1], GPTQ_MARLIN_MIN_THREAD_N)
         return check_marlin_supports_shape(
-            c.partition_weight_shape[1],  # out_features
+            padded_n,  # out_features (possibly padded up to tile multiple)
             c.partition_weight_shape[0],  # in_features
             c.full_weight_shape[0],  # in_features
             c.group_size,
+        )
+
+    def _maybe_pad_n(self, layer: torch.nn.Module) -> None:
+        """Pad weight / scales / zeros / bias along the output dim to the
+        next multiple of GPTQ_MARLIN_MIN_THREAD_N so Marlin can run on
+        shards whose per-rank out-dim is not tile-aligned (e.g. the
+        n=32 shard produced by Intel AutoRound Int4 on TP=2).
+
+        Stores `layer._marlin_orig_n` for later output slicing and
+        replaces `self.config` with a new config whose
+        partition_weight_shape reports the padded out-dim so that
+        downstream transforms (repack, permute_scales, marlin_zero_points)
+        see the padded size.
+        """
+        c = self.config
+        orig_n = c.partition_weight_shape[1]
+        padded_n = round_up(orig_n, GPTQ_MARLIN_MIN_THREAD_N)
+        layer._marlin_orig_n = orig_n
+        if padded_n == orig_n:
+            return
+
+        pad = padded_n - orig_n
+        pack_factor = 32 // c.weight_type.size_bits
+
+        # qweight: [k/pack, n] int32, output_dim=1, unpacked along dim 1.
+        # Pad with zeros → those output columns decode to weight 0.
+        q = getattr(layer, self.w_q_name)
+        q_padded = F.pad(q.data, (0, pad), value=0)
+        q.data = q_padded
+
+        # scales: [num_groups, n], output_dim=1. Pad with zeros
+        # (values don't matter; the padded weight columns are zero).
+        s = getattr(layer, self.w_s_name)
+        s_padded = F.pad(s.data, (0, pad), value=0)
+        s.data = s_padded
+
+        # qzeros: [num_groups, n/pack] int32, packed_dim=1. Pad by
+        # pad/pack extra packed columns. Pad value 0 is safe (used only
+        # for padded weight columns, which are already zero).
+        if c.zero_points and self.w_zp_name is not None:
+            zp = getattr(layer, self.w_zp_name, None)
+            if zp is not None:
+                zp_pad_cols = pad // pack_factor
+                if zp_pad_cols > 0:
+                    zp.data = F.pad(zp.data, (0, zp_pad_cols), value=0)
+
+        # bias: [n] → [padded_n]
+        if hasattr(layer, "bias") and layer.bias is not None:
+            layer.bias.data = F.pad(layer.bias.data, (0, pad), value=0)
+
+        # Swap config so that all downstream transforms use padded n.
+        self.config = dataclasses.replace(
+            c,
+            partition_weight_shape=(c.partition_weight_shape[0], padded_n),
+        )
+        logger.info_once(
+            "Marlin: padded output dim %d → %d to satisfy tile_n=%d",
+            orig_n,
+            padded_n,
+            GPTQ_MARLIN_MIN_THREAD_N,
         )
 
     # note assumes that
     #  `weight_packed` is: {input_dim = 0, output_dim = 1, packed_dim = 0}
     #  `weight_scale` is: {input_dim = 0, output_dim = 1}
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Pad out-dim up to the Marlin tile multiple before any repack /
+        # permute / zero-point processing touches the tensors.
+        self._maybe_pad_n(layer)
+
         device = getattr(layer, self.w_q_name).device
         c = self.config
         is_a_8bit = c.act_type is not None and c.act_type.itemsize == 1
@@ -182,7 +260,15 @@ class MarlinLinearKernel(MPLinearKernel):
         # `process_weights_after_loading` will ensure w_zp and w_gidx are not
         #  None for marlin
 
-        return apply_gptq_marlin_linear(
+        padded_n = c.partition_weight_shape[1]
+        orig_n = getattr(layer, "_marlin_orig_n", padded_n)
+
+        # If caller supplied a bias sized for the unpadded output, pad it
+        # here so the fused bias-add inside marlin_gemm sees padded_n.
+        if bias is not None and bias.shape[-1] != padded_n:
+            bias = F.pad(bias, (0, padded_n - bias.shape[-1]), value=0)
+
+        out = apply_gptq_marlin_linear(
             input=x,
             weight=w_q,
             weight_scale=w_s,
@@ -192,9 +278,14 @@ class MarlinLinearKernel(MPLinearKernel):
             workspace=self.workspace,
             wtype=c.weight_type,
             input_size_per_partition=c.partition_weight_shape[0],
-            output_size_per_partition=c.partition_weight_shape[1],
+            output_size_per_partition=padded_n,
             is_k_full=self.is_k_full,
             input_global_scale=getattr(layer, "input_global_scale", None),
             bias=bias,
             input_dtype=c.act_type,
         )
+
+        # Discard the extra columns produced by the padded matmul.
+        if orig_n != padded_n:
+            out = out[..., :orig_n].contiguous()
+        return out

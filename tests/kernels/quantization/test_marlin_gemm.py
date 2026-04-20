@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_quant_int8,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    GPTQ_MARLIN_MIN_THREAD_N,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
     marlin_permute_bias,
@@ -617,4 +618,79 @@ def test_marlin_gemm_with_bias(size_m):
 
     max_diff = compute_max_diff(output, output_ref)
 
+    assert max_diff < 0.04
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("orig_n", [32, 48, 96])
+def test_marlin_gemm_sub_tile_n_pad(orig_n):
+    """Verify the pad-on-load strategy implemented in
+    `MarlinLinearKernel` for shapes where `size_n` is not a multiple of
+    `GPTQ_MARLIN_MIN_THREAD_N`.
+
+    The kernel pads qweight/scales/qzeros along the output dim to the
+    next tile multiple at `process_weights_after_loading` time and
+    slices the extra columns off the output in `apply_weights`. This
+    test replays that sequence directly against `ops.marlin_gemm` and
+    checks the sliced output against a reference matmul on the
+    un-padded weight.
+    """
+    quant_type = scalar_types.uint4b8
+    group_size = 128
+    size_m, size_k = 32, 1024
+
+    padded_n = (
+        (orig_n + GPTQ_MARLIN_MIN_THREAD_N - 1) // GPTQ_MARLIN_MIN_THREAD_N
+    ) * GPTQ_MARLIN_MIN_THREAD_N
+
+    a_input = rand_data((size_m, size_k))
+    b_weight = rand_data((size_k, orig_n))
+
+    # Zero-pad the weight along the output dim up to padded_n. The
+    # kernel pad lives at the pre-repack layer — padding the raw
+    # qweight with zeros and then running repack at the padded n
+    # produces a valid Marlin layout whose padded output columns
+    # decode to zero.
+    b_weight_padded = torch.nn.functional.pad(b_weight, (0, padded_n - orig_n), value=0)
+
+    w_ref_padded, marlin_q_w, marlin_s, g_idx, sort_indices, _ = marlin_quantize(
+        b_weight_padded, quant_type, group_size, False
+    )
+
+    marlin_zp = marlin_make_empty_g_idx(marlin_s.device)
+    workspace = marlin_make_workspace_new(a_input.device)
+
+    output_padded = ops.marlin_gemm(
+        a_input,
+        None,
+        marlin_q_w,
+        None,
+        marlin_s,
+        None,
+        None,
+        marlin_zp,
+        g_idx,
+        sort_indices,
+        workspace,
+        quant_type,
+        size_m,
+        padded_n,
+        size_k,
+        is_k_full=True,
+        use_atomic_add=False,
+        use_fp32_reduce=True,
+        is_zp_float=False,
+    )
+
+    # Slice back to the un-padded output — the columns Marlin wrote
+    # for the zero-weight padding are discarded.
+    output = output_padded[..., :orig_n].contiguous()
+    output_ref = torch.matmul(a_input, w_ref_padded[:, :orig_n])
+
+    torch.accelerator.synchronize()
+
+    max_diff = compute_max_diff(output, output_ref)
     assert max_diff < 0.04
