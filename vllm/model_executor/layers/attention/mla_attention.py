@@ -489,11 +489,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             attn_metadata: MLACommonMetadata
             if isinstance(attn_metadata_raw, dict):
                 attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
-            else:
+            elif isinstance(attn_metadata_raw, list):
                 # list[dict[str, AttentionMetadata]]: used in speculative decoding
                 # where [0] is the base-model (non-speculative) metadata dict.
-                assert isinstance(attn_metadata_raw, list)
                 attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment]
+            else:
+                attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
             slot_mapping = forward_context.slot_mapping
 
