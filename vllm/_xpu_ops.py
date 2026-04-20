@@ -22,6 +22,23 @@ else:
     except ImportError:
         from torch.library import impl_abstract as register_fake
 
+if hasattr(torch.ops._xpu_C, "fp8_gemm"):
+
+    @register_fake("_xpu_C::fp8_gemm")
+    def _fp8_gemm_fake(
+        q_input: torch.Tensor,
+        q_weight: torch.Tensor,
+        out_dtype: torch.dtype,
+        input_scales: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        input_2d = q_input.view(-1, q_input.shape[-1])
+        M = input_2d.size(0)
+        N = q_weight.size(1)
+        return torch.empty((M, N), dtype=out_dtype, device=q_input.device)
+
+
 if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
 
     @register_fake("_xpu_C::fp8_gemm_w8a16")
@@ -142,6 +159,46 @@ def _xpu_mxfp8_quantize_fake(
     x_s = torch.zeros(shape, device=x.device, dtype=torch.float32)
 
     return x.to(dtype), x_s.to(torch.float8_e8m0fnu)
+
+
+def _xpu_mxfp4_quantize_impl(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP4_BLOCK_SIZE = 32
+    eps = 1e-10
+    assert x.ndim == 2, "input must be 2-D"
+    assert x.shape[-1] % MXFP4_BLOCK_SIZE == 0, (
+        f"last dimension {x.shape[-1]} must be divisible by group_size "
+        f"{MXFP4_BLOCK_SIZE}"
+    )
+    assert x.is_contiguous(), "input groups must be contiguous"
+
+    M, N = x.shape
+
+    # Packed FP4 output: two nibbles per byte
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+
+    torch.ops._C.per_token_group_quant_mxfp4(x, x_q, x_s, MXFP4_BLOCK_SIZE, eps)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
+
+
+def _xpu_mxfp4_quantize_fake(
+    x: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    MXFP4_BLOCK_SIZE = 32
+    M, N = x.shape
+
+    # Packed FP4 output: two nibbles per byte
+    x_q = torch.empty(M, N // 2, device=x.device, dtype=torch.uint8)
+    x_s = torch.empty(M, N // MXFP4_BLOCK_SIZE, device=x.device, dtype=torch.float32)
+
+    x_q = x_q.view(torch.float4_e2m1fn_x2)
+    x_s = x_s.to(dtype=torch.float8_e8m0fnu, memory_format=torch.preserve_format)
+    return x_q, x_s
 
 
 # Global flag to ensure ops are registered only once
@@ -553,6 +610,12 @@ class xpu_ops:
                 op_name="xpu_mxfp8_quantize",
                 op_func=_xpu_mxfp8_quantize_impl,
                 fake_impl=_xpu_mxfp8_quantize_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="xpu_mxfp4_quantize",
+                op_func=_xpu_mxfp4_quantize_impl,
+                fake_impl=_xpu_mxfp4_quantize_fake,
             )
 
             _OPS_REGISTERED = True
