@@ -596,7 +596,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_mqa_tokens = attn_metadata.num_decode_tokens
         num_mha_tokens = q.size(0) - num_mqa_tokens
 
-        # Sparse MLA: use MHA only for pure prefill in the sweet spot.
+        # Sparse MLA: use MHA only for pure prefill in the optimal seq_len range
         # Outside this range or with cached context, MQA is faster.
         if is_sparse_impl and num_mha_tokens > 0:
             max_seq_len = getattr(attn_metadata, "max_seq_len", 0)

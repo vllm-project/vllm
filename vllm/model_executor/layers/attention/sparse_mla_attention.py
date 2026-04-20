@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import torch
 
 import vllm._custom_ops as ops
-from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
@@ -43,10 +42,6 @@ def build_sparse_mla_prefill_fields(
     int,  # prefill_max_kv_len
     torch.Tensor | None,  # prefill_block_table
 ]:
-    """Compute prefill fields for sparse MLA metadata builders.
-
-    Mirrors how MLACommonMetadataBuilder.build() computes prefill_query_start_loc.
-    """
     if num_prefills == 0:
         return None, 0, False, None, None, 0, None
 
@@ -55,8 +50,8 @@ def build_sparse_mla_prefill_fields(
 
     qsl_cpu = cm.query_start_loc_cpu
     prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
-    prefill_qlens = prefill_qsl_cpu[1:] - prefill_qsl_cpu[:-1]
-    prefill_max_query_len = int(prefill_qlens.max().item())
+    prefill_query_lens = prefill_qsl_cpu[1:] - prefill_qsl_cpu[:-1]
+    prefill_max_query_len = int(prefill_query_lens.max().item())
 
     has_context = False
     seq_lens_cpu = cm.seq_lens.cpu()
@@ -86,7 +81,7 @@ def build_sparse_mla_prefill_fields(
         prefill_query_start_loc,
         prefill_max_query_len,
         has_context,
-        prefill_qlens,
+        prefill_query_lens,
         prefill_cu_seq_lens_kv,
         prefill_max_kv_len,
         prefill_block_table,
@@ -223,11 +218,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             and (self.num_heads == 128)
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
-        )
-
-        self.dcp_world_size: int = -1
-        self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
 
     def _concat_k_nope_k_pe(
