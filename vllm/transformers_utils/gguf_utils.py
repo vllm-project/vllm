@@ -5,16 +5,17 @@
 from functools import cache
 from os import PathLike
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import gguf
 import regex as re
-from gguf.constants import Keys, VisionProjectorType
-from gguf.quants import GGMLQuantizationType
-from transformers import Gemma3Config, PretrainedConfig, SiglipVisionConfig
+from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 
 from .repo_utils import list_filtered_repo_files
+
+if TYPE_CHECKING:
+    from transformers import SiglipVisionConfig
 
 logger = init_logger(__name__)
 
@@ -93,6 +94,8 @@ def is_valid_gguf_quant_type(gguf_quant_type: str) -> bool:
     Supports both exact GGML quant types (e.g., Q4_K, IQ1_S) and
     extended naming conventions (e.g., Q4_K_M, Q3_K_S, Q5_K_L).
     """
+    from gguf.quants import GGMLQuantizationType
+
     # Check for exact match first
     if getattr(GGMLQuantizationType, gguf_quant_type, None) is not None:
         return True
@@ -113,6 +116,8 @@ def split_remote_gguf(model: str | Path) -> tuple[str, str]:
     if is_remote_gguf(model):
         parts = model.rsplit(":", 1)
         return (parts[0], parts[1])
+    from gguf.quants import GGMLQuantizationType
+
     raise ValueError(
         f"Wrong GGUF model or invalid GGUF quant type: {model}.\n"
         "- It should be in repo_id:quant_type format.\n"
@@ -192,6 +197,10 @@ def extract_vision_config_from_gguf(mmproj_path: str) -> "SiglipVisionConfig | N
         Exception: Exceptions from GGUF reading (file not found, corrupted
             file, etc.) propagate directly from gguf.GGUFReader
     """
+    import gguf
+    from gguf.constants import Keys, VisionProjectorType
+    from transformers import SiglipVisionConfig
+
     reader = gguf.GGUFReader(str(mmproj_path))
 
     # Detect projector type to apply model-specific parameters
@@ -285,6 +294,8 @@ def maybe_patch_hf_config_from_gguf(
         text_config = hf_config.get_text_config()
         is_gemma3 = hf_config.model_type in ("gemma3", "gemma3_text")
         if vision_config is not None and is_gemma3:
+            from transformers import Gemma3Config
+
             new_hf_config = Gemma3Config(
                 text_config=text_config,
                 vision_config=vision_config,
