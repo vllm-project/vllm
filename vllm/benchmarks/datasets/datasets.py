@@ -3590,6 +3590,8 @@ class SpeedBench(CustomDataset):
     `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -`
     """  # noqa: E501
 
+    DOWNLOAD_SCRIPT_URL = "https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py"
+
     def __init__(self, **kwargs) -> None:
         self.dataset_subset = kwargs.pop("dataset_subset", "qualitative")
         self.category = kwargs.pop("category", None)
@@ -3599,6 +3601,13 @@ class SpeedBench(CustomDataset):
     def load_data(self) -> None:
         if self.dataset_path is None:
             raise ValueError("dataset_path must be provided for loading data.")
+
+        if not Path(self.dataset_path).is_dir():
+            raise ValueError(
+                f"dataset_path {self.dataset_path} is not a directory. "
+                f"Please make sure to download the dataset from HuggingFace using "
+                f"`curl -LsSf {self.DOWNLOAD_SCRIPT_URL} | python3 -`"
+            )
 
         self.data = []
 
@@ -3610,7 +3619,11 @@ class SpeedBench(CustomDataset):
 
         # check if the JSONL file has a 'turns' column
         if "messages" not in jsonl_data.columns:
-            raise ValueError("JSONL file must contain a 'messages' column.")
+            raise ValueError(
+                "JSONL file must contain a 'messages' column. "
+                "Please make sure to download the dataset from HuggingFace using "
+                f"`curl -LsSf {self.DOWNLOAD_SCRIPT_URL} | python3 -`"
+            )
 
         for _, row in jsonl_data.iterrows():
             # sample only from a specific category if specified
