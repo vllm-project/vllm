@@ -66,6 +66,31 @@ if len(sys.argv) > 1 and sys.argv[1] == "serve":
         name="vllm-forkserver-prewarm",
     ).start()
 
+    # [startup] CRIU + cuda-checkpoint snapshot restore (opt-in).
+    # If VLLM_SNAPSHOT_ENABLED=1 and a compatible snapshot exists for
+    # the current (vllm, python, torch, cuda-driver, gpu-arch) tuple,
+    # restore from it instead of re-running all the Python imports +
+    # CUDA context init. See vllm/snapshot/ and
+    # .startup-bench/design/criu_cuda_checkpoint_plan.md.
+    #
+    # This hook runs on main thread BEFORE torch is imported so the
+    # restore path can skip torch entirely. The restored process
+    # resumes in vllm.snapshot.helper._resume() which swaps in the
+    # user's argv/env/cwd and calls main() from a warm state.
+    if os.environ.get("VLLM_SNAPSHOT_ENABLED") == "1":
+        try:
+            from vllm.snapshot.cli import try_restore_and_dispatch
+
+            if try_restore_and_dispatch():
+                # sys.exit inside try_restore_and_dispatch hands control
+                # to the restored process; this module-level code path
+                # never returns past this point.
+                pass
+        except Exception:
+            # Silent fallback — snapshot is a nice-to-have, not a
+            # correctness requirement.
+            pass
+
 
 from vllm.logger import init_logger
 
@@ -79,6 +104,7 @@ def main():
     import vllm.entrypoints.cli.openai
     import vllm.entrypoints.cli.run_batch
     import vllm.entrypoints.cli.serve
+    import vllm.entrypoints.cli.snapshot
     from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG, cli_env_setup
     from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -89,6 +115,7 @@ def main():
         vllm.entrypoints.cli.benchmark.main,
         vllm.entrypoints.cli.collect_env,
         vllm.entrypoints.cli.run_batch,
+        vllm.entrypoints.cli.snapshot,
     ]
 
     cli_env_setup()
