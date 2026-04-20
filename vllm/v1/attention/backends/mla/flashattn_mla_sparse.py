@@ -313,6 +313,28 @@ class FlashAttentionMLASparseImpl(
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
+        total_k = k_pe_cache.shape[0] * k_pe_cache.shape[1]
+
+        # DIAGNOSTIC: check topk_indices from indexer
+        topk_max = topk_indices.max().item()
+        topk_min = topk_indices.min().item()
+        seq_lens = attn_metadata.seq_lens
+        max_seq_len = seq_lens.max().item() if seq_lens.numel() > 0 else 0
+        if topk_max >= max_seq_len:
+            logger.error(
+                "DIAGNOSTIC: topk_indices out of range! "
+                "topk min=%d max=%d, max_seq_len=%d, "
+                "num_actual_toks=%d, num_reqs=%d, "
+                "block_table shape=%s, total_k=%d",
+                topk_min,
+                topk_max,
+                max_seq_len,
+                num_actual_toks,
+                attn_metadata.num_reqs,
+                attn_metadata.block_table.shape,
+                total_k,
+            )
+
         gather_kv_indices = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,
@@ -321,11 +343,52 @@ class FlashAttentionMLASparseImpl(
             NUM_TOPK_TOKENS=topk_indices.shape[1],
         )
 
-        # FA4's gather_kv_indices does not support -1 sentinel values;
-        # clamp to 0 to avoid out-of-bounds GPU memory reads.
-        gather_kv_indices.clamp_(min=0)
+        # DIAGNOSTIC: check gather_kv_indices before clamp
+        gkv_max = gather_kv_indices.max().item()
+        gkv_min = gather_kv_indices.min().item()
+        if gkv_max >= total_k:
+            bad_mask = gather_kv_indices >= total_k
+            num_bad = bad_mask.sum().item()
+            bad_rows = bad_mask.any(dim=1).nonzero(as_tuple=True)[0]
+            sample_row = bad_rows[0].item() if bad_rows.numel() > 0 else -1
+            sample_req = (
+                attn_metadata.req_id_per_token[sample_row].item()
+                if sample_row >= 0
+                else -1
+            )
+            sample_topk = (
+                topk_indices[sample_row].cpu().tolist() if sample_row >= 0 else []
+            )
+            sample_gather = (
+                gather_kv_indices[sample_row].cpu().tolist() if sample_row >= 0 else []
+            )
+            sample_bad_topk = [
+                sample_topk[i]
+                for i in range(len(sample_topk))
+                if i < len(sample_gather) and sample_gather[i] >= total_k
+            ]
+            logger.error(
+                "DIAGNOSTIC: gather_kv_indices OOB! "
+                "pre-clamp min=%d max=%d, total_k=%d, "
+                "num_bad=%d/%d, sample_row=%d, sample_req=%d, "
+                "bad topk values=%s, "
+                "seq_lens=%s, block_table[req] shape=%s",
+                gkv_min,
+                gkv_max,
+                total_k,
+                num_bad,
+                gather_kv_indices.numel(),
+                sample_row,
+                sample_req,
+                sample_bad_topk[:20],
+                seq_lens[: attn_metadata.num_reqs].cpu().tolist()[:20],
+                attn_metadata.block_table.shape,
+            )
 
-        total_k = k_pe_cache.shape[0] * k_pe_cache.shape[1]
+        # FA4's gather_kv_indices does not support -1 sentinel values;
+        # clamp to valid range to prevent out-of-bounds GPU memory reads.
+        gather_kv_indices.clamp_(min=0, max=total_k - 1)
+
         num_reqs = attn_metadata.num_reqs
         cu_seqlens_k = torch.zeros(num_reqs + 1, dtype=torch.int32, device=q_pe.device)
 

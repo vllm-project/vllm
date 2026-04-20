@@ -74,9 +74,9 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         self.is_v32 = hasattr(config, "index_topk")
         if self.is_v32:
             topk_tokens = config.index_topk
-            topk_indices_buffer = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                topk_tokens,
+            topk_indices_buffer = torch.full(
+                (vllm_config.scheduler_config.max_num_batched_tokens, topk_tokens),
+                fill_value=-1,
                 dtype=torch.int32,
                 device=self.device,
             )
