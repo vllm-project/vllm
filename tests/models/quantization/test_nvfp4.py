@@ -125,8 +125,8 @@ def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
 @pytest.mark.parametrize(
     "model",
     [
-        "amd-quark/Qwen3-30B-A3B-NVFP4-2-layers-modelopt",
-        "amd-quark/Qwen3-30B-A3B-NVFP4-2-layers-compressed-tensors",
+        "nvidia/Qwen3-30B-A3B-NVFP4",
+        "RedHatAI/Qwen3-30B-A3B-NVFP4",
     ],
 )
 @pytest.mark.parametrize("backend", ["emulation"])
@@ -136,5 +136,10 @@ def test_nvfp4(vllm_runner, model, eager, backend, monkeypatch):
 )
 def test_nvfp4_moe(vllm_runner, model, backend, monkeypatch):
     monkeypatch.setenv("VLLM_NVFP4_GEMM_BACKEND", backend)
-    with vllm_runner(model, moe_backend=backend) as llm:
+    with vllm_runner(
+        model,
+        moe_backend=backend,
+        load_format="dummy",
+        hf_overrides={"num_hidden_layers": 2},
+    ) as llm:
         _ = llm.generate_greedy(["1 2 3 4 5"], max_tokens=2)
