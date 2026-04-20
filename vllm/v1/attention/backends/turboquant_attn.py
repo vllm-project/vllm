@@ -17,6 +17,7 @@ Per-head per-position slot layout:
 """
 
 import functools
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, ClassVar
@@ -48,6 +49,9 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     triton_turboquant_decode_attention,
 )
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
+from vllm.platforms import current_platform
+
+logger = logging.getLogger(__name__)
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
@@ -277,6 +281,26 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
         )
+
+        # Use HIP decode kernel on ROCm for FP8 key TQ k8v4.
+        self._use_hip_decode = False
+        if current_platform.is_rocm() and self.tq_config.key_fp8:
+            try:
+                from vllm.v1.attention.ops.tq_k8v4_rocm_decode import (
+                    _load_tq_k8v4_kernel,
+                )
+
+                self._use_hip_decode = _load_tq_k8v4_kernel()
+                if self._use_hip_decode:
+                    logger.info(
+                        "TQ k8v4: using HIP decode kernel on ROCm"
+                    )
+            except Exception as e:
+                logger.warning(
+                    "TQ k8v4 HIP kernel not available, "
+                    "falling back to Triton: %s",
+                    e,
+                )
 
     def _ensure_on_device(self, layer, device):
         """One-time derivation of TQ buffers (rotation matrix, midpoints).
@@ -770,6 +794,31 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         PiT: torch.Tensor | None = None,
         layer: torch.nn.Module | None = None,
     ) -> torch.Tensor:
+        # ROCm HIP kernel path for FP8 key TQ k8v4.
+        # Uses MFMA-based GQA attention for high batch + long context,
+        # and per-Q-head split-K for low batch.
+        if self._use_hip_decode:
+            from vllm.v1.attention.ops.tq_k8v4_rocm_decode import (
+                tq_k8v4_rocm_decode_attention,
+            )
+
+            # For FP8 key path, query is used directly (no rotation).
+            q_input = query.contiguous()
+            output_buf = None
+            if layer is not None:
+                output_buf = getattr(layer, "_tq_output_buf", None)
+
+            return tq_k8v4_rocm_decode_attention(
+                query=q_input,
+                kv_cache=kv_cache,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                scale=self.scale,
+                key_packed_size=self.tq_config.key_packed_size,
+                max_num_kv_splits=self.max_num_kv_splits,
+                output_buf=output_buf,
+            )
+
         # Grab cached decode buffers from the layer (lazily allocated).
         mid_o_buf = output_buf = lse_buf = None
         if layer is not None:
