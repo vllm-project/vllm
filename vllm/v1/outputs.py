@@ -221,6 +221,8 @@ class DraftTokenIds:
     req_ids: list[str]
     # num_reqs x num_draft_tokens
     draft_token_ids: list[list[int]]
+    # [num_reqs]
+    num_valid_draft_tokens: list[int] | None = None
 
 
 def make_empty_encoder_model_runner_output(

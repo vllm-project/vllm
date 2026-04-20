@@ -1667,9 +1667,16 @@ class Scheduler(SchedulerInterface):
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
-        for req_id, spec_token_ids in zip(
-            draft_token_ids.req_ids,
-            draft_token_ids.draft_token_ids,
+        # Optional per-request valid-draft-count from variable-length
+        # speculators (e.g. ngram_gpu). When present, we enumerate with an
+        # index so each request can be trimmed independently before
+        # further processing (structured-output grammar validation, etc.).
+        num_valid_list = draft_token_ids.num_valid_draft_tokens
+        for i, (req_id, spec_token_ids) in enumerate(
+            zip(
+                draft_token_ids.req_ids,
+                draft_token_ids.draft_token_ids,
+            )
         ):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
@@ -1682,6 +1689,17 @@ class Scheduler(SchedulerInterface):
                     request.spec_token_ids = []
                 continue
 
+            # Variable-length drafters: truncate to the number of drafts
+            # that actually matched a real n-gram. Anything beyond that
+            # count was a safe-fallback substitution (see
+            # NgramGPUSpeculator) and must not be surfaced as a draft.
+            if num_valid_list is not None:
+                num_valid = num_valid_list[i]
+                if num_valid < len(spec_token_ids):
+                    # Slice defensively; spec_token_ids is a Python list
+                    # produced by ``ndarray.tolist()`` so slicing is O(k).
+                    spec_token_ids = spec_token_ids[:num_valid]
+
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
@@ -1692,11 +1710,14 @@ class Scheduler(SchedulerInterface):
         self, draft_token_ids: DraftTokenIds, scheduler_output: SchedulerOutput
     ) -> None:
         num_invalid_spec_tokens: dict[str, int] = {}
+        num_valid_list = draft_token_ids.num_valid_draft_tokens
 
         sched_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-        for req_id, spec_token_ids in zip(
-            draft_token_ids.req_ids,
-            draft_token_ids.draft_token_ids,
+        for i, (req_id, spec_token_ids) in enumerate(
+            zip(
+                draft_token_ids.req_ids,
+                draft_token_ids.draft_token_ids,
+            )
         ):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
@@ -1710,7 +1731,14 @@ class Scheduler(SchedulerInterface):
             orig_num_spec_tokens = len(placeholder_spec_tokens)
             # Trim drafts to scheduled number of spec tokens
             # (needed for chunked prefill case for example).
-            del spec_token_ids[orig_num_spec_tokens:]
+            effective_num_spec_tokens = orig_num_spec_tokens
+            if num_valid_list is not None:
+                effective_num_spec_tokens = max(
+                    0,
+                    min(num_valid_list[i], orig_num_spec_tokens),
+                )
+
+            del spec_token_ids[effective_num_spec_tokens:]
             # Filter out spec tokens which do not adhere to the grammar.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request

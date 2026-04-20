@@ -15,6 +15,7 @@ class RequestState:
         num_speculative_steps: int,
         vocab_size: int,
         device: torch.device,
+        use_dense_all_token_ids: bool = False,
     ):
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -29,12 +30,14 @@ class RequestState:
 
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
-        # To save GPU memory, we use UVA instead of GPU for this tensor.
+        # To save GPU memory, we use UVA instead of GPU by default, but
+        # ngram_gpu benefits from dense device residency because it scans
+        # active rows repeatedly during proposal.
         self.all_token_ids = StagedWriteTensor(
             (self.max_num_reqs, self.max_model_len),
             dtype=torch.int32,
             device=device,
-            uva_instead_of_gpu=True,
+            uva_instead_of_gpu=not use_dense_all_token_ids,
         )
         # NOTE(woosuk): Distinguish clearly between prompt_len and prefill_len:
         # - prompt_len: Number of tokens in the user-provided prompt.

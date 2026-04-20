@@ -183,6 +183,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner: PoolingRunner | None = None
 
         # General request states.
+        use_dense_all_token_ids = (
+            self.speculative_config is not None
+            and self.speculative_config.use_ngram_gpu()
+        )
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -190,12 +194,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_speculative_steps=self.num_speculative_steps,
             vocab_size=self.vocab_size,
             device=self.device,
+            use_dense_all_token_ids=use_dense_all_token_ids,
         )
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
+
+        # Inject RequestState into speculators that consume the persistent
+        # token store directly (e.g. NgramGPUSpeculator). Attribute-based
+        # injection keeps speculators that don't need it (EagleSpeculator)
+        # untouched — they simply don't declare the `req_states` attribute.
+        if self.speculator is not None and hasattr(self.speculator, "req_states"):
+            self.speculator.req_states = self.req_states
 
         self.sampler: Sampler | None = None
         self.rejection_sampler: RejectionSampler | None = None
@@ -296,7 +308,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if not load_dummy_weights:
             prepare_communication_buffer_for_model(self.model)
-            if self.speculator is not None:
+            if self.speculator is not None and hasattr(self.speculator, "model"):
                 prepare_communication_buffer_for_model(self.speculator.model)
 
         # Initialize the components that require the model.
@@ -1219,7 +1231,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
+            # Speculators that can produce fewer than `num_speculative_steps`
+            # real drafts (e.g. ngram_gpu on a no-match row) expose a
+            # `get_num_valid_draft_tokens` accessor. When present, the
+            # companion tensor is shipped to the scheduler via the same
+            # async D2H copy stream as the draft tokens themselves.
+            num_valid_draft_tokens: torch.Tensor | None = None
+            get_num_valid = getattr(self.speculator, "get_num_valid_draft_tokens", None)
+            if get_num_valid is not None:
+                num_valid_draft_tokens = get_num_valid(input_batch.num_reqs)
+            self.draft_tokens_handler.set_draft_tokens(
+                input_batch, draft_tokens, num_valid_draft_tokens
+            )
 
         if self.use_async_scheduling:
             return async_output
