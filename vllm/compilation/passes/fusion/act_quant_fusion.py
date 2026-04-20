@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -48,6 +49,9 @@ if silu_and_mul_nvfp4_quant_supported:
 if current_platform.is_cuda_alike():
     FUSED_OPS[kFp8Dynamic128Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
     FUSED_OPS[kFp8Dynamic64Sym] = torch.ops._C.silu_and_mul_per_block_quant.default
+    FUSED_OPS[kFp8DynamicTokenSym] = (
+        torch.ops.vllm.fused_silu_mul_per_token_quant.default
+    )
 
 
 class ActivationQuantPattern(ABC):
@@ -276,6 +280,43 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
         register_replacement(pattern, replacement, inps, fwd_only, pm_pass)
 
 
+class SiluMulDynamicPerTokenQuantPattern(ActivationQuantPattern):
+    """
+    Fusion for SiluMul + dynamic per-token FP8 quantization.
+    Matches: silu_and_mul -> dynamic_per_token_scaled_fp8_quant
+    Replaces with: fused_silu_mul_per_token_quant (single fused kernel).
+    """
+
+    def __init__(self) -> None:
+        super().__init__(kFp8DynamicTokenSym)
+        self.quant_matcher = MatcherQuantFP8(kFp8DynamicTokenSym)
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        return self.silu_and_mul_matcher.inputs()
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            silu_out = self.silu_and_mul_matcher(input)
+            # dynamic per-token quant: no scale input, returns (result, scale)
+            return self.quant_matcher(silu_out)  # type: ignore[return-value]
+
+        def replacement(
+            input: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            at = auto_functionalized(
+                self.FUSED_OP,
+                input=input,
+                quant_dtype=self.quant_dtype,
+                scale_ub=None,
+            )
+            return at[1], at[2]
+
+        inps = self.get_inputs()
+        register_replacement(pattern, replacement, inps, fwd_only, pm_pass)
+
+
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
@@ -313,6 +354,9 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
                                 is_tma_aligned=is_tma_aligned,
                             ).register(self.patterns)
 
+        if current_platform.is_cuda_alike():
+            SiluMulDynamicPerTokenQuantPattern().register(self.patterns)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -327,4 +371,5 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
             SiluMulBlockQuantPattern,
+            SiluMulDynamicPerTokenQuantPattern,
         )

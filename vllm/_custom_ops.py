@@ -633,6 +633,66 @@ def silu_and_mul_per_block_quant(
     return output, scales
 
 
+# fused silu_and_mul + per-token dynamic FP8 quant (Triton)
+def fused_silu_mul_per_token_quant(
+    input: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fused SiLU+Mul + dynamic per-token FP8 quantization (Oink Triton).
+
+    Args:
+        input: [num_tokens, hidden_size * 2] bf16/fp16 (gate || up layout)
+        quant_dtype: output dtype (e.g., torch.float8_e4m3fn)
+        scale_ub: optional [1] float32 upper bound for scales
+
+    Returns:
+        output: [num_tokens, hidden_size] quant_dtype
+        scales: [num_tokens, 1] float32
+    """
+    return torch.ops.vllm.fused_silu_mul_per_token_quant(
+        input, quant_dtype, scale_ub
+    )
+
+
+def _fused_silu_mul_per_token_quant_impl(
+    input: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from vllm.model_executor.layers.quantization.triton_quantization import (
+        fused_silu_mul_per_token_quant as _impl,
+    )
+
+    return _impl(input, quant_dtype, scale_ub)
+
+
+def _fused_silu_mul_per_token_quant_fake(
+    input: torch.Tensor,
+    quant_dtype: torch.dtype,
+    scale_ub: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = input.size(0)
+    hidden_size = input.size(1) // 2
+    output = torch.empty(
+        (num_tokens, hidden_size), device=input.device, dtype=quant_dtype
+    )
+    scales = torch.empty(
+        (num_tokens, 1), device=input.device, dtype=torch.float32
+    )
+    return output, scales
+
+
+from vllm.utils.torch_utils import direct_register_custom_op
+
+direct_register_custom_op(
+    op_name="fused_silu_mul_per_token_quant",
+    op_func=_fused_silu_mul_per_token_quant_impl,
+    mutates_args=[],
+    fake_impl=_fused_silu_mul_per_token_quant_fake,
+)
+
+
 # quantization ops
 # awq
 def awq_dequantize(

@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,
     kFp8Dynamic128Sym,
+    kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
@@ -222,6 +223,43 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
         return [FUSED_OPS[self.quant_key]]
 
 
+class TestSiluMulPerTokenQuantModel(torch.nn.Module):
+    quant_key = kFp8DynamicTokenSym
+
+    def __init__(self, hidden_size: int, **kwargs):
+        super().__init__()
+        self.silu_and_mul = SiluAndMul()
+        self.quant_fp8 = QuantFP8(
+            static=False,
+            group_shape=GroupShape.PER_TOKEN,
+            compile_native=False,
+        )
+
+        self.enable_silu_mul_custom_op = self.silu_and_mul.enabled()
+        self.enable_quant_fp8_custom_op = self.quant_fp8.enabled()
+
+    def forward(self, x):
+        y = self.silu_and_mul(x)
+        out, scale = self.quant_fp8(y)
+        # Dequant for numerical comparison
+        dequant = out.to(dtype=torch.float32) * scale
+        return (dequant,)
+
+    def ops_in_model_before(self):
+        ops = []
+        if self.enable_silu_mul_custom_op:
+            ops.append(SILU_MUL_OP)
+        ops.append(
+            QUANT_OPS[self.quant_key]
+            if self.enable_quant_fp8_custom_op
+            else torch.ops.aten.reciprocal.default
+        )
+        return ops
+
+    def ops_in_model_after(self):
+        return [FUSED_OPS[self.quant_key]]
+
+
 ROCM_KERNELS = [ROCmFP8ScaledMMLinearKernel, PerTensorTorchFP8ScaledMMLinearKernel]
 CUDA_KERNELS = [
     FlashInferFP8ScaledMMLinearKernel,
@@ -270,6 +308,16 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
             )
             for transposed in [False, True]
         ],
+        # Per-token dynamic FP8 quant fusion (CUDA only, Triton kernel).
+        pytest.param(
+            TestSiluMulPerTokenQuantModel,
+            True,
+            None,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda_alike(), reason="CUDA only"
+            ),
+            id="TestSiluMulPerTokenQuant",
+        ),
     ],
 )
 @pytest.mark.skipif(
@@ -284,6 +332,7 @@ def test_fusion_silu_and_mul_quant(
         | TestSiluMulNvfp4QuantModel
         | TestSiluMulGroupFp8QuantModel
         | TestSiluMulBlockQuantModel
+        | TestSiluMulPerTokenQuantModel
     ],
     enable_silu_mul_custom_op: bool,
     enable_quant_fp8_custom_op: bool,
@@ -353,7 +402,12 @@ def test_fusion_silu_and_mul_quant(
         elif isinstance(model, TestSiluMulNvfp4QuantModel):
             atol, rtol = 1e-1, 1e-1
         elif isinstance(
-            model, (TestSiluMulGroupFp8QuantModel, TestSiluMulBlockQuantModel)
+            model,
+            (
+                TestSiluMulGroupFp8QuantModel,
+                TestSiluMulBlockQuantModel,
+                TestSiluMulPerTokenQuantModel,
+            ),
         ):
             atol, rtol = 5e-2, 5e-2
 
