@@ -27,7 +27,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
     chunked_prefill_paged_decode,
 )
@@ -69,7 +68,6 @@ class RocmAttentionMetadata:
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
 
-    # Whether attention among query tokens is causal (decoder) or bidirectional.
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
 
@@ -207,8 +205,6 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_non_causal(cls) -> bool:
-        # Bidirectional attention among draft query tokens (e.g. DFlash) is
-        # implemented when RocmAttentionMetadata.causal is False.
         return True
 
     forward_includes_kv_cache_update: bool = False
@@ -312,7 +308,7 @@ class RocmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         output: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: RocmAttentionMetadata,
         layer: torch.nn.Module,
     ) -> torch.Tensor:
         """Forward pass for encoder attention without KV cache.
@@ -361,7 +357,7 @@ class RocmAttentionImpl(AttentionImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: RocmAttentionMetadata,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
@@ -449,7 +445,7 @@ class RocmAttentionImpl(AttentionImpl):
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,
-            causal=getattr(attn_metadata, "causal", True),
+            causal=attn_metadata.causal,
         )
 
         return output
