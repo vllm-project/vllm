@@ -1856,6 +1856,7 @@ class TestFP8Layer(torch.nn.Module):
             out_dtype=out_dtype,
             force_kernel=force_kernel,
         )
+        self.kernel.process_weights_after_loading(self)
 
     def is_quant_fp8_enabled(self) -> bool:
         return self.kernel.quant_fp8.enabled()
