@@ -19,11 +19,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
     tensor_model_parallel_reduce_scatter,
 )
-from vllm.distributed.device_communicators.base_device_communicator import (
-    DeviceCommunicatorBase,
-)
 from vllm.distributed.parallel_state import GroupCoordinator, TensorMetadata
-from vllm.utils.torch_utils import is_strictly_contiguous
 from vllm.v1.worker.gpu_worker import AsyncIntermediateTensors
 
 from ..utils import (
@@ -280,32 +276,6 @@ def test_irecv_tensor_dict_send_allgather_postprocess_binds_keys(
     assert td["b"].shape == torch.Size([4])
     torch.testing.assert_close(td["a"], torch.ones(4, dtype=torch.int32))
     torch.testing.assert_close(td["b"], torch.ones(4, dtype=torch.int32))
-
-
-def test_device_communicator_all_gather_materializes_rank_one_last_dim(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    comm = DeviceCommunicatorBase.__new__(DeviceCommunicatorBase)
-    comm.world_size = 4
-    comm.device_group = object()
-
-    def fake_all_gather_into_tensor(
-        output_tensor: torch.Tensor,
-        input_tensor: torch.Tensor,
-        group: object,
-    ) -> None:
-        gathered = torch.cat([input_tensor for _ in range(comm.world_size)], dim=0)
-        output_tensor.copy_(gathered)
-
-    monkeypatch.setattr(
-        torch.distributed, "all_gather_into_tensor", fake_all_gather_into_tensor
-    )
-
-    input_tensor = torch.randn(2, 3, 1)
-    output = comm.all_gather(input_tensor, dim=-1)
-
-    assert output.shape == (2, 3, 4)
-    assert is_strictly_contiguous(output)
 
 
 def test_async_intermediate_tensors_lazy_wait() -> None:

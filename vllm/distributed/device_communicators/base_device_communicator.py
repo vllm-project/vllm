@@ -7,8 +7,6 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from vllm.utils.torch_utils import is_strictly_contiguous, make_strictly_contiguous
-
 
 class Cache:
     def __init__(self):
@@ -204,12 +202,6 @@ class DeviceCommunicatorBase:
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]
         )
-        # When the gathered dimension has size 1, torch.compile can preserve a
-        # degenerate-stride view through reshape/movedim/reshape. Downstream
-        # Triton LoRA kernels assume canonical contiguous buffers for their
-        # mutated intermediates, so materialize this rare rank-one case here.
-        if input_size[dim] == 1 and not is_strictly_contiguous(output_tensor):
-            output_tensor = make_strictly_contiguous(output_tensor)
         return output_tensor
 
     def all_gatherv(
