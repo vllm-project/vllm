@@ -1,91 +1,185 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Shared forward_mha implementation for sparse MLA backends."""
+"""Shared forward_mha implementation and metadata builder for sparse MLA backends."""
 
 from typing import TYPE_CHECKING, Generic, TypeVar
 
+import numpy as np
 import torch
 
 import vllm._custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backend import (
     AttentionMetadata,
+    AttentionMetadataBuilder,
     SparseMLAAttentionImpl,
     is_quantized_kv_cache,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
     flash_attn_varlen_func,
 )
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.model_executor.layers.linear import ColumnParallelLinear
     from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
 
 
-def build_sparse_mla_prefill_fields(
-    cm: "CommonAttentionMetadata",
-    num_decodes: int,
-    num_prefills: int,
-) -> tuple[
-    torch.Tensor | None,  # prefill_query_start_loc
-    int,  # prefill_max_query_len
-    bool,  # has_context
-    torch.Tensor | None,  # prefill_query_lens_cpu
-    torch.Tensor | None,  # prefill_cu_seq_lens_kv
-    int,  # prefill_max_kv_len
-    torch.Tensor | None,  # prefill_block_table
-]:
-    if num_prefills == 0:
-        return None, 0, False, None, None, 0, None
+class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
+    metadata_cls: type[T]
 
-    offset = cm.query_start_loc[num_decodes]
-    prefill_query_start_loc = cm.query_start_loc[num_decodes:] - offset
-
-    qsl_cpu = cm.query_start_loc_cpu
-    prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
-    prefill_query_lens = prefill_qsl_cpu[1:] - prefill_qsl_cpu[:-1]
-    prefill_max_query_len = int(prefill_query_lens.max().item())
-
-    has_context = False
-    seq_lens_cpu = cm.seq_lens.cpu()
-    for i in range(num_prefills):
-        idx = num_decodes + i
-        if seq_lens_cpu[idx] > qsl_cpu[idx + 1] - qsl_cpu[idx]:
-            has_context = True
-            break
-
-    # Precompute context-prefill fields
-    prefill_cu_seq_lens_kv = None
-    prefill_max_kv_len = 0
-    prefill_block_table = None
-    if has_context:
-        prefill_seq_lens = cm.seq_lens[num_decodes : num_decodes + num_prefills]
-        seq_lens_t = prefill_seq_lens.to(torch.int32)
-        prefill_cu_seq_lens_kv = torch.zeros(
-            num_prefills + 1, dtype=torch.int32, device=cm.seq_lens.device
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.model_config = vllm_config.model_config
+        self.mla_dims = get_mla_dims(self.model_config)
+        self.topk_tokens: int = vllm_config.model_config.hf_config.index_topk
+        self.req_id_per_token_buffer = torch.empty(
+            (vllm_config.scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=device,
         )
-        torch.cumsum(seq_lens_t, dim=0, out=prefill_cu_seq_lens_kv[1:])
-        prefill_max_kv_len = int(seq_lens_t.max().item())
-        prefill_block_table = cm.block_table_tensor[
+
+    def _build_req_id_per_token(
+        self,
+        common_attn_metadata: "CommonAttentionMetadata",
+    ) -> torch.Tensor:
+        num_tokens = common_attn_metadata.num_actual_tokens
+        starts = np.asarray(common_attn_metadata.query_start_loc_cpu, dtype=np.int32)
+        seg_lengths = np.diff(starts)
+        req_id_per_token = np.repeat(
+            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
+        )
+        self.req_id_per_token_buffer.fill_(0)
+        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
+            torch.from_numpy(req_id_per_token), non_blocking=True
+        )
+        return self.req_id_per_token_buffer[:num_tokens]
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: "CommonAttentionMetadata",
+        fast_build: bool = False,
+    ) -> T:
+        req_id_per_token = self._build_req_id_per_token(common_attn_metadata)
+
+        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
+            common_attn_metadata,
+            decode_threshold=self.reorder_batch_threshold or 1,
+        )
+        (
+            prefill_query_start_loc,
+            prefill_max_query_len,
+            has_context,
+            prefill_query_lens_cpu,
+            prefill_cu_seq_lens_kv,
+            prefill_max_kv_len,
+            prefill_block_table,
+        ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
+
+        return self.metadata_cls(
+            num_reqs=common_attn_metadata.num_reqs,
+            max_query_len=common_attn_metadata.max_query_len,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            block_table=common_attn_metadata.block_table_tensor,
+            req_id_per_token=req_id_per_token,
+            seq_lens=common_attn_metadata.seq_lens,
+            block_size=self.kv_cache_spec.block_size,
+            topk_tokens=self.topk_tokens,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+            num_decode_tokens=num_decode_tokens,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_max_query_len=prefill_max_query_len,
+            has_context=has_context,
+            prefill_query_lens_cpu=prefill_query_lens_cpu,
+            prefill_cu_seq_lens_kv=prefill_cu_seq_lens_kv,
+            prefill_max_kv_len=prefill_max_kv_len,
+            prefill_block_table=prefill_block_table,
+        )
+
+    @staticmethod
+    def _build_prefill_fields(
+        common_attn_metadata: "CommonAttentionMetadata",
+        num_decodes: int,
+        num_prefills: int,
+    ) -> tuple[
+        torch.Tensor | None,  # prefill_query_start_loc
+        int,  # prefill_max_query_len
+        bool,  # has_context
+        torch.Tensor | None,  # prefill_query_lens_cpu
+        torch.Tensor | None,  # prefill_cu_seq_lens_kv
+        int,  # prefill_max_kv_len
+        torch.Tensor | None,  # prefill_block_table
+    ]:
+        if num_prefills == 0:
+            return None, 0, False, None, None, 0, None
+
+        offset = common_attn_metadata.query_start_loc[num_decodes]
+        prefill_query_start_loc = (
+            common_attn_metadata.query_start_loc[num_decodes:] - offset
+        )
+
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
+        prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
+        prefill_query_lens = prefill_qsl_cpu[1:] - prefill_qsl_cpu[:-1]
+        prefill_max_query_len = int(prefill_query_lens.max().item())
+
+        num_computed_tokens_cpu = (
+            common_attn_metadata.compute_num_computed_tokens().cpu()
+        )
+        context_lens_cpu = num_computed_tokens_cpu[
             num_decodes : num_decodes + num_prefills
         ]
+        has_context = bool(context_lens_cpu.max().item() > 0)
 
-    return (
-        prefill_query_start_loc,
-        prefill_max_query_len,
-        has_context,
-        prefill_query_lens,
-        prefill_cu_seq_lens_kv,
-        prefill_max_kv_len,
-        prefill_block_table,
-    )
+        prefill_cu_seq_lens_kv = None
+        prefill_max_kv_len = 0
+        prefill_block_table = None
+        if has_context:
+            prefill_seq_lens = common_attn_metadata.seq_lens[
+                num_decodes : num_decodes + num_prefills
+            ]
+            seq_lens_t = prefill_seq_lens.to(torch.int32)
+            prefill_cu_seq_lens_kv = torch.zeros(
+                num_prefills + 1,
+                dtype=torch.int32,
+                device=common_attn_metadata.seq_lens.device,
+            )
+            torch.cumsum(seq_lens_t, dim=0, out=prefill_cu_seq_lens_kv[1:])
+            prefill_max_kv_len = int(seq_lens_t.max().item())
+            prefill_block_table = common_attn_metadata.block_table_tensor[
+                num_decodes : num_decodes + num_prefills
+            ]
+
+        return (
+            prefill_query_start_loc,
+            prefill_max_query_len,
+            has_context,
+            prefill_query_lens,
+            prefill_cu_seq_lens_kv,
+            prefill_max_kv_len,
+            prefill_block_table,
+        )
 
 
 @triton.jit

@@ -15,19 +15,14 @@ For sparse MLA:
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar
 
-import numpy as np
 import torch
 from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import (
-    get_mla_dims,
-)
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
-    build_sparse_mla_prefill_fields,
+    SparseMLACommonMetadataBuilder,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -36,18 +31,12 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionMetadata,
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.attention.backends.utils import (
-    KVCacheLayoutType,
-    split_decodes_and_prefills,
-)
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.attention.backends.utils import KVCacheLayoutType
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -186,91 +175,10 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
 
 
 class FlashInferMLASparseMetadataBuilder(
-    AttentionMetadataBuilder[FlashInferMLASparseMetadata]
+    SparseMLACommonMetadataBuilder[FlashInferMLASparseMetadata]
 ):
-    """Builder for FlashInfer MLA Sparse attention metadata."""
-
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
-
-    def __init__(
-        self,
-        kv_cache_spec: AttentionSpec,
-        layer_names: list[str],
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ) -> None:
-        self.vllm_config = vllm_config
-        self.layer_names = layer_names
-        self.kv_cache_spec = kv_cache_spec
-        self.model_config = vllm_config.model_config
-        self.device = device
-
-        self.mla_dims = get_mla_dims(self.model_config)
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
-
-        self.req_id_per_token_buffer = torch.empty(
-            (vllm_config.scheduler_config.max_num_batched_tokens,),
-            dtype=torch.int32,
-            device=device,
-        )
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        fast_build: bool = False,
-    ) -> FlashInferMLASparseMetadata:
-        cm = common_attn_metadata
-        num_tokens = cm.num_actual_tokens
-
-        # Build req_id_per_token mapping
-        starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
-
-        # Zero-fill for cudagraphs
-        self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
-        )
-        req_id_per_token_tensor = self.req_id_per_token_buffer[:num_tokens]
-
-        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(cm)
-        (
-            prefill_query_start_loc,
-            prefill_max_query_len,
-            has_context,
-            prefill_query_lens_cpu,
-            prefill_cu_seq_lens_kv,
-            prefill_max_kv_len,
-            prefill_block_table,
-        ) = build_sparse_mla_prefill_fields(cm, num_decodes, num_prefills)
-
-        return FlashInferMLASparseMetadata(
-            num_reqs=cm.num_reqs,
-            max_query_len=cm.max_query_len,
-            max_seq_len=cm.max_seq_len,
-            num_actual_tokens=cm.num_actual_tokens,
-            query_start_loc=cm.query_start_loc,
-            slot_mapping=cm.slot_mapping,
-            block_table=cm.block_table_tensor,
-            req_id_per_token=req_id_per_token_tensor,
-            seq_lens=cm.seq_lens,
-            block_size=self.kv_cache_spec.block_size,
-            topk_tokens=self.topk_tokens,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-            num_decode_tokens=num_decode_tokens,
-            prefill_query_start_loc=prefill_query_start_loc,
-            prefill_max_query_len=prefill_max_query_len,
-            has_context=has_context,
-            prefill_query_lens_cpu=prefill_query_lens_cpu,
-            prefill_cu_seq_lens_kv=prefill_cu_seq_lens_kv,
-            prefill_max_kv_len=prefill_max_kv_len,
-            prefill_block_table=prefill_block_table,
-        )
+    metadata_cls = FlashInferMLASparseMetadata
 
 
 # Global workspace buffer (lazily initialized)
