@@ -103,7 +103,7 @@ class TestMmWarmupRunsNormally:
             mm_limits={"image": 1},
         )
 
-        with patch("vllm.renderers.base.TimingContext", autospec=True):
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
             BaseRenderer.warmup(renderer, ChatParams())
 
         renderer.mm_processor.apply.assert_called_once()
@@ -115,7 +115,7 @@ class TestMmWarmupRunsNormally:
             mm_limits={"image": 1, "video": 0},
         )
 
-        with patch("vllm.renderers.base.TimingContext", autospec=True):
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
             BaseRenderer.warmup(renderer, ChatParams())
 
         renderer.mm_processor.apply.assert_called_once()
@@ -126,7 +126,7 @@ class TestMmWarmupRunsNormally:
             mm_limits={"image": 1},
         )
 
-        with patch("vllm.renderers.base.TimingContext", autospec=True):
+        with patch("vllm.multimodal.processing.TimingContext", autospec=True):
             BaseRenderer.warmup(renderer, ChatParams())
 
         renderer.clear_mm_cache.assert_called_once()
