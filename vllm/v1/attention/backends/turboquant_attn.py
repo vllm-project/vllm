@@ -18,6 +18,7 @@ Per-head per-position slot layout:
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -47,7 +48,14 @@ from vllm.v1.attention.ops.triton_turboquant_decode import (
     _use_fp8_e4b15,
     triton_turboquant_decode_attention,
 )
+from vllm.v1.attention.ops.triton_turboquant_decode_v2 import (
+    triton_turboquant_decode_attention_v2,
+)
 from vllm.v1.attention.ops.triton_turboquant_store import triton_turboquant_store
+
+# Opt-in flag to dispatch decode path to the v2 Triton kernel.
+# v1 remains the default. Set VLLM_TQ_DECODE_V2=1 to enable v2.
+_USE_TQ_V2 = os.environ.get("VLLM_TQ_DECODE_V2", "0") == "1"
 
 _HAS_FLASH_ATTN = is_flash_attn_varlen_func_available()
 if _HAS_FLASH_ATTN:
@@ -592,21 +600,44 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         dtype=attn_metadata.seq_lens.dtype,
                     )
                     synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
-                    out = triton_turboquant_decode_attention(
-                        query=q_seq,
-                        kv_cache=kv_cache,
-                        block_table=synth_bt,
-                        seq_lens=synth_seq_lens,
-                        Pi=Pi,
-                        centroids=centroids,
-                        scale=self.scale,
-                        mse_bits=self.tq_config.key_mse_bits,
-                        key_packed_size=self.tq_config.key_packed_size,
-                        value_quant_bits=(self.tq_config.effective_value_quant_bits),
-                        key_fp8=self.tq_config.key_fp8,
-                        norm_correction=self.tq_config.norm_correction,
-                        PiT=PiT,
-                    )
+                    if _USE_TQ_V2:
+                        out = triton_turboquant_decode_attention_v2(
+                            query=q_seq,
+                            kv_cache=kv_cache,
+                            block_table=synth_bt,
+                            seq_lens=synth_seq_lens,
+                            Pi=Pi,
+                            centroids=centroids,
+                            scale=self.scale,
+                            mse_bits=self.tq_config.key_mse_bits,
+                            key_packed_size=self.tq_config.key_packed_size,
+                            value_quant_bits=(
+                                self.tq_config.effective_value_quant_bits
+                            ),
+                            value_packed_size=self.tq_config.value_packed_size,
+                            max_seq_len=int(seq_len),
+                            key_fp8=self.tq_config.key_fp8,
+                            norm_correction=self.tq_config.norm_correction,
+                            PiT=PiT,
+                        )
+                    else:
+                        out = triton_turboquant_decode_attention(
+                            query=q_seq,
+                            kv_cache=kv_cache,
+                            block_table=synth_bt,
+                            seq_lens=synth_seq_lens,
+                            Pi=Pi,
+                            centroids=centroids,
+                            scale=self.scale,
+                            mse_bits=self.tq_config.key_mse_bits,
+                            key_packed_size=self.tq_config.key_packed_size,
+                            value_quant_bits=(
+                                self.tq_config.effective_value_quant_bits
+                            ),
+                            key_fp8=self.tq_config.key_fp8,
+                            norm_correction=self.tq_config.norm_correction,
+                            PiT=PiT,
+                        )
                 else:
                     # Large continuation: dequant cached K/V and use
                     # flash_attn for better throughput.
@@ -777,24 +808,43 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             output_buf = getattr(layer, "_tq_output_buf", None)
             lse_buf = getattr(layer, "_tq_lse_buf", None)
 
-        result = triton_turboquant_decode_attention(
-            query=query,
-            kv_cache=kv_cache,
-            block_table=attn_metadata.block_table,
-            seq_lens=attn_metadata.seq_lens,
-            Pi=Pi,
-            centroids=centroids,
-            scale=self.scale,
-            mse_bits=self.tq_config.key_mse_bits,
-            key_packed_size=self.tq_config.key_packed_size,
-            value_quant_bits=self.tq_config.effective_value_quant_bits,
-            key_fp8=self.tq_config.key_fp8,
-            norm_correction=self.tq_config.norm_correction,
-            PiT=PiT,
-            mid_o_buf=mid_o_buf,
-            output_buf=output_buf,
-            lse_buf=lse_buf,
-            buf_holder=layer,
-            max_num_kv_splits=self.max_num_kv_splits,
-        )
+        if _USE_TQ_V2:
+            result = triton_turboquant_decode_attention_v2(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=self.scale,
+                mse_bits=self.tq_config.key_mse_bits,
+                key_packed_size=self.tq_config.key_packed_size,
+                value_quant_bits=self.tq_config.effective_value_quant_bits,
+                value_packed_size=self.tq_config.value_packed_size,
+                max_seq_len=attn_metadata.max_seq_len,
+                key_fp8=self.tq_config.key_fp8,
+                norm_correction=self.tq_config.norm_correction,
+                PiT=PiT,
+            )
+        else:
+            result = triton_turboquant_decode_attention(
+                query=query,
+                kv_cache=kv_cache,
+                block_table=attn_metadata.block_table,
+                seq_lens=attn_metadata.seq_lens,
+                Pi=Pi,
+                centroids=centroids,
+                scale=self.scale,
+                mse_bits=self.tq_config.key_mse_bits,
+                key_packed_size=self.tq_config.key_packed_size,
+                value_quant_bits=self.tq_config.effective_value_quant_bits,
+                key_fp8=self.tq_config.key_fp8,
+                norm_correction=self.tq_config.norm_correction,
+                PiT=PiT,
+                mid_o_buf=mid_o_buf,
+                output_buf=output_buf,
+                lse_buf=lse_buf,
+                buf_holder=layer,
+                max_num_kv_splits=self.max_num_kv_splits,
+            )
         return result

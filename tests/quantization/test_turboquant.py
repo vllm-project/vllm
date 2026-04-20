@@ -542,3 +542,393 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+
+# ============================================================================
+# v1 vs v2 decode kernel equivalence (GPU + Triton required)
+# ============================================================================
+
+
+@pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
+class TestDecodeV2Equivalence:
+    """Verify the opt-in v2 decode kernel produces the same result as v1.
+
+    v2 is a re-tiled implementation (grouped Q heads, pair LUT, exp2,
+    load-halving) reading the same cache layout. For identical inputs
+    its output should match v1 up to floating-point rounding noise
+    (cosine similarity ~= 1, max abs delta dominated by fp16 tile-order
+    differences, never catastrophic disagreement).
+    """
+
+    @staticmethod
+    def _build_and_store(
+        preset: str, Hk: int, D: int, seq_len: int, block_size: int, seed: int
+    ):
+        """Build inputs and populate KV cache via the production store path."""
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        device = torch.device(DEVICE_TYPE)
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=D)
+
+        # Pure Hadamard rotation (symmetric, so Pi = PiT).
+        H = _build_hadamard(D, DEVICE_TYPE)
+        Pi = PiT = H
+
+        centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+
+        torch.manual_seed(seed)
+        key = torch.randn(seq_len, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(seq_len, Hk, D, device=device, dtype=torch.float16)
+
+        num_blocks = (seq_len + block_size - 1) // block_size + 1
+        padded_slot = cfg.slot_size_aligned
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            Hk,
+            padded_slot,
+            device=device,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.arange(seq_len, device=device, dtype=torch.int32)
+
+        triton_turboquant_store(
+            key,
+            value,
+            kv_cache,
+            slot_mapping,
+            PiT,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+        )
+        return cfg, Pi, PiT, centroids, kv_cache, num_blocks
+
+    @staticmethod
+    def _run_both_kernels(
+        cfg, Pi, PiT, centroids, kv_cache, num_blocks, B, Hq, D, seq_len, qseed
+    ):
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_decode_v2 import (
+            triton_turboquant_decode_attention_v2,
+        )
+
+        device = torch.device(DEVICE_TYPE)
+        torch.manual_seed(qseed)
+        query = torch.randn(B, Hq, D, device=device, dtype=torch.float16)
+        block_table = (
+            torch.arange(
+                num_blocks,
+                device=device,
+                dtype=torch.int32,
+            )
+            .unsqueeze(0)
+            .expand(B, -1)
+            .contiguous()
+        )
+        seq_lens = torch.full((B,), seq_len, device=device, dtype=torch.int32)
+
+        scale = 1.0 / math.sqrt(D)
+        common = dict(
+            query=query,
+            kv_cache=kv_cache,
+            block_table=block_table,
+            seq_lens=seq_lens,
+            Pi=Pi,
+            centroids=centroids,
+            scale=scale,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+            norm_correction=cfg.norm_correction,
+            PiT=PiT,
+        )
+        out_v1 = triton_turboquant_decode_attention(
+            **common,
+            max_num_kv_splits=8,
+        )
+        out_v2 = triton_turboquant_decode_attention_v2(
+            **common,
+            value_packed_size=cfg.value_packed_size,
+            max_seq_len=int(seq_lens.max().item()),
+        )
+        return query, out_v1, out_v2
+
+    @staticmethod
+    def _assert_v1_v2_close(tag, out_v1, out_v2, cos_thr=0.999, abs_thr=0.05):
+        a = out_v1.float().flatten()
+        b = out_v2.float().flatten()
+        cos_sim = torch.nn.functional.cosine_similarity(
+            a.unsqueeze(0),
+            b.unsqueeze(0),
+        ).item()
+        max_abs = (a - b).abs().max().item()
+        assert cos_sim > cos_thr, (
+            f"{tag} v1/v2 cosine_sim={cos_sim:.6f} below {cos_thr}"
+        )
+        assert max_abs < abs_thr, f"{tag} v1/v2 max_abs={max_abs:.4e} above {abs_thr}"
+
+    # ------------------------------------------------------------------
+    # Tier 1a: kernel-to-kernel equivalence across a wide shape matrix
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("preset", ALL_PRESETS)
+    @pytest.mark.parametrize(
+        "B,Hq,Hk,D,seq_len",
+        [
+            (1, 4, 4, 128, 16),  # minimal, GQA=1, short seq
+            (4, 8, 2, 128, 64),  # GQA=4
+            (4, 16, 2, 128, 1024),  # wide GQA=8, multi-split
+            (2, 64, 8, 64, 2048),  # gpt-oss-ish: D=64, GQA=8, 2k ctx
+            (2, 32, 4, 128, 4096),  # llama-ish:  D=128, GQA=8, 4k ctx
+            (1, 64, 8, 64, 8192),  # long context
+        ],
+    )
+    def test_v1_v2_equivalence(self, preset, B, Hq, Hk, D, seq_len):
+        cfg, Pi, PiT, centroids, kv_cache, num_blocks = self._build_and_store(
+            preset,
+            Hk=Hk,
+            D=D,
+            seq_len=seq_len,
+            block_size=16,
+            seed=4242,
+        )
+        _, out_v1, out_v2 = self._run_both_kernels(
+            cfg,
+            Pi,
+            PiT,
+            centroids,
+            kv_cache,
+            num_blocks,
+            B=B,
+            Hq=Hq,
+            D=D,
+            seq_len=seq_len,
+            qseed=7777,
+        )
+        self._assert_v1_v2_close(
+            f"[{preset} B={B} Hq={Hq} Hk={Hk} D={D} seq={seq_len}]",
+            out_v1,
+            out_v2,
+        )
+
+    # ------------------------------------------------------------------
+    # Tier 1b: seq_len edge cases (non-power-of-2, boundaries)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize("seq_len", [1, 2, 17, 33, 127, 129, 513, 1025])
+    def test_v1_v2_equivalence_seqlen_edges(self, seq_len):
+        # 3-bit preset is the most quantization-lossy -> strongest stress.
+        preset = "turboquant_3bit_nc"
+        cfg, Pi, PiT, centroids, kv_cache, num_blocks = self._build_and_store(
+            preset,
+            Hk=2,
+            D=128,
+            seq_len=seq_len,
+            block_size=16,
+            seed=111,
+        )
+        _, out_v1, out_v2 = self._run_both_kernels(
+            cfg,
+            Pi,
+            PiT,
+            centroids,
+            kv_cache,
+            num_blocks,
+            B=2,
+            Hq=8,
+            D=128,
+            seq_len=seq_len,
+            qseed=222,
+        )
+        self._assert_v1_v2_close(f"[seq_len={seq_len}]", out_v1, out_v2)
+
+    # ------------------------------------------------------------------
+    # Tier 1c: FP32 ground-truth absolute accuracy gate
+    # ------------------------------------------------------------------
+    # Compute true softmax attention on the RAW un-quantized K/V in fp32.
+    # Both kernels read the same quantized cache -> same intrinsic quant
+    # error vs. the oracle. Assert v2's error is no worse than v1's.
+
+    @staticmethod
+    def _reference_attention_fp32(query, raw_k, raw_v, scale):
+        B, Hq, D = query.shape
+        S, Hk, _ = raw_k.shape
+        group = Hq // Hk
+        q = query.float()
+        k = raw_k.float().repeat_interleave(group, dim=1)
+        v = raw_v.float().repeat_interleave(group, dim=1)
+        scores = scale * torch.einsum("bhd,shd->bhs", q, k)
+        probs = torch.softmax(scores, dim=-1)
+        return torch.einsum("bhs,shd->bhd", probs, v)
+
+    @staticmethod
+    def _build_and_store_return_raw(preset, Hk, D, seq_len, block_size, seed):
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        device = torch.device(DEVICE_TYPE)
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=D)
+        H = _build_hadamard(D, DEVICE_TYPE)
+        Pi = PiT = H
+        centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+
+        torch.manual_seed(seed)
+        raw_k = torch.randn(seq_len, Hk, D, device=device, dtype=torch.float16)
+        raw_v = torch.randn(seq_len, Hk, D, device=device, dtype=torch.float16)
+
+        num_blocks = (seq_len + block_size - 1) // block_size + 1
+        kv_cache = torch.zeros(
+            num_blocks,
+            block_size,
+            Hk,
+            cfg.slot_size_aligned,
+            device=device,
+            dtype=torch.uint8,
+        )
+        slot_mapping = torch.arange(seq_len, device=device, dtype=torch.int32)
+        triton_turboquant_store(
+            raw_k,
+            raw_v,
+            kv_cache,
+            slot_mapping,
+            PiT,
+            midpoints,
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+        )
+        return (cfg, Pi, PiT, centroids, kv_cache, num_blocks, raw_k, raw_v)
+
+    @pytest.mark.parametrize("preset", ALL_PRESETS)
+    @pytest.mark.parametrize(
+        "B,Hq,Hk,D,seq_len",
+        [
+            (2, 8, 2, 128, 128),  # moderate context
+            (2, 64, 8, 64, 1024),  # D=64 GQA=8 long-ish
+            (1, 32, 4, 128, 2048),  # D=128 GQA=8 longer
+        ],
+    )
+    def test_v2_no_worse_than_v1_vs_fp32_reference(self, preset, B, Hq, Hk, D, seq_len):
+        (cfg, Pi, PiT, centroids, kv_cache, num_blocks, raw_k, raw_v) = (
+            self._build_and_store_return_raw(
+                preset,
+                Hk=Hk,
+                D=D,
+                seq_len=seq_len,
+                block_size=16,
+                seed=4242,
+            )
+        )
+        query, out_v1, out_v2 = self._run_both_kernels(
+            cfg,
+            Pi,
+            PiT,
+            centroids,
+            kv_cache,
+            num_blocks,
+            B=B,
+            Hq=Hq,
+            D=D,
+            seq_len=seq_len,
+            qseed=7777,
+        )
+        ref = self._reference_attention_fp32(
+            query,
+            raw_k,
+            raw_v,
+            scale=1.0 / math.sqrt(D),
+        )
+        e1 = (out_v1.float() - ref).abs()
+        e2 = (out_v2.float() - ref).abs()
+        v1_max, v1_mean = e1.max().item(), e1.mean().item()
+        v2_max, v2_mean = e2.max().item(), e2.mean().item()
+
+        tag = f"[{preset} B={B} Hq={Hq} Hk={Hk} D={D} seq={seq_len}]"
+        # Absolute ceiling sanity: attention outputs on N(0,1) inputs are
+        # O(1); per-element max-abs error of 1.5 would already mean total
+        # loss of signal. Generous bound to catch catastrophic breakage.
+        assert v1_max < 1.5, f"{tag} v1 max_err {v1_max:.3f} suspiciously large"
+        assert v2_max < 1.5, f"{tag} v2 max_err {v2_max:.3f} suspiciously large"
+        # Primary gate: v2 must not be materially worse than v1.
+        assert v2_max <= v1_max * 1.10 + 0.02, (
+            f"{tag} v2 max_err={v2_max:.4f} exceeds "
+            f"v1 max_err={v1_max:.4f} * 1.10 + 0.02"
+        )
+        assert v2_mean <= v1_mean * 1.10 + 0.005, (
+            f"{tag} v2 mean_err={v2_mean:.4f} exceeds "
+            f"v1 mean_err={v1_mean:.4f} * 1.10 + 0.005"
+        )
+
+    # ------------------------------------------------------------------
+    # Tier 1d: v2 determinism (same inputs -> bitwise identical outputs)
+    # ------------------------------------------------------------------
+    # Guards against any uninitialized memory / race / nondeterministic
+    # reduction in the optimized kernel.
+
+    @pytest.mark.parametrize("preset", ["turboquant_k8v4", "turboquant_4bit_nc"])
+    @pytest.mark.parametrize(
+        "B,Hq,Hk,D,seq_len",
+        [
+            (2, 16, 2, 128, 1024),  # multi-split decode
+            (1, 64, 8, 64, 2048),  # D=64 GQA=8
+        ],
+    )
+    def test_v2_deterministic(self, preset, B, Hq, Hk, D, seq_len):
+        cfg, Pi, PiT, centroids, kv_cache, num_blocks = self._build_and_store(
+            preset,
+            Hk=Hk,
+            D=D,
+            seq_len=seq_len,
+            block_size=16,
+            seed=4242,
+        )
+        # Two runs with IDENTICAL inputs. We rebuild query with the same
+        # seed to guarantee identical input tensors.
+        _, _, out_v2_a = self._run_both_kernels(
+            cfg,
+            Pi,
+            PiT,
+            centroids,
+            kv_cache,
+            num_blocks,
+            B=B,
+            Hq=Hq,
+            D=D,
+            seq_len=seq_len,
+            qseed=13131,
+        )
+        _, _, out_v2_b = self._run_both_kernels(
+            cfg,
+            Pi,
+            PiT,
+            centroids,
+            kv_cache,
+            num_blocks,
+            B=B,
+            Hq=Hq,
+            D=D,
+            seq_len=seq_len,
+            qseed=13131,
+        )
+        tag = f"[{preset} B={B} Hq={Hq} Hk={Hk} D={D} seq={seq_len}]"
+        assert torch.equal(out_v2_a, out_v2_b), (
+            f"{tag} v2 produced non-bitwise-identical outputs across two "
+            f"runs with identical inputs; max diff="
+            f"{(out_v2_a.float() - out_v2_b.float()).abs().max().item():.4e}"
+        )
