@@ -188,7 +188,12 @@ def test_tp1_fp4_fusions(
         ),
     )
 
-    matches_check = ["act_quant_fusion", "attn_quant_fusion", "norm_rope_fusion"]
+    matches_check = [
+        "rms_quant_fusion",
+        "act_quant_fusion",
+        "attn_quant_fusion",
+        "norm_rope_fusion",
+    ]
 
     run_e2e_fusion_test(
         model_name,
