@@ -357,11 +357,19 @@ class GatedDeltaNetAttention(PluggableLayer, MambaBase):
         set_weight_attrs(self.A_log, {"weight_loader": sharded_weight_loader(0)})
         set_weight_attrs(self.dt_bias, {"weight_loader": sharded_weight_loader(0)})
 
+        output_gate_type = getattr(config, "output_gate_type", "silu")
+        if output_gate_type == "swish":
+            output_gate_type = "silu"
+        assert output_gate_type in ["silu", "swish", "sigmoid"], (
+            f"unsupported {output_gate_type=}"
+        )
+
         self.norm = RMSNormGated(
             self.head_v_dim,
             eps=self.layer_norm_epsilon,
             group_size=None,
             norm_before_gate=True,
+            activation=output_gate_type,
             device=current_platform.current_device(),
         )
 
