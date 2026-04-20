@@ -16,6 +16,7 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
+    ReqContext,
 )
 from vllm.v1.kv_offload.file.load_store_spec import FileLoadStoreSpec
 
@@ -104,7 +105,11 @@ class FileOffloadingManager(OffloadingManager):
 
     # --- OffloadingManager interface ---
 
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
+    def lookup(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> int | None:
         hit_count = 0
         for key in keys:
             block = self._blocks.get(key)
@@ -113,7 +118,11 @@ class FileOffloadingManager(OffloadingManager):
             hit_count += 1
         return hit_count
 
-    def prepare_load(self, keys: Iterable[OffloadKey]) -> LoadStoreSpec:
+    def prepare_load(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> LoadStoreSpec:
         keys_list = list(keys)
         file_paths: list[str] = []
         block_offsets: list[int] = []
@@ -141,7 +150,11 @@ class FileOffloadingManager(OffloadingManager):
             assert block.ref_cnt > 0, f"Block {key!r} ref_cnt is already 0"
             block.ref_cnt -= 1
 
-    def prepare_store(self, keys: Iterable[OffloadKey]) -> PrepareStoreOutput | None:
+    def prepare_store(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> PrepareStoreOutput | None:
         keys_list = list(keys)
 
         # Filter out blocks already stored
