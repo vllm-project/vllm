@@ -26,7 +26,7 @@ from vllm.v1.worker.workspace import current_workspace_manager
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 elif current_platform.is_xpu():
-    from vllm import _xpu_ops
+    from vllm._xpu_ops import xpu_ops
 
 logger = init_logger(__name__)
 
@@ -146,7 +146,7 @@ def sparse_attn_indexer(
             ]
 
             if current_platform.is_xpu():
-                _xpu_ops.xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
+                xpu_ops.top_k_per_row_prefill(  # type: ignore[attr-defined]
                     logits,
                     chunk.cu_seqlen_ks,
                     chunk.cu_seqlen_ke,
@@ -223,7 +223,7 @@ def sparse_attn_indexer(
             )
         else:
             if current_platform.is_xpu():
-                _xpu_ops.xpu_ops.top_k_per_row_decode(  # type: ignore[attr-defined]
+                xpu_ops.top_k_per_row_decode(  # type: ignore[attr-defined]
                     logits,
                     next_n,
                     seq_lens,

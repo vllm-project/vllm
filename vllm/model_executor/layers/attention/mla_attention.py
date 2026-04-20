@@ -1059,9 +1059,9 @@ except ImportError:
                 "AITER_MLA backends use aiter kernels instead."
             )
     elif current_platform.is_xpu():
-        from vllm import _xpu_ops
+        from vllm._xpu_ops import xpu_ops
 
-        flash_attn_varlen_func = _xpu_ops.xpu_ops.flash_attn_varlen_func  # type: ignore[no-redef,attr-defined,assignment]
+        flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[no-redef,attr-defined,assignment]
 
 
 def dynamic_per_batched_tensor_quant(
