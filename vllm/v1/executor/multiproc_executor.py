@@ -128,6 +128,8 @@ class MultiprocExecutor(Executor):
         distributed_init_method = get_distributed_init_method(
             get_loopback_ip(), get_open_port()
         )
+        # Set VLLM_DIST_IDENT for SHM communicator before spawning workers
+        os.environ["VLLM_DIST_IDENT"] = distributed_init_method.split(":")[-1]
         self.rpc_broadcast_mq: MessageQueue | None = None
         scheduler_output_handle: Handle | None = None
         # Initialize worker and set up message queues for SchedulerOutputs
