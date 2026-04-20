@@ -10,6 +10,35 @@ import torch
 from vllm.utils.torch_utils import get_dtype_size
 
 
+def get_padded_page_size_for_kernel_block_size(
+    *,
+    padded_page_size_bytes: int | None,
+    kv_block_size: int,
+    kernel_block_size: int,
+) -> int | None:
+    """Scale padded page size for a smaller kernel block size.
+
+    ``page_size_padded`` is recorded at the KV-cache block granularity. When a
+    backend reshapes cache tensors using a smaller runtime kernel block size, we
+    need to divide the padded size by the number of kernel blocks per KV block.
+    """
+    if padded_page_size_bytes is None:
+        return None
+
+    num_blocks_per_kv_block = kv_block_size // kernel_block_size
+    if num_blocks_per_kv_block > 1:
+        if padded_page_size_bytes % num_blocks_per_kv_block != 0:
+            raise ValueError(
+                "page_size_padded must be divisible by "
+                "num_blocks_per_kv_block: "
+                f"page_size_padded={padded_page_size_bytes}, "
+                f"num_blocks_per_kv_block={num_blocks_per_kv_block}"
+            )
+        return padded_page_size_bytes // num_blocks_per_kv_block
+
+    return padded_page_size_bytes
+
+
 def adjust_kv_cache_shape_for_padded_page_size(
     kv_cache_shape: tuple[int, ...],
     *,

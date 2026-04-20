@@ -193,6 +193,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_cache_shape_utils import (
     adjust_kv_cache_shape_for_padded_page_size,
+    get_padded_page_size_for_kernel_block_size,
 )
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -6566,20 +6567,11 @@ class GPUModelRunner(
                             cache_dtype_str=self.cache_config.cache_dtype,
                         )
                     )
-                    padded_page_size_bytes = kv_cache_spec.page_size_padded
-                    if (
-                        padded_page_size_bytes is not None
-                        and num_blocks_per_kv_block > 1
-                    ):
-                        if padded_page_size_bytes % num_blocks_per_kv_block != 0:
-                            raise ValueError(
-                                "page_size_padded must be divisible by "
-                                "num_blocks_per_kv_block: "
-                                f"page_size_padded={padded_page_size_bytes}, "
-                                "num_blocks_per_kv_block="
-                                f"{num_blocks_per_kv_block}"
-                            )
-                        padded_page_size_bytes //= num_blocks_per_kv_block
+                    padded_page_size_bytes = get_padded_page_size_for_kernel_block_size(
+                        padded_page_size_bytes=kv_cache_spec.page_size_padded,
+                        kv_block_size=kv_cache_spec.block_size,
+                        kernel_block_size=kernel_block_size,
+                    )
 
                     kv_cache_shape = adjust_kv_cache_shape_for_padded_page_size(
                         kv_cache_shape=kv_cache_shape,

@@ -6,7 +6,39 @@ import torch
 
 from vllm.v1.worker.kv_cache_shape_utils import (
     adjust_kv_cache_shape_for_padded_page_size,
+    get_padded_page_size_for_kernel_block_size,
 )
+
+
+def test_get_padded_page_size_noop_without_padding():
+    assert (
+        get_padded_page_size_for_kernel_block_size(
+            padded_page_size_bytes=None,
+            kv_block_size=16,
+            kernel_block_size=16,
+        )
+        is None
+    )
+
+
+def test_get_padded_page_size_scales_for_smaller_kernel_block():
+    assert (
+        get_padded_page_size_for_kernel_block_size(
+            padded_page_size_bytes=1024,
+            kv_block_size=16,
+            kernel_block_size=8,
+        )
+        == 512
+    )
+
+
+def test_get_padded_page_size_raises_when_not_divisible():
+    with pytest.raises(ValueError, match="num_blocks_per_kv_block"):
+        get_padded_page_size_for_kernel_block_size(
+            padded_page_size_bytes=1025,
+            kv_block_size=16,
+            kernel_block_size=8,
+        )
 
 
 def test_adjust_kv_cache_shape_noop_without_padding():
