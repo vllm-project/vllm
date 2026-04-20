@@ -32,7 +32,7 @@ jobs:
 
       - name: Install dependencies and build vLLM
         run: |
-          uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match
+          uv pip install -r requirements/build/cpu.txt --index-strategy unsafe-best-match
           uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
           uv pip install -e . --no-build-isolation
         env:
@@ -45,6 +45,7 @@ jobs:
       - name: Smoke test vllm serve
         run: |
           # Start server in background
+          VLLM_CPU_KVCACHE_SPACE=1 \
           vllm serve Qwen/Qwen3-0.6B \
             --max-model-len=2K \
             --load-format=dummy \
