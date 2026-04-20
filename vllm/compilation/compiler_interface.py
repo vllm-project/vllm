@@ -295,6 +295,9 @@ class InductorStandaloneAdaptor(CompilerInterface):
             },
         }
 
+        if is_torch_equal_or_newer("2.13.0.dev"):
+            compile_kwargs["donate_graph_module"] = True  # type: ignore[assignment]
+
         use_aot: bool = supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT
         # only add 'aot' parameter if both supported and enabled...
         # this will set bundled_autograd_cache
