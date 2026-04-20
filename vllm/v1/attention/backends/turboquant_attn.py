@@ -825,6 +825,11 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 key_fp8=self.tq_config.key_fp8,
                 norm_correction=self.tq_config.norm_correction,
                 PiT=PiT,
+                mid_o_buf=mid_o_buf,
+                output_buf=output_buf,
+                lse_buf=lse_buf,
+                buf_holder=layer,
+                max_num_kv_splits=self.max_num_kv_splits,
             )
         else:
             result = triton_turboquant_decode_attention(

@@ -21,21 +21,19 @@ Stage 2 is reused unchanged from triton_decode_attention.py.
 """
 
 import math
+from typing import Any
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_decode_attention import _fwd_kernel_stage2
+from vllm.v1.attention.ops.triton_turboquant_decode import _use_fp8_e4b15
 
-_FP8_E4B15: dict[int, int] = {}
-
-
-def _use_fp8_e4b15(device: int = 0) -> int:
-    """Return 1 if device needs fp8e4b15 (Ampere/Ada, SM < 8.9), else 0."""
-    if device not in _FP8_E4B15:
-        cap = torch.cuda.get_device_capability(device)
-        _FP8_E4B15[device] = 1 if cap < (8, 9) else 0
-    return _FP8_E4B15[device]
+# ROCm prefers num_stages=1 in attention-like kernels to reduce shared-memory
+# pressure (mirrors the pattern used in triton_decode_attention.py and
+# triton_turboquant_decode.py).
+_is_hip = current_platform.is_rocm()
 
 
 # ---------------------------------------------------------------------------
@@ -517,13 +515,25 @@ def triton_turboquant_decode_attention_v2(
     key_packed_size: int,
     value_quant_bits: int,
     value_packed_size: int,
-    num_kv_splits: int = 128,
-    max_seq_len: int = 0,
+    max_seq_len: int = 0,  # unused; kept for backward compatibility
     key_fp8: bool = False,
     norm_correction: bool = False,
     PiT: torch.Tensor | None = None,
+    # Pre-allocated buffers (optional, required for CUDA-graph stability).
+    mid_o_buf: torch.Tensor | None = None,
+    output_buf: torch.Tensor | None = None,
+    lse_buf: torch.Tensor | None = None,
+    buf_holder: Any = None,
+    # Fixed split count — MUST be a compile-time constant across iterations
+    # for CUDA-graph capture/replay to work. Mirrors the v1 launcher contract.
+    max_num_kv_splits: int = 32,
 ) -> torch.Tensor:
-    """Launch optimized TQ decode attention (v2 stage1 + shared stage2)."""
+    """Launch optimized TQ decode attention (v2 stage1 + shared stage2).
+
+    Follows the same buffer-reuse + fixed-grid contract as the v1 launcher
+    (triton_turboquant_decode_attention) so the backend can capture a CUDA
+    graph across both versions.
+    """
     B, Hq, D = query.shape
     Hk = kv_cache.shape[2]
     block_size = kv_cache.shape[1]
@@ -532,6 +542,7 @@ def triton_turboquant_decode_attention_v2(
     n_centroids = centroids.shape[0]
     kv_group_size = Hq // Hk
     device = query.device
+    del max_seq_len  # no longer used: splits is fixed via max_num_kv_splits
 
     cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
 
@@ -550,43 +561,36 @@ def triton_turboquant_decode_attention_v2(
     # TILE_SIZE (BLOCK_KV): tokens per inner-loop iteration
     TILE_SIZE = 16
 
-    # Occupancy-aware NUM_KV_SPLITS
-    MIN_TOKENS_PER_SPLIT = 128
-    max_seq = max_seq_len if max_seq_len > 0 else num_kv_splits * MIN_TOKENS_PER_SPLIT
-    effective = max(1, max_seq // MIN_TOKENS_PER_SPLIT)
-    NUM_KV_SPLITS = 1
-    while min(effective, num_kv_splits) >= NUM_KV_SPLITS * 2:
-        NUM_KV_SPLITS *= 2
+    # Fixed split count — must be constant across calls for cudagraph replay.
+    NUM_KV_SPLITS = max_num_kv_splits
 
-    SM_COUNT = torch.cuda.get_device_properties(device).multi_processor_count
-    TARGET_GRID = SM_COUNT * 2
-    grid_blocks = B * Hk * NUM_KV_SPLITS
-    if grid_blocks < TARGET_GRID:
-        needed = math.ceil(TARGET_GRID / (B * Hk))
-        ns = NUM_KV_SPLITS
-        while ns < needed and ns < 128:
-            ns *= 2
-        max_allowed = max(1, max_seq // 16)
-        ns = min(ns, max_allowed, 128)
-        final = NUM_KV_SPLITS
-        while final * 2 <= ns:
-            final *= 2
-        NUM_KV_SPLITS = final
-
-    mid_o = torch.empty(
-        B,
-        Hq,
-        NUM_KV_SPLITS,
-        D + 1,
-        dtype=torch.float32,
-        device=device,
-    )
+    # --- mid_o buffer reuse (same pattern as v1 launcher) ---
+    if (
+        mid_o_buf is not None
+        and mid_o_buf.shape[0] >= B
+        and mid_o_buf.shape[2] >= NUM_KV_SPLITS
+    ):
+        mid_o = mid_o_buf[:B, :Hq, :NUM_KV_SPLITS, :]
+    else:
+        mid_o = torch.empty(
+            B,
+            Hq,
+            NUM_KV_SPLITS,
+            D + 1,
+            dtype=torch.float32,
+            device=device,
+        )
+        if buf_holder is not None:
+            buf_holder._tq_mid_o_buf = mid_o
 
     fp8_e4b15 = _use_fp8_e4b15(device.index or 0)
 
     # Build pair LUT for 4-bit MSE (FLUTE §3.2)
     use_pair_lut = mse_bits == 4 and not key_fp8
     pair_lut = _get_pair_lut(centroids) if use_pair_lut else centroids
+
+    # Platform-dependent pipelining depth: ROCm prefers num_stages=1.
+    stage1_num_stages = 1 if _is_hip else 2
 
     # --- Stage 1: v2 kernel ---
     # Grid over KV heads (not Q heads) — each program handles all Q heads
@@ -631,13 +635,24 @@ def triton_turboquant_decode_attention_v2(
         FP8_E4B15=fp8_e4b15,
         USE_PAIR_LUT=1 if use_pair_lut else 0,
         num_warps=4,
-        num_stages=2,
+        num_stages=stage1_num_stages,
     )
 
-    # --- Stage 2: reduce across KV splits (unchanged) ---
-    output = torch.empty(B, Hq, D, dtype=torch.float32, device=device)
-    lse = torch.empty(B, Hq, dtype=torch.float32, device=device)
+    # --- output / lse buffer reuse (same pattern as v1 launcher) ---
+    if output_buf is not None and output_buf.shape[0] >= B:
+        output = output_buf[:B, :Hq, :D]
+    else:
+        output = torch.empty(B, Hq, D, dtype=torch.float32, device=device)
+        if buf_holder is not None:
+            buf_holder._tq_output_buf = output
+    if lse_buf is not None and lse_buf.shape[0] >= B:
+        lse = lse_buf[:B, :Hq]
+    else:
+        lse = torch.empty(B, Hq, dtype=torch.float32, device=device)
+        if buf_holder is not None:
+            buf_holder._tq_lse_buf = lse
 
+    # --- Stage 2: reduce across KV splits (unchanged) ---
     grid2 = (B, Hq)
     _fwd_kernel_stage2[grid2](
         mid_o,
