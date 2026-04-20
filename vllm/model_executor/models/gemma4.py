@@ -441,14 +441,18 @@ class Gemma4Attention(nn.Module):
         # We pad global to 1040 so hybrid page-size unification can use an
         # integer ratio. Keep this constant to preserve current Gemma4 behavior.
         kv_cache_page_size_padded = None
-        if cache_config is not None and cache_config.cache_dtype in (
-                "int8_per_token_head", "fp8_per_token_head"):
-            if self.head_dim == 512:
-                # Calculate per-GPU num_kv_heads
-                tp_size = get_tensor_model_parallel_world_size()
-                num_kv_heads_per_gpu = max(1, num_kv_heads // tp_size)
-                kv_cache_page_size_padded = (cache_config.block_size *
-                                             num_kv_heads_per_gpu * 1040)
+        if (
+            cache_config is not None
+            and cache_config.cache_dtype
+            in ("int8_per_token_head", "fp8_per_token_head")
+            and self.head_dim == 512
+        ):
+            # Calculate per-GPU num_kv_heads
+            tp_size = get_tensor_model_parallel_world_size()
+            num_kv_heads_per_gpu = max(1, num_kv_heads // tp_size)
+            kv_cache_page_size_padded = (
+                cache_config.block_size * num_kv_heads_per_gpu * 1040
+            )
 
         # Initialize RoPE based on layer type.
         # Gemma4 uses different RoPE parameters for sliding vs full attention.
