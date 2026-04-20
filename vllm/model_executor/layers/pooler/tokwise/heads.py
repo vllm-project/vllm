@@ -57,6 +57,35 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed"}
 
+    def project_batch(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Project entire batch tensor at once for zero-copy scoring.
+
+        Applies projector and activation (same pipeline as forward_chunk
+        but without per-request matryoshka truncation).
+        Returns [total_tokens, embed_dim].
+
+        The dtype cast is deferred until after projection so that the
+        large [N, hidden_dim] tensor stays in its native dtype.  Only
+        the smaller [N, embed_dim] output is cast — avoids a temporary
+        allocation that can be 4-8x larger than the final result.
+        """
+        # Project in the input's native dtype (fp16) to avoid casting
+        # the large [N, hidden_dim] tensor to fp32.  We temporarily cast
+        # the small weight [embed, hidden] instead.  Only the small
+        # [N, embed_dim] output is cast to head_dtype afterwards.
+        if self.projector is not None:
+            import torch.nn.functional as F
+            w = self.projector.weight.to(hidden_states.dtype)
+            b = (self.projector.bias.to(hidden_states.dtype)
+                 if self.projector.bias is not None else None)
+            hidden_states = F.linear(hidden_states, w, b)
+        # Cast the small [N, embed_dim] result, not the big [N, hidden].
+        if self.head_dtype is not None:
+            hidden_states = hidden_states.to(self.head_dtype)
+        if self.activation is not None:
+            hidden_states = self.activation(hidden_states)
+        return hidden_states
+
     def forward_chunk(
         self,
         pooled_data: TokenPoolingMethodOutputItem,

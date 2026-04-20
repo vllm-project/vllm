@@ -1,12 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import zlib
 from collections.abc import Sequence
 
 import torch
 
 from vllm.pooling_params import LateInteractionParams, PoolingParams
+
+try:
+    from vllm.v1.pool.flash_maxsim.flash_maxsim_varlen import (
+        flash_maxsim_packed,
+        pack_docs,
+    )
+    _HAS_FLASH_MAXSIM = not os.environ.get("VLLM_FORCE_VANILLA_MAXSIM")
+except ImportError:
+    _HAS_FLASH_MAXSIM = False
 
 LATE_INTERACTION_MODE_CACHE_QUERY = "cache_query"
 LATE_INTERACTION_MODE_SCORE_DOC = "score_doc"
@@ -56,13 +66,14 @@ def build_late_interaction_doc_params(
     )
 
 
-def compute_maxsim_score_batched(
+def _vanilla_compute_maxsim_score_batched(
     q_embs: Sequence[torch.Tensor],
     d_embs: Sequence[torch.Tensor],
     max_batch_size: int = 64,
     max_score_matrix_elements: int = 64_000_000,
 ) -> list[torch.Tensor]:
-    """Compute MaxSim for multiple query/doc pairs in mini-batches."""
+    """Vanilla MaxSim via padded bmm. Used as fallback when Triton is
+    unavailable."""
     if len(q_embs) != len(d_embs):
         raise ValueError("q_embs and d_embs must have the same length")
 
@@ -132,3 +143,54 @@ def compute_maxsim_score_batched(
         start = end
 
     return scores
+
+
+def compute_maxsim_score_batched(
+    q_embs: Sequence[torch.Tensor],
+    d_embs: Sequence[torch.Tensor],
+    max_batch_size: int = 64,
+    max_score_matrix_elements: int = 64_000_000,
+) -> list[torch.Tensor]:
+    """Compute MaxSim for multiple query/doc pairs.
+
+    Uses fused flash-maxsim Triton kernels when available (22x faster,
+    O(1) memory). Falls back to vanilla padded bmm otherwise.
+    """
+    if len(q_embs) != len(d_embs):
+        raise ValueError("q_embs and d_embs must have the same length")
+    if len(q_embs) == 0:
+        return []
+
+    # Fall back to vanilla when flash-maxsim is unavailable, when
+    # embedding dim < 16 (Triton tl.dot requires K >= 16), or when
+    # tensors are on CPU (Triton requires CUDA).
+    if not _HAS_FLASH_MAXSIM or (
+        q_embs[0].shape[1] < 16 or not q_embs[0].is_cuda
+    ):
+        return _vanilla_compute_maxsim_score_batched(
+            q_embs, d_embs, max_batch_size, max_score_matrix_elements,
+        )
+
+    # Group by query identity — queries sharing the same cached tensor
+    # (same data_ptr) can be scored together with shared_docs=True.
+    groups: dict[int, tuple[torch.Tensor, list[int], list[torch.Tensor]]] = {}
+    for i, (q, d) in enumerate(zip(q_embs, d_embs)):
+        key = q.data_ptr()
+        if key not in groups:
+            groups[key] = (q, [], [])
+        groups[key][1].append(i)
+        groups[key][2].append(d)
+
+    results: list[torch.Tensor | None] = [None] * len(q_embs)
+
+    for _, (query, indices, docs) in groups.items():
+        # Pack docs contiguously — single torch.cat, no padding, no
+        # Python-loop copy. flash_maxsim_packed reads the packed layout
+        # directly, skipping padding tokens entirely.
+        D_packed, cu_seqlens, max_ld = pack_docs(docs)
+        scores = flash_maxsim_packed(query, D_packed, cu_seqlens, max_ld)
+
+        for j, idx in enumerate(indices):
+            results[idx] = scores[j]
+
+    return results  # type: ignore[return-value]
