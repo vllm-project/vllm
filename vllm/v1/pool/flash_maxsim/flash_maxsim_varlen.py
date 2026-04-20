@@ -179,7 +179,7 @@ def flash_maxsim_packed(
     Q: torch.Tensor,
     D_packed: torch.Tensor,
     cu_seqlens_d: torch.Tensor,
-    max_seqlen_d: int = None,
+    max_seqlen_d: int | None = None,
     query_chunk_size: int = 128,
 ) -> torch.Tensor:
     """MaxSim: one query against B variable-length packed docs.

@@ -160,6 +160,7 @@ from vllm.v1.outputs import (
     SamplerOutput,
     make_empty_encoder_model_runner_output,
 )
+from vllm.v1.pool.late_interaction import LATE_INTERACTION_MODE_SCORE_DOC
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.logits_processor.interface import LogitsProcessor
@@ -3156,10 +3157,6 @@ class GPUModelRunner(
             and not cursor.is_partial_prefill()
         )
 
-        from vllm.v1.pool.late_interaction import (
-            LATE_INTERACTION_MODE_SCORE_DOC,
-        )
-
         if use_zerocopy:
             # Verify every doc request uses params compatible with
             # project_batch (no matryoshka truncation, activation on).
@@ -3173,29 +3170,31 @@ class GPUModelRunner(
                     break
 
         if use_zerocopy:
+            assert cursor is not None  # narrowed by use_zerocopy
             pooler = model.pooler
             # One matmul for the full batch — all tokens projected.
-            projected_batch = pooler.head.project_batch(hidden_states)
+            projected_batch = pooler.head.project_batch(hidden_states)  # type: ignore[operator,union-attr]
             # Per-request slicing: AllPool extracts views of hidden_states
-            pooled_data = pooler.pooling(hidden_states, pooling_metadata)
+            pooled_data = pooler.pooling(hidden_states, pooling_metadata)  # type: ignore[operator]
             # Single GPU->CPU sync instead of N .item() calls per request.
             firsts = cursor.first_token_indices_gpu.tolist()
             lasts = cursor.last_token_indices_gpu.tolist()
             params_list = pooling_metadata.pooling_params
             # Build output: docs get projected_batch slices (views),
             # queries/other go through normal forward_chunk.
-            raw_pooler_output: PoolerOutput = []
+            zerocopy_output: list[torch.Tensor | None] = []
             for i in range(num_reqs):
                 lip = params_list[i].late_interaction_params
                 if (lip is not None
                         and lip.mode == LATE_INTERACTION_MODE_SCORE_DOC):
                     # View into projected_batch — no copy, no extra alloc
-                    raw_pooler_output.append(
+                    zerocopy_output.append(
                         projected_batch[firsts[i]:lasts[i] + 1])
                 else:
-                    raw_pooler_output.append(
-                        pooler.head.forward_chunk(
+                    zerocopy_output.append(
+                        pooler.head.forward_chunk(  # type: ignore[operator,union-attr]
                             pooled_data[i], params_list[i]))
+            raw_pooler_output: PoolerOutput = zerocopy_output
             # Release AllPool views so hidden_states can be freed.
             # forward_chunk results are independent tensors; doc entries
             # are views of projected_batch (not hidden_states).

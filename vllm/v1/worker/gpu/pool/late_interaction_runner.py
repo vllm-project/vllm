@@ -186,6 +186,7 @@ class LateInteractionRunner:
         firsts_cpu: list[int] = []
         lasts_cpu: list[int] = []
         if use_zerocopy:
+            assert pooling_cursor is not None  # narrowed by use_zerocopy
             firsts_cpu = pooling_cursor.first_token_indices_gpu.tolist()
             lasts_cpu = pooling_cursor.last_token_indices_gpu.tolist()
 
@@ -248,6 +249,7 @@ class LateInteractionRunner:
 
         if score_indices:
             if use_zerocopy:
+                assert projected_batch is not None  # narrowed by use_zerocopy
                 score_values = self._score_zerocopy(
                     score_queries, projected_batch,
                     score_doc_offsets, score_doc_lengths,

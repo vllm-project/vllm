@@ -401,7 +401,7 @@ def _default_lengths(B, Ld, device, doc_lengths=None):
 # ---------------------------------------------------------------------------
 
 def flash_maxsim(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
-                 query_chunk_size: int = 128,
+                 query_chunk_size: int | None = 128,
                  splitk: bool = False) -> torch.Tensor:
     """Compute MaxSim scores.
 
@@ -490,7 +490,7 @@ def _round_up_lq(Lq: int) -> int:
 def flash_maxsim_batched(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
                          shared_docs: bool = True, query_lengths=None,
                          pad_lq: bool = True,
-                         query_chunk_size: int = 128) -> torch.Tensor:
+                         query_chunk_size: int | None = 128) -> torch.Tensor:
     """Batched MaxSim. Q: [Nq, Lq, d], D: [B, Ld, d] -> [Nq, B].
 
     Args:
