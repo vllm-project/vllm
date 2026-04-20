@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import logging
 import os
 from contextlib import AsyncExitStack
 from dataclasses import replace
@@ -12,6 +13,8 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
+
+logger = logging.getLogger(__name__)
 
 DP_SIZE = int(os.getenv("DP_SIZE", 2))
 
@@ -91,6 +94,11 @@ async def test_run_eagle_dp(monkeypatch: pytest.MonkeyPatch, attn_backend: str):
             return token_ids
 
     async def engine_create_and_generate(engine_args: AsyncEngineArgs):
+        logger.info(
+            "VLLM_BATCH_INVARIANT=%s (model=%s)",
+            os.environ.get("VLLM_BATCH_INVARIANT"),
+            engine_args.model,
+        )
         async with AsyncExitStack() as after:
             engine = AsyncLLM.from_engine_args(engine_args)
             after.callback(engine.shutdown)
