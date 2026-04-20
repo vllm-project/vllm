@@ -47,7 +47,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsCrossEncoding, SupportsPP
@@ -242,31 +241,24 @@ class GPT2Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if ".attn.bias" in name or ".attn.masked_bias" in name:
-                # Skip attention mask.
-                # NOTE: "c_attn.bias" should not be skipped.
-                continue
-
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            # The HF's GPT-2 implementation uses Conv1D instead of Linear.
-            # Because of this, we need to transpose the weights.
-            # Note(zhuohan): the logic below might break quantized models.
-            for conv1d_weight_name in ["c_attn", "c_proj", "c_fc"]:
-                if conv1d_weight_name not in name:
+        # Preprocess: transpose Conv1D weights and filter PP missing params
+        def transform_weights(weights):
+            for name, loaded_weight in weights:
+                # Skip attention mask (but not c_attn.bias)
+                if ".attn.bias" in name or ".attn.masked_bias" in name:
                     continue
-                if not name.endswith(".weight"):
+                if is_pp_missing_parameter(name, self):
                     continue
-                loaded_weight = loaded_weight.t()
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+                # Conv1D weight transpose for HF GPT-2 compatibility
+                if name.endswith(".weight"):
+                    for conv1d_name in ["c_attn", "c_proj", "c_fc"]:
+                        if conv1d_name in name:
+                            loaded_weight = loaded_weight.t()
+                            break
+                yield name, loaded_weight
+
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(transform_weights(weights))
 
 
 class GPT2LMHeadModel(nn.Module, SupportsPP):
