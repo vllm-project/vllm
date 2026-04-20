@@ -585,6 +585,12 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         needs_squeeze = hidden_states.dim() == 1
         if needs_squeeze:
             hidden_states = hidden_states.unsqueeze(0)
+        # Cast to fc params_dtype to handle mixed-precision targets (e.g. AWQ
+        # with unquantized attention layers that output float32 activations).
+        # params_dtype is the intended compute dtype; weight.dtype may be a
+        # packed integer type under quantization.
+        if hidden_states.dtype != self.model.fc.params_dtype:
+            hidden_states = hidden_states.to(self.model.fc.params_dtype)
         result = self.model.fc(hidden_states)
         if needs_squeeze:
             result = result.squeeze(0)
