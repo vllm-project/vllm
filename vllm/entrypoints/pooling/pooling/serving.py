@@ -78,7 +78,7 @@ class ServingPooling(PoolingServingBase):
 
         # plugin task uses io_processor.parse_request to verify inputs
         if pooling_task != "plugin" and pooling_task != self.pooling_task:
-            if pooling_task not in self.io_processors:
+            if pooling_task not in self.supported_tasks:
                 raise ValueError(
                     f"Unsupported task: {pooling_task!r} "
                     f"Supported tasks: {self.supported_tasks}"
@@ -89,7 +89,7 @@ class ServingPooling(PoolingServingBase):
                     f"via --pooler-config.task {request.task}."
                 )
 
-        if pooling_task == "plugin" and "plugin" not in self.io_processors:
+        if pooling_task == "plugin" and "plugin" not in self.supported_tasks:
             raise ValueError(
                 "No IOProcessor plugin installed. Please refer "
                 "to the documentation and to the "

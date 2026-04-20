@@ -10,7 +10,7 @@ from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.logger import init_logger
 from vllm.plugins.io_processors import has_io_processor
 from vllm.renderers import BaseRenderer
-from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tasks import POOLING_TASKS, SCORE_TYPE_MAP, SupportedTask
 
 from .base.io_processor import PoolingIOProcessor
 from .utils import enable_scoring_api
@@ -80,14 +80,7 @@ def init_pooling_io_processors(
     if enable_scoring_api(supported_tasks, model_config):
         from .scoring.io_processor import ScoringIOProcessors
 
-        score_type = None
-        if pooling_task == "embed":
-            score_type = "bi-encoder"
-        elif pooling_task == "token_embed":
-            score_type = "late-interaction"
-        elif pooling_task == "classify":
-            score_type = "cross-encoder"
-
+        score_type: str | None = SCORE_TYPE_MAP.get(pooling_task, None)
         if score_type is not None and score_type in ScoringIOProcessors:
             processors[score_type] = ScoringIOProcessors[score_type]
 
@@ -148,6 +141,10 @@ def init_pooling_state(
     request_logger: RequestLogger | None,
     supported_tasks: tuple["SupportedTask", ...],
 ):
+    model_config = engine_client.model_config
+    if model_config is None:
+        return
+
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.tasks import POOLING_TASKS
 
@@ -156,7 +153,6 @@ def init_pooling_state(
     from .pooling.serving import ServingPooling
     from .scoring.serving import ServingScores
 
-    model_config = engine_client.model_config
     resolved_chat_template = load_chat_template(args.chat_template)
     pooling_task = model_config.get_pooling_task(supported_tasks)
 
@@ -203,6 +199,7 @@ def init_pooling_state(
         ServingScores(
             engine_client,
             state.openai_serving_models,
+            supported_tasks=supported_tasks,
             request_logger=request_logger,
             chat_template_config=chat_template_config,
             enable_flash_late_interaction=getattr(
@@ -218,10 +215,13 @@ def get_pooling_invocation_types(
     supported_tasks: tuple["SupportedTask", ...],
     model_config: ModelConfig | None = None,
 ):
-    pooling_task = model_config.get_pooling_task(supported_tasks)
-
     # NOTE: Items defined earlier take higher priority
     invocation_types: list[tuple[RequestType, tuple[GetHandlerFn, EndpointFn]]] = []
+
+    if model_config is None:
+        return invocation_types
+
+    pooling_task = model_config.get_pooling_task(supported_tasks)
 
     if pooling_task == "embed":
         from .embed.api_router import create_embedding, embedding
