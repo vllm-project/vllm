@@ -51,13 +51,27 @@ def test_hf_overrides_model_type_returns_correct_config_class():
                 },
             )
 
-            assert type(config).__name__ == "_TestCustomConfig", (
+            from transformers import AutoConfig
+            from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+            # get_config() returns the registered custom class
+            assert isinstance(config, _TestCustomConfig), (
                 f"Expected _TestCustomConfig, got {type(config).__name__}"
             )
-            assert hasattr(config, "custom_attr"), (
-                "Custom attribute missing from config"
+
+            # AutoConfig has _TestCustomConfig registered under both
+            # the overridden model_type and the on-disk model_type
+            assert CONFIG_MAPPING["test_custom_model"] is _TestCustomConfig
+            assert CONFIG_MAPPING["mixtral"] is _TestCustomConfig
+
+            # AutoConfig.from_pretrained now returns _TestCustomConfig
+            # for this checkpoint (even though its on-disk model_type
+            # is "mixtral")
+            auto_config = AutoConfig.from_pretrained(tmpdir)
+            assert isinstance(auto_config, _TestCustomConfig), (
+                f"Expected _TestCustomConfig from AutoConfig, got "
+                f"{type(auto_config).__name__}"
             )
-            assert config.custom_attr == 42
     finally:
         _CONFIG_REGISTRY.pop("test_custom_model", None)
         # Restore the original mixtral AutoConfig mapping to avoid
