@@ -12,8 +12,8 @@ Usage:
 """
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 from .flash_maxsim import _get_configs, _next_pow2, _prune_configs
 

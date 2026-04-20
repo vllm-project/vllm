@@ -1,8 +1,8 @@
 """Fused Triton kernels for ColBERT/ColPali MaxSim scoring."""
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 
 def _next_pow2(x):

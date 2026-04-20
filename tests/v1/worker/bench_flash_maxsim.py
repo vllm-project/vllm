@@ -27,11 +27,11 @@ from vllm.v1.pool.late_interaction import (
 def _time_fn(fn, *args, warmup=3, repeats=10):
     for _ in range(warmup):
         fn(*args)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     t0 = time.perf_counter()
     for _ in range(repeats):
         fn(*args)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return (time.perf_counter() - t0) / repeats
 
 

@@ -23,11 +23,11 @@ def bench(fn, *args, warmup=5, repeats=20):
     """Benchmark with warmup and GPU sync."""
     for _ in range(warmup):
         fn(*args)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     t0 = time.perf_counter()
     for _ in range(repeats):
         fn(*args)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
     return (time.perf_counter() - t0) / repeats * 1000  # ms
 
 

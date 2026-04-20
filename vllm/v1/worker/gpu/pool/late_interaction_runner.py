@@ -120,7 +120,7 @@ class LateInteractionRunner:
         finally:
             # Free any partial allocations from an interrupted warmup.
             if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                torch.accelerator.empty_cache()
 
     @property
     def has_pending_docs(self) -> bool:

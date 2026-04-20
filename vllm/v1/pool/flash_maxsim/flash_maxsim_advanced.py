@@ -14,8 +14,8 @@ Opt 3 — split-K over Ld:
 """
 
 import torch
-import triton
-import triton.language as tl
+
+from vllm.triton_utils import tl, triton
 
 # ---------------------------------------------------------------------------
 # Opt 2: Q-reuse kernel — one CTA handles DOCS_PER_CTA consecutive docs,
