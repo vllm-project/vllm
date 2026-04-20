@@ -111,7 +111,6 @@ class MLARoPEKVCacheCatPattern:
                 head_size=self.qk_rope_head_dim,
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
-                mla_mode=False,
             )
         else:
             self.rope_matcher = MatcherRotaryEmbedding(
@@ -120,7 +119,6 @@ class MLARoPEKVCacheCatPattern:
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_kv_heads,
                 use_flashinfer=self.use_flashinfer,
-                mla_mode=False,
             )
 
     def get_inputs(self) -> list:

@@ -24,11 +24,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Dynamic,
 )
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.model_executor.layers.rotary_embedding.common import (
-    ApplyRotaryEmb,
-    rotate_gptj,
-    rotate_neox,
-)
 from vllm.model_executor.layers.rotary_embedding.deepseek_scaling_rope import (
     DeepseekScalingRotaryEmbedding,
 )
@@ -98,7 +93,6 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         use_flashinfer: bool = False,
         match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
-        mla_mode: bool = False,
     ) -> None:
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
@@ -113,16 +107,12 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
-        self.mla_mode = mla_mode
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
         elif match_rocm_aiter:
             self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
         else:
             self.rotary_op = ROTARY_OP
-
-        if not enabled and mla_mode:
-            self.forward = self.forward_native_mla
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
@@ -171,20 +161,6 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         )
         return result
 
-    def forward_native_mla(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        cos_sin_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        cos_sin = cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        query = ApplyRotaryEmb.forward_static(query, cos, sin, self.is_neox)
-        if key is not None:
-            key = ApplyRotaryEmb.forward_static(key, cos, sin, self.is_neox)
-        return query, key
-
 
 class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
     def __init__(
@@ -195,7 +171,6 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         num_kv_heads: int,
         use_flashinfer: bool = False,
         enabled: bool | None = None,
-        mla_mode: bool = False,
     ) -> None:
         if enabled is None:
             enabled = DeepseekScalingRotaryEmbedding.enabled()
@@ -208,10 +183,6 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
         self.q_size = self.num_heads * self.head_size
         self.kv_size = self.num_kv_heads * self.head_size
         self.rotary_dim = head_size
-        self.mla_mode = mla_mode
-
-        if not enabled and mla_mode:
-            self.forward = self.forward_native_mla
 
     def inputs(self) -> list[torch.Tensor]:
         positions = self.empty_int64(5)
@@ -258,27 +229,6 @@ class MatcherDeepseekScalingRotaryEmbedding(MatcherCustomOp):
             )
         )
         return result
-
-    def forward_native_mla(
-        self,
-        positions: torch.Tensor,
-        query: torch.Tensor,
-        key: torch.Tensor | None,
-        cos_sin_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        cos_sin = cos_sin_cache[positions]
-        cos, sin = cos_sin.chunk(2, dim=-1)
-        if self.is_neox:
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
-        else:
-            cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
-            sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
-        rotate_fn = rotate_neox if self.is_neox else rotate_gptj
-        query = query * cos + rotate_fn(query) * sin
-        if key is not None:
-            key = key * cos + rotate_fn(key) * sin
-        return query, key
 
 
 class MatcherFusedAddRMSNorm(MatcherCustomOp):

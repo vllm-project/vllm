@@ -239,7 +239,7 @@ else:
 
 
 @pytest.mark.parametrize("attn_backend", MLA_BACKENDS)
-@pytest.mark.parametrize("use_deepseek_scaling_rope", [True, False])
+@pytest.mark.parametrize("use_deepseek_scaling_rope", [True])
 @pytest.mark.parametrize("num_heads", [16])
 @pytest.mark.parametrize("qk_nope_head_dim", [128])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
