@@ -213,7 +213,7 @@ def _run_add_kernel(n: int, block: int = 256) -> None:
     out = torch.empty(n, device="cuda")
     grid = ((n + block - 1) // block,)
     _add_kernel[grid](x, y, out, n, BLOCK=block)
-    torch.cuda.synchronize()
+    torch.accelerator.synchronize()
 
 
 @_skip_no_gpu
