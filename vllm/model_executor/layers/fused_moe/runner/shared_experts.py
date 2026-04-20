@@ -5,10 +5,6 @@ from enum import IntEnum
 import torch
 
 import vllm.envs as envs
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
-)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -48,7 +44,6 @@ class SharedExperts:
         layer: torch.nn.Module,
         moe_config: FusedMoEConfig,
         quant_method: QuantizeMethodBase,
-        reduce_results: bool,
         enable_dbo: bool,
     ):
         from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
@@ -68,7 +63,6 @@ class SharedExperts:
         self._layer = layer
         self._moe_config = moe_config
         self._quant_method = quant_method
-        self._reduce_results = reduce_results
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
@@ -138,18 +132,6 @@ class SharedExperts:
         current_stream().wait_stream(self._stream)
 
         return output
-
-    def _maybe_reduce_shared_out(self, shared_out: torch.Tensor) -> torch.Tensor:
-        # Reduce shared expert outputs if necessary, since the MLP
-        # should have been created with reduce_results=False.
-        if (
-            self._reduce_results
-            and self._quant_method.moe_kernel is not None
-            and self._quant_method.moe_kernel.output_is_reduced()
-            and get_tensor_model_parallel_world_size() > 1
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out
 
     @property
     def _output_idx(self) -> int:

@@ -236,7 +236,6 @@ class MoETestConfig:
     use_gate: bool
     use_routed_input_transform: bool
     enable_eplb: bool = False
-    reduce_results: bool = False
     backend: str | None = None
     ep_size: int = 1
     dp_size: int = 1
@@ -295,7 +294,6 @@ def generate_valid_test_configs(
         use_shared_experts,
         use_gate,
         use_routed_input_transform,
-        reduce_results,
     ) in product(
         SHAPE_COMBOS,
         NUM_EXPERTS,
@@ -304,7 +302,6 @@ def generate_valid_test_configs(
         [False, True],  # shared
         [False, True],  # gate
         [False, True],  # routed input exform
-        [False, True],  # reduce results
     ):
         config = MoETestConfig(
             shape[0],  # m
@@ -318,7 +315,6 @@ def generate_valid_test_configs(
             use_gate,
             use_routed_input_transform,
             enable_eplb,
-            reduce_results,
             backend,
             ep_size,
             dp_size,
@@ -395,18 +391,7 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
         and config.backend.startswith("flashinfer_nvlink")
         and not current_platform.has_device_capability(90)
     ):
-        return False, "flashinfer_nvlink needs an H100+ GPUs"
-
-    # reduce_results incompatibilities
-    if config.reduce_results and config.use_shared_experts:
-        return False, "reduce_results=True is not compatible with shared_experts=True"
-
-    if config.reduce_results and config.quantization is not None:
-        return (
-            False,
-            "reduce_results=True only tested with unquantized data types in "
-            "order to limit number of tests run",
-        )
+        return False, "flashinfer_nvlink needs H100+ GPUs"
 
     # Backend-specific checks
     if config.backend is not None:
@@ -447,10 +432,6 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
 
     if config.enable_eplb and config.backend not in EPLB_SUPPORTED_BACKENDS:
         return False, f"EPLB not supported with {config.backend}."
-
-    world_size = config.tp_size * config.dp_size
-    if config.reduce_results and world_size == 1:
-        return False, "reduce_results=True only makes sense for multi-GPU tests"
 
     if (
         config.backend is not None
@@ -846,7 +827,6 @@ def make_fused_moe_layer(
     tp_size: int,
     ep_size: int,
     dp_size: int,
-    reduce_results: bool,
     w1: torch.Tensor,
     w2: torch.Tensor,
     top_k: int,
@@ -874,7 +854,7 @@ def make_fused_moe_layer(
     routed_input_transform: torch.nn.Module | None = None,
     routed_output_transform: torch.nn.Module | None = None,
     pcp_size: int | None = 1,
-) -> tuple[Callable, FusedMoE]:
+) -> FusedMoE:
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
     kwargs = dict()
@@ -887,8 +867,10 @@ def make_fused_moe_layer(
     # Add gate and routed_input_transform if provided
     if gate is not None:
         kwargs["gate"] = gate
+
     if routed_input_transform is not None:
         kwargs["routed_input_transform"] = routed_input_transform
+        kwargs["routed_output_transform"] = routed_output_transform
 
     layer = builder(
         num_experts=global_num_experts,
@@ -896,7 +878,6 @@ def make_fused_moe_layer(
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         params_dtype=in_dtype,
-        reduce_results=reduce_results,
         renormalize=renormalize,
         use_grouped_topk=use_grouped_topk,
         num_expert_group=num_expert_group,
@@ -936,36 +917,7 @@ def make_fused_moe_layer(
 
     layer.quant_method.process_weights_after_loading(layer)
 
-    def _moe(
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
-        if shared_experts is None:
-            final_shared_states = None
-            final_hidden_states = layer(hidden_states, router_logits)
-        else:
-            final_shared_states, final_hidden_states = layer(
-                hidden_states, router_logits
-            )
-
-        # Apply routed output transform if provided
-        # (e.g., latent space -> original space)
-        if routed_output_transform is not None:
-            final_hidden_states = routed_output_transform(final_hidden_states)
-
-        if shared_experts is not None:
-            assert not reduce_results
-            assert final_shared_states is not None
-            final_hidden_states += final_shared_states
-
-        if not reduce_results and layer.tp_size > 1:
-            final_hidden_states = layer.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
-
-        return final_hidden_states
-
-    return _moe, layer
+    return layer
 
 
 def make_fake_moe_layer(
@@ -999,7 +951,6 @@ def make_fake_moe_layer(
     tp_size: int = 1,
     dp_size: int = 1,
     ep_size: int = 1,
-    reduce_results: bool = False,
 ) -> Callable:
     activation = MoEActivation.from_str(activation)
 
@@ -1101,7 +1052,7 @@ def make_fake_moe_layer(
 
 
 def _test_body_regular(
-    moe_fn: Callable,
+    moe_layer: Callable,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
     vllm_config: VllmConfig,
@@ -1118,13 +1069,12 @@ def _test_body_regular(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        output = moe_fn(hidden_states, router_logits)
+        output = moe_layer(hidden_states, router_logits)
 
     return baseline_output, output
 
 
 def _test_body_eplb(
-    moe_fn: Callable,
     moe_layer: FusedMoE,
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
@@ -1145,7 +1095,6 @@ def _test_body_eplb(
     n: int,
     top_k: int,
     shared_experts,
-    reduce_results: bool,
     gate: torch.nn.Module | None,
     routed_input_transform: torch.nn.Module | None,
     routed_output_transform: torch.nn.Module | None,
@@ -1161,7 +1110,7 @@ def _test_body_eplb(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        output_before = moe_fn(hidden_states, router_logits)
+        output_before = moe_layer(hidden_states, router_logits)
 
     # Create a fresh FusedMoE layer with enable_eplb=True
     # Delete the original layer's registration so the constructor can
@@ -1174,7 +1123,7 @@ def _test_body_eplb(
     # When using routed_input_transform, experts operate in latent space
     hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
 
-    moe_fn, moe_layer = make_fused_moe_layer(
+    eplb_moe_layer = make_fused_moe_layer(
         quantization=quantization,
         use_ep=use_ep,
         hidden_size=hidden_size_for_layer,
@@ -1183,7 +1132,6 @@ def _test_body_eplb(
         tp_size=tp_size,
         ep_size=ep_size,
         dp_size=dp_size,
-        reduce_results=reduce_results,
         w1=w1,
         w2=w2,
         top_k=top_k,
@@ -1196,14 +1144,14 @@ def _test_body_eplb(
     )
 
     # Necessary?
-    if moe_layer._expert_map is not None:
-        moe_layer._expert_map = moe_layer._expert_map.to(device)
+    if eplb_moe_layer._expert_map is not None:
+        eplb_moe_layer._expert_map = eplb_moe_layer._expert_map.to(device)
 
     # All ranks must generate the same permutation
     initial_indices = torch.arange(num_experts, dtype=torch.long)
     shuffled_indices = initial_indices[torch.randperm(num_experts)]
 
-    expert_weights = [list(moe_layer.get_expert_weights())]
+    expert_weights = [list(eplb_moe_layer.get_expert_weights())]
 
     communicator = create_eplb_communicator(
         group_coordinator=get_eplb_group(),
@@ -1227,7 +1175,7 @@ def _test_body_eplb(
         num_experts, dtype=torch.int32, device=device
     )
 
-    moe_layer.set_eplb_state(
+    eplb_moe_layer.set_eplb_state(
         moe_layer_idx=0,
         expert_load_view=torch.zeros(
             (1, num_experts),
@@ -1244,7 +1192,7 @@ def _test_body_eplb(
         ),
     )
 
-    moe_layer.eplb_state.should_record_tensor = torch.ones(
+    eplb_moe_layer.eplb_state.should_record_tensor = torch.ones(
         (), dtype=torch.bool, device=device
     )
 
@@ -1255,7 +1203,7 @@ def _test_body_eplb(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        output_after = moe_fn(hidden_states, router_logits)
+        output_after = eplb_moe_layer(hidden_states, router_logits)
 
     return output_before, output_after
 
@@ -1274,7 +1222,6 @@ def _run_one_config(
     num_experts: int,
     top_k: int,
     quantization: str | None,
-    reduce_results: bool,
     backend: str | None,
     test_body_fn: Callable,
     use_shared_experts: bool,
@@ -1341,7 +1288,6 @@ def _run_one_config(
         tp_size=tp_size,
         ep_size=ep_size,
         dp_size=dp_size,
-        reduce_results=reduce_results,
     )
 
     baseline_output = baseline_layer(hidden_states, router_logits)
@@ -1369,7 +1315,7 @@ def _run_one_config(
         hidden_size_for_layer = k // 2 if routed_input_transform is not None else k
 
         # Create initial MoE layer
-        moe_fn, moe_layer = make_fused_moe_layer(
+        moe_layer = make_fused_moe_layer(
             quantization=quantization,
             use_ep=use_ep,
             hidden_size=hidden_size_for_layer,
@@ -1378,7 +1324,6 @@ def _run_one_config(
             tp_size=tp_size,
             ep_size=ep_size,
             dp_size=dp_size,
-            reduce_results=reduce_results,
             w1=w1,
             w2=w2,
             top_k=top_k,
@@ -1402,7 +1347,6 @@ def _run_one_config(
 
         # Call the test body function with all necessary context
         expected, actual = test_body_fn(
-            moe_fn=moe_fn,
             moe_layer=moe_layer,
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -1423,7 +1367,6 @@ def _run_one_config(
             m=m,
             top_k=top_k,
             shared_experts=shared_experts,
-            reduce_results=reduce_results,
             gate=gate,
             routed_input_transform=routed_input_transform,
             routed_output_transform=routed_output_transform,
@@ -1520,7 +1463,6 @@ def test_moe_layer_no_parallel(
         test_config.num_experts,
         test_config.top_k,
         test_config.quantization,
-        test_config.reduce_results,
         test_config.backend,
         _test_body_regular,
         use_shared_experts=test_config.use_shared_experts,
@@ -1578,7 +1520,6 @@ def _parallel_worker(
                 test_config.num_experts,
                 test_config.top_k,
                 test_config.quantization,
-                test_config.reduce_results,
                 test_config.backend,
                 functools.partial(
                     _test_body_config, test_config=test_config, cpu_group=cpu_group
@@ -1597,7 +1538,7 @@ def _parallel_worker(
             failed = failed + 1
             if verbosity > 0:
                 traceback.print_exc()
-                print(f"\n{str(ex)}\nFAILED {ex.__class__}")
+                print(f"\n{str(ex)}\nFAILED")
             else:
                 print("F", end="")
         finally:

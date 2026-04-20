@@ -38,10 +38,6 @@ class DefaultMoERunner(MoERunnerBase):
     """
 
     @property
-    def reduce_results(self) -> bool:
-        return self._reduce_results
-
-    @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
             self.moe_config.dp_size > 1 and not self.quant_method.supports_internal_mk
