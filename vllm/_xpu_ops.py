@@ -22,6 +22,23 @@ else:
     except ImportError:
         from torch.library import impl_abstract as register_fake
 
+if hasattr(torch.ops._xpu_C, "fp8_gemm"):
+
+    @register_fake("_xpu_C::fp8_gemm")
+    def _fp8_gemm_fake(
+        q_input: torch.Tensor,
+        q_weight: torch.Tensor,
+        out_dtype: torch.dtype,
+        input_scales: torch.Tensor,
+        weight_scale: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        input_2d = q_input.view(-1, q_input.shape[-1])
+        M = input_2d.size(0)
+        N = q_weight.size(1)
+        return torch.empty((M, N), dtype=out_dtype, device=q_input.device)
+
+
 if hasattr(torch.ops._xpu_C, "fp8_gemm_w8a16"):
 
     @register_fake("_xpu_C::fp8_gemm_w8a16")
