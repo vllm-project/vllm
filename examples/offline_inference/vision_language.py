@@ -2080,8 +2080,7 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
 
 # Qwen3-VL-Dense
 def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
-    # model_name = "Qwen/Qwen3-VL-4B-Instruct"
-    model_name = "/shared/models/modelscope/models/Qwen/Qwen3-VL-8B-Instruct"
+    model_name = "Qwen/Qwen3-VL-4B-Instruct"
 
     mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
     engine_args = EngineArgs(
