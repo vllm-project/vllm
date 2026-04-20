@@ -405,13 +405,6 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     ):
         return False, "flashinfer_nvlink needs H100+ GPUs"
 
-    if (
-        config.backend is not None
-        and config.backend.startswith("flashinfer_nvlink")
-        and config.ep_size > 1
-    ):
-        return False, "flashinfer_nvlink EP not yet supported."
-
     # Backend-specific checks
     if config.backend is not None:
         supported_quants = BACKEND_SUPPORTED_QUANTS.get(config.backend)
@@ -472,9 +465,6 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
 
         if config.num_experts % config.dp_size != 0:
             return False, "EPLB requires num_experts divisible by ep_size"
-
-        if config.ep_size == 1:
-            return False, "EPLB only works with EP+DP"
 
     # Disable fp4 tests until flashinfer is updated or the Dockerfile is
     # modified to install cublasLt.h. See #39525.
