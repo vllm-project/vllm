@@ -1980,32 +1980,6 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
-- label: Quantized MoE Test (B200-MI355) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - tests/quantization/test_gfx950_moe.py
-  - vllm/model_executor/models/deepseek_v2.py
-  - vllm/model_executor/models/gpt_oss.py
-  - vllm/model_executor/models/llama4.py
-  - vllm/model_executor/layers/fused_moe
-  - vllm/model_executor/layers/quantization/compressed_tensors
-  - vllm/model_executor/layers/quantization/modelopt.py
-  - vllm/model_executor/layers/quantization/mxfp4.py
-  - vllm/v1/attention/backends/triton_attn.py
-  - vllm/v1/attention/backends/rocm_attn.py
-  - vllm/v1/attention/backends/rocm_aiter_fa.py
-  - vllm/v1/attention/backends/mla/
-  - vllm/v1/attention/selector.py
-  - vllm/model_executor/layers/layernorm.py
-  - vllm/_aiter_ops.py
-  - vllm/platforms/rocm.py
-  - vllm/model_executor/model_loader/
-  commands:
-  - pytest -s -v tests/quantization/test_gfx950_moe.py
-
 #-----------------------------------------------------------  mi300 · rocm  ------------------------------------------------------------#
 
 - label: ROCm AITER Ops Test # TBD
@@ -3235,6 +3209,32 @@ steps:
   - uv pip install --system torchao==0.17.0
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
+
+# - label: Quantized MoE Test (B200-MI355) # TBD
+#   timeout_in_minutes: 180
+#   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+#   agent_pool: mi355_1
+#   working_dir: "/vllm-workspace/"
+#   source_file_dependencies:
+#   - tests/quantization/test_gfx950_moe.py
+#   - vllm/model_executor/models/deepseek_v2.py
+#   - vllm/model_executor/models/gpt_oss.py
+#   - vllm/model_executor/models/llama4.py
+#   - vllm/model_executor/layers/fused_moe
+#   - vllm/model_executor/layers/quantization/compressed_tensors
+#   - vllm/model_executor/layers/quantization/modelopt.py
+#   - vllm/model_executor/layers/quantization/mxfp4.py
+#   - vllm/v1/attention/backends/triton_attn.py
+#   - vllm/v1/attention/backends/rocm_attn.py
+#   - vllm/v1/attention/backends/rocm_aiter_fa.py
+#   - vllm/v1/attention/backends/mla/
+#   - vllm/v1/attention/selector.py
+#   - vllm/model_executor/layers/layernorm.py
+#   - vllm/_aiter_ops.py
+#   - vllm/platforms/rocm.py
+#   - vllm/model_executor/model_loader/
+#   commands:
+#   - pytest -s -v tests/quantization/test_gfx950_moe.py
 
 #------------------------------------------------------------  mi355 · v1  -------------------------------------------------------------#
 
