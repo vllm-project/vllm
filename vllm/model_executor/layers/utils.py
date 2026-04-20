@@ -452,14 +452,13 @@ def _torch_compile_bf16_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
-def _tinygemm_unquantized_gemm(
-    layer: torch.nn.Module,
+def _tinygemm_eligible(
     x: torch.Tensor,
     weight: torch.Tensor,
-    bias: torch.Tensor | None = None,
-):
+    bias: torch.Tensor | None,
+) -> bool:
     num_tokens = x.numel() // x.shape[-1]
-    if (
+    return (
         num_tokens <= 8
         and x.dtype == torch.bfloat16
         and weight.dtype == torch.bfloat16
@@ -467,20 +466,53 @@ def _tinygemm_unquantized_gemm(
         and x.is_contiguous()
         and weight.is_contiguous()
         and (bias is None or bias.dtype == torch.bfloat16)
-    ):
-        if bias is None:
-            bias = torch.zeros(
-                weight.shape[0],
-                dtype=torch.bfloat16,
-                device=x.device,
-            )
-        out_shape = (*x.shape[:-1], weight.shape[0])
-        result = torch.ops.vllm.tinygemm_bf16(
-            x.view(num_tokens, -1),
-            weight,
-            bias,
+    )
+
+
+def _apply_tinygemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor:
+    num_tokens = x.numel() // x.shape[-1]
+    if bias is None:
+        bias = torch.zeros(
+            weight.shape[0],
+            dtype=torch.bfloat16,
+            device=x.device,
         )
-        return result.view(out_shape)
+    out_shape = (*x.shape[:-1], weight.shape[0])
+    result = torch.ops.vllm.tinygemm_bf16(
+        x.view(num_tokens, -1),
+        weight,
+        bias,
+    )
+    return result.view(out_shape)
+
+
+def _tinygemm_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    if _tinygemm_eligible(x, weight, bias):
+        return _apply_tinygemm(x, weight, bias)
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def _tinygemm_then_compile_bf16_unquantized_gemm(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+):
+    if _tinygemm_eligible(x, weight, bias):
+        return _apply_tinygemm(x, weight, bias)
+    if _should_use_unquant_bf16_linear_torch_compile(x, weight, bias):
+        output = _apply_unquant_bf16_linear_torch_compile(x, weight, bias)
+        if output is not None:
+            return output
     return torch.nn.functional.linear(x, weight, bias)
 
 
@@ -699,12 +731,15 @@ def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm
-    elif (
+    compile_enabled = (
         envs.VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE
         and current_platform.is_cuda()
-    ):
-        return _torch_compile_bf16_unquantized_gemm
+    )
+    if _TINYGEMM_AVAILABLE and compile_enabled:
+        return _tinygemm_then_compile_bf16_unquantized_gemm
     elif _TINYGEMM_AVAILABLE:
         return _tinygemm_unquantized_gemm
+    elif compile_enabled:
+        return _torch_compile_bf16_unquantized_gemm
     else:
         return default_unquantized_gemm

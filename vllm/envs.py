@@ -1097,7 +1097,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Wrap the unquantized BF16 F.linear call in torch.compile with
     # mode="max-autotune-no-cudagraphs" so inductor autotunes across
     # triton/aten/cutlass per shape without compiling the whole model.
-    # Opt-in; takes precedence over the tinygemm_bf16 fast path when set.
+    # Opt-in. When tinygemm_bf16 is also available, tinygemm handles
+    # M<=8 shapes and this torch.compile path handles the rest.
     "VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "0"))
     ),

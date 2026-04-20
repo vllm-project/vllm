@@ -45,12 +45,26 @@ def _reset_compile_state(monkeypatch):
 # --------------------------------------------------------------------- #
 
 
-def test_dispatch_prefers_compile_path_when_env_set(monkeypatch):
+def test_dispatch_combines_tinygemm_and_compile_when_both_set(monkeypatch):
     monkeypatch.setenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "1")
     monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(utils, "_TINYGEMM_AVAILABLE", True)
+
+    # Tinygemm owns M<=8; torch.compile picks up the larger shapes.
+    assert (
+        utils.dispatch_unquantized_gemm()
+        is utils._tinygemm_then_compile_bf16_unquantized_gemm
+    )
+
+
+def test_dispatch_prefers_compile_path_when_tinygemm_unavailable(monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "1")
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(utils, "_TINYGEMM_AVAILABLE", False)
 
     assert (
         utils.dispatch_unquantized_gemm()
