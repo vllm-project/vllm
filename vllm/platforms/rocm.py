@@ -966,7 +966,9 @@ class RocmPlatform(Platform):
             for device_id in range(cls.device_count()):
                 physical_device_id = cls.device_id_to_physical_device_id(device_id)
                 try:
-                    numa_node = amdsmi_topo_get_numa_node_number(handles[physical_device_id])
+                    numa_node = amdsmi_topo_get_numa_node_number(
+                        handles[physical_device_id]
+                    )
                 except AmdSmiException as e:
                     logger.warning(
                         "Could not detect NUMA node for GPU %d, "
