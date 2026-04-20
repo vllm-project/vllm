@@ -35,6 +35,12 @@ class Granite4VisionConfig(transformers.PretrainedConfig):
         spatial_stride: int = 2,
         spatial_vision_layer: int = -1,
         spatial_target_layers: list[int] | None = None,
+        # Hub aliases — base model config uses different field names
+        vision_layer_to_llm_layer: list[list[int]] | None = None,
+        use_checkerboard_sampling: bool | None = None,
+        checkerboard_stride: int | None = None,
+        checkerboard_vision_layer: int | None = None,
+        checkerboard_llm_layers: list[int] | None = None,
         **kwargs: Any,
     ):
         self.image_token_index = image_token_index
@@ -46,11 +52,22 @@ class Granite4VisionConfig(transformers.PretrainedConfig):
         self.projector_dropout = projector_dropout
         self.downsample_rate = downsample_rate
         self.use_image_newline_parameter = use_image_newline_parameter
-        self.deepstack_layer_map = deepstack_layer_map
-        self.use_spatial_sampling = use_spatial_sampling
-        self.spatial_stride = spatial_stride
-        self.spatial_vision_layer = spatial_vision_layer
-        self.spatial_target_layers = spatial_target_layers or [0, 10, 20, 30]
+        self.deepstack_layer_map = deepstack_layer_map or vision_layer_to_llm_layer
+        self.use_spatial_sampling = (
+            use_spatial_sampling if use_checkerboard_sampling is None
+            else use_checkerboard_sampling
+        )
+        self.spatial_stride = (
+            spatial_stride if checkerboard_stride is None
+            else checkerboard_stride
+        )
+        self.spatial_vision_layer = (
+            spatial_vision_layer if checkerboard_vision_layer is None
+            else checkerboard_vision_layer
+        )
+        self.spatial_target_layers = (
+            spatial_target_layers or checkerboard_llm_layers or [0, 10, 20, 30]
+        )
 
         if vision_config is None:
             vision_config = {}
