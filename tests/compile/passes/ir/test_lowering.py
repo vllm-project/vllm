@@ -28,22 +28,15 @@ def _get_op_provider_pairs() -> list[tuple[str, str]]:
     return pairs
 
 
-def _make_simple_model(op: IrOp) -> nn.Module:
-    """Create a simple model that calls the op with fake arguments."""
-    class SimpleModel(nn.Module):
-        def forward(self, x):
-            args = _make_fake_args_for_op(op)
-            return op(*args)
-    return SimpleModel()
-
-
 def _make_fake_args_for_op(op: IrOp) -> tuple[Any, ...]:
     """Create fake meta tensors with unbacked symint dimensions for an op.
 
     Uses unbacked SymInt for the batch dimension to verify that supports_args
     does not specialize on concrete tensor shapes.
+
+    NOTE: This must be called outside of torch.compile context.
     """
-    from torch._dynamo.utils import create_unbacked_symint
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
     sig = op._py_signature
     args = []
@@ -51,7 +44,7 @@ def _make_fake_args_for_op(op: IrOp) -> tuple[Any, ...]:
         ann = param.annotation
         if ann == torch.Tensor:
             # Use unbacked symint for batch dimension
-            batch = create_unbacked_symint()
+            batch = ShapeEnv().create_unbacked_symint()
             args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
         elif ann in (int, "int"):
             args.append(16)
@@ -59,13 +52,66 @@ def _make_fake_args_for_op(op: IrOp) -> tuple[Any, ...]:
             args.append(1e-5)
         elif "Tensor | None" in str(ann) or "Optional[Tensor]" in str(ann):
             # Tensor | None type - pass a fake tensor (supports_args checks attributes)
-            batch = create_unbacked_symint()
+            batch = ShapeEnv().create_unbacked_symint()
             args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
         elif "int | None" in str(ann) or "Optional[int]" in str(ann):
             args.append(16)
         else:
             args.append(None)
     return tuple(args)
+
+
+def _make_simple_model(op: IrOp) -> nn.Module:
+    """Create a simple model that calls the op with real arguments."""
+    # Create args once at model construction time (outside torch.compile)
+    sig = op._py_signature
+    args = []
+    for param in sig.parameters.values():
+        ann = param.annotation
+        if ann == torch.Tensor:
+            args.append(torch.randn(8, 16, dtype=torch.bfloat16))
+        elif ann in (int, "int"):
+            args.append(16)
+        elif ann in (float, "float"):
+            args.append(1e-5)
+        elif "Tensor | None" in str(ann) or "Optional[Tensor]" in str(ann):
+            args.append(torch.randn(8, 16, dtype=torch.bfloat16))
+        elif "int | None" in str(ann) or "Optional[int]" in str(ann):
+            args.append(16)
+        else:
+            args.append(None)
+    fake_args = tuple(args)
+
+    class SimpleModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Register tensors as buffers so they're visible to Dynamo
+            for i, arg in enumerate(fake_args):
+                if isinstance(arg, torch.Tensor):
+                    self.register_buffer(f"_arg_{i}", arg)
+
+        def forward(self, x):
+            # Reconstruct args from buffers
+            reconstructed = []
+            idx = 0
+            for param in sig.parameters.values():
+                ann = param.annotation
+                if ann == torch.Tensor:
+                    reconstructed.append(getattr(self, f"_arg_{idx}"))
+                    idx += 1
+                elif ann in (int, "int"):
+                    reconstructed.append(16)
+                elif ann in (float, "float"):
+                    reconstructed.append(1e-5)
+                elif "Tensor | None" in str(ann) or "Optional[Tensor]" in str(ann):
+                    reconstructed.append(getattr(self, f"_arg_{idx}"))
+                    idx += 1
+                elif "int | None" in str(ann) or "Optional[int]" in str(ann):
+                    reconstructed.append(16)
+                else:
+                    reconstructed.append(None)
+            return op(*reconstructed)
+    return SimpleModel()
 
 
 # ============================================================
@@ -102,6 +148,8 @@ class TestPerOpLowering:
         backend = TestBackend(lowering_pass)
 
         torch.set_default_device(current_platform.device_type)
+
+        fake_args = _make_fake_args_for_op(op)
 
         with (
             op.set_priority([provider, "native"]),
@@ -200,33 +248,47 @@ class TestLoweringUnit:
             if "_test_sig_op" in IrOp.registry:
                 del IrOp.registry["_test_sig_op"]
 
-    def test_dispatch_failure_no_matching_impl(self):
+    def test_dispatch_fallback_to_native(self, default_vllm_config):
         """
-        Test that dispatch raises RuntimeError when no implementation
-        matches (including native). This verifies the error handling
-        path when priority is set incorrectly.
+        Test that dispatch falls back to native when no implementation matches.
+        
+        The set_priority context manager automatically appends 'native' to the
+        priority list as a fallback. This test verifies that:
+        1. When a custom impl doesn't match, native is used instead
+        2. selected_impls records 'native' as the provider
         """
-        @ir.register_op(name="_test_fail_op")
-        def _test_fail_op(x: torch.Tensor) -> torch.Tensor:
+        @ir.register_op(name="_test_fallback_op")
+        def _test_fallback_op(x: torch.Tensor) -> torch.Tensor:
             return x
 
-        # Register impl that never matches
-        @_test_fail_op.register_impl(
+        @_test_fallback_op.register_impl(
             "never_matches",
             supports_args=lambda x: False,  # never True
         )
         def never_matches_impl(x: torch.Tensor) -> torch.Tensor:
-            return x
+            return x * 2
 
         try:
-            x = torch.randn(8, 16, dtype=torch.bfloat16)
-            # Set priority WITHOUT native - should fail
-            with _test_fail_op.set_priority(["never_matches"]):
-                with pytest.raises(RuntimeError, match="Priority set incorrectly"):
-                    _test_fail_op.dispatch(x)
+            lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
+            backend = TestBackend(lowering_pass)
+
+            torch.set_default_device(current_platform.device_type)
+
+            # Set priority WITHOUT native - it will be auto-appended
+            with _test_fallback_op.set_priority(["never_matches"]):
+                model = _make_simple_model(_test_fallback_op)
+                x = torch.randn(8, 16, dtype=torch.bfloat16)
+                compiled = torch.compile(model, backend=backend, fullgraph=True)
+                output = compiled(x)
+
+            # Verify native was selected (fallback)
+            selected = lowering_pass.selected_impls["_test_fallback_op"]
+            assert "native" in selected.values(), (
+                f"Expected native fallback, got {selected}"
+            )
         finally:
-            if "_test_fail_op" in IrOp.registry:
-                del IrOp.registry["_test_fail_op"]
+            if "_test_fallback_op" in IrOp.registry:
+                del IrOp.registry["_test_fallback_op"]
 
 
 # ============================================================
