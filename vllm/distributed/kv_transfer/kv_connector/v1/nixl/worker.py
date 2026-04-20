@@ -21,8 +21,8 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
-    HeteroTPTransferConfig,
-    TpKVTopology,
+    MambaEngineTransferInfo,
+    TransferTopology,
     get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
     kv_postprocess_blksize_on_receive,
@@ -45,15 +45,14 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
-    NixlWrapper,
-    nixl_agent_config,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
-    compute_mamba_phys_ratio,
+    compute_physical_blocks_per_logical,
     derive_mamba_conv_split,
 )
+from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -270,14 +269,12 @@ class NixlConnectorWorker:
         self._registered_descs: list[Any] = []
 
         # ---- Mamba-HMA per-engine state (only used when self._has_mamba) ----
-        # Per-engine transfer config (source of truth for FA/mamba sizing).
-        self._transfer_configs: dict[str, HeteroTPTransferConfig] = {}
-        # NOTE (ZhanqiuHu): _mamba_phys_ratio MUST be per-engine.
-        # compute_mamba_phys_ratio = ceil((conv_bytes + ssm_bytes) / block_len)
+        # NOTE (ZhanqiuHu): _physical_blocks_per_logical MUST be per-engine.
+        # physical_blocks_per_logical = ceil((conv_bytes + ssm_bytes) / block_len)
         # where conv/ssm bytes are per-TP-rank (dimension-sharded).  With
         # heterogeneous TP the per-rank sizes differ, so the ratio differs:
         #   e.g. Nemotron 30B: P(TP=4) → 131, D(TP=1) → 261.
-        self._mamba_phys_ratio: dict[EngineId, int] = {}
+        self._physical_blocks_per_logical: dict[EngineId, int] = {}
 
         # In progress transfers.
         # [req_id -> list[handle]]
@@ -323,10 +320,8 @@ class NixlConnectorWorker:
 
         # lazy initialized in register_kv_caches
         self.compat_hash: str | None = None
-        self.kv_topo: TpKVTopology | None = None
+        self.transfer_topo: TransferTopology | None = None
 
-        self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
-        self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
@@ -356,7 +351,6 @@ class NixlConnectorWorker:
                 self.block_size // kernel_block_size
             )
             self.block_size = kernel_block_size
-            self._block_size[self.engine_id] = kernel_block_size
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
     def _nixl_handshake(
@@ -385,8 +379,8 @@ class NixlConnectorWorker:
         # Regardless, only handshake with the remote TP rank(s) that current
         # local rank will read from. Note that With homogeneous TP,
         # this happens to be the same single rank_i.
-        assert self.kv_topo is not None
-        p_remote_ranks = self.kv_topo.get_target_remote_ranks(remote_tp_size)
+        assert self.transfer_topo is not None
+        p_remote_ranks = self.transfer_topo.handshake_target_ranks(remote_tp_size)
         remote_rank_to_agent_name = {}
         path = make_zmq_path("tcp", host, port)
 
@@ -650,11 +644,11 @@ class NixlConnectorWorker:
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data in nixl."""
-        self.kv_topo = TpKVTopology(
+        self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
+            tp_size=self.world_size,
+            block_size=self.block_size,
             engine_id=self.engine_id,
-            remote_tp_size=self._tp_size,  # shared state
-            remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
@@ -665,7 +659,7 @@ class NixlConnectorWorker:
             is_mamba=self._has_mamba,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
+            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
         )
 
         if self.use_host_buffer:
@@ -717,7 +711,7 @@ class NixlConnectorWorker:
             if isinstance(layer_spec, UniformTypeKVCacheSpecs):
                 # MLA DSv32 Indexer case: UniformTypeKVCacheSpecs merges kv_cache_specs
                 layer_spec = layer_spec.kv_cache_specs[layer_name]
-            cache_list = self.kv_topo.get_transfer_cache_regions(
+            cache_list = self.transfer_topo.get_transfer_cache_regions(
                 cache_or_caches, layer_spec
             )
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
@@ -730,7 +724,7 @@ class NixlConnectorWorker:
             )
             # For when registering multiple tensors eg K/V in separate regions.
             physical_page_size = physical_page_size // len(cache_list)
-            if self.kv_topo._cross_layers_blocks:
+            if self.transfer_topo._cross_layers_blocks:
                 # When cross-layers blocks are used, multiply by number of layers
                 physical_page_size = physical_page_size * len(
                     self.kv_cache_config.kv_cache_tensors
@@ -794,7 +788,7 @@ class NixlConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
 
-        if self.kv_topo.is_kv_layout_blocks_first:
+        if self.transfer_topo.is_kv_layout_blocks_first:
             # NOTE (NickLucche) When FlashInfer is used, memory is registered
             # with joint KV for each block. This minimizes the overhead in
             # registerMem allowing faster descs queries. In order to be able to
@@ -818,7 +812,7 @@ class NixlConnectorWorker:
         self.dst_num_blocks[self.engine_id] = self.num_blocks
 
         if self._has_mamba:
-            self._mamba_phys_ratio[self.engine_id] = (
+            self._physical_blocks_per_logical[self.engine_id] = (
                 self._physical_blocks_per_logical_kv_block
             )
             logger.info(
@@ -877,11 +871,13 @@ class NixlConnectorWorker:
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks * block_size_ratio
-        phys_ratio = self._physical_blocks_per_logical_kv_block
+        physical_per_logical = self._physical_blocks_per_logical_kv_block
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
-            page_stride = self.block_len_per_layer[i] // block_size_ratio * phys_ratio
+            page_stride = (
+                self.block_len_per_layer[i] // block_size_ratio * physical_per_logical
+            )
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append(
@@ -901,14 +897,14 @@ class NixlConnectorWorker:
     def _build_fa_remote_for_mamba(
         self,
         nixl_agent_meta: NixlAgentMetadata,
-        transfer_cfg: HeteroTPTransferConfig,
         block_size_ratio: int,
-        kv_topo: TpKVTopology,
+        transfer_topo: TransferTopology,
+        remote_engine_id: EngineId,
     ) -> list[tuple[int, int, int]]:
         """Build remote FA descriptors for mamba models.
 
-        Uses transfer_cfg for GQA-aware FA divisor and head-based rank offset
-        instead of the standard uniform tp_ratio split.
+        Uses TransferTopology for GQA-aware FA divisor and head-based rank
+        offset instead of the standard uniform tp_ratio split.
         """
         assert block_size_ratio == 1, (
             "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
@@ -916,7 +912,9 @@ class NixlConnectorWorker:
         )
         # TODO (ZhanqiuHu): unify with register_remote_blocks when Mamba-HMA
         # hetero-TP logic stabilizes.
-        tp_ratio = transfer_cfg.tp_ratio
+        mamba_info = transfer_topo.get_engine_info(remote_engine_id)
+        assert isinstance(mamba_info, MambaEngineTransferInfo)
+        tp_ratio = transfer_topo.tp_ratio(mamba_info.remote_tp_size)
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
             local_block_len = self.get_backend_aware_kv_block_len(
@@ -927,9 +925,11 @@ class NixlConnectorWorker:
                 local_block_len = remote_kv_block_len
 
             if tp_ratio < 0 and not self.use_mla:
-                local_block_len = local_block_len // transfer_cfg.physical_fa_num_reads
+                local_block_len = local_block_len // mamba_info.remote_num_fa_reads
 
-            rank_offset = transfer_cfg.fa_rank_offset(remote_kv_block_len)
+            rank_offset = transfer_topo.fa_rank_offset(
+                remote_engine_id, remote_kv_block_len
+            )
 
             num_blocks = nixl_agent_meta.num_blocks
             page_size = nixl_agent_meta.block_lens[i]
@@ -938,12 +938,12 @@ class NixlConnectorWorker:
                 addr = base_addr + block_offset + rank_offset
                 result.append((addr, local_block_len, nixl_agent_meta.device_id))
 
-            if kv_topo.is_kv_layout_blocks_first:
+            if transfer_topo.is_kv_layout_blocks_first:
                 second_split = self.get_backend_aware_kv_block_len(
                     layer_idx=i, first_split=False, mamba_view=False
                 )
                 if tp_ratio < 0 and not self.use_mla:
-                    second_split = second_split // transfer_cfg.physical_fa_num_reads
+                    second_split = second_split // mamba_info.remote_num_fa_reads
                 for block_id in range(num_blocks):
                     block_offset = block_id * page_size
                     addr = base_addr + block_offset + rank_offset
@@ -982,15 +982,17 @@ class NixlConnectorWorker:
             conv_offsets = [(0, xb_p), (xb_p, bb_p), (xb_p + bb_p, bb_p)]
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
-        remote_ratio = self._mamba_phys_ratio[nixl_agent_meta.engine_id]
-        num_blocks = nixl_agent_meta.num_blocks // remote_ratio
+        remote_physical_per_logical = self._physical_blocks_per_logical[
+            nixl_agent_meta.engine_id
+        ]
+        num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
         device_id = nixl_agent_meta.device_id
 
         result: list[tuple[int, int, int]] = []
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            page_stride = nixl_agent_meta.block_lens[i] * remote_ratio
+            page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append((base_addr + blk * page_stride + off, sz, device_id))
@@ -1020,8 +1022,8 @@ class NixlConnectorWorker:
         register another local_xfer_handler using remote block len to ensure
         data copy correctness.
         """
-        assert self.kv_topo is not None
-        kv_topo = self.kv_topo
+        assert self.transfer_topo is not None
+        transfer_topo = self.transfer_topo
 
         block_size_ratio = self.block_size // block_size
         blocks_data: list[tuple[int, int, int]] = []
@@ -1052,7 +1054,7 @@ class NixlConnectorWorker:
                     # (addr, len, device id)
                     blocks_data.append((addr, kv_block_len, self.device_id))
 
-                if kv_topo.is_kv_layout_blocks_first:
+                if transfer_topo.is_kv_layout_blocks_first:
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=mamba
                     )
@@ -1154,11 +1156,29 @@ class NixlConnectorWorker:
             )
             return self._remote_agents[engine_id][remote_tp_rank]
 
-        ### Register remote agent metadata
-        if engine_id not in self._tp_size:
-            self._tp_size[engine_id] = remote_tp_size
-        if engine_id not in self._block_size:
-            self._block_size[engine_id] = nixl_agent_meta.block_size
+        ### Register remote engine in TransferTopology (idempotent).
+        assert self.transfer_topo is not None
+        transfer_topo = self.transfer_topo
+        physical_blocks_per_logical = (
+            compute_physical_blocks_per_logical(
+                nixl_agent_meta.ssm_sizes,
+                nixl_agent_meta.block_lens[0],
+            )
+            if self._has_mamba
+            else 1
+        )
+        transfer_topo.register_remote_engine(
+            remote_engine_id=engine_id,
+            remote_tp_size=remote_tp_size,
+            remote_block_size=nixl_agent_meta.block_size,
+            remote_block_len=nixl_agent_meta.block_lens[0],
+            remote_physical_blocks_per_logical=physical_blocks_per_logical,
+            local_block_len=self.block_len_per_layer[0],
+        )
+        if self._has_mamba and engine_id not in self._physical_blocks_per_logical:
+            self._physical_blocks_per_logical[engine_id] = physical_blocks_per_logical
+
+        logger.info("Transfer plan: %s", transfer_topo.describe(engine_id))
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -1171,16 +1191,10 @@ class NixlConnectorWorker:
         # remote:               | 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|
         # local origin:|          0|          1|          8|         12|
         # local mapped:| 0| 1| 2| 3| 4| 5| 6| 7| 8| 9|10|11|12|13|14|15|
-        assert self.kv_topo is not None
-        kv_topo = self.kv_topo
-        block_size_ratio = kv_topo.block_size_ratio_from_engine_id(engine_id)
+        block_size_ratio = transfer_topo.block_size_ratio(nixl_agent_meta.block_size)
 
         if engine_id not in self.dst_num_blocks:
             self.dst_num_blocks[engine_id] = nixl_agent_meta.num_blocks
-        if self._has_mamba:
-            self._mamba_phys_ratio[engine_id] = compute_mamba_phys_ratio(
-                nixl_agent_meta.ssm_sizes, nixl_agent_meta.block_lens[0]
-            )
 
         # Keep track of remote agent kv caches base addresses.
         self.kv_caches_base_addr[engine_id][remote_tp_rank] = (
@@ -1190,27 +1204,12 @@ class NixlConnectorWorker:
 
         # This is 1 when P and D `--tensor-parallel-size` match. Otherwise,
         # this is the ratio between the two sizes.
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(engine_id)
+        tp_ratio = transfer_topo.tp_ratio(remote_tp_size)
 
         # Handle tp_size>num_kv_heads: replicate KV cache.
         indexes_into_remote = (
-            not self.kv_topo.replicates_kv_cache(engine_id) and tp_ratio > 0
+            not transfer_topo.replicates_kv_cache(engine_id) and tp_ratio > 0
         )
-
-        # Create transfer config (single source of truth for descriptor sizes).
-        if self._has_mamba and engine_id not in self._transfer_configs:
-            self._transfer_configs[engine_id] = HeteroTPTransferConfig(
-                tp_ratio=tp_ratio,
-                K=kv_topo.total_num_kv_heads,
-                d_tp=self.world_size,
-                p_tp=remote_tp_size,
-                d_rank=self.tp_rank,
-                use_mla=self.use_mla,
-                d_block_len=self.block_len_per_layer[0],
-                p_block_len=nixl_agent_meta.block_lens[0],
-                is_blocks_first=kv_topo.is_kv_layout_blocks_first,
-            )
-            logger.info("Created %s", self._transfer_configs[engine_id].describe())
 
         logger.debug(
             "Registering remote agent (%s, rank %s) memory regions with tp_ratio %s",
@@ -1232,12 +1231,10 @@ class NixlConnectorWorker:
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
             if self._has_mamba:
-                transfer_cfg = self._transfer_configs.get(engine_id)
-                assert transfer_cfg is not None
-                if transfer_cfg.needs_split_handles:
+                if transfer_topo.needs_split_handles(engine_id):
                     # Mamba-HMA: FA and Mamba use different split factors.
-                    for handle_data in transfer_cfg.compute_split_handle_data(
-                        self.src_blocks_data, self.num_descs, abs_tp
+                    for handle_data in transfer_topo.compute_split_handle_data(
+                        engine_id, self.src_blocks_data, self.num_descs, abs_tp
                     ):
                         descs = self.nixl_wrapper.get_xfer_descs(
                             handle_data, self.nixl_memory_type
@@ -1248,12 +1245,8 @@ class NixlConnectorWorker:
                         self.src_xfer_handles_by_tp_ratio[tp_ratio].append(handle)
 
                     logger.info(
-                        "Mamba-HMA split handles: targets=%s, fa_reads=%s, "
-                        "fa_entry=%s, mamba_reads=%s, num_descs=%s",
-                        transfer_cfg.transfer_targets,
-                        transfer_cfg.physical_fa_num_reads,
-                        transfer_cfg.fa_entry_size,
-                        transfer_cfg.mamba_num_reads,
+                        "Mamba-HMA split handles: %s, num_descs=%s",
+                        transfer_topo.describe(engine_id),
                         self.num_descs,
                     )
             else:
@@ -1322,7 +1315,7 @@ class NixlConnectorWorker:
                         (addr, local_block_len, nixl_agent_meta.device_id)
                     )
 
-                if kv_topo.is_kv_layout_blocks_first:
+                if transfer_topo.is_kv_layout_blocks_first:
                     # With FlashInfer index V separately to allow head splitting.
                     second_split = self.get_backend_aware_kv_block_len(
                         layer_idx=i, first_split=False, mamba_view=mamba
@@ -1361,14 +1354,12 @@ class NixlConnectorWorker:
                 engine_id,
                 remote_tp_rank,
             )
-            transfer_cfg = self._transfer_configs.get(engine_id)
-            assert transfer_cfg is not None
             blocks_data.extend(
                 self._build_fa_remote_for_mamba(
                     nixl_agent_meta,
-                    transfer_cfg,
                     block_size_ratio,
-                    kv_topo,
+                    transfer_topo,
+                    engine_id,
                 )
             )
             blocks_data.extend(
@@ -1404,18 +1395,19 @@ class NixlConnectorWorker:
         """
         remote_engine_id = nixl_agent_meta.engine_id
 
-        assert self._tp_size[remote_engine_id] == remote_tp_size
-        assert self.kv_topo is not None
+        assert self.transfer_topo is not None
+        remote_info = self.transfer_topo.get_engine_info(remote_engine_id)
+        assert remote_info.remote_tp_size == remote_tp_size
 
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
-        block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
-            remote_engine_id
+        tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            nixl_agent_meta.block_size
         )
         # num_kv_heads > tp_size with P_TP > D_TP not supported for non-mamba.
         # Mamba models can have replicated FA KV with tp_ratio < 0.
         if not self._has_mamba:
             assert not (
-                tp_ratio < 0 and self.kv_topo.is_kv_replicated(remote_engine_id)
+                tp_ratio < 0 and self.transfer_topo.is_kv_replicated(remote_engine_id)
             )
 
         if self._is_hma_required:
@@ -1468,7 +1460,7 @@ class NixlConnectorWorker:
         if (
             abs(tp_ratio) != 1
             and not self.use_mla
-            and not self.kv_topo.is_kv_replicated(remote_engine_id)
+            and not self.transfer_topo.is_kv_replicated(remote_engine_id)
             and kv_cache_layout != "HND"
             and not self.enable_permute_local_kv
         ):
@@ -1479,7 +1471,7 @@ class NixlConnectorWorker:
 
         # Block len can only vary across layers when using MLA.
         remote_block_len = nixl_agent_meta.block_lens[0]
-        if self.use_mla or self.kv_topo.is_kv_replicated(remote_engine_id):
+        if self.use_mla or self.transfer_topo.is_kv_replicated(remote_engine_id):
             # With replicated KV cache, only the number of blocks can differ.
             # TODO (ZhanqiuHu): For mamba models, validate FA and mamba
             # block_lens separately.
@@ -1595,7 +1587,7 @@ class NixlConnectorWorker:
         if len(self.device_kv_caches) == 0:
             return
         assert block_size_ratio >= 1, "Only nP < nD supported currently."
-        assert self.kv_topo is not None
+        assert self.transfer_topo is not None
         if self.enable_permute_local_kv and block_size_ratio > 1:
             logger.debug(
                 "Post-processing device kv cache on receive by converting "
@@ -1615,7 +1607,7 @@ class NixlConnectorWorker:
                 block_size_ratio,
             )
 
-        split_k_and_v = self.kv_topo.split_k_and_v
+        split_k_and_v = self.transfer_topo.split_k_and_v
 
         for block_ids in block_ids_list:
             indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
@@ -1662,7 +1654,7 @@ class NixlConnectorWorker:
         The scheduler process (via the MultiprocExecutor) will use this output
         to track which workers are done.
         """
-        assert self.kv_topo is not None
+        assert self.transfer_topo is not None
         done_sending = self._get_new_notifs()
         done_recving = self._pop_done_transfers(self._recving_transfers)
 
@@ -1690,8 +1682,9 @@ class NixlConnectorWorker:
                 self.sync_recved_kv_to_device(req_id, meta)
 
             # post processing for heteroblocksize
-            block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(
-                meta.remote.engine_id
+            remote_info = self.transfer_topo.get_engine_info(meta.remote.engine_id)
+            block_size_ratio = self.transfer_topo.block_size_ratio(
+                remote_info.remote_block_size
             )
             if not self.use_mla and (
                 block_size_ratio > 1 or self.enable_permute_local_kv
@@ -1742,7 +1735,7 @@ class NixlConnectorWorker:
         are reading from the same producer (heterogeneous TP scenario), wait
         for all consumers to be done pulling.
         """
-        assert self.kv_topo is not None
+        assert self.transfer_topo is not None
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
@@ -1761,7 +1754,7 @@ class NixlConnectorWorker:
 
                 # NOTE: `tp_ratio` is the opposite when swapping local<>remote
                 n_consumers = int(tp_size)
-                tp_ratio = self.kv_topo.tp_ratio(n_consumers)
+                tp_ratio = self.transfer_topo.tp_ratio(n_consumers)
 
                 # Number of reads *per producer* to wait for.
                 # When remote D TP > local P TP we expect `tp_ratio` reads.
@@ -1902,17 +1895,17 @@ class NixlConnectorWorker:
                 self._reqs_to_send[req_id] = expiration_time
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
-        assert meta.remote is not None and self.kv_topo is not None
-        remote_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
-            meta.remote.engine_id
-        )
-        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(meta.remote.engine_id)
+        assert meta.remote is not None and self.transfer_topo is not None
+        engine_id = meta.remote.engine_id
+        remote_ranks = self.transfer_topo.target_remote_ranks(engine_id)
+        remote_info = self.transfer_topo.get_engine_info(engine_id)
+        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
         if self._has_mamba:
             # Expand remote logical → kernel block IDs.
             meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
                 meta.remote.block_ids,
-                self._mamba_phys_ratio[meta.remote.engine_id],
+                self._physical_blocks_per_logical[meta.remote.engine_id],
             )
         else:
             meta.remote.block_ids = self._logical_to_kernel_block_ids(
@@ -1925,7 +1918,7 @@ class NixlConnectorWorker:
                 # the first remote rank (cache is duplicated)..
                 break
 
-            remote_block_size = self.kv_topo.remote_block_size[meta.remote.engine_id]
+            remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
                 " on remote rank %s with remote block size %s for req %s",
@@ -1956,9 +1949,8 @@ class NixlConnectorWorker:
             remote_ids: BlockIds = meta.remote.block_ids
             if self._has_mamba:
                 # Mamba-HMA: zero out FA groups for P ranks outside fa_read_targets.
-                transfer_cfg = self._transfer_configs.get(meta.remote.engine_id)
-                assert transfer_cfg is not None
-                local_ids, remote_ids = transfer_cfg.filter_block_ids_for_rank(
+                local_ids, remote_ids = self.transfer_topo.filter_block_ids_for_rank(
+                    engine_id,
                     remote_rank,
                     local_ids,
                     remote_ids,
@@ -2000,8 +1992,11 @@ class NixlConnectorWorker:
         Post a READ point-to-point xfer request from a single local worker to
         a single remote worker.
         """
-        assert self.kv_topo is not None
-        block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
+        assert self.transfer_topo is not None
+        remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            remote_info.remote_block_size
+        )
         if block_size_ratio > 1:
             # TODO (NickLucche) assume HMA is off. Change to handle multiple KV groups.
             assert not self._is_hma_required
@@ -2191,8 +2186,8 @@ class NixlConnectorWorker:
             # This is like having two "low-level views" of the same storage.
             # `num_fa_descs` offset must be computed per-engine since P and D can
             # have different num_blocks (and thus different FA descs counts).
-            ratio = self._mamba_phys_ratio[engine_id]
-            logical_blocks = num_blocks // ratio
+            physical_per_logical = self._physical_blocks_per_logical[engine_id]
+            logical_blocks = num_blocks // physical_per_logical
             num_fa_descs = self.num_regions * num_blocks
             # 3-read mamba: 4 regions per unique cache tensor (x, B, C, ssm).
             mamba_region_ids = np.arange(len(self.block_len_per_layer) * 4)[:, None]
@@ -2235,21 +2230,22 @@ class NixlConnectorWorker:
         ]
 
     def _logical_to_remote_kernel_block_ids(
-        self, block_ids: BlockIds, remote_ratio: int
+        self, block_ids: BlockIds, remote_physical_per_logical: int
     ) -> BlockIds:
         """Map logical block IDs to physical kernel block IDs on the remote.
 
         Args:
             block_ids: per-group lists of logical block IDs.
-            remote_ratio: remote engine's physical blocks per logical block.
+            remote_physical_per_logical: remote engine's physical blocks
+                per logical block.
 
         Returns:
             Same structure with FA groups expanded (each logical block L
-            becomes kernel blocks [L*remote_ratio .. L*remote_ratio +
-            local_ratio - 1]).  Mamba groups are passed through unchanged.
+            becomes kernel blocks [L*ratio .. L*ratio + local_ratio - 1]).
+            Mamba groups are passed through unchanged.
         """
         local_ratio = self._physical_blocks_per_logical_kv_block
-        if remote_ratio == 1:
+        if remote_physical_per_logical == 1:
             return block_ids
         local_arange = np.arange(local_ratio).reshape(1, -1)
         group_specs = self.kv_cache_config.kv_cache_groups
@@ -2257,7 +2253,7 @@ class NixlConnectorWorker:
         for i, group in enumerate(block_ids):
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec):
                 arr = np.array(group).reshape(-1, 1)
-                expanded = (arr * remote_ratio + local_arange).flatten()
+                expanded = (arr * remote_physical_per_logical + local_arange).flatten()
                 result.append(expanded.tolist())
             else:
                 # Mamba blocks are 1:1 logical-to-physical (no expansion).
@@ -2297,8 +2293,8 @@ class NixlConnectorWorker:
            +-------------------+         +--------------------+
            |1st_split-2nd_split|         |1st_split-2nd_split |
         """
-        assert self.kv_topo is not None
-        if self.kv_topo.is_kv_layout_blocks_first:
+        assert self.transfer_topo is not None
+        if self.transfer_topo.is_kv_layout_blocks_first:
             # For indexing only half (either just the K or V part).
             if mamba_view:
                 # NOTE (NickLucche) Mamba Opt: this is already skipping the padding so
