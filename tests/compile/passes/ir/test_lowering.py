@@ -12,7 +12,6 @@ from vllm.compilation.passes.ir.lowering_pass import (
     VllmIRLoweringPass,
 )
 from vllm.config import get_current_vllm_config
-from vllm.ir import ops
 from vllm.ir.op import IrOp
 from vllm.platforms import current_platform
 
@@ -45,6 +44,7 @@ def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
         if ann == torch.Tensor:
             if use_fake:
                 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
                 batch = ShapeEnv().create_unbacked_symint()
                 args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
             else:
@@ -56,6 +56,7 @@ def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
         elif "Tensor | None" in str(ann) or "Optional[Tensor]" in str(ann):
             if use_fake:
                 from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
                 batch = ShapeEnv().create_unbacked_symint()
                 args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
             else:
@@ -138,9 +139,7 @@ class TestPerOpLowering:
             output = compiled_model(x)
 
         # Verify lowering succeeded
-        assert op_name in lowering_pass.selected_impls, (
-            f"Op {op_name} was not lowered"
-        )
+        assert op_name in lowering_pass.selected_impls, f"Op {op_name} was not lowered"
         selected = lowering_pass.selected_impls[op_name]
         assert len(selected) > 0, f"No instances of {op_name} were lowered"
 
@@ -164,6 +163,7 @@ class TestLoweringUnit:
         Test that lowering correctly selects implementation based on complex
         supports_args conditions. Uses a fake op with multiple providers.
         """
+
         @ir.register_op(name="_test_selection_op")
         def _test_selection_op(x: torch.Tensor) -> torch.Tensor:
             return x
@@ -188,13 +188,11 @@ class TestLoweringUnit:
 
             torch.set_default_device(current_platform.device_type)
 
-            with _test_selection_op.set_priority(
-                ["bf16_impl", "fp32_impl", "native"]
-            ):
+            with _test_selection_op.set_priority(["bf16_impl", "fp32_impl", "native"]):
                 model = _make_simple_model(_test_selection_op)
                 x = torch.randn(8, 16, dtype=torch.bfloat16)
                 compiled = torch.compile(model, backend=backend, fullgraph=True)
-                output = compiled(x)
+                _ = compiled(x)
 
             # Verify bf16_impl was selected (dtype matches supports_args)
             selected = lowering_pass.selected_impls["_test_selection_op"]
@@ -210,15 +208,15 @@ class TestLoweringUnit:
         Test that supports_args signature validation catches mismatches
         during registration.
         """
+
         @ir.register_op(name="_test_sig_op")
         def _test_sig_op(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             return x + y
 
         try:
             with pytest.raises(ValueError, match="number of parameters"):
-                @_test_sig_op.register_impl(
-                    "bad_sig", supports_args=lambda x: True
-                )
+
+                @_test_sig_op.register_impl("bad_sig", supports_args=lambda x: True)
                 def bad_sig_impl(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
                     return x + y
         finally:
@@ -228,12 +226,13 @@ class TestLoweringUnit:
     def test_dispatch_fallback_to_native(self, default_vllm_config):
         """
         Test that dispatch falls back to native when no implementation matches.
-        
+
         The set_priority context manager automatically appends 'native' to the
         priority list as a fallback. This test verifies that:
         1. When a custom impl doesn't match, native is used instead
         2. selected_impls records 'native' as the provider
         """
+
         @ir.register_op(name="_test_fallback_op")
         def _test_fallback_op(x: torch.Tensor) -> torch.Tensor:
             return x
@@ -256,7 +255,7 @@ class TestLoweringUnit:
                 model = _make_simple_model(_test_fallback_op)
                 x = torch.randn(8, 16, dtype=torch.bfloat16)
                 compiled = torch.compile(model, backend=backend, fullgraph=True)
-                output = compiled(x)
+                _ = compiled(x)
 
             # Verify native was selected (fallback)
             selected = lowering_pass.selected_impls["_test_fallback_op"]
@@ -275,6 +274,7 @@ class TestLoweringUnit:
         This test intentionally writes a buggy supports_args that checks
         batch size, then confirms the isinstance(result, bool) check fails.
         """
+
         @ir.register_op(name="_test_batch_dep_op")
         def _test_batch_dep_op(x: torch.Tensor) -> torch.Tensor:
             return x
@@ -354,16 +354,15 @@ class TestE2ELowering:
                 output_unlowered = compiled_unlowered(x)
                 torch.testing.assert_close(output_unlowered, output)
             except Exception as e:
-                pytest.skip(
-                    f"E2E test skipped for {op_name}:{provider}: {e}"
-                )
+                pytest.skip(f"E2E test skipped for {op_name}:{provider}: {e}")
 
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
-    def test_lowering_dispatch_consistency(self, op_name, provider,
-                                           default_vllm_config):
+    def test_lowering_dispatch_consistency(
+        self, op_name, provider, default_vllm_config
+    ):
         """
         Verify lowering pass selection matches direct dispatch results.
-        
+
         This ensures the lowering pass correctly uses ir_op.dispatch() to
         select implementations, and that the selected providers are consistent
         with what dispatch() would return for the same arguments.
@@ -396,9 +395,7 @@ class TestE2ELowering:
         # Verify selected_impls matches direct dispatch result
         if op_name in lowering_pass.selected_impls:
             selected = lowering_pass.selected_impls[op_name]
-            assert len(selected) > 0, (
-                f"No instances of {op_name} were lowered"
-            )
+            assert len(selected) > 0, f"No instances of {op_name} were lowered"
 
             for node_name, selected_provider in selected.items():
                 assert selected_provider == expected_impl.provider, (
