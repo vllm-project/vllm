@@ -18,6 +18,7 @@ import math
 import os
 from collections.abc import Iterable, Mapping
 from fractions import Fraction
+from itertools import islice
 
 import torch
 import torch.nn as nn
@@ -50,10 +51,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from vllm.model_executor.models.llava import (
-    LlavaDummyInputsBuilder,
-    init_vision_tower_for_llava,
-)
+from vllm.model_executor.models.llava import LlavaDummyInputsBuilder
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.model_executor.models.llava_next import (
     BaseLlavaNextMultiModalProcessor,
@@ -63,11 +61,14 @@ from vllm.model_executor.models.llava_next import (
     LlavaNextImageInputs,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.granite import GraniteForCausalLM, GraniteModel
+from vllm.compilation.decorators import support_torch_compile
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
+    PPMissingLayer,
     WeightsMapper,
-    _merge_multimodal_embeddings,
-    init_vllm_registered_model,
     maybe_prefix,
 )
 
@@ -227,6 +228,95 @@ class WindowQFormerDownsampler(nn.Module):
         out = self._unwin(out_w, n=n, win=self.query_side)
         out = self.dropout(out)
         return self.out_linear(out)
+
+
+# ---------------------------------------------------------------------------
+# LLM subclasses with deepstack injection in the layer loop
+# ---------------------------------------------------------------------------
+
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": 0,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+        "deepstack_input_embeds": 0,
+    }
+)
+class Granite4VisionLLMModel(GraniteModel):
+    """GraniteModel with deepstack feature injection in the layer loop."""
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        deepstack_input_embeds: IntermediateTensors | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_input_ids(input_ids)
+                hidden_states = hidden_states * self.config.embedding_multiplier
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+
+        for layer_idx, layer in islice(
+            enumerate(self.layers), self.start_layer, self.end_layer
+        ):
+            if deepstack_input_embeds is not None:
+                key = f"ds_{layer_idx}"
+                if key in deepstack_input_embeds.tensors:
+                    feat = deepstack_input_embeds[key]
+                    # Resize to match hidden_states in case of CUDA graph padding
+                    num_tokens = hidden_states.size(0)
+                    buf_len = feat.shape[0]
+                    if buf_len != num_tokens:
+                        feat = torch.nn.functional.pad(
+                            feat[:num_tokens],
+                            (0, 0, 0, max(0, num_tokens - buf_len)),
+                        )
+                    hidden_states = hidden_states + feat
+            hidden_states = layer(positions, hidden_states)
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
+
+        hidden_states = self.norm(hidden_states)
+        return hidden_states
+
+
+class Granite4VisionLLMForCausalLM(GraniteForCausalLM):
+    """GraniteForCausalLM backed by Granite4VisionLLMModel."""
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+        self.model = Granite4VisionLLMModel(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if config.tie_word_embeddings:
+                self.lm_head.weight = self.model.embed_tokens.weight
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            if hasattr(config, "logits_scaling"):
+                logit_scale /= config.logits_scaling
+            self.logits_processor = LogitsProcessor(config.vocab_size,
+                                                    scale=logit_scale)
+        else:
+            self.lm_head = PPMissingLayer()
 
 
 # ---------------------------------------------------------------------------
@@ -418,9 +508,8 @@ class Granite4VisionForConditionalGeneration(
 
         # ----- Language model (marked as LM) -----
         with self._mark_language_model(vllm_config):
-            self.language_model = init_vllm_registered_model(
-                vllm_config=vllm_config,
-                hf_config=config.text_config,
+            self.language_model = Granite4VisionLLMForCausalLM(
+                vllm_config=vllm_config.with_hf_config(config.text_config),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
@@ -438,10 +527,30 @@ class Granite4VisionForConditionalGeneration(
         )
         self._downsample_rate = Fraction(config.downsample_rate)
 
-        # Deepstack state — set during embed_input_ids, consumed during forward
-        # list of (llm_layer_idx, features_buffer) where buffer is (N, hidden_size)
-        self._ds_features: list[tuple[int, torch.Tensor]] = []
-        self._ds_vision_mask: torch.Tensor | None = None
+        # Ordered list of LLM layer indices for each deepstack level.
+        # Pre-populated from config so it's available during CUDA graph capture
+        # (before any embed_multimodal call).
+        self._ds_layer_indices: list[int] = (
+            [llm_layer for _, llm_layer in config.deepstack_layer_map]
+            + list(getattr(config, "spatial_target_layers", []))
+        )
+
+        # Pre-allocated persistent GPU buffers for deepstack features.
+        # Written via .copy_() in embed_input_ids(), read by forward() via a
+        # slice. Because the buffer address is fixed, CUDA graph replay sees
+        # the updated values written just before each prefill.
+        # Shape: (max_num_batched_tokens, lm_hidden_size) per level.
+        n_layerwise = len(config.deepstack_layer_map)
+        n_spatial = len(getattr(config, "spatial_target_layers", []))
+        num_ds_levels = n_layerwise + n_spatial
+        lm_hidden = config.text_config.hidden_size
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        # Allocated on CPU first; moved to GPU in embed_input_ids on first use.
+        self._ds_buffers: list[torch.Tensor] = [
+            torch.zeros(max_tokens, lm_hidden)
+            for _ in range(num_ds_levels)
+        ]
+        self._ds_num_tokens: int = 0  # tokens written in last embed_input_ids call
 
     # ----- Vision feature extraction -----
 
@@ -539,15 +648,20 @@ class Granite4VisionForConditionalGeneration(
         self,
         pixel_values: torch.Tensor,
         image_sizes: torch.Tensor,
-    ) -> list[tuple[int, list[torch.Tensor]]]:
-        """Extract deepstack + spatial features.
+    ) -> tuple[list[int], list[torch.Tensor]]:
+        """Extract deepstack + spatial features for all levels.
 
-        Returns list of (llm_layer_idx, [per_image_features, ...]) tuples.
-        This is the vLLM equivalent of HF's get_image_features.
+        Returns:
+          llm_layer_indices: ordered list of target LLM layer indices
+          per_image_packed:  one tensor per image, shape
+                             (num_tokens_i, lm_hidden_size * num_levels),
+                             all levels packed on dim=-1.
+
+        Packing on dim=-1 means the framework's token-level slicing for
+        chunked prefill preserves all levels intact.
         """
         select_strategy = self._vision_feature_select_strategy
 
-        # Count patches per image for splitting
         image_num_patches = [
             image_size_to_num_patches(
                 image_size=imsize,
@@ -557,56 +671,50 @@ class Granite4VisionForConditionalGeneration(
             for imsize in image_sizes
         ]
 
-        # Flatten 5D → 4D if needed
         if pixel_values.dim() == 5:
-            _pv_list = [
-                pv[:np_]
-                for pv, np_ in zip(pixel_values, image_num_patches)
-            ]
-            pixel_values = torch.cat(_pv_list, dim=0)
+            pixel_values = torch.cat(
+                [pv[:np_] for pv, np_ in zip(pixel_values, image_num_patches)],
+                dim=0,
+            )
 
-        # Run vision tower once, get all hidden states
         all_hidden_states = self._get_vision_hidden_states(pixel_values)
 
-        all_features = []
+        # Collect per-level: (llm_layer, [per_image_tensor, ...])
+        levels: list[tuple[int, list[torch.Tensor]]] = []
 
-        # ----- Deepstack features -----
         for proj_idx, (vision_layer, llm_layer) in enumerate(
             self._deepstack_layer_map
         ):
             selected = all_hidden_states[vision_layer]
-
             if select_strategy == "default":
-                selected = selected[:, 1:]  # remove CLS
-
+                selected = selected[:, 1:]
             projected = self.layerwise_projectors[proj_idx](selected)
-
-            projected_split = torch.split(projected, image_num_patches, dim=0)
-
-            packed = self._pack_and_unpad_image_features(
-                projected_split, image_sizes
+            per_image = self._pack_and_unpad_image_features(
+                torch.split(projected, image_num_patches, dim=0), image_sizes
             )
+            levels.append((llm_layer, per_image))
 
-            all_features.append((llm_layer, packed))
-
-        # ----- Spatial features -----
         if self._use_spatial_sampling and self.spatial_projectors is not None:
             spatial_hidden = all_hidden_states[self._spatial_vision_layer]
-
             if select_strategy == "default":
                 spatial_hidden = spatial_hidden[:, 1:]
-
             for group_idx, llm_layer in enumerate(self._spatial_target_layers):
                 projected = self.spatial_projectors[group_idx](spatial_hidden)
-                projected_split = torch.split(
-                    projected, image_num_patches, dim=0
+                per_image = self._pack_and_unpad_image_features(
+                    torch.split(projected, image_num_patches, dim=0), image_sizes
                 )
-                packed = self._pack_and_unpad_image_features(
-                    projected_split, image_sizes
-                )
-                all_features.append((llm_layer, packed))
+                levels.append((llm_layer, per_image))
 
-        return all_features
+        llm_layer_indices = [llm_layer for llm_layer, _ in levels]
+        num_images = len(image_sizes)
+        per_image_packed = [
+            torch.cat(
+                [levels[lvl][1][img] for lvl in range(len(levels))], dim=-1
+            )
+            for img in range(num_images)
+        ]
+
+        return llm_layer_indices, per_image_packed
 
     # ----- Multimodal interface -----
 
@@ -638,12 +746,14 @@ class Granite4VisionForConditionalGeneration(
         raise AssertionError("Unreachable")
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
-        """Convert pixel values → per-image placeholder tensors.
+        """Run vision tower and return per-image packed feature tensors.
 
-        The actual vision features are stored in self._ds_level_features and
-        injected during the forward loop (like HF does). We return zero-
-        tensors with the right shape so that _merge_multimodal_embeddings
-        fills image positions with zeros (matching HF's masked_fill(mask, 0)).
+        Each returned tensor has shape (num_tokens_i, lm_hidden_size * num_levels)
+        with all deepstack levels packed on dim=-1. The framework caches these
+        tensors and slices along dim=0 for chunked prefill — all levels survive
+        intact because slicing is token-wise, not feature-wise.
+
+        embed_input_ids() splits the packed tensor back into per-level buffers.
         """
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -658,22 +768,11 @@ class Granite4VisionForConditionalGeneration(
         if isinstance(pixel_values, list):
             pixel_values = torch.cat(pixel_values, dim=0)
 
-        # Get all (llm_layer, [per_image_features]) pairs
-        all_features = self._get_all_layer_features(pixel_values, image_sizes)
-
-        # Store ALL level features for deepstack injection in forward()
-        self._ds_level_features = all_features
-
-        # Return zero-tensors matching the shape of level-0 features.
-        # This makes _merge_multimodal_embeddings write zeros at image
-        # positions (equivalent to HF's inputs_embeds.masked_fill(mask, 0)).
-        # All real features are injected during the layer loop.
-        if all_features:
-            return [
-                torch.zeros_like(feat)
-                for feat in all_features[0][1]
-            ]
-        return []
+        llm_layer_indices, per_image_packed = self._get_all_layer_features(
+            pixel_values, image_sizes
+        )
+        self._ds_layer_indices = llm_layer_indices
+        return per_image_packed
 
     def embed_input_ids(
         self,
@@ -689,16 +788,14 @@ class Granite4VisionForConditionalGeneration(
         1. inputs_embeds = embed_tokens(input_ids)
         2. inputs_embeds.masked_fill(vision_mask, 0.0)
         3. hidden_states = inputs_embeds * embedding_multiplier
-        4. layer loop with deepstack injection via masked_scatter
+        4. layer loop injects deepstack features at target layers
 
-        vLLM's GraniteModel.forward:
-        - if inputs_embeds given: hidden_states = inputs_embeds (NO multiplier)
-        - if input_ids given: hidden_states = embed(input_ids) * multiplier
-
-        So we apply embedding_multiplier here and pass inputs_embeds to forward.
+        multimodal_embeddings contains packed tensors from embed_multimodal():
+        shape (num_tokens_i, lm_hidden_size * num_levels). We split on dim=-1
+        to get per-level features, build batch-sized buffers (zero at text
+        positions), and store in self._ds_features for forward().
         """
-        # Access the inner GraniteModel
-        lm_inner = self.language_model.model  # GraniteModel
+        lm_inner = self.language_model.model
 
         has_vision = (
             multimodal_embeddings is not None
@@ -708,54 +805,44 @@ class Granite4VisionForConditionalGeneration(
         )
 
         if not has_vision:
-            # Text-only or decode: clear deepstack state
-            self._ds_features = []
-            self._ds_vision_mask = None
-            self._ds_level_features = []
-            # Apply embedding_multiplier here because forward() always receives
-            # inputs_embeds and skips the inner model's embed+multiply path.
+            self._ds_num_tokens = 0
             embeds = lm_inner.embed_input_ids(input_ids)
             return embeds * lm_inner.config.embedding_multiplier
 
-        # --- Vision path ---
-        # HF flow: embed -> masked_fill(0) -> multiply
-        # by embedding_multiplier. Layer loop adds vision
-        # features via masked_scatter (never in inputs_embeds).
-
-        # 1. Get text embeddings
+        # 1. Text embeddings
         text_embeds = lm_inner.embed_input_ids(input_ids)
 
-        # 2. Zero out image positions (HF: inputs_embeds.masked_fill(vision_mask, 0.0))
-        #    _merge_multimodal_embeddings writes our zero-tensors here, same effect.
-        _merge_multimodal_embeddings(
-            inputs_embeds=text_embeds,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
+        # 2. Zero image positions (matches HF masked_fill(vision_mask, 0.0))
+        text_embeds[is_multimodal] = 0.0
+
+        # 3. Apply embedding_multiplier
+        inputs_embeds = text_embeds * lm_inner.config.embedding_multiplier
+
+        # 4. Split packed tensors into per-level features and build buffers.
+        #    multimodal_embeddings is a list of per-image packed tensors
+        #    (possibly a chunk slice from the framework's encoder cache).
+        #    Concatenate along token dim → (total_mm_tokens, lm_h * num_levels).
+        N, lm_h = inputs_embeds.shape
+        all_packed = torch.cat(
+            [t.to(dtype=inputs_embeds.dtype) for t in multimodal_embeddings],
+            dim=0,
         )
+        level_features = all_packed.split(lm_h, dim=-1)  # num_levels tensors
 
-        # 3. Apply embedding_multiplier to ALL positions (text + vision=0)
-        embedding_multiplier = lm_inner.config.embedding_multiplier
-        inputs_embeds = text_embeds * embedding_multiplier
+        # Ensure persistent buffers are on the right device/dtype (first call).
+        buf0 = self._ds_buffers[0]
+        if buf0.device != inputs_embeds.device or buf0.dtype != inputs_embeds.dtype:
+            self._ds_buffers = [
+                b.to(device=inputs_embeds.device, dtype=inputs_embeds.dtype)
+                for b in self._ds_buffers
+            ]
 
-        # 5. Prepare deepstack feature buffers for the layer loop
-        N = inputs_embeds.size(0)
-        hidden_size = inputs_embeds.size(1)
+        for level_idx in range(len(self._ds_layer_indices)):
+            buf_data = torch.zeros(N, lm_h, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
+            buf_data[is_multimodal] = level_features[level_idx]
+            self._ds_buffers[level_idx][:N].copy_(buf_data)
 
-        prepared = []
-        for llm_layer, per_image_features in getattr(self, "_ds_level_features", []):
-            concat_features = torch.cat(per_image_features, dim=0)
-            buf = torch.zeros(
-                N, hidden_size,
-                dtype=inputs_embeds.dtype,
-                device=inputs_embeds.device,
-            )
-            buf[is_multimodal] = concat_features.to(dtype=inputs_embeds.dtype)
-            prepared.append((llm_layer, buf))
-
-        self._ds_features = prepared
-        self._ds_vision_mask = is_multimodal
-        self._ds_level_features = []  # consumed
-
+        self._ds_num_tokens = N
         return inputs_embeds
 
     # ----- Forward -----
@@ -768,56 +855,37 @@ class Granite4VisionForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | IntermediateTensors:
-        """Forward pass with deepstack injection.
-
-        Runs the LLM layer loop directly (like HF Granite4VisionModel.forward)
-        to inject vision features at target layers via masked addition.
-        """
         if intermediate_tensors is not None:
             inputs_embeds = None
 
-        # Access the inner GraniteModel
-        lm_inner = self.language_model.model
-
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                # embed_input_ids already applied embedding_multiplier
-                hidden_states = inputs_embeds
-            else:
-                # Text-only path: embed + multiply
-                hidden_states = lm_inner.embed_input_ids(input_ids)
-                hidden_states = hidden_states * lm_inner.config.embedding_multiplier
+        # Build IntermediateTensors from pre-allocated persistent buffers.
+        # Always pass deepstack when inputs_embeds is non-None (prefill path),
+        # including during CUDA graph capture (buffers are zero → no-op injection).
+        # This ensures the graph captures the injection code path.
+        if inputs_embeds is not None and get_pp_group().is_first_rank and self._ds_layer_indices:
+            n = self._ds_num_tokens if self._ds_num_tokens > 0 else inputs_embeds.size(0)
+            ds: IntermediateTensors | None = IntermediateTensors({
+                f"ds_{llm_layer}": self._ds_buffers[lvl][:n]
+                for lvl, llm_layer in enumerate(self._ds_layer_indices)
+            })
         else:
-            if intermediate_tensors is None:
-                raise RuntimeError("Intermediate tensors may not be None!")
-            hidden_states = intermediate_tensors["hidden_states"]
+            ds = None
 
-        num_tokens = hidden_states.size(0)
+        hidden_states = self.language_model.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            deepstack_input_embeds=ds,
+        )
 
-        # Build O(1) lookup for deepstack features
-        ds_map: dict[int, torch.Tensor] = {}
-        for llm_layer_idx, features in self._ds_features:
-            ds_map[llm_layer_idx] = features
+        # Clear buffers after use so stale features don't leak into the next request.
+        if inputs_embeds is not None and get_pp_group().is_first_rank and self._ds_num_tokens > 0:
+            n = self._ds_num_tokens
+            for buf in self._ds_buffers:
+                buf[:n].zero_()
+            self._ds_num_tokens = 0
 
-        vision_mask = self._ds_vision_mask
-        if vision_mask is not None:
-            vision_mask = vision_mask[:num_tokens]
-
-        # Run through decoder layers with deepstack injection
-        for i in range(lm_inner.start_layer, lm_inner.end_layer):
-            layer = lm_inner.layers[i]
-
-            # Inject deepstack features at target layers (before layer forward)
-            if i in ds_map and vision_mask is not None and vision_mask.any():
-                features = ds_map[i][:num_tokens]
-                hidden_states[vision_mask] += features[vision_mask]
-
-            hidden_states = layer(positions, hidden_states)
-
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors({"hidden_states": hidden_states})
-
-        hidden_states = lm_inner.norm(hidden_states)
         return hidden_states
 
     def compute_logits(
