@@ -1,6 +1,6 @@
 use super::types::ChatCompletionRequest;
 use crate::error::{ApiError, bail_invalid_request};
-use crate::routes::openai::utils::types::{ToolChoice, ToolChoiceValue};
+use crate::routes::openai::utils::types::{ChatMessage, Tool, ToolChoice, ToolChoiceValue};
 
 /// Enforce the minimal compatibility contract for the Rust OpenAI server.
 pub(super) fn validate_request_compat(
@@ -46,10 +46,15 @@ pub(super) fn validate_request_compat(
     }
 
     if let Some(tools) = request.tools.as_ref() {
-        for tool in tools {
-            if tool.tool_type != "function" {
-                bail_invalid_request!(param = "tools", "Only function tools are supported.");
-            }
+        validate_function_tools(tools, "tools")?;
+    }
+
+    for message in &request.messages {
+        if let ChatMessage::Developer {
+            tools: Some(tools), ..
+        } = message
+        {
+            validate_function_tools(tools, "messages[].tools")?;
         }
     }
 
@@ -174,6 +179,15 @@ fn reject_non_default<T>(
     Ok(())
 }
 
+fn validate_function_tools(tools: &[Tool], param: &'static str) -> Result<(), ApiError> {
+    for tool in tools {
+        if tool.tool_type != "function" {
+            bail_invalid_request!(param = param, "Only function tools are supported.");
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -236,6 +250,47 @@ mod tests {
         };
         validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
             .expect("function tools should be accepted");
+
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("policy".to_string()),
+                tools: Some(vec![Tool {
+                    tool_type: "function".to_string(),
+                    function: Function {
+                        name: "tool".to_string(),
+                        description: None,
+                        parameters: json!({}),
+                        strict: None,
+                    },
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+        validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat")
+            .expect("developer function tools should be accepted");
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_non_function_developer_tools() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::Developer {
+                content: MessageContent::Text("policy".to_string()),
+                tools: Some(vec![Tool {
+                    tool_type: "mcp".to_string(),
+                    function: Function {
+                        name: "tool".to_string(),
+                        description: None,
+                        parameters: json!({}),
+                        strict: None,
+                    },
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        assert!(validate_request_compat(&request, "Qwen/Qwen1.5-0.5B-Chat").is_err());
     }
 
     #[test]

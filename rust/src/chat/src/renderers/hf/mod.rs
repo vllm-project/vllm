@@ -137,6 +137,9 @@ impl ChatRenderer for HfChatRenderer {
 pub(super) struct TemplateMessage {
     role: &'static str,
     content: TemplateContent,
+    // Developer-role messages may provide message-local tools in the same shape
+    // as top-level request tools.
+    tools: Option<Vec<TemplateTool>>,
     // Reasoning-capable HF templates are inconsistent on the exact field name,
     // so expose both variants for compatibility.
     reasoning: Option<String>,
@@ -192,6 +195,16 @@ fn to_template_message(
         ChatMessage::System { content } => TemplateMessage {
             role: "system",
             content: to_template_content(content, content_format)?,
+            tools: None,
+            reasoning: None,
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
+        ChatMessage::Developer { content, tools } => TemplateMessage {
+            role: "developer",
+            content: to_template_content(content, content_format)?,
+            tools: tools.as_deref().map(to_template_tools),
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -200,6 +213,7 @@ fn to_template_message(
         ChatMessage::User { content } => TemplateMessage {
             role: "user",
             content: to_template_content(content, content_format)?,
+            tools: None,
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -213,6 +227,7 @@ fn to_template_message(
             TemplateMessage {
                 role: "assistant",
                 content,
+                tools: None,
                 reasoning: reasoning.clone(),
                 reasoning_content: reasoning,
                 tool_calls,
@@ -225,6 +240,7 @@ fn to_template_message(
         } => TemplateMessage {
             role: "tool",
             content: to_template_content(content, content_format)?,
+            tools: None,
             reasoning: None,
             reasoning_content: None,
             tool_calls: None,
@@ -369,6 +385,31 @@ mod tests {
         let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
 
         assert_eq!(rendered, "hello world");
+    }
+
+    #[test]
+    fn chat_template_exposes_developer_tools() {
+        let request = sample_request(vec![ChatMessage::developer(
+            "policy",
+            Some(vec![ChatTool {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"],
+                }),
+                strict: Some(true),
+            }]),
+        )]);
+
+        let rendered = render(
+            Some("{{ messages[0].role }}|{{ messages[0].content }}|{{ messages[0].tools[0].function.name }}|{{ messages[0].tools[0].function.parameters.required[0] }}"),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(rendered, "developer|policy|get_weather|city");
     }
 
     #[test]

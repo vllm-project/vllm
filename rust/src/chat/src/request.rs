@@ -15,6 +15,7 @@ use crate::event::{AssistantContentBlock, AssistantMessage};
 #[serde(rename_all = "snake_case")]
 pub enum ChatRole {
     System,
+    Developer,
     User,
     Assistant,
     ToolResponse,
@@ -91,6 +92,11 @@ impl From<Vec<ChatContentPart>> for ChatContent {
 pub enum ChatMessage {
     /// System message content.
     System { content: ChatContent },
+    /// Developer message content plus optional message-local tools.
+    Developer {
+        content: ChatContent,
+        tools: Option<Vec<ChatTool>>,
+    },
     /// User message content.
     User { content: ChatContent },
     /// Assistant history content assembled from structured assistant blocks.
@@ -109,6 +115,7 @@ impl ChatMessage {
 
         match role {
             ChatRole::System => Self::system(content),
+            ChatRole::Developer => Self::developer(content, None),
             ChatRole::User => Self::user(content),
             ChatRole::Assistant => Self::assistant_text(content),
             ChatRole::ToolResponse => {
@@ -124,6 +131,14 @@ impl ChatMessage {
     pub fn system(content: impl Into<ChatContent>) -> Self {
         Self::System {
             content: content.into(),
+        }
+    }
+
+    /// Construct one chat message with developer role.
+    pub fn developer(content: impl Into<ChatContent>, tools: Option<Vec<ChatTool>>) -> Self {
+        Self::Developer {
+            content: content.into(),
+            tools,
         }
     }
 
@@ -158,6 +173,7 @@ impl ChatMessage {
     pub fn role(&self) -> ChatRole {
         match self {
             Self::System { .. } => ChatRole::System,
+            Self::Developer { .. } => ChatRole::Developer,
             Self::User { .. } => ChatRole::User,
             Self::Assistant { .. } => ChatRole::Assistant,
             Self::ToolResponse { .. } => ChatRole::ToolResponse,
@@ -168,6 +184,7 @@ impl ChatMessage {
     pub fn text_content(&self) -> Result<String> {
         match self {
             Self::System { content }
+            | Self::Developer { content, .. }
             | Self::User { content }
             | Self::ToolResponse { content, .. } => content.try_flatten_to_text(),
             Self::Assistant { content } => Ok(content.text()),
@@ -178,7 +195,10 @@ impl ChatMessage {
     pub fn reasoning_content(&self) -> Option<String> {
         match self {
             Self::Assistant { content } => content.reasoning(),
-            Self::System { .. } | Self::User { .. } | Self::ToolResponse { .. } => None,
+            Self::System { .. }
+            | Self::Developer { .. }
+            | Self::User { .. }
+            | Self::ToolResponse { .. } => None,
         }
     }
 }
@@ -223,7 +243,7 @@ impl Default for ChatOptions {
 }
 
 /// One function-style tool made available to the model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChatTool {
     pub name: String,
     pub description: Option<String>,
@@ -333,6 +353,7 @@ impl ChatRole {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::System => "system",
+            Self::Developer => "developer",
             Self::User => "user",
             Self::Assistant => "assistant",
             Self::ToolResponse => "tool_response",
@@ -342,9 +363,9 @@ impl ChatRole {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{json, to_value};
 
-    use super::{ChatContent, ChatContentPart, ChatMessage, ChatRole};
+    use super::{ChatContent, ChatContentPart, ChatMessage, ChatRole, ChatTool};
     use crate::event::AssistantContentBlock;
 
     #[test]
@@ -398,5 +419,25 @@ mod tests {
         assert_eq!(message.role(), ChatRole::Assistant);
         assert_eq!(message.text_content().unwrap(), "outer");
         assert_eq!(message.reasoning_content().as_deref(), Some("inner"));
+    }
+
+    #[test]
+    fn developer_message_round_trips_through_serde() {
+        let message = ChatMessage::developer(
+            "hello",
+            Some(vec![ChatTool {
+                name: "get_weather".to_string(),
+                description: Some("Get weather".to_string()),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {"city": {"type": "string"}},
+                }),
+                strict: Some(true),
+            }]),
+        );
+
+        let value = to_value(&message).unwrap();
+        let decoded: ChatMessage = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded, message);
     }
 }

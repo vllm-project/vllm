@@ -9,7 +9,7 @@ use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
 use crate::routes::openai::utils::structured_outputs::convert_from_response_format;
 use crate::routes::openai::utils::types::{
-    ChatMessage, ContentPart, MessageContent, ToolChoice, ToolChoiceValue,
+    ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
 use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
 
@@ -200,9 +200,14 @@ fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, ApiError> {
         ChatMessage::Function { .. } => {
             bail_invalid_request!("Function messages are not supported.")
         }
-        ChatMessage::Developer { .. } => {
-            bail_invalid_request!("Developer messages are not supported.")
-        }
+        ChatMessage::Developer {
+            content,
+            tools,
+            name: _,
+        } => Ok(VllmChatMessage::developer(
+            convert_content(content)?,
+            convert_message_tools(tools)?,
+        )),
     }
 }
 
@@ -259,9 +264,7 @@ fn convert_assistant_tool_calls(
         .collect()
 }
 
-fn convert_tools(
-    tools: Option<Vec<crate::routes::openai::utils::types::Tool>>,
-) -> Result<Vec<ChatTool>, ApiError> {
+fn convert_tools(tools: Option<Vec<Tool>>) -> Result<Vec<ChatTool>, ApiError> {
     tools
         .unwrap_or_default()
         .into_iter()
@@ -277,6 +280,11 @@ fn convert_tools(
             })
         })
         .collect()
+}
+
+fn convert_message_tools(tools: Option<Vec<Tool>>) -> Result<Option<Vec<ChatTool>>, ApiError> {
+    let tools = convert_tools(tools)?;
+    Ok((!tools.is_empty()).then_some(tools))
 }
 
 fn convert_tool_choice(tool_choice: Option<&ToolChoice>) -> Result<ChatToolChoice, ApiError> {
@@ -437,11 +445,61 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_unsupported_roles() {
+    fn prepare_chat_request_accepts_developer_messages() {
         let request = ChatCompletionRequest {
             messages: vec![ChatMessage::Developer {
                 content: MessageContent::Text("hello".to_string()),
-                tools: None,
+                tools: Some(vec![Tool {
+                    tool_type: "function".to_string(),
+                    function: Function {
+                        name: "get_weather".to_string(),
+                        description: Some("Get weather".to_string()),
+                        parameters: json!({
+                            "type": "object",
+                            "properties": {"city": {"type": "string"}},
+                        }),
+                        strict: Some(true),
+                    },
+                }]),
+                name: None,
+            }],
+            ..base_request()
+        };
+
+        let prepared = prepare_chat_request(
+            request,
+            "Qwen/Qwen1.5-0.5B-Chat",
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+
+        assert_eq!(
+            prepared.chat_request.messages,
+            vec![VllmChatMessage::developer(
+                "hello",
+                Some(vec![VllmChatTool {
+                    name: "get_weather".to_string(),
+                    description: Some("Get weather".to_string()),
+                    parameters: json!({
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                    }),
+                    strict: Some(true),
+                }]),
+            )]
+        );
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_non_text_content_parts() {
+        let request = ChatCompletionRequest {
+            messages: vec![ChatMessage::User {
+                content: MessageContent::Parts(vec![ContentPart::ImageUrl {
+                    image_url: ImageUrl {
+                        url: "https://example.com/image.png".to_string(),
+                        detail: None,
+                    },
+                }]),
                 name: None,
             }],
             ..base_request()
@@ -458,15 +516,16 @@ mod tests {
     }
 
     #[test]
-    fn prepare_chat_request_rejects_non_text_content_parts() {
+    fn prepare_chat_request_rejects_non_text_developer_content_parts() {
         let request = ChatCompletionRequest {
-            messages: vec![ChatMessage::User {
+            messages: vec![ChatMessage::Developer {
                 content: MessageContent::Parts(vec![ContentPart::ImageUrl {
                     image_url: ImageUrl {
                         url: "https://example.com/image.png".to_string(),
                         detail: None,
                     },
                 }]),
+                tools: None,
                 name: None,
             }],
             ..base_request()
