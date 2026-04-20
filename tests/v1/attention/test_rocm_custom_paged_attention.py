@@ -4,6 +4,7 @@
 import importlib
 import sys
 import types
+from typing import Any
 
 import pytest
 import torch
@@ -13,7 +14,7 @@ def _install_fake_amdsmi(
     monkeypatch: pytest.MonkeyPatch,
     target_graphics_version: str,
 ) -> None:
-    fake_amdsmi = types.ModuleType("amdsmi")
+    fake_amdsmi: Any = types.ModuleType("amdsmi")
 
     class AmdSmiException(Exception):
         pass
