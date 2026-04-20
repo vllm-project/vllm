@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import torch
+from torch._library.triton import set_wrap_triton_enabled
 
 import vllm.envs as envs
 import vllm.ir
@@ -326,6 +327,7 @@ def set_forward_context(
             vllm.ir.enable_torch_wrap(
                 vllm_config.compilation_config.ir_enable_torch_wrap
             ),
+            set_wrap_triton_enabled(False),
         ):
             yield
     finally:

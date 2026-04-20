@@ -24,12 +24,15 @@ rms_norm_native = ir.ops.rms_norm.impls["native"].impl_fn
     reason="Currently only kernels on CUDA, ROCm and XPU",
 )
 def test_rms_norm_registration():
+    from vllm.triton_utils import HAS_TRITON
+
     expected = {
         "native": True,
         "vllm_c": current_platform.is_cuda_alike(),
         "aiter": current_platform.is_rocm(),
         "oink": False,
         "xpu_kernels": current_platform.is_xpu(),
+        "triton_batch_invariant": HAS_TRITON,
     }
 
     actual = {
@@ -71,11 +74,12 @@ class TestRMSNorm:
         out4 = rms_norm_native(x, None, epsilon=epsilon)
         torch.testing.assert_close(out3, out4)
 
-    @pytest.mark.parametrize("provider", ["vllm_c", "aiter", "xpu_kernels"])
+    @pytest.mark.parametrize("provider", vllm.ir.ops.rms_norm.supported_providers())
     def test_impls(self, dtype, n_tokens, hidden_size, epsilon, provider):
         impl = ir.ops.rms_norm.impls[provider]
-        if not impl.supported:
-            pytest.skip(f"{provider} impl not supported on this platform")
+        assert impl.supported, (
+            f"{provider} impl expected to be supported on this platform"
+        )
 
         x, weight = rms_norm_inputs(n_tokens, hidden_size, dtype)
         args = (x, weight, epsilon, None)
@@ -102,9 +106,10 @@ class TestRMSNorm:
         # exact match
         torch.testing.assert_close(out_impl2, out_impl, rtol=0.0, atol=0.0)
 
-        # none of these support variance_size override
-        assert not impl.supports_args(x, weight, epsilon, 4)
-        assert not impl.supports_args(x, weight, epsilon, variance_size=4)
+        if impl.provider != "native":
+            # none of the kernels support variance_size override
+            assert not impl.supports_args(x, weight, epsilon, 4)
+            assert not impl.supports_args(x, weight, epsilon, variance_size=4)
 
         # test weight=None behavior
         out_impl_no_weight = impl.impl_fn(x, None, epsilon)

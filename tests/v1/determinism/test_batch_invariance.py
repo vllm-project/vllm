@@ -23,12 +23,11 @@ IS_DEVICE_CAPABILITY_BELOW_90 = is_device_capability_below_90()
 
 @skip_unsupported
 @pytest.mark.timeout(1000)
-@pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("enforce_eager", [True, False])
 def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
     backend,
+    enforce_eager: bool,
 ):
     """
     Ensures that the same request (the 'needle' prompt) yields identical output
@@ -51,6 +50,9 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
     """
+    if not enforce_eager and IS_DEVICE_CAPABILITY_BELOW_90:
+        pytest.skip("enforce_eager required for <sm90")
+
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
 
@@ -90,6 +92,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
             max_num_seqs=max_batch_size,
             gpu_memory_utilization=gpu_mem_util,
             max_model_len=max_model_len,
+            enforce_eager=enforce_eager,
             attention_config=attention_config,
         )
 
@@ -146,13 +149,15 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
 
 
 @skip_unsupported
-@pytest.mark.parametrize(
-    "backend",
-    BACKENDS,
-)
+@pytest.mark.parametrize("backend", BACKENDS)
+@pytest.mark.parametrize("enforce_eager", [True, False])
 def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     backend,
+    enforce_eager: bool,
 ):
+    if not enforce_eager and IS_DEVICE_CAPABILITY_BELOW_90:
+        pytest.skip("enforce_eager required for <sm90")
+
     seed = int(os.getenv("VLLM_TEST_SEED", "12345"))
     random.seed(seed)
     tp_size = int(os.getenv("VLLM_TEST_TP_SIZE", "1"))
@@ -175,7 +180,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         max_model_len=8192,
         dtype="auto",  # not everything is supported
         gpu_memory_utilization=0.9,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        enforce_eager=enforce_eager,
         attention_config={"backend": backend},
     )
 
@@ -906,6 +911,7 @@ def LLM_with_max_seqs(
     max_num_seqs: int,
     gpu_memory_utilization: float,
     max_model_len: int,
+    enforce_eager: bool,
     attention_config: dict | None = None,
 ) -> LLM:
     """
@@ -920,7 +926,7 @@ def LLM_with_max_seqs(
         dtype="auto",
         tensor_parallel_size=int(os.getenv("VLLM_TP_SIZE", "1")),
         enable_prefix_caching=False,
-        enforce_eager=IS_DEVICE_CAPABILITY_BELOW_90,
+        enforce_eager=enforce_eager,
         attention_config=attention_config,
         # Enable for MOE models
         # enable_expert_parallel=True,

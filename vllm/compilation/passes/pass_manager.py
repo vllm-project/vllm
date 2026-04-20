@@ -114,8 +114,8 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
         VllmInductorPass.dump_prefix += 1
 
         # clean up after lowering again
-        self.post_cleanup(graph)
-        VllmInductorPass.dump_prefix += 1
+        # self.post_cleanup(graph)
+        # VllmInductorPass.dump_prefix += 1
 
         # always run fix_functionalization last
         self.fix_functionalization(graph)
@@ -194,7 +194,7 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
 
         passes.append(self.post_cleanup.uuid())
         passes.append(self.ir_lowering.uuid())
-        passes.append(self.post_cleanup.uuid())
+        # passes.append(self.post_cleanup.uuid())
         passes.append(self.fix_functionalization.uuid())
 
         # Include the compile range in the uuid to ensure that inductor

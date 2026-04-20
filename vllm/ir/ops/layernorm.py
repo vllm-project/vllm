@@ -6,7 +6,7 @@ from torch import Tensor
 from ..op import register_op
 
 
-@register_op
+@register_op(has_reduction=True)
 def rms_norm(
     x: Tensor, weight: Tensor | None, epsilon: float, variance_size: int | None = None
 ) -> Tensor:

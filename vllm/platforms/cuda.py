@@ -573,12 +573,19 @@ class CudaPlatformBase(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
+        # triton_batch_invariant available even when VLLM_BATCH_INVARIANT=0,
+        # but it won't be selected. vllm_c is skipped when VLLM_BATCH_INVARIANT=1.
+        rms_norm = (
+            ["native"]
+            if using_inductor
+            else ["vllm_c", "triton_batch_invariant", "native"]
+        )
+
         # Use oink if enabled for rms_norm
         # TODO(Laurawly/luka): remove this env var,
         #  users can just use IR op priority directly
-        rms_norm = default
         if envs.VLLM_USE_OINK_OPS:
-            rms_norm = ["oink"] + default
+            rms_norm = ["oink"] + rms_norm
 
         return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
 
