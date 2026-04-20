@@ -118,11 +118,7 @@ async def transfer_run_periodically(
             # model_state.expert_buffer, which will be consumed by the main thread in
             # move_to_workspace
             while model_state.rebalanced and layer_idx < num_layers:
-                (
-                    is_unchanged,
-                    is_received_locally,
-                    recv_metadata,
-                ) = await transfer_layer(
+                transfer_metadata = await transfer_layer(
                     old_layer_indices=physical_to_logical_map_cpu[layer_idx],
                     new_layer_indices=new_physical_to_logical_map[layer_idx],
                     expert_weights=model_state.model.expert_weights[layer_idx],
@@ -145,9 +141,7 @@ async def transfer_run_periodically(
                 model_state.pending_result = AsyncEplbLayerResult(
                     layer_idx=layer_idx,
                     new_physical_to_logical_map=new_physical_to_logical_map[layer_idx],
-                    is_unchanged=is_unchanged,
-                    is_received_locally=is_received_locally,
-                    recv_metadata=recv_metadata,
+                    transfer_metadata=transfer_metadata,
                     consumed_event=consumed_event,
                 )
 
