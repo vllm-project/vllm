@@ -402,7 +402,10 @@ def flash_maxsim_varlen(
     return scores
 
 
-def pack_pairs(q_embs: list, d_embs: list):
+def pack_pairs(
+    q_embs: list[torch.Tensor],
+    d_embs: list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int, int]:
     """Pack variable-length pairs into contiguous buffers with cu_seqlens.
 
     Args:
