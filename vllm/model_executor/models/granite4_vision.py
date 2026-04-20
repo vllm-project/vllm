@@ -369,7 +369,7 @@ class Granite4VisionForConditionalGeneration(
             )
 
             # image_newline parameter
-            if getattr(config, "use_image_newline_parameter", False):
+            if config.use_image_newline_parameter:
                 self.image_newline = nn.Parameter(
                     torch.empty(config.text_config.hidden_size)
                 )
@@ -384,7 +384,7 @@ class Granite4VisionForConditionalGeneration(
 
             # Spatial projectors: 4 offset groups
             self.spatial_projectors = None
-            if getattr(config, "use_spatial_sampling", False):
+            if config.use_spatial_sampling:
                 self.spatial_projectors = nn.ModuleList([
                     WindowQFormerDownsampler(config, spatial_offset=i)
                     for i in range(4)

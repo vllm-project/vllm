@@ -445,20 +445,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
     ),
-    "granite4_vision": VLMTestInfo(
-        models=["granite-vision-dev/granite-4.1-3b-vision"],
-        test_type=(VLMTestType.IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
-        max_model_len=8192,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=_granite4_vision_vllm_to_hf_output,
-        image_size_factors=[(1.0,)],
-        vllm_runner_kwargs={
-            "enable_lora": True,
-            "max_lora_rank": 256,
-            "default_mm_loras": {"image": "granite-vision-dev/granite-4.1-3b-vision"},
-        },
-    ),
     "glm4v": VLMTestInfo(
         models=["zai-org/glm-4v-9b"],
         test_type=VLMTestType.IMAGE,
@@ -525,6 +511,20 @@ VLM_TEST_SETTINGS = {
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         auto_cls=AutoModelForImageTextToText,
         marks=[large_gpu_mark(min_gb=32)],
+    ),
+    "granite4_vision": VLMTestInfo(
+        models=["granite-vision-dev/granite-4.1-3b-vision"],
+        test_type=(VLMTestType.IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
+        max_model_len=8192,
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=_granite4_vision_vllm_to_hf_output,
+        image_size_factors=[(1.0,)],
+        vllm_runner_kwargs={
+            "enable_lora": True,
+            "max_lora_rank": 256,
+            "default_mm_loras": {"image": "granite-vision-dev/granite-4.1-3b-vision"},
+        },
     ),
     "h2ovl": VLMTestInfo(
         models=[
