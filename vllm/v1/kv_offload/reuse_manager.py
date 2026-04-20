@@ -27,8 +27,9 @@ class FilterReusedOffloadingManager(OffloadingManager):
     All methods are delegated to the *backing* manager.  Two methods are
     intercepted:
 
-    * ``lookup`` — records each visited key in an internal LRU counter.
     * ``prepare_store`` — filters out keys that have not yet
+    * ``lookup`` — records the visited key in an internal LRU
+      counter, then delegates to the backing manager.
       crossed the threshold *before* calling the backing
       ``prepare_store``.
 
@@ -66,18 +67,16 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # Intercepted methods
     # ------------------------------------------------------------------
 
-    def lookup(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> int | None:
-        """Record each key, then delegate lookup to backing manager."""
-        keys = list(keys)
-        for key in keys:
-            if key in self.counts:
-                self.counts.move_to_end(key)
-                self.counts[key] += 1
-            else:
-                if len(self.counts) >= self.max_tracker_size:
-                    self.counts.popitem(last=False)  # evict LRU
-                self.counts[key] = 1
-        return self._backing.lookup(keys, req_context)
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+        """Record the key, then delegate lookup to backing manager."""
+        if key in self.counts:
+            self.counts.move_to_end(key)
+            self.counts[key] += 1
+        else:
+            if len(self.counts) >= self.max_tracker_size:
+                self.counts.popitem(last=False)  # evict LRU
+            self.counts[key] = 1
+        return self._backing.lookup(key, req_context)
 
     def prepare_store(
         self, keys: Iterable[OffloadKey], req_context: ReqContext

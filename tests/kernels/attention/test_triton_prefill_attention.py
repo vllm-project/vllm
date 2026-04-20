@@ -5,7 +5,10 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.platforms import current_platform
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+
+DEVICE_TYPE = current_platform.device_type
 
 
 def ref_masked_attention(
@@ -92,17 +95,19 @@ def test_context_attention(
     torch.manual_seed(42)
 
     # Generate random sequence lengths for each batch
-    seq_lens = torch.randint(max_seq_len // 2, max_seq_len + 1, (B,), device="cuda")
+    seq_lens = torch.randint(
+        max_seq_len // 2, max_seq_len + 1, (B,), device=DEVICE_TYPE
+    )
     total_tokens = seq_lens.sum().item()
 
     # Create batch start locations
-    b_start_loc = torch.zeros(B, dtype=torch.int32, device="cuda")
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
     b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
 
     # Create input tensors
-    q = torch.randn(total_tokens, H_Q, D, dtype=dtype, device="cuda")
-    k = torch.randn(total_tokens, H_KV, D, dtype=dtype, device="cuda")
-    v = torch.randn(total_tokens, H_KV, D, dtype=dtype, device="cuda")
+    q = torch.randn(total_tokens, H_Q, D, dtype=dtype, device=DEVICE_TYPE)
+    k = torch.randn(total_tokens, H_KV, D, dtype=dtype, device=DEVICE_TYPE)
+    v = torch.randn(total_tokens, H_KV, D, dtype=dtype, device=DEVICE_TYPE)
     o = torch.zeros_like(q)
 
     # Call Triton kernel
@@ -169,17 +174,19 @@ def test_context_attention_sliding_window(
     torch.manual_seed(42)
 
     # Generate random sequence lengths for each batch
-    seq_lens = torch.randint(max_seq_len // 2, max_seq_len + 1, (B,), device="cuda")
+    seq_lens = torch.randint(
+        max_seq_len // 2, max_seq_len + 1, (B,), device=DEVICE_TYPE
+    )
     total_tokens = seq_lens.sum().item()
 
     # Create batch start locations
-    b_start_loc = torch.zeros(B, dtype=torch.int32, device="cuda")
+    b_start_loc = torch.zeros(B, dtype=torch.int32, device=DEVICE_TYPE)
     b_start_loc[1:] = torch.cumsum(seq_lens[:-1], dim=0)
 
     # Create input tensors
-    q = torch.randn(total_tokens, H_Q, D, dtype=dtype, device="cuda")
-    k = torch.randn(total_tokens, H_KV, D, dtype=dtype, device="cuda")
-    v = torch.randn(total_tokens, H_KV, D, dtype=dtype, device="cuda")
+    q = torch.randn(total_tokens, H_Q, D, dtype=dtype, device=DEVICE_TYPE)
+    k = torch.randn(total_tokens, H_KV, D, dtype=dtype, device=DEVICE_TYPE)
+    v = torch.randn(total_tokens, H_KV, D, dtype=dtype, device=DEVICE_TYPE)
     o = torch.zeros_like(q)
 
     # Call Triton kernel

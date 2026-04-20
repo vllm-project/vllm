@@ -2,5 +2,5 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-def test_mi3xx_moe():
-    print("TODO: add tests for Mi3xx MoE quantization")
+def test_mi355_moe():
+    print("TODO: add tests for Mi355 MoE quantization")
