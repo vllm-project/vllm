@@ -49,7 +49,7 @@ def _custom_add_op(
 @_custom_add_op.register_impl(
     "mask_a", supports_args=lambda a, b, mask, mask_a, mask_b: mask_a
 )
-def _custom_add_int16(
+def _custom_add_mask_a(
     a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
 ) -> Tensor:
     return a.masked_fill(mask, 0) + b
@@ -58,7 +58,7 @@ def _custom_add_int16(
 @_custom_add_op.register_impl(
     "mask_b", supports_args=lambda a, b, mask, mask_a, mask_b: mask_b
 )
-def _custom_add_int64(
+def _custom_add_mask_b(
     a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
 ) -> Tensor:
     return a + b.masked_fill(mask, 0)
@@ -67,7 +67,7 @@ def _custom_add_int64(
 @_custom_add_op.register_impl(
     "mask_a_and_b", supports_args=lambda a, b, mask, mask_a, mask_b: mask_a and mask_b
 )
-def _custom_add_int64(
+def _custom_add_mask_a_and_b(
     a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
 ) -> Tensor:
     return a.masked_fill(mask, 0) + b.masked_fill(mask, 0)
@@ -83,7 +83,7 @@ def _custom_sub_op(
 @_custom_sub_op.register_impl(
     "mask_a", supports_args=lambda a, b, mask, mask_a, mask_b: mask_a
 )
-def _custom_sub_int16(
+def _custom_sub_mask_a(
     a: Tensor, b: Tensor, mask: Tensor, mask_a: bool, mask_b: bool
 ) -> torch.Tensor:
     return a.masked_fill(mask, 0) - b
