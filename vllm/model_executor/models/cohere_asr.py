@@ -1900,7 +1900,7 @@ class CohereASRDummyInputsBuilder(BaseDummyInputsBuilder[CohereASRProcessingInfo
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options=Mapping[str, BaseDummyOptions],
+        mm_options: Mapping[str, BaseDummyOptions],
         mm_processor_kwargs=None,
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
