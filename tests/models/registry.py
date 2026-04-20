@@ -900,7 +900,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="5.0.0",
     ),
     "Granite4VisionForConditionalGeneration": _HfExamplesInfo(
-        "granite-vision-dev/granite-4.1-3b-vision",
+        "ibm-granite/granite-vision-4.1-4b",
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(

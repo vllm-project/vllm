@@ -513,7 +513,7 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=32)],
     ),
     "granite4_vision": VLMTestInfo(
-        models=["granite-vision-dev/granite-4.1-3b-vision"],
+        models=["ibm-granite/granite-vision-4.1-4b"],
         test_type=(VLMTestType.IMAGE),
         prompt_formatter=lambda img_prompt: f"<|user|>\n{img_prompt}\n<|assistant|>\n",
         max_model_len=8192,
@@ -523,7 +523,7 @@ VLM_TEST_SETTINGS = {
         vllm_runner_kwargs={
             "enable_lora": True,
             "max_lora_rank": 256,
-            "default_mm_loras": {"image": "granite-vision-dev/granite-4.1-3b-vision"},
+            "default_mm_loras": {"image": "ibm-granite/granite-vision-4.1-4b"},
         },
     ),
     "h2ovl": VLMTestInfo(

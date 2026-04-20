@@ -432,7 +432,7 @@ class Granite4VisionForConditionalGeneration(
             "model.layerwise_projectors.": "layerwise_projectors.",
             "model.spatial_projectors.": "spatial_projectors.",
             "model.image_newline": "image_newline",
-            "model.vision_tower.": "vision_tower.vision_model.",
+            "model.vision_tower.": "vision_tower.",
             "lm_head.": "language_model.lm_head.",
         }
     )
