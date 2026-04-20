@@ -21,7 +21,7 @@ from vllm import LLM
 from vllm.config import KVTransferConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     KVOutputAggregator,
-    TpKVTopology,
+    TransferTopology,
     get_current_attn_backend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1 import nixl
@@ -463,19 +463,20 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         test_shape = self.attn_backends[0].get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
-        self.kv_topo = TpKVTopology(
+        self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
+            tp_size=self.world_size,
+            block_size=self.block_size,
             engine_id=self.engine_id,
-            remote_tp_size=self._tp_size,  # shared state
-            remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
+            is_mamba=False,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=self.attn_backends,
             tensor_shape=test_shape,
         )
 
         self.compat_hash = compute_nixl_compatibility_hash(
-            self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
+            self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
         )
 
     def _nixl_handshake(
@@ -496,7 +497,7 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         # Adjust remote block length metadata to satisfy heterogeneous TP
         # invariants enforced during handshake validation.
         remote_block_lens = list(self.block_len_per_layer)
-        tp_ratio = self.kv_topo.tp_ratio(remote_tp_size)
+        tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
         if remote_tp_size > self.world_size:
             # P TP > D TP case, block_len of remote is smaller
             remote_block_lens = [
@@ -731,8 +732,9 @@ class TestNixlHandshake:
             assert set(remote_agents.keys()) == set(range(tp_ratio))
 
             remote_engine_id = worker.REMOTE_ENGINE_ID
-            assert worker._tp_size[remote_engine_id] == remote_tp_size
-            assert -tp_ratio == worker.kv_topo.tp_ratio_from_engine_id(remote_engine_id)
+            remote_info = worker.transfer_topo.get_engine_info(remote_engine_id)
+            assert remote_info.remote_tp_size == remote_tp_size
+            assert -tp_ratio == worker.transfer_topo.tp_ratio(remote_tp_size)
             # ensure src_xfer_handles_by_tp_ratio is populated with tpratio chunks
             assert -tp_ratio in worker.src_xfer_handles_by_tp_ratio
             assert len(worker.src_xfer_handles_by_tp_ratio[-tp_ratio]) == tp_ratio
@@ -796,7 +798,7 @@ class TestNixlHandshake:
             (conn_p0.connector_worker, conn_p1.connector_worker)
         ):
             worker.world_size = p_tp_size
-            worker.kv_topo.remote_tp_size = {worker.engine_id: p_tp_size}
+            worker.transfer_topo.tp_size = p_tp_size
             worker.tp_rank = rank
             worker.use_mla = True
 
@@ -2337,7 +2339,7 @@ def test_compatibility_hash_validation(
         remote_hash = compute_nixl_compatibility_hash(
             remote_vllm_config,
             decode_worker.backend_name,
-            decode_worker.kv_topo.cross_layers_blocks,
+            decode_worker.transfer_topo.cross_layers_blocks,
         )
 
     prefill_block_size = config_overrides.get("block_size", 16)
@@ -2424,12 +2426,13 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     test_shape = backend.get_kv_cache_shape(
         num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
     )
-    decode_worker.kv_topo = TpKVTopology(
+    decode_worker.transfer_topo = TransferTopology(
         tp_rank=decode_worker.tp_rank,
+        tp_size=decode_worker.world_size,
+        block_size=decode_worker.block_size,
         engine_id=decode_worker.engine_id,
-        remote_tp_size=decode_worker._tp_size,  # shared state
-        remote_block_size=decode_worker._block_size,  # shared state
         is_mla=decode_worker.use_mla,
+        is_mamba=False,
         total_num_kv_heads=decode_worker.model_config.get_total_num_kv_heads(),
         attn_backends=[backend],
         tensor_shape=test_shape,
@@ -2438,7 +2441,7 @@ def test_handshake_decode_errors(default_vllm_config, dist_init, error_scenario)
     decode_worker.compat_hash = compute_nixl_compatibility_hash(
         decode_worker.vllm_config,
         decode_worker.backend_name,
-        decode_worker.kv_topo.cross_layers_blocks,
+        decode_worker.transfer_topo.cross_layers_blocks,
     )
 
     if error_scenario == "handshake_decode_error":
