@@ -1019,8 +1019,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         fp8_attention = self.kv_cache_dtype.startswith("fp8")
 
-        num_decode_tokens = torch.ops.vllm.mla_split_batch(q, self.layer_name)
-
         # Write to KV cache via custom op
         dummy_tensor = torch.ops.vllm.mla_write_kv_cache(
             kv_c_normed,
@@ -1028,6 +1026,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.layer_name,
         )
 
+        num_decode_tokens = torch.ops.vllm.mla_split_batch(q, self.layer_name)
+        # Prefill path
         # We need to hint compiler for unbacked sym int, num_decode_tokens.
         D = num_decode_tokens
         B_kv = kv_c_normed.size(0)
@@ -1054,15 +1054,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.layer_name,
         )
 
-        # Decode path: W_UK_T BMM on full batch (CUDA-graph-safe)
+        # Phase 1 Optimization 1b: Slice BEFORE W_UK_T BMM
+        # Only process decode tokens (eliminates wasted computation on prefill tokens)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        q_nope = q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
-        q_nope = q_nope.transpose(0, 1)
+        # Slice to decode portion only (first D tokens)
+        # D already validated via torch._check_is_size(D) above
+        torch._check(D >= 0)  # This might create a guard that backs D
+        torch._check(q_nope.size(0) >= D)
+        torch._check(q_pe.size(0) >= D)
+        decode_q_nope = q_nope.narrow(0, 0, D)  # First D tokens
+        decode_q_pe = q_pe.narrow(0, 0, D)  # First D tokens
+
+        decode_q_nope = decode_q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
+        decode_q_nope = decode_q_nope.transpose(0, 1)
 
         if self.is_aiter_triton_fp8_bmm_enabled:
             ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                q_nope,
+                decode_q_nope,
                 self.W_K,
                 self.W_K_scale,
                 group_size=128,
@@ -1070,38 +1079,30 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         else:
             assert self.W_UK_T is not None
-            ql_nope = torch.bmm(q_nope, self.W_UK_T)
+            ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
             ql_nope = ql_nope.transpose(0, 1)
 
         if fp8_attention:
-            decode_q0 = torch.cat([ql_nope, q_pe], dim=-1)
+            decode_q0 = torch.cat([ql_nope, decode_q_pe], dim=-1)
             decode_q_final, _ = ops.scaled_fp8_quant(
                 decode_q0.view(decode_q0.shape[0], -1),
                 self._q_scale,
             )
             decode_q_final = decode_q_final.view(decode_q0.shape)
         else:
-            decode_q_final = torch.cat([ql_nope, q_pe], dim=-1)
+            decode_q_final = torch.cat([ql_nope, decode_q_pe], dim=-1)
 
         if self.dcp_world_size > 1:
             assert not fp8_attention, "DCP not support fp8 kvcache now."
             decode_q_final = get_dcp_group().all_gather(decode_q_final, dim=1)
 
-        # Pre-allocate decode attention buffers in compiled code so they
-        # live in the CUDA graph pool with stable addresses across replays.
-        attn_out = decode_q_final.new_zeros(
-            (decode_q_final.shape[0], self.num_heads, self.kv_lora_rank)
-        )
-        lse = decode_q_final.new_zeros(
-            (decode_q_final.shape[0], self.num_heads), dtype=torch.float32
-        )
-
-        # Decode attention (cudagraph_unsafe): writes into attn_out/lse
-        torch.ops.vllm.mla_attention_decode(
+        # Decode attention: returns attn_out and lse directly (zero-copy!)
+        # No pre-allocation needed - eliminates 2 allocations + 2 copies
+        attn_out, lse = torch.ops.vllm.mla_attention_decode(
             decode_q_final,
             num_decode_tokens,
-            attn_out,
-            lse,
+            self.num_heads,
+            self.kv_lora_rank,
             dummy_tensor,
             self.layer_name,
         )
@@ -1117,6 +1118,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # v_up_proj BMM on full batch (CUDA-graph-safe, functional).
         # Returns a new tensor so output is only mutated once (by the
         # merge op below), satisfying auto-functionalization constraints.
+
         decode_result = self._v_up_proj_functional(attn_out)
 
         # Single cudagraph_unsafe op merges decode[0:D] and prefill[D:B]
@@ -1329,11 +1331,12 @@ direct_register_custom_op(
 def mla_attention_decode(
     decode_q: torch.Tensor,
     num_decode_tokens: int,
-    attn_out: torch.Tensor,
-    lse: torch.Tensor,
+    num_heads: int,
+    kv_lora_rank: int,
     dummy_tensor: torch.Tensor,
     layer_name: str,
-) -> None:
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode attention - returns (attn_out, lse) directly (zero-copy)."""
     _ = dummy_tensor + 0
 
     attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
@@ -1341,40 +1344,42 @@ def mla_attention_decode(
         kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
     if num_decode_tokens == 0:
-        attn_out.zero_()
-        lse.zero_()
-        return
+        # Return empty tensors for zero decode tokens
+        return (
+            decode_q.new_zeros(0, num_heads, kv_lora_rank),
+            decode_q.new_zeros(0, num_heads, dtype=torch.float32),
+        )
 
-    decode_q_actual = decode_q[0:num_decode_tokens]
-
-    attn_out_actual, lse_actual = attn_layer._forward_decode(
-        decode_q_actual, kv_cache, attn_metadata, attn_layer
+    # decode_q is already D-sized from Phase 1b slicing - use directly
+    attn_out, lse = attn_layer._forward_decode(
+        decode_q, kv_cache, attn_metadata, attn_layer
     )
 
-    attn_out.zero_()
-    attn_out[0:num_decode_tokens] = attn_out_actual
+    # Return directly - no copy, no intermediate allocation!
+    if lse is None:
+        lse = decode_q.new_zeros(num_decode_tokens, num_heads, dtype=torch.float32)
 
-    lse.zero_()
-    if lse_actual is not None:
-        lse[0:num_decode_tokens] = lse_actual
+    return attn_out, lse
 
 
 def mla_attention_decode_fake(
     decode_q: torch.Tensor,
     num_decode_tokens: int,
-    attn_out: torch.Tensor,
-    lse: torch.Tensor,
+    num_heads: int,
+    kv_lora_rank: int,
     dummy_tensor: torch.Tensor,
     layer_name: str,
-) -> None:
-    """Fake implementation for torch.compile (in-place op)."""
-    return
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Fake implementation for torch.compile - returns tuple."""
+    attn_out = decode_q.new_empty(num_decode_tokens, num_heads, kv_lora_rank)
+    lse = decode_q.new_empty(num_decode_tokens, num_heads, dtype=torch.float32)
+    return attn_out, lse
 
 
 direct_register_custom_op(
     op_name="mla_attention_decode",
     op_func=mla_attention_decode,
-    mutates_args=["attn_out", "lse"],
+    mutates_args=[],
     fake_impl=mla_attention_decode_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch._C.Tag.cudagraph_unsafe,),
