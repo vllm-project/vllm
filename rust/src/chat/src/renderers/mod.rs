@@ -3,7 +3,9 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::request::ChatRequest;
 
+pub mod deepseek_v32;
 pub mod hf;
+pub use deepseek_v32::DeepSeekV32ChatRenderer;
 
 /// Rendered chat prompt submitted to the text backend.
 #[derive(Debug, Clone, PartialEq, Eq)]

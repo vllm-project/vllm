@@ -80,9 +80,23 @@ impl [AssistantContentBlock] {
         .filter(|s: &String| !s.is_empty())
     }
 
+    /// Return whether this assistant message contains any non-empty reasoning text blocks.
+    pub fn has_reasoning(&self) -> bool {
+        self.iter().any(|block| match block {
+            AssistantContentBlock::Reasoning { text } => !text.is_empty(),
+            _ => false,
+        })
+    }
+
     /// Return finalized assistant tool calls in encounter order.
     pub fn tool_calls(&self) -> impl Iterator<Item = &AssistantToolCall> {
         self.iter().filter_map(AssistantContentBlock::as_tool_call)
+    }
+
+    /// Return whether this assistant message contains any tool-call blocks.
+    pub fn has_tool_calls(&self) -> bool {
+        self.iter()
+            .any(|block| matches!(block, AssistantContentBlock::ToolCall(_)))
     }
 }
 
