@@ -374,10 +374,14 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
+            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager and not current_platform.is_rocm():
+            if (
+                not current_platform.is_rocm()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
