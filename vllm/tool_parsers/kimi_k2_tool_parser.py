@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from collections.abc import Sequence
 
 import regex as re
@@ -18,6 +19,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
@@ -68,7 +70,61 @@ class KimiK2ToolParser(ToolParser):
             # Ensure special-token markers appear as literal text in
             # current_text so we can do pure text-based parsing.
             request.skip_special_tokens = False
+
+        # Add structural_tag guided decoding to constrain tool name and JSON
+        # schema, preventing hallucinated tool names and malformed arguments.
+        if (
+            request.structured_outputs is None
+            and request.tools
+            and request.tool_choice in ("auto", None)
+        ):
+            tag_json = self._build_structural_tag(request.tools)
+            if tag_json is not None:
+                request.structured_outputs = StructuredOutputsParams(
+                    structural_tag=tag_json
+                )
+
         return request
+
+    def _build_structural_tag(self, tools) -> str | None:
+        """Build structural_tag JSON for guided decoding.
+
+        Constrains the model to only call tools from the provided list and
+        to produce arguments that conform to each tool's JSON schema.
+        """
+        tags = []
+        for tool in tools:
+            name = tool.function.name
+            params = tool.function.parameters or {
+                "type": "object",
+                "properties": {},
+            }
+            tags.append({
+                "type": "tag",
+                "begin": f"<|tool_call_begin|>functions.{name}",
+                "content": {
+                    "type": "sequence",
+                    "elements": [
+                        {"type": "regex", "pattern": r":\d+"},
+                        {"type": "const_string",
+                         "value": "<|tool_call_argument_begin|>"},
+                        {"type": "json_schema", "json_schema": params},
+                    ],
+                },
+                "end": "<|tool_call_end|>",
+            })
+        if not tags:
+            return None
+        return json.dumps({
+            "type": "structural_tag",
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<|tool_call_begin|>"],
+                "tags": tags,
+                "at_least_one": False,
+                "stop_after_first": False,
+            },
+        })
 
     def extract_tool_calls(
         self,
