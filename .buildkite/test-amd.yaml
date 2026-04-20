@@ -1980,13 +1980,13 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
-- label: Quantized MoE Test (B200-MI300) # TBD
+- label: Quantized MoE Test (B200-MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   working_dir: "/vllm-workspace/"
   source_file_dependencies:
-  - tests/quantization/test_gfx3xx_moe.py
+  - tests/quantization/test_gfx950_moe.py
   - vllm/model_executor/models/deepseek_v2.py
   - vllm/model_executor/models/gpt_oss.py
   - vllm/model_executor/models/llama4.py
@@ -2004,7 +2004,7 @@ steps:
   - vllm/platforms/rocm.py
   - vllm/model_executor/model_loader/
   commands:
-  - pytest -s -v tests/quantization/test_gfx3xx_moe.py
+  - pytest -s -v tests/quantization/test_gfx950_moe.py
 
 #-----------------------------------------------------------  mi300 · rocm  ------------------------------------------------------------#
 
