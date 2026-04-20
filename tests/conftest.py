@@ -364,6 +364,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "auto",
         *,
+        revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
         trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
@@ -383,6 +384,7 @@ class HfRunner:
             self._init(
                 model_name=model_name,
                 dtype=dtype,
+                revision=revision,
                 model_kwargs=model_kwargs,
                 trust_remote_code=trust_remote_code,
                 is_sentence_transformer=is_sentence_transformer,
@@ -396,6 +398,7 @@ class HfRunner:
         model_name: str,
         dtype: str = "auto",
         *,
+        revision: str | None = None,
         model_kwargs: dict[str, Any] | None = None,
         trust_remote_code: bool = True,
         is_sentence_transformer: bool = False,
@@ -437,6 +440,7 @@ class HfRunner:
 
             self.model = SentenceTransformer(
                 model_name,
+                revision=revision,
                 device=self.device,
                 model_kwargs=model_kwargs,
                 trust_remote_code=trust_remote_code,
@@ -447,6 +451,7 @@ class HfRunner:
 
             self.model = CrossEncoder(
                 model_name,
+                revision=revision,
                 device=self.device,
                 automodel_args=model_kwargs,
                 trust_remote_code=trust_remote_code,
@@ -456,6 +461,7 @@ class HfRunner:
                 nn.Module,
                 auto_cls.from_pretrained(
                     model_name,
+                    revision=revision,
                     trust_remote_code=trust_remote_code,
                     **model_kwargs,
                 ),
