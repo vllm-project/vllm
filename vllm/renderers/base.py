@@ -220,7 +220,11 @@ class BaseRenderer(ABC, Generic[_T]):
         except Exception:
             logger.warning("Chat template warmup failed", exc_info=True)
 
-        if self.mm_processor:
+        if (
+                self.mm_processor
+                and not self.model_config.get_multimodal_config().language_model_only
+                and any(v > 0 for v in self.mm_processor.info.allowed_mm_limits.values())
+            ):
             from vllm.multimodal.processing import TimingContext
 
             model_config = self.model_config
