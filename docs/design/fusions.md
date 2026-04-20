@@ -31,6 +31,7 @@ or just on the low or high end.
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
+| [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm → single kernel          | O1 (ROCm/AITER only)           | ~2%                | No        | Always       |
 
 ## Support Matrix
 
@@ -51,6 +52,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
 | `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
 | `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
+| `fuse_mla_dual_rms_norm`     | —                                        | —                                        | —                                        | —             | BF16                                     |
 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
@@ -380,6 +382,44 @@ when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`RocmAiterTritonAddRMSNormPadFusionPass`)
+
+### MLA Dual RMSNorm (`fuse_mla_dual_rms_norm`)
+
+!!! info
+    ROCm/AITER-only. Targeted at DeepSeek-V3 / Kimi-K2 MLA attention.
+
+!!! note
+    When the native implementation of `rms_norm` is used (the default on CUDA and
+    ROCm for now), Inductor's built-in fusion already handles merging these norms
+    automatically. This explicit pass targets the case where AITER's custom
+    `rms_norm` op is active, which Inductor cannot fuse on its own.
+
+**What it fuses.** Fuses the paired `q_a_layernorm` and `kv_a_layernorm` RMS norm
+operations in MLA attention into a single `fused_qk_rmsnorm` HIP kernel call via AITER,
+reducing kernel launch overhead from 2 launches to 1 per MLA layer.
+
+```text
+# Unfused:
+q_c, kv_lora = split(projected, [q_dim, kv_dim])
+kv_c, k_pe   = split(kv_lora,  [kv_c_dim, k_pe_dim])
+q_c  = rms_norm(q_c,  q_weight,  eps)
+kv_c = rms_norm(kv_c, kv_weight, eps)
+
+# Fused:
+q_c, kv_lora = split(projected, [q_dim, kv_dim])
+kv_c, k_pe   = split(kv_lora,  [kv_c_dim, k_pe_dim])
+q_normed, kv_normed = fused_mla_dual_rms_norm(
+    q_c, q_weight, kv_c, kv_weight, eps1, eps2)
+```
+
+Requires: AMD ROCm with AITER enabled. Enabled by default at optimization level O1 and above
+when AITER is available.
+
+**Code locations.**
+
+- Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`MLADualRMSNormFusionPass`)
+- Custom op: [`vllm/_aiter_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (`fused_mla_dual_rms_norm`)
+- AITER kernel: [`fused_qk_rmsnorm`](https://github.com/ROCm/aiter/pull/2442)
 
 ## See Also
 
