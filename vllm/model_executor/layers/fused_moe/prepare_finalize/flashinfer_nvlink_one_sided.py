@@ -31,6 +31,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         num_experts: int,
         hidden_size: int,
         num_dispatchers: int = 1,
+        dispatch_dtype_bytes_per_elem: int = 0,
+        dispatch_has_fp8_scale: bool = True,
     ):
         super().__init__()
         self.max_num_tokens = max_num_tokens
@@ -49,6 +51,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             top_k=self.top_k,
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
+            dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
+            dispatch_has_fp8_scale=dispatch_has_fp8_scale,
         )
 
     @property
@@ -92,14 +96,19 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             else a1.shape[0]
         )
 
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            a1,
-            quant_config.a1_gscale,
-            quant_config.quant_dtype,
-            quant_config.per_act_token_quant,
-            quant_config.block_shape,
-            is_fp4_scale_swizzled=False,  # delay swizzle to after comm
-        )
+        if defer_input_quant:
+            # Experts (e.g. trtllm_mxfp4_moe with mxfp8 activations) will
+            # quantize post-dispatch. Ship bf16 tokens and skip scales.
+            a1q, a1q_scale = a1, None
+        else:
+            a1q, a1q_scale = moe_kernel_quantize_input(
+                a1,
+                quant_config.a1_gscale,
+                quant_config.quant_dtype,
+                quant_config.per_act_token_quant,
+                quant_config.block_shape,
+                is_fp4_scale_swizzled=False,  # delay swizzle to after comm
+            )
 
         payloads = []
         payloads.append(a1q)

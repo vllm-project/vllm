@@ -92,6 +92,7 @@ def maybe_make_prepare_finalize(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     allow_new_interface: bool = False,
     use_monolithic: bool = False,
+    defer_input_quant: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
     # NOTE(rob): we are migrating each quant_method to hold the MK
     # in all cases. The allow_new_interface=False flag allow us to fall
@@ -239,12 +240,26 @@ def maybe_make_prepare_finalize(
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens
         )
+        if defer_input_quant or quant_config.quant_dtype is None:
+            # Experts (e.g. trtllm_mxfp4 with mxfp8 activations) quantize
+            # post-dispatch; ship bf16 tokens with no per-token scale payload.
+            dispatch_dtype_bytes_per_elem, dispatch_has_fp8_scale = 2, False
+        elif quant_config.quant_dtype == "nvfp4":
+            dispatch_dtype_bytes_per_elem, dispatch_has_fp8_scale = 0, True
+        else:
+            raise NotImplementedError(
+                "flashinfer_nvlink_one_sided dispatch only supports nvfp4, "
+                "bf16, and defer_input_quant paths today; got "
+                f"quant_dtype={quant_config.quant_dtype!r}"
+            )
         prepare_finalize = FlashInferNVLinkOneSidedPrepareAndFinalize(
             max_num_tokens=max_num_tokens,
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
             num_dispatchers=all2all_manager.world_size,
+            dispatch_dtype_bytes_per_elem=dispatch_dtype_bytes_per_elem,
+            dispatch_has_fp8_scale=dispatch_has_fp8_scale,
         )
 
     elif moe.use_ag_rs_all2all_kernels and allow_new_interface:

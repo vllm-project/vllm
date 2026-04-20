@@ -577,8 +577,18 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
+        dispatch_dtype_bytes_per_elem: int = 0,
+        dispatch_has_fp8_scale: bool = True,
     ):
-        """Initialize the MoeAlltoAll workspace."""
+        """Initialize the MoeAlltoAll workspace.
+
+        dispatch_dtype_bytes_per_elem: bytes/elem for the dispatched hidden
+            states. Use 0 as a sentinel for sub-byte nvfp4 (0.5 B/elem); use
+            1 for fp8, 2 for bf16/fp16.
+        dispatch_has_fp8_scale: whether a per-16-elem fp8 scale tensor is
+            dispatched alongside the hidden states (true for nvfp4/fp8,
+            false for bf16 passthrough).
+        """
         if self.initialized:
             return
 
@@ -607,9 +617,14 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         ep_config = MnnvlConfig(
             comm_backend=CustomCommunicator(self.cpu_group),
         )
+        if dispatch_dtype_bytes_per_elem == 0:
+            hidden_bytes = hidden_size // 2  # nvfp4
+        else:
+            hidden_bytes = hidden_size * dispatch_dtype_bytes_per_elem
+        scale_bytes = hidden_size // 16 if dispatch_has_fp8_scale else 0
         total_dispatch_payload_size_per_token = (
-            hidden_size // 2  # nvfp4 hidden states
-            + hidden_size // 16  # fp8 scaling factors
+            hidden_bytes
+            + scale_bytes
             + top_k * 4  # int32 topks ids
             + top_k * 4  # float32 topk weights
         )

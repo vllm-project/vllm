@@ -1250,6 +1250,15 @@ def make_mxfp4_moe_kernel(
     """Create a FusedMoEKernel for the given MXFP4 backend."""
     is_monolithic = issubclass(experts_cls, mk.FusedMoEExpertsMonolithic)
 
+    # Some experts (trtllm_mxfp4 with mxfp8 activations) prefer bf16 tokens
+    # on dispatch and quantize internally; signal this to the prepare/finalize
+    # so workspace + prepare path ship bf16 instead of the quant_config dtype.
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+        TrtLlmMxfp4ExpertsBase,
+    )
+
+    defer_input_quant = issubclass(experts_cls, TrtLlmMxfp4ExpertsBase)
+
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -1257,6 +1266,7 @@ def make_mxfp4_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=is_monolithic,
+        defer_input_quant=defer_input_quant,
     )
     assert prepare_finalize is not None
 
