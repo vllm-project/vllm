@@ -256,6 +256,11 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
+  - id: check-vllm-ir-imports
+    name: Check vllm/ir import restrictions
+    entry: python tools/pre_commit/check_vllm_ir_imports.py
+    language: python
+    files: ^vllm/ir/.*\.py$
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
