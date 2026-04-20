@@ -692,7 +692,7 @@ class AiterFlashAttentionMetadataBuilder(
             common_prefix_len=common_prefix_len,
             total_tokens=self.total_tokens,
             k_scale=self.scale,
-            v_scale=self.scale
+            v_scale=self.scale,
         )
         return attn_metadata
 
@@ -810,7 +810,7 @@ class AiterFlashAttentionBackend(AttentionBackend):
         # which is known to be buggy on rocm systems. on_mi3xx uses amd-smi which is
         # more reliable.
         return on_mi3xx()
-    
+
     @classmethod
     def supports_non_causal(cls) -> bool:
         return True
@@ -1187,6 +1187,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         from aiter.ops.triton.attention.mha_v3 import (
                             flash_attn_with_kvcache,
                         )
+
                         descale_shape = (num_decodes, key_cache.shape[2])
                         decode_query = query[:num_decode_tokens].reshape(
                             num_decodes,
@@ -1219,11 +1220,10 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         # Non-uniform query lengths can appear in real serving
                         # traffic (e.g. mixed datasets). Fall back to varlen
                         # unified_attention instead of asserting.
-                        from importlib import import_module
+                        from aiter.ops.triton.unified_attention import (
+                            unified_attention,
+                        )
 
-                        unified_attention = import_module(
-                            "aiter.ops.triton.unified_attention"
-                        ).unified_attention
                         decode_cu_seqlens_q = (
                             attn_metadata.decode_metadata.query_start_loc
                         )
