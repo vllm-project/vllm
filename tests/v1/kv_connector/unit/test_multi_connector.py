@@ -8,6 +8,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
 from vllm import LLM, SamplingParams
@@ -1024,3 +1025,68 @@ def test_multi_connector_hma_opt_in():
     assert not supports_hma(mc_mixed2._connectors[0])
     assert supports_hma(mc_mixed2._connectors[1])
     assert mc_mixed2._all_support_hma is False
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
+)
+def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
+    """
+    When MultiConnector wraps a mix of HMA (NixlConnector) and non-HMA
+    (MockConnector) sub-connectors, verify that:
+    1. The scheduler's MultiConnector has _all_support_hma == False.
+    2. vLLM auto-disables the hybrid KV cache manager (no preference expressed by user)
+    """
+    from unittest.mock import patch
+
+    from tests.v1.kv_connector.unit.test_nixl_connector import FakeNixlWrapper
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "connectors": [
+                {
+                    "kv_connector": "NixlConnector",
+                    "kv_role": "kv_both",
+                },
+                {
+                    "kv_connector": "MockConnector",
+                    "kv_role": "kv_both",
+                    "kv_connector_module_path": (
+                        "tests.v1.kv_connector.unit.test_multi_connector"
+                    ),
+                },
+            ],
+        },
+    )
+
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+        FakeNixlWrapper,
+    ):
+        llm = LLM(
+            model="Qwen/Qwen3-0.6B",
+            enforce_eager=True,
+            gpu_memory_utilization=0.3,
+            max_model_len=128,
+            max_num_seqs=1,
+            max_num_batched_tokens=128,
+            kv_transfer_config=kv_transfer_config,
+        )
+        try:
+            # HMA should be auto-disabled when user has not expressed a preference.
+            assert (
+                llm.llm_engine.vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+                is True
+            )
+            # The scheduler-side MultiConnector should detect the mixed
+            # HMA support among its sub-connectors.
+            scheduler = llm.llm_engine.engine_core.engine_core.scheduler
+            mc = scheduler.connector
+            assert isinstance(mc, MultiConnector)
+            assert mc._all_support_hma is False
+        finally:
+            llm.llm_engine.engine_core.shutdown()
