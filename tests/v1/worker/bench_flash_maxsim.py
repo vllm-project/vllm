@@ -131,15 +131,15 @@ def benchmark_memory():
         Q = torch.randn(128, 128, device="cuda", dtype=torch.float16)
         D = torch.randn(B, 1024, 128, device="cuda", dtype=torch.float16)
 
-        torch.cuda.reset_peak_memory_stats()
-        base = torch.cuda.memory_allocated()
+        torch.accelerator.reset_peak_memory_stats()
+        base = torch.accelerator.memory_allocated()
         _vanilla_bmm_maxsim(Q, D)
-        mem_vanilla = (torch.cuda.max_memory_allocated() - base) / 1e6
+        mem_vanilla = (torch.accelerator.max_memory_allocated() - base) / 1e6
 
-        torch.cuda.reset_peak_memory_stats()
-        base = torch.cuda.memory_allocated()
+        torch.accelerator.reset_peak_memory_stats()
+        base = torch.accelerator.memory_allocated()
         flash_maxsim(Q, D)
-        mem_flash = (torch.cuda.max_memory_allocated() - base) / 1e6
+        mem_flash = (torch.accelerator.max_memory_allocated() - base) / 1e6
 
         print(f"{B:>10} {mem_vanilla:>13.1f} {mem_flash:>13.1f} "
               f"{mem_vanilla - mem_flash:>11.1f}")
@@ -180,12 +180,12 @@ def benchmark_zerocopy():
         vanilla_doc_mem = B * Ld * dim * 4 / 1e6  # fp32
 
         # Zero-copy: 0 extra bytes for docs
-        torch.cuda.reset_peak_memory_stats()
-        base = torch.cuda.memory_allocated()
+        torch.accelerator.reset_peak_memory_stats()
+        base = torch.accelerator.memory_allocated()
         t = _time_fn(
             flash_maxsim_rerank_direct, Q, batch_tensor, offsets, lengths, Ld
         ) * 1000
-        zerocopy_mem = (torch.cuda.max_memory_allocated() - base) / 1e6
+        zerocopy_mem = (torch.accelerator.max_memory_allocated() - base) / 1e6
 
         print(f"{B:>10} {vanilla_doc_mem:>13.1f} {zerocopy_mem:>15.1f} "
               f"{t:>11.2f}")

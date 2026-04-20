@@ -65,7 +65,7 @@ class LateInteractionRunner:
                 flash_maxsim_packed,
                 pack_docs,
             )
-            device = torch.cuda.current_device()
+            device = torch.accelerator.current_device_index()
             # d=128 covers ColBERT (128) and ColPali (128).  Extend via
             # env var if running models with other embedding dims.
             d = int(os.environ.get("VLLM_FLASH_MAXSIM_WARMUP_D", "128"))
