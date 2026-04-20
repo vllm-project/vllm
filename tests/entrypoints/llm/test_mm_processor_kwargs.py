@@ -54,6 +54,26 @@ def test_enqueue_forwards_mm_processor_kwargs() -> None:
     )
 
 
+def test_chat_forwards_mm_processor_kwargs() -> None:
+    llm = _make_mock_llm()
+    mm_processor_kwargs = {"do_pan_and_scan": True}
+    sampling_params = SamplingParams(max_tokens=1)
+    messages = [{"role": "user", "content": "hello"}]
+
+    llm._run_chat = Mock(return_value=["ok"])
+
+    outputs = llm.chat(
+        messages,
+        sampling_params=sampling_params,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    assert outputs == ["ok"]
+    assert llm._run_chat.call_args.kwargs["mm_processor_kwargs"] == (
+        mm_processor_kwargs
+    )
+
+
 def test_run_completion_forwards_mm_processor_kwargs() -> None:
     llm = _make_mock_llm()
     mm_processor_kwargs = {"min_pixels": 4 * 28 * 28}
@@ -171,3 +191,51 @@ def test_preprocess_cmpl_keeps_prompt_mm_processor_kwargs_when_no_override(
         "tok-params",
         prompt_extras=None,
     )
+
+
+def test_preprocess_chat_applies_mm_processor_kwargs_to_renderer() -> None:
+    llm = _make_mock_llm()
+    mm_processor_kwargs = {"num_crops": 8}
+    messages = [[{"role": "user", "content": "Describe this image."}]]
+
+    renderer = Mock()
+    renderer.tokenizer = object()
+    renderer.default_chat_tok_params = Mock()
+    renderer.default_chat_tok_params.with_kwargs.return_value = "tok-params"
+    renderer.render_chat.return_value = (messages, ["engine-input"])
+    llm.renderer = renderer
+
+    outputs = llm._preprocess_chat(
+        messages,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+
+    assert outputs == ["engine-input"]
+    call_args = renderer.render_chat.call_args
+    assert call_args.args[0] == messages
+    assert call_args.args[1].mm_processor_kwargs == mm_processor_kwargs
+    assert call_args.args[2] == "tok-params"
+    assert call_args.kwargs["prompt_extras"] == {
+        "mm_processor_kwargs": mm_processor_kwargs
+    }
+
+
+def test_preprocess_chat_omits_mm_processor_kwargs_when_no_override() -> None:
+    llm = _make_mock_llm()
+    messages = [[{"role": "user", "content": "Describe this image."}]]
+
+    renderer = Mock()
+    renderer.tokenizer = object()
+    renderer.default_chat_tok_params = Mock()
+    renderer.default_chat_tok_params.with_kwargs.return_value = "tok-params"
+    renderer.render_chat.return_value = (messages, ["engine-input"])
+    llm.renderer = renderer
+
+    outputs = llm._preprocess_chat(messages)
+
+    assert outputs == ["engine-input"]
+    call_args = renderer.render_chat.call_args
+    assert call_args.args[0] == messages
+    assert call_args.args[1].mm_processor_kwargs is None
+    assert call_args.args[2] == "tok-params"
+    assert call_args.kwargs["prompt_extras"] is None

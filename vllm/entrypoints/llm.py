@@ -929,16 +929,22 @@ class LLM:
                     tokenize=is_mistral_tokenizer(renderer.tokenizer),
                 ),
             ),
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         tok_params = renderer.default_chat_tok_params.with_kwargs(
             **(tokenization_kwargs or {})
+        )
+        prompt_extras = (
+            None
+            if mm_processor_kwargs is None
+            else {"mm_processor_kwargs": mm_processor_kwargs}
         )
 
         _, engine_inputs = renderer.render_chat(
             conversations,
             chat_params,
             tok_params,
-            prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
+            prompt_extras=prompt_extras,
         )
 
         return engine_inputs
