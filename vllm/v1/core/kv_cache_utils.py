@@ -345,6 +345,33 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
+    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Put a list of blocks at the front of the free list.
+
+        Args:
+            blocks: The blocks to prepend.
+        """
+        if len(blocks) == 0:
+            return
+
+        first_block = self.fake_free_list_head.next_free_block
+        assert first_block is not None, (
+            "next_free_block of fake_free_list_head should always exist"
+        )
+
+        # Chain the new blocks together
+        prev = self.fake_free_list_head
+        for block in blocks:
+            prev.next_free_block = block
+            block.prev_free_block = prev
+            prev = block
+
+        # Connect the last prepended block to the old first block
+        prev.next_free_block = first_block
+        first_block.prev_free_block = prev
+
+        self.num_free_blocks += len(blocks)
+
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
 

@@ -644,7 +644,8 @@ class SimpleCPUOffloadScheduler:
         self.cpu_block_pool.free_blocks(cpu_blocks)
         assert self._gpu_block_pool is not None
         self._gpu_block_pool.free_blocks(
-            self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids
+            (self._gpu_block_pool.blocks[bid] for bid in gpu_block_ids),
+            prepend=True,
         )
 
     def has_pending_stores(self) -> bool:
