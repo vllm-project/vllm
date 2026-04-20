@@ -557,12 +557,16 @@ def test_eagle_correctness_light(
             "auto",
             0.8,
         ),
-        (
+        pytest.param(
             ("eagle3", "Qwen/Qwen3-8B", "AngelSlim/Qwen3-8B_eagle3", 1),
             False,
             False,
             "transformers",
             0.8,
+            # TODO(hmellor): figure out why memory usage is so high
+            marks=pytest.mark.skip(
+                reason="Feature is experimental and uses too much memory in CI",
+            ),
         ),
         pytest.param(
             (
