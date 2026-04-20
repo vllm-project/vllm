@@ -631,6 +631,27 @@ class OpenAIServingChat(OpenAIServing):
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
 
+                if getattr(request, "return_progress", False) and getattr(res, "num_computed_tokens", None) is not None and not res.outputs[0].token_ids:
+                    time_ms = int((time.time() - created_time) * 1000)
+                    if res.metrics and hasattr(res.metrics, "arrival_time"):
+                        time_ms = int((time.time() - res.metrics.arrival_time) * 1000)
+                    
+                    progress_chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[],
+                        model=model_name,
+                        prompt_progress={
+                            "total": num_prompt_tokens,
+                            "cache": res.num_cached_tokens or 0,
+                            "processed": res.num_computed_tokens,
+                            "time_ms": time_ms
+                        }
+                    )
+                    data = progress_chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).

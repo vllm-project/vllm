@@ -61,6 +61,7 @@ class CompletionRequest(OpenAIBaseModel):
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    return_progress: bool | None = False
     suffix: str | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -512,3 +513,4 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    prompt_progress: dict[str, int] | None = None

@@ -131,6 +131,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     usage: UsageInfo | None = Field(default=None)
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    prompt_progress: dict[str, int] | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
@@ -169,6 +170,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    return_progress: bool | None = False
     temperature: float | None = None
     top_p: float | None = None
     tools: list[ChatCompletionToolsParam] | None = None

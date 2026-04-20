@@ -1459,6 +1459,8 @@ class Scheduler(SchedulerInterface):
                 or pooler_output is not None
                 or kv_transfer_params
                 or stopped
+                or request.is_prefill_chunk
+                or request.num_computed_tokens < request.num_tokens
             ):
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -1476,6 +1478,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        num_computed_tokens=request.num_computed_tokens,
                     )
                 )
             else:

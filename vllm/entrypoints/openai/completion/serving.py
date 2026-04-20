@@ -293,6 +293,32 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
+                num_prompt_tokens[prompt_idx] = (
+                    len(prompt_token_ids) if prompt_token_ids else 0
+                )
+                if res.encoder_prompt_token_ids is not None:
+                    num_prompt_tokens[prompt_idx] += len(res.encoder_prompt_token_ids)
+
+                if getattr(request, "return_progress", False) and getattr(res, "num_computed_tokens", None) is not None and not res.outputs[0].token_ids:
+                    time_ms = int((time.time() - created_time) * 1000)
+                    if res.metrics and hasattr(res.metrics, "arrival_time"):
+                        time_ms = int((time.time() - res.metrics.arrival_time) * 1000)
+                    
+                    progress_chunk = CompletionStreamResponse(
+                        id=request_id,
+                        created=created_time,
+                        model=model_name,
+                        choices=[],
+                        prompt_progress={
+                            "total": num_prompt_tokens[prompt_idx],
+                            "cache": res.num_cached_tokens or 0,
+                            "processed": res.num_computed_tokens,
+                            "time_ms": time_ms
+                        }
+                    )
+                    data = progress_chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
+
                 if first_iteration:
                     num_cached_tokens = res.num_cached_tokens
                     first_iteration = False
