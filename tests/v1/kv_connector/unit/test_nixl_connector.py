@@ -2237,6 +2237,99 @@ def test_transfer_setup_failure_returns_finished(default_vllm_config, dist_init)
     assert request_id in done_recving
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    FailingNixlWrapper,
+)
+@pytest.mark.parametrize(
+    "failure_mode",
+    ["handshake", "transfer_setup"],
+)
+def test_failed_request_skips_kv_postprocessing(
+    default_vllm_config, dist_init, failure_mode
+):
+    """Test that failed requests skip KV sync and post-processing in
+    get_finished().
+
+    This is the core safety behavior: when a handshake or transfer setup
+    fails, the request must still appear in done_recving (so the scheduler
+    can apply kv_load_failure_policy), but sync_recved_kv_to_device and
+    post-processing must NOT be called since no valid KV data was received.
+    """
+    vllm_config = create_vllm_config()
+
+    connector = NixlConnector(
+        vllm_config, KVConnectorRole.WORKER, make_kv_cache_config(block_size=16)
+    )
+    connector.connector_worker = FakeNixlConnectorWorker(
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0.1 if failure_mode == "handshake" else 0,
+    )
+    worker = connector.connector_worker
+
+    if failure_mode == "handshake":
+        worker.nixl_wrapper.fail_handshake = True
+    else:
+        worker.nixl_wrapper.fail_transfer_setup = True
+
+    request_id = f"test_{failure_mode}_skip_postprocess"
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id=request_id,
+        local_block_ids=([1, 2, 3],),
+        kv_transfer_params={
+            "remote_block_ids": ([4, 5, 6],),
+            "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+            "remote_request_id": f"prefill-{request_id}",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+        },
+    )
+    connector.bind_connector_metadata(metadata)
+
+    dummy_ctx = ForwardContext(
+        no_compile_layers={},
+        attn_metadata={},
+        slot_mapping={},
+    )
+    connector.start_load_kv(dummy_ctx)
+
+    if failure_mode == "handshake":
+        # Wait for async handshake to fail
+        time.sleep(0.3)
+    else:
+        # Transfer setup failure: process ready_requests queue
+        connector.bind_connector_metadata(NixlConnectorMetadata())
+        time.sleep(0.1)
+        connector.start_load_kv(dummy_ctx)
+
+    # Spy on sync_recved_kv_to_device and post_process_device_kv_on_receive
+    # to verify they are NOT called for the failed request.
+    with (
+        patch.object(worker, "sync_recved_kv_to_device") as mock_sync,
+        patch.object(worker, "post_process_device_kv_on_receive") as mock_postprocess,
+    ):
+        _, done_recving = connector.get_finished(finished_req_ids=set())
+
+    # The failed request must appear in done_recving so the scheduler
+    # can handle it (e.g., trigger recompute via kv_load_failure_policy).
+    assert request_id in done_recving
+
+    # Critical: KV sync and post-processing must NOT have been called
+    # since no valid KV data was received for the failed request.
+    mock_sync.assert_not_called()
+    mock_postprocess.assert_not_called()
+
+    # Metadata for the request should have been cleaned up.
+    assert request_id not in worker._recving_metadata
+
+    # Blocks should have been marked as invalid.
+    invalid_blocks = connector.get_block_ids_with_load_errors()
+    assert invalid_blocks == {1, 2, 3}
+
+
 @pytest.mark.parametrize(
     "mismatch_type,config_overrides,version_override,should_fail,enforce_handshake_compat",
     [
