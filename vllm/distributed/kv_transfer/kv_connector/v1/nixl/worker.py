@@ -21,7 +21,6 @@ from vllm import envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineId,
-    MambaEngineTransferInfo,
     TransferTopology,
     get_current_attn_backends,
     kv_postprocess_blksize_and_layout_on_receive,
@@ -31,7 +30,6 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import CopyBlocksOp
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (
-    MambaModelBlockTransferPolicy,
     ModelBlockTransferPolicy,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
@@ -692,7 +690,7 @@ class NixlConnectorWorker:
         self.block_len_per_layer = list[int]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
-            # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
+            # that of FI, with block laid out as in `get_kv_block_len`.
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
