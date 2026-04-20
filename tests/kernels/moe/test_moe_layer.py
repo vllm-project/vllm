@@ -465,6 +465,14 @@ def is_valid_config(config: MoETestConfig) -> tuple[bool, str | None]:
     if config.enable_eplb and config.ep_size == 1:
         return False, "EPLB only works with EP+DP"
 
+    # Disable fp4 tests until flashinfer is updated or the Dockerfile is
+    # modified to install cublasLt.h. See #39525.
+    if (
+        config.quantization == "modelopt_fp4"
+        and current_platform.is_device_capability_family(100)
+    ):
+        return False, "Temporarily skip until #39525 is resolved"
+
     return True, None
 
 
