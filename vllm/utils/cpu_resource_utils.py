@@ -155,7 +155,7 @@ def _get_cpu_list() -> list[LogicalCPUInfo]:
         return [LogicalCPUInfo(i, i, 0) for i in range(cpu_count)]
 
     lscpu_output = subprocess.check_output(
-        "lscpu -J -e=CPU,CORE,NODE", shell=True, text=True
+        "lscpu --json --extended=CPU,CORE,NODE --online", shell=True, text=True
     )
 
     # For platform without NUMA, replace '-' to '0'

@@ -131,7 +131,6 @@ class AfmoeMoE(nn.Module):
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=self.route_norm if self.score_func == "sigmoid" else False,
             quant_config=quant_config,
             use_grouped_topk=True,
@@ -152,19 +151,9 @@ class AfmoeMoE(nn.Module):
 
         router_logits = self.gate(hidden_states.to(dtype=torch.float32))
 
-        fused_moe_out = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = fused_moe_out
-            final_hidden_states = final_hidden_states + shared_output
-        else:
-            final_hidden_states = fused_moe_out
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 
