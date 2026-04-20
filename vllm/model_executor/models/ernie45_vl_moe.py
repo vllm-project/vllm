@@ -263,7 +263,6 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 top_k=config.moe_k,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size[0],
-                reduce_results=False,
                 renormalize=True,
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[0],
@@ -301,7 +300,6 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 top_k=config.moe_k,
                 hidden_size=config.hidden_size,
                 intermediate_size=config.moe_intermediate_size[1],
-                reduce_results=False,
                 renormalize=True,
                 quant_config=quant_config,
                 e_score_correction_bias=self.e_score_correction_bias[1],
@@ -342,9 +340,6 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             visual_token_mask = visual_token_mask.repeat(1, self.hidden_size).bool()
             text_token_mask = ~visual_token_mask
             final_experts_hidden_states = torch.zeros_like(hidden_states)
-            final_shared_output = (
-                torch.zeros_like(hidden_states) if self.has_shared_experts else None
-            )
 
             text_hidden_states = hidden_states[text_token_mask].reshape(
                 -1, self.hidden_size
@@ -356,26 +351,20 @@ class Ernie4_5_VLMoeMoE(nn.Module):
             text_router_logits, _ = self.text_experts_gate(
                 text_hidden_states.to(dtype=torch.float32)
             )
-            text_shared_output, text_experts_output = self.text_experts(
+            text_output = self.text_experts(
                 hidden_states=text_hidden_states, router_logits=text_router_logits
             )
-            final_experts_hidden_states[text_token_mask] = text_experts_output.flatten()
-            if self.has_shared_experts:
-                final_shared_output[text_token_mask] = text_shared_output.flatten()
+            final_experts_hidden_states[text_token_mask] = text_output.flatten()
 
             vision_router_logits, _ = self.vision_experts_gate(
                 vision_hidden_states.to(dtype=torch.float32)
             )
-            vision_shared_output, vision_experts_output = self.vision_experts(
+            vision_output = self.vision_experts(
                 hidden_states=vision_hidden_states, router_logits=vision_router_logits
             )
-            final_experts_hidden_states[visual_token_mask] = (
-                vision_experts_output.flatten()
-            )
-            if self.has_shared_experts:
-                final_shared_output[visual_token_mask] = vision_shared_output.flatten()
+            final_experts_hidden_states[visual_token_mask] = vision_output.flatten()
 
-            final_hidden_states = (final_shared_output, final_experts_hidden_states)
+            final_hidden_states = final_experts_hidden_states
         else:
             # only text modal input
             text_router_logits, _ = self.text_experts_gate(
@@ -384,20 +373,6 @@ class Ernie4_5_VLMoeMoE(nn.Module):
 
             final_hidden_states = self.text_experts(
                 hidden_states=hidden_states, router_logits=text_router_logits
-            )
-
-        if self.has_shared_experts:
-            # for shared_experts model
-            final_hidden_states = final_hidden_states[0] + final_hidden_states[1]
-        else:
-            # for not shared_experts model
-            final_hidden_states = final_hidden_states[1]
-
-        if self.tp_size > 1:
-            final_hidden_states = (
-                self.text_experts.maybe_all_reduce_tensor_model_parallel(
-                    final_hidden_states
-                )
             )
 
         return final_hidden_states.view(orig_shape)

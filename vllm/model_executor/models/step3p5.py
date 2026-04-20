@@ -379,7 +379,6 @@ class FusedMoEBlock(nn.Module):
             top_k=config.moe_top_k,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=config.norm_expert_weight,
             quant_config=quant_config,
             activation=activation,
@@ -397,28 +396,14 @@ class FusedMoEBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
 
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
-            fused_moe_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=hidden_states
             )
         else:
-            # router_logits: (num_tokens, n_experts)
+            # TODO(bnell): this gate could be moved into the FusedMoE?
             router_logits, _ = self.gate(hidden_states)
-            fused_moe_out = self.experts(
+            final_hidden_states = self.experts(
                 hidden_states=hidden_states, router_logits=router_logits
-            )
-
-        shared_output, final_hidden_states = fused_moe_out
-        if self.share_expert is None:
-            assert shared_output is None
-
-        if self.share_expert is not None:
-            assert shared_output is not None
-            final_hidden_states += shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
             )
 
         return final_hidden_states.view(num_tokens, hidden_dim)

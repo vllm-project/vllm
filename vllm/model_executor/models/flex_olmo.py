@@ -76,7 +76,6 @@ class FlexOlmoMoE(nn.Module):
             top_k=hf_config.num_experts_per_tok,
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
-            reduce_results=True,
             renormalize=False,
             quant_config=None,
             tp_size=tp_size,

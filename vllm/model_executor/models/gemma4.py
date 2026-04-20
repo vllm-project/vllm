@@ -349,7 +349,6 @@ class Gemma4MoE(nn.Module):
                 "moe_intermediate_size",
                 getattr(config, "expert_intermediate_size", None),
             ),
-            reduce_results=True,
             renormalize=True,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
