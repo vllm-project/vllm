@@ -41,7 +41,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .bert_with_rope import BertWithRope, JinaRobertaModel
-from .interfaces import SupportsCrossEncoding
+from .interfaces import SupportsCrossEncoding, SupportsLoRA
 from .interfaces_base import default_pooling_type
 
 
@@ -116,8 +116,16 @@ class RobertaClassificationHead(nn.Module):
 
 
 @default_pooling_type(seq_pooling_type="CLS")
-class RobertaEmbeddingModel(BertEmbeddingModel):
+class RobertaEmbeddingModel(BertEmbeddingModel, SupportsLoRA):
     """A model that uses Roberta to provide embedding functionalities."""
+
+    embedding_modules = {}
+    embedding_padding_modules: list[str] = []
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={"roberta.": ""},
+        orig_to_new_prefix={"": "model."},
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
