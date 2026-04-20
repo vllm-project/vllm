@@ -67,6 +67,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -880,6 +881,7 @@ class Gemma4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsEagle3,
 ):
     packed_modules_mapping = {
@@ -1254,9 +1256,10 @@ class Gemma4ForConditionalGeneration(
             # computation (using token_type_ids == 0 as text_mask).
             # Replicate this: map image token positions to token 0.
             if is_multimodal is not None:
-                is_multimodal = is_multimodal.to(input_ids.device)
                 ple_input_ids = torch.where(
-                    is_multimodal, torch.zeros_like(input_ids), input_ids
+                    is_multimodal.to(input_ids.device, non_blocking=True),
+                    torch.zeros_like(input_ids),
+                    input_ids,
                 )
             else:
                 ple_input_ids = input_ids
@@ -1357,10 +1360,16 @@ class Gemma4ForConditionalGeneration(
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
+        connectors = ["embed_vision"]
+        tower_models = ["vision_tower"]
+        if self.audio_tower is not None:
+            connectors.append("embed_audio")
+            tower_models.append("audio_tower")
+
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector=["embed_vision", "embed_audio"],
-            tower_model=["vision_tower", "audio_tower"],
+            connector=connectors,
+            tower_model=tower_models,
         )
 
     @classmethod
