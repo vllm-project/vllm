@@ -153,3 +153,48 @@ def test_streaming_tool_section_ends_reasoning(kimi_k2_tokenizer):
     )
     assert isinstance(result, DeltaMessage)
     assert result.content == "<|tool_calls_section_begin|>"
+
+
+def test_streaming_same_delta_think_end_and_content(kimi_k2_tokenizer):
+    """Grouped <think>...</think> deltas should not leak the start marker."""
+    parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+
+    think_id = parser._start_token_id
+    end_think_id = parser._end_token_id
+    reasoning_ids = kimi_k2_tokenizer.encode("step one", add_special_tokens=False)
+    content_ids = kimi_k2_tokenizer.encode("answer", add_special_tokens=False)
+
+    result = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text="<think>step one</think>answer",
+        delta_text="<think>step one</think>answer",
+        previous_token_ids=[],
+        current_token_ids=[think_id, *reasoning_ids, end_think_id, *content_ids],
+        delta_token_ids=[think_id, *reasoning_ids, end_think_id, *content_ids],
+    )
+
+    assert isinstance(result, DeltaMessage)
+    assert result.reasoning == "step one"
+    assert result.content == "answer"
+
+
+def test_streaming_same_delta_think_and_tool_section(kimi_k2_tokenizer):
+    """Grouped <think>...tool-section deltas should not leak the start marker."""
+    parser = KimiK2ReasoningParser(kimi_k2_tokenizer)
+
+    think_id = parser._start_token_id
+    tool_begin_id = parser._tool_section_start_token_id
+    reasoning_ids = kimi_k2_tokenizer.encode("step one", add_special_tokens=False)
+
+    result = parser.extract_reasoning_streaming(
+        previous_text="",
+        current_text="<think>step one<|tool_calls_section_begin|>",
+        delta_text="<think>step one<|tool_calls_section_begin|>",
+        previous_token_ids=[],
+        current_token_ids=[think_id, *reasoning_ids, tool_begin_id],
+        delta_token_ids=[think_id, *reasoning_ids, tool_begin_id],
+    )
+
+    assert isinstance(result, DeltaMessage)
+    assert result.reasoning == "step one"
+    assert result.content == "<|tool_calls_section_begin|>"

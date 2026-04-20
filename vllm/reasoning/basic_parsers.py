@@ -148,8 +148,9 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 )
             else:
                 # start token in delta, no end token in delta,
-                # reasoning content continues
-                return DeltaMessage(reasoning=delta_text)
+                # reasoning content continues. Strip the leading start token when
+                # it is grouped with reasoning text in the same delta.
+                return DeltaMessage(reasoning=delta_text.removeprefix(self.start_token))
         else:
             # not find thinking start token
             return DeltaMessage(content=delta_text)

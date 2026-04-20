@@ -212,19 +212,28 @@ class KimiK2ReasoningParser(ReasoningParser):
         ]:
             return None
 
+        delta_reasoning = (
+            delta_text.removeprefix(self._start_token)
+            if (
+                self._start_token_id in delta_token_ids
+                and self._start_token_id not in previous_token_ids
+            )
+            else delta_text
+        )
+
         if self._end_token_id in delta_token_ids:
-            end_index = delta_text.find(self._end_token)
-            reasoning = delta_text[:end_index]
-            content = delta_text[end_index + len(self._end_token) :]
+            end_index = delta_reasoning.find(self._end_token)
+            reasoning = delta_reasoning[:end_index]
+            content = delta_reasoning[end_index + len(self._end_token) :]
             return DeltaMessage(
                 reasoning=reasoning, content=content if content else None
             )
 
         if self._tool_section_start_token_id in delta_token_ids:
-            tool_index = delta_text.find(self._tool_section_start_token)
-            reasoning = delta_text[:tool_index]
-            content = delta_text[tool_index:]
+            tool_index = delta_reasoning.find(self._tool_section_start_token)
+            reasoning = delta_reasoning[:tool_index]
+            content = delta_reasoning[tool_index:]
             return DeltaMessage(reasoning=reasoning, content=content)
 
         # still reasoning (no end token)
-        return DeltaMessage(reasoning=delta_text)
+        return DeltaMessage(reasoning=delta_reasoning)

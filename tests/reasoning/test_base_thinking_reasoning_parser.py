@@ -333,6 +333,22 @@ class TestBaseThinkingReasoningParserStreaming:
         assert reasoning == "Some reasoning"
         assert content == "Answer"
 
+    def test_streaming_with_start_token_grouped_with_text(self, test_tokenizer):
+        """Grouped start-token deltas should not leak the start marker."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+
+        deltas = [
+            "<test:think>Some ",
+            "reasoning",
+            "</test:think>",
+            "Answer",
+        ]
+
+        reasoning, content = run_reasoning_extraction(parser, deltas, streaming=True)
+
+        assert reasoning == "Some reasoning"
+        assert content == "Answer"
+
     def test_streaming_no_end_token(self, test_tokenizer):
         """Test streaming when no end token is encountered."""
         parser = TestThinkingReasoningParser(test_tokenizer)
