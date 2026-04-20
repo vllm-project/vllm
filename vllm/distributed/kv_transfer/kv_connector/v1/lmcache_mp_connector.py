@@ -215,8 +215,11 @@ class LMCacheMPRequestTracker:
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
 
+    cache_salt: str = ""
+
     def __init__(self, request: "Request"):
         self.request_id = request.request_id
+        self.cache_salt: str = request.cache_salt or ""
         self.all_token_ids = request.all_token_ids
         self.block_hashes = ConstantList(request.block_hashes)
         self.allocated_block_ids = []
@@ -289,6 +292,7 @@ class LMCacheMPRequestMetadata:
     request_id: str
     direction: Literal["STORE", "RETRIEVE"]
     op: LoadStoreOp
+    cache_salt: str = ""
 
     @staticmethod
     def GetStoreMetadata(
@@ -309,14 +313,25 @@ class LMCacheMPRequestMetadata:
         # always be a multiple of `blocks_in_chunk`
         # TODO: This should be checked everytime we update the num_stored_blocks
         #
-        # Why computed_blocks includes num_lmcache_hit_blocks:
+        # Why computed_blocks uses max(num_vllm_hit_blocks, num_lmcache_hit_blocks):
         #
-        # Include lmcache-hit blocks so that the upper bound
-        # matches num_stored_blocks (which already covers
-        # them). Hit blocks are NOT re-stored.
-        computed_blocks = (
-            tracker.num_scheduled_tokens // vllm_block_size
-            + tracker.num_lmcache_hit_blocks
+        # Both values represent a prefix of blocks whose KV data is already
+        # available (either from vLLM APC or from LMCache), so they must NOT
+        # be summed (that would double-count the overlapping prefix).
+        #
+        # * num_lmcache_hit_blocks: LMCache-hit blocks are already counted in
+        #   num_stored_blocks (set during lookup), so they must be included
+        #   here to keep the upper bound consistent.  They are NOT re-stored.
+        # * num_vllm_hit_blocks: LMCache stores in units of chunks (N blocks),
+        #   so num_lmcache_hit_blocks is rounded DOWN to the nearest chunk
+        #   boundary.  When vLLM APC hits more blocks than that rounded value
+        #   (e.g. APC=44 blocks, LMCache=32 blocks after chunk alignment),
+        #   using only num_lmcache_hit_blocks would set the upper bound too
+        #   low and silently skip the APC-hit blocks that fall between the
+        #   two values, causing under-storing.  Taking the max ensures we
+        #   always use the tighter (larger) of the two hit counts.
+        computed_blocks = tracker.num_scheduled_tokens // vllm_block_size + max(
+            tracker.num_vllm_hit_blocks, tracker.num_lmcache_hit_blocks
         )
         min_available_blocks = min(
             len(tracker.block_hashes),
@@ -344,6 +359,7 @@ class LMCacheMPRequestMetadata:
                 request_id=tracker.request_id,
                 direction="STORE",
                 op=op,
+                cache_salt=tracker.cache_salt,
             )
 
             # Update the request tracker
@@ -410,6 +426,7 @@ class LMCacheMPRequestMetadata:
                 request_id=tracker.request_id,
                 direction="RETRIEVE",
                 op=op,
+                cache_salt=tracker.cache_salt,
             )
             return ret
 
@@ -558,12 +575,14 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         request_ids = []
         ops = []
+        cache_salts = []
 
         for meta in metadata.requests:
             if meta.direction != "RETRIEVE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            cache_salts.append(meta.cache_salt)
 
         if len(request_ids) == 0:
             return
@@ -572,7 +591,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             event = torch.cuda.Event(interprocess=True)
             event.record()
 
-        self.worker_adapter.batched_submit_retrieve_requests(request_ids, ops, event)
+        self.worker_adapter.batched_submit_retrieve_requests(
+            request_ids, ops, event, cache_salts=cache_salts
+        )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -629,11 +650,13 @@ class LMCacheMPConnector(KVConnectorBase_V1):
 
         request_ids = []
         ops = []
+        cache_salts = []
         for meta in metadata.requests:
             if meta.direction != "STORE":
                 continue
             request_ids.append(meta.request_id)
             ops.append(meta.op)
+            cache_salts.append(meta.cache_salt)
 
         if len(request_ids) == 0:
             return
@@ -642,7 +665,9 @@ class LMCacheMPConnector(KVConnectorBase_V1):
             event = torch.cuda.Event(interprocess=True)
             event.record()
 
-        self.worker_adapter.batched_submit_store_requests(request_ids, ops, event)
+        self.worker_adapter.batched_submit_store_requests(
+            request_ids, ops, event, cache_salts=cache_salts
+        )
 
     def get_finished(
         self, finished_req_ids: set[str]
@@ -744,6 +769,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         self.scheduler_adapter.maybe_submit_lookup_request(
             request.request_id,
             token_ids=list(request.all_token_ids),
+            cache_salt=tracker.cache_salt,
         )
 
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)

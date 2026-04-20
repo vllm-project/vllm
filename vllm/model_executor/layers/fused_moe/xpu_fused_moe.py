@@ -24,6 +24,13 @@ if current_platform.is_xpu():
     from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
 
+def prepare_fp8_moe_layer_for_xpu(
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return w13.transpose(-1, -2).contiguous(), w2.transpose(-1, -2).contiguous()
+
+
 class XPUExperts(mk.FusedMoEExpertsModular):
     def __init__(
         self,
