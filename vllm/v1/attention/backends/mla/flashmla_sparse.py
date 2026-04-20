@@ -488,60 +488,21 @@ class FlashMLASparseMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlashMLASparseMetadata:
-        cm = common_attn_metadata
-        fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
-        fp8_extra_metadata: (
-            FlashMLASparseMetadata.FP8SeparatePrefillDecode
-            | FlashMLASparseMetadata.FP8KernelMetadata
-            | None
-        ) = None
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+
         if self.use_fp8_kv_cache:
+            fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+            metadata.fp8_use_mixed_batch = fp8_use_mixed_batch
             if fp8_use_mixed_batch:
-                fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(cm)
+                metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(
+                    common_attn_metadata
+                )
             else:
-                fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
+                metadata.fp8_extra_metadata = self._build_fp8_separate_prefill_decode(
+                    common_attn_metadata
+                )
 
-        req_id_per_token = self._build_req_id_per_token(cm)
-
-        num_decodes, num_prefills, num_decode_tokens, _ = split_decodes_and_prefills(
-            cm,
-            decode_threshold=self.reorder_batch_threshold or 1,
-        )
-        (
-            prefill_query_start_loc,
-            prefill_max_query_len,
-            has_context,
-            prefill_query_lens_cpu,
-            prefill_cu_seq_lens_kv,
-            prefill_max_kv_len,
-            prefill_block_table,
-        ) = self._build_prefill_fields(cm, num_decodes, num_prefills)
-
-        return self.metadata_cls(
-            num_reqs=cm.num_reqs,
-            max_query_len=cm.max_query_len,
-            max_seq_len=cm.max_seq_len,
-            num_actual_tokens=cm.num_actual_tokens,
-            query_start_loc=cm.query_start_loc,
-            slot_mapping=cm.slot_mapping,
-            block_table=cm.block_table_tensor,
-            req_id_per_token=req_id_per_token,
-            block_size=self.kv_cache_spec.block_size,
-            topk_tokens=self.topk_tokens,
-            num_decodes=num_decodes,
-            num_prefills=num_prefills,
-            num_decode_tokens=num_decode_tokens,
-            seq_lens=cm.seq_lens,
-            prefill_query_start_loc=prefill_query_start_loc,
-            prefill_max_query_len=prefill_max_query_len,
-            has_context=has_context,
-            prefill_query_lens_cpu=prefill_query_lens_cpu,
-            prefill_cu_seq_lens_kv=prefill_cu_seq_lens_kv,
-            prefill_max_kv_len=prefill_max_kv_len,
-            prefill_block_table=prefill_block_table,
-            fp8_extra_metadata=fp8_extra_metadata,
-            fp8_use_mixed_batch=fp8_use_mixed_batch,
-        )
+        return metadata
 
 
 class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
