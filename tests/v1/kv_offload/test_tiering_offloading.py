@@ -16,7 +16,12 @@ from collections.abc import Iterable
 import pytest
 import torch
 
-from vllm.v1.kv_offload.abstract import JobMetadata, OffloadKey, make_offload_key
+from vllm.v1.kv_offload.abstract import (
+    JobMetadata,
+    OffloadKey,
+    ReqContext,
+    make_offload_key,
+)
 from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
 from vllm.v1.kv_offload.secondary_tiers.dummy import DummySecondaryTier
 from vllm.v1.kv_offload.tiering.manager import (
@@ -24,9 +29,28 @@ from vllm.v1.kv_offload.tiering.manager import (
     TieringOffloadingManager,
 )
 
+_CTX = ReqContext()
+
 
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
     return [make_offload_key(str(i).encode(), 0) for i in int_ids]
+
+
+def count_hits(manager, keys: list[OffloadKey]) -> int | None:
+    """Count consecutive lookup hits from the start of keys.
+
+    Returns the count of leading True results, or None if any lookup
+    returns None (retry-later signal).
+    """
+    count = 0
+    for key in keys:
+        result = manager.lookup(key, _CTX)
+        if result is None:
+            return None
+        if not result:
+            break
+        count += 1
+    return count
 
 
 class TestDummySecondaryTier:
@@ -161,7 +185,7 @@ class TestTieringOffloadingManager:
         blocks = to_keys(range(3))
 
         # Prepare store
-        result = self.manager.prepare_store(blocks)
+        result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
         assert len(result.keys_to_store) == 3
 
@@ -169,14 +193,14 @@ class TestTieringOffloadingManager:
         self.manager.complete_store(blocks, success=True)
 
         # Blocks should be in primary tier
-        assert self.primary_tier.lookup(blocks) == 3
+        assert count_hits(self.primary_tier, blocks) == 3
 
     def test_cascade_to_all_secondary_tiers(self, manager_setup):
         """Test that blocks are cascaded to ALL secondary tiers."""
         blocks = to_keys(range(3))
 
         # Store to primary
-        result = self.manager.prepare_store(blocks)
+        result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
 
         # Complete store (triggers cascade)
@@ -198,7 +222,7 @@ class TestTieringOffloadingManager:
         blocks = to_keys(range(3))
 
         # Store to primary
-        result = self.manager.prepare_store(blocks)
+        result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
         self.manager.complete_store(blocks, success=True)
 
@@ -222,11 +246,11 @@ class TestTieringOffloadingManager:
         blocks = to_keys(range(3))
 
         # Store blocks
-        self.manager.prepare_store(blocks)
+        self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, success=True)
 
         # Lookup should find all blocks in primary
-        assert self.manager.lookup(blocks) == 3
+        assert count_hits(self.manager, blocks) == 3
 
     def test_promotion_from_secondary(self, manager_setup):
         """Test promotion of blocks from secondary to primary tier."""
@@ -236,36 +260,37 @@ class TestTieringOffloadingManager:
         for block in blocks:
             self.secondary_tier1.blocks[block] = True
 
-        # Lookup should initiate promotion
-        result = self.manager.lookup(blocks)
-        assert result is None  # Retry later
+        # Lookup each block to initiate promotion for all of them
+        for block in blocks:
+            result = self.manager.lookup(block, _CTX)
+            assert result is None  # Retry later (promotion initiated)
 
         # Process finished jobs to complete promotion
         self.manager._process_finished_jobs()
 
         # Now blocks should be in primary tier
-        assert self.primary_tier.lookup(blocks) == 3
+        assert count_hits(self.primary_tier, blocks) == 3
 
         # Next lookup should succeed
-        assert self.manager.lookup(blocks) == 3
+        assert count_hits(self.manager, blocks) == 3
 
     def test_partial_lookup(self, manager_setup):
         """Test lookup with partial hits."""
         blocks = to_keys(range(5))
 
         # Store first 3 blocks to primary
-        self.manager.prepare_store(blocks[:3])
+        self.manager.prepare_store(blocks[:3], _CTX)
         self.manager.complete_store(blocks[:3], success=True)
 
         # Lookup all 5 blocks should return 3 (first 3 found)
-        assert self.manager.lookup(blocks) == 3
+        assert count_hits(self.manager, blocks) == 3
 
     def test_eviction_in_primary_tier(self, manager_setup):
         """Test eviction in primary tier when capacity is exceeded."""
         # Primary tier has capacity of 5 blocks
         # First, fill the primary tier
         blocks = to_keys(range(5))
-        result = self.manager.prepare_store(blocks)
+        result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
         assert len(result.keys_to_store) == 5
         self.manager.complete_store(blocks, success=True)
@@ -275,7 +300,7 @@ class TestTieringOffloadingManager:
 
         # Now try to store 2 more blocks (should trigger eviction)
         more_blocks = to_keys(range(5, 7))
-        result = self.manager.prepare_store(more_blocks)
+        result = self.manager.prepare_store(more_blocks, _CTX)
 
         # Should evict 2 blocks from primary tier
         assert result is not None
@@ -287,7 +312,7 @@ class TestTieringOffloadingManager:
         blocks = to_keys(range(3))
 
         # Store blocks
-        self.manager.prepare_store(blocks)
+        self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, success=True)
         self.manager._process_finished_jobs()
 
@@ -311,7 +336,7 @@ class TestTieringOffloadingManager:
         blocks = to_keys(range(3))
 
         # Prepare store
-        result = self.manager.prepare_store(blocks)
+        result = self.manager.prepare_store(blocks, _CTX)
         assert result is not None
 
         # Complete store with failure
@@ -348,7 +373,7 @@ class TestTieringOffloadingManager:
 
         # First, store 5 blocks to fill the small tier
         blocks1 = to_keys(range(5))
-        result = manager.prepare_store(blocks1)
+        result = manager.prepare_store(blocks1, _CTX)
         assert result is not None
         manager.complete_store(blocks1, success=True)
         manager._process_finished_jobs()
@@ -359,7 +384,7 @@ class TestTieringOffloadingManager:
 
         # Now store 3 more blocks - small tier should evict 3 blocks
         blocks2 = to_keys(range(5, 8))
-        result = manager.prepare_store(blocks2)
+        result = manager.prepare_store(blocks2, _CTX)
         assert result is not None
         manager.complete_store(blocks2, success=True)
         manager._process_finished_jobs()
@@ -375,7 +400,7 @@ class TestTieringOffloadingManager:
         blocks = to_keys(range(3))
 
         # Store blocks
-        self.manager.prepare_store(blocks)
+        self.manager.prepare_store(blocks, _CTX)
         self.manager.complete_store(blocks, success=True)
 
         # Blocks should have ref_cnt = 2 (one for each secondary tier)
@@ -385,7 +410,7 @@ class TestTieringOffloadingManager:
 
         # Call prepare_store again (should process finished jobs first)
         more_blocks = to_keys(range(3, 5))
-        self.manager.prepare_store(more_blocks)
+        self.manager.prepare_store(more_blocks, _CTX)
 
         # Original blocks should now have ref_cnt = 0
         for block_hash in blocks:
@@ -412,11 +437,11 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         blocks = to_keys(range(3))
 
         # Should work like a regular OffloadingManager
-        result = manager.prepare_store(blocks)
+        result = manager.prepare_store(blocks, _CTX)
         assert result is not None
         manager.complete_store(blocks, success=True)
 
-        assert manager.lookup(blocks) == 3
+        assert count_hits(manager, blocks) == 3
 
 
 if __name__ == "__main__":

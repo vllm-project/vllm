@@ -33,6 +33,7 @@ from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
+    ReqContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -65,18 +66,18 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         )
         self._mmap_region = mmap_region
 
-    def prepare_write(self, keys) -> PrepareStoreOutput | None:
+    def prepare_write(self, keys, req_context: ReqContext) -> PrepareStoreOutput | None:
         """Allocate space in primary for a secondary->primary write (promotion)."""
-        return self.prepare_store(keys)
+        return self.prepare_store(keys, req_context)
 
     def complete_write(self, keys, success: bool = True) -> None:
         """Finalize secondary->primary write, making blocks available."""
         self.complete_store(keys, success)
 
-    def prepare_read(self, keys) -> LoadStoreSpec:
+    def prepare_read(self, keys, req_context: ReqContext) -> LoadStoreSpec:
         """Protect primary blocks for a primary->secondary read (cascade),
         incrementing ref_cnt."""
-        return self.prepare_load(keys)
+        return self.prepare_load(keys, req_context)
 
     def complete_read(self, keys) -> None:
         """Release protection after primary->secondary read completes,
@@ -198,74 +199,53 @@ class TieringOffloadingManager(OffloadingManager):
                         tier.get_tier_name(),
                     )
 
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
-        Find the length of the maximal series of blocks that are offloaded.
+        Check whether a single block is offloaded and ready.
 
         Algorithm:
-        1. Check primary tier first
-        2. If not all blocks found, check all secondary tiers sequentially,
-           promoting blocks from each tier that has hits and updating the
-           remaining blocks to search for
-        3. Return None to signal "retry later" if any promotions were initiated
+        1. Process any completed async jobs first
+        2. Check primary tier
+        3. If not in primary, check secondary tiers and initiate promotion
+           if the block is found there
 
         Args:
-            keys: Block hashes to look up.
+            key: Block hash to look up.
+            req_context: Per-request context.
 
         Returns:
-            Number of consecutive blocks (from start) that are present,
-            or None if blocks are being transferred (retry later).
+            True if the block is in the primary tier and ready,
+            False if not found in any tier,
+            None if the block is being transferred (retry later).
         """
-        # Process any completed async jobs first to ensure promoted blocks
-        # are finalized and available in the primary tier
         self._process_finished_jobs()
 
-        keys_list = list(keys)
-
         # Step 1: Check primary tier
-        primary_hits = self.primary_tier.lookup(keys_list)
-
-        if primary_hits is None:
-            # Primary tier is busy (blocks being transferred)
+        primary_hit = self.primary_tier.lookup(key, req_context)
+        if primary_hit is None:
             return None
+        if primary_hit:
+            return True
 
-        if primary_hits == len(keys_list):
-            # All blocks in primary tier
-            return primary_hits
-
-        # Step 2: Check all secondary tiers for remaining blocks
-        remaining_keys = keys_list[primary_hits:]
-
-        # Track whether any promotions were initiated
-        has_promotions = False
-
+        # Step 2: Check secondary tiers
         for tier in self.secondary_tiers:
-            if not remaining_keys:
-                # All blocks have been found
-                break
+            secondary_hits = tier.lookup([key])
+            if secondary_hits is None:
+                # Tier is busy with this block
+                return None
+            if secondary_hits > 0:
+                # Found in secondary — initiate promotion and signal retry
+                self._initiate_promotion(tier, [key], req_context)
+                return None
 
-            secondary_hits = tier.lookup(remaining_keys)
+        return False
 
-            # Skip if tier is busy (None) or has no hits (0)
-            if not secondary_hits:
-                continue
-
-            # Found blocks in this secondary tier, initiate promotion
-            blocks_to_promote = remaining_keys[:secondary_hits]
-            self._initiate_promotion(tier, blocks_to_promote)
-            has_promotions = True
-
-            # Update remaining_keys to continue searching for the rest
-            remaining_keys = remaining_keys[secondary_hits:]
-
-        # Step 3: If any promotions were initiated, return None to signal retry
-        if has_promotions:
-            return None
-
-        # No more blocks found in any tier
-        return primary_hits
-
-    def _initiate_promotion(self, tier: SecondaryTierManager, keys: list[OffloadKey]):
+    def _initiate_promotion(
+        self,
+        tier: SecondaryTierManager,
+        keys: list[OffloadKey],
+        req_context: ReqContext,
+    ):
         """
         Initiate promotion of blocks from a secondary tier to the primary tier.
 
@@ -277,9 +257,10 @@ class TieringOffloadingManager(OffloadingManager):
         Args:
             tier: The secondary tier to promote from
             keys: Blocks to promote
+            req_context: Per-request context forwarded to primary.prepare_write().
         """
         # Allocate space in primary tier for promoted blocks
-        primary_store_result = self.primary_tier.prepare_write(keys)
+        primary_store_result = self.primary_tier.prepare_write(keys, req_context)
 
         if primary_store_result is None:
             # Cannot allocate space in primary tier (full)
@@ -299,7 +280,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         tier.submit_load(job_metadata)
 
-    def prepare_load(self, keys: Iterable[OffloadKey]) -> LoadStoreSpec:
+    def prepare_load(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> LoadStoreSpec:
         """
         Prepare blocks to be loaded from primary tier to GPU.
 
@@ -311,6 +294,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         Args:
             keys: Blocks to prepare for loading.
+            req_context: Per-request context.
 
         Returns:
             LoadStoreSpec for reading from primary tier.
@@ -318,7 +302,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Process completed promotions to ensure blocks are ready
         self._process_finished_jobs()
 
-        return self.primary_tier.prepare_load(keys)
+        return self.primary_tier.prepare_load(keys, req_context)
 
     def touch(self, keys: Iterable[OffloadKey]):
         """
@@ -344,7 +328,9 @@ class TieringOffloadingManager(OffloadingManager):
         """
         self.primary_tier.complete_load(keys)
 
-    def prepare_store(self, keys: Iterable[OffloadKey]) -> PrepareStoreOutput | None:
+    def prepare_store(
+        self, keys: Iterable[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
         """
         Prepare blocks to be stored from GPU to primary tier.
 
@@ -354,6 +340,7 @@ class TieringOffloadingManager(OffloadingManager):
 
         Args:
             keys: Blocks to prepare for storing.
+            req_context: Per-request context.
 
         Returns:
             PrepareStoreOutput describing where to store blocks and what was
@@ -365,14 +352,18 @@ class TieringOffloadingManager(OffloadingManager):
         self._process_finished_jobs()
 
         # Step 2: Store to primary tier
-        primary_result = self.primary_tier.prepare_store(keys)
+        primary_result = self.primary_tier.prepare_store(keys, req_context)
 
         # Note: Secondary tier cascading will happen in complete_store()
         # after the GPU→Primary transfer completes and blocks are ready.
 
         return primary_result
 
-    def complete_store(self, keys: Iterable[OffloadKey], success: bool = True):
+    def complete_store(
+        self,
+        keys: Iterable[OffloadKey],
+        success: bool = True,
+    ):
         """
         Mark blocks as done storing from GPU to primary tier.
 
@@ -389,6 +380,7 @@ class TieringOffloadingManager(OffloadingManager):
         Args:
             keys: Blocks that finished storing.
             success: Whether the GPU→primary transfer succeeded.
+            req_context: Per-request context forwarded to primary.prepare_read().
         """
         # Materialize only if success=True (needed for cascading to secondary tiers)
         keys_list = list(keys) if success else keys
@@ -411,7 +403,8 @@ class TieringOffloadingManager(OffloadingManager):
         # secondary tier.
         for tier in self.secondary_tiers:
             # Get spec for reading from primary tier AND increment ref_cnt
-            primary_blocks_spec = self.primary_tier.prepare_read(keys_list)
+            # TODO: pass the actual req_context instead of None
+            primary_blocks_spec = self.primary_tier.prepare_read(keys_list, None)
 
             # Submit async store job: primary→secondary
             job_id = self._next_job_id()
