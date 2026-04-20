@@ -265,7 +265,11 @@ class Granite4VisionLLMModel(GraniteModel):
             hidden_states = intermediate_tensors["hidden_states"]
             # Recover deepstack features forwarded from the previous PP rank.
             if deepstack_input_embeds is None:
-                ds_keys = [k for k in intermediate_tensors.tensors if k.startswith("ds_")]
+                ds_keys = [
+                    k
+                    for k in intermediate_tensors.tensors
+                    if k.startswith("ds_")
+                ]
                 if ds_keys:
                     deepstack_input_embeds = IntermediateTensors(
                         {k: intermediate_tensors[k] for k in ds_keys}
@@ -562,8 +566,9 @@ class Granite4VisionForConditionalGeneration(
             + list(getattr(config, "spatial_target_layers", []))
         )
 
-        # Share ds_layer_indices with the LLM causal model so make_empty_intermediate_tensors
-        # includes the correct keys (its self.config is text_config, no deepstack_layer_map).
+        # Share ds_layer_indices with the LLM causal model so
+        # make_empty_intermediate_tensors includes the correct keys
+        # (its self.config is text_config, no deepstack_layer_map).
         self.language_model._ds_layer_indices = self._ds_layer_indices
 
         # Pre-allocated persistent GPU buffers for deepstack features.
@@ -893,7 +898,11 @@ class Granite4VisionForConditionalGeneration(
         # Always pass deepstack when inputs_embeds is non-None (prefill path),
         # including during CUDA graph capture (buffers are zero → no-op injection).
         # This ensures the graph captures the injection code path.
-        if inputs_embeds is not None and get_pp_group().is_first_rank and self._ds_layer_indices:
+        if (
+            inputs_embeds is not None
+            and get_pp_group().is_first_rank
+            and self._ds_layer_indices
+        ):
             ds: IntermediateTensors | None = IntermediateTensors({
                 f"ds_{llm_layer}": self._ds_buffers[lvl]
                 for lvl, llm_layer in enumerate(self._ds_layer_indices)
@@ -910,7 +919,11 @@ class Granite4VisionForConditionalGeneration(
         )
 
         # Clear buffers after use so stale features don't leak into the next request.
-        if inputs_embeds is not None and get_pp_group().is_first_rank and self._ds_num_tokens > 0:
+        if (
+            inputs_embeds is not None
+            and get_pp_group().is_first_rank
+            and self._ds_num_tokens > 0
+        ):
             n = self._ds_num_tokens
             for buf in self._ds_buffers:
                 buf[:n].zero_()
