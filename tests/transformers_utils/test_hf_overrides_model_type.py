@@ -60,3 +60,8 @@ def test_hf_overrides_model_type_returns_correct_config_class():
             assert config.custom_attr == 42
     finally:
         _CONFIG_REGISTRY.pop("test_custom_model", None)
+        # Restore the original mixtral AutoConfig mapping to avoid
+        # side effects on other tests in the same process
+        from transformers import AutoConfig, MixtralConfig
+
+        AutoConfig.register("mixtral", MixtralConfig, exist_ok=True)
