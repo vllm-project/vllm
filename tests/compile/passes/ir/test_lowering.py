@@ -70,40 +70,15 @@ def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
 def _make_simple_model(op: IrOp) -> nn.Module:
     """Create a simple model that calls the op with pre-generated arguments.
 
-    Arguments are created once at model construction time and registered as
-    buffers to avoid Dynamo tracing issues.
+    Arguments are created once at model construction time and captured via
+    closure for direct use in forward.
     """
     real_args = _make_args_for_op(op, use_fake=False)
 
     class SimpleModel(nn.Module):
-        def __init__(self):
-            super().__init__()
-            # Register tensors as buffers so they're visible to Dynamo
-            for i, arg in enumerate(real_args):
-                if isinstance(arg, torch.Tensor):
-                    self.register_buffer(f"_arg_{i}", arg)
-
         def forward(self, x):
-            # Reconstruct args from buffers
-            reconstructed = []
-            idx = 0
-            for param in op._py_signature.parameters.values():
-                ann = param.annotation
-                if ann == torch.Tensor:
-                    reconstructed.append(getattr(self, f"_arg_{idx}"))
-                    idx += 1
-                elif ann in (int, "int"):
-                    reconstructed.append(16)
-                elif ann in (float, "float"):
-                    reconstructed.append(1e-5)
-                elif "Tensor | None" in str(ann) or "Optional[Tensor]" in str(ann):
-                    reconstructed.append(getattr(self, f"_arg_{idx}"))
-                    idx += 1
-                elif "int | None" in str(ann) or "Optional[int]" in str(ann):
-                    reconstructed.append(16)
-                else:
-                    reconstructed.append(None)
-            return op(*reconstructed)
+            return op(*real_args)
+
     return SimpleModel()
 
 
