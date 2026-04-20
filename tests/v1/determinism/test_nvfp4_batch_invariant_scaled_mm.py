@@ -23,10 +23,7 @@ import os
 import pytest
 import torch
 
-from tests.kernels.quantization.nvfp4_utils import (
-    FLOAT4_E2M1_MAX,
-    FLOAT8_E4M3_MAX,
-)
+from tests.kernels.quantization.nvfp4_utils import get_nvfp4_global_scale
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -47,6 +44,10 @@ CONSISTENCY_SHAPES = [
     (256, 128, 4096),
     (512, 256, 4096),
     (256, 256, 2048),
+    (241, 160, 2048),
+    (401, 352, 1984),
+    (333, 320, 1008),
+    (287, 96, 4096),
 ]
 
 
@@ -72,12 +73,8 @@ def test_nvfp4_gemm_batch_invariance(
     a_dtype = torch.randn((m, k), dtype=dtype, device="cuda")
     b_dtype = torch.randn((n, k), dtype=dtype, device="cuda")
 
-    a_global_scale = (
-        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(a_dtype.flatten(), dim=-1)
-    ).to(torch.float32)
-    b_global_scale = (
-        (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX) / torch.amax(b_dtype.flatten(), dim=-1)
-    ).to(torch.float32)
+    a_global_scale = get_nvfp4_global_scale(a_dtype)
+    b_global_scale = get_nvfp4_global_scale(b_dtype)
     alpha = 1.0 / (a_global_scale * b_global_scale)
 
     b_fp4, b_scale_interleaved = ops.scaled_fp4_quant(b_dtype, b_global_scale)
