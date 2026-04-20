@@ -90,10 +90,13 @@ class TestPerOpLowering:
     """
 
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
-    def test_supports_args_dynamo_executable(self, op_name, provider):
+    def test_supports_args_dynamo_compatible(self, op_name, provider):
         """
-        Verify all supports_args functions can be executed by Dynamo.
-        This ensures the supports_args code is compatible with torch.compile tracing.
+        Verify supports_args is Dynamo-compatible and doesn't specialize on batch size.
+
+        Uses unbacked SymInt for batch dimensions to ensure:
+        1. supports_args can be traced by torch.compile
+        2. supports_args doesn't depend on concrete batch values
         """
         op = IrOp.registry[op_name]
         impl = op.impls[provider]
@@ -101,51 +104,23 @@ class TestPerOpLowering:
         if impl._supports_args is None:
             pytest.skip("No supports_args defined for this provider")
 
-        # Wrap supports_args with torch.compile to verify Dynamo compatibility
-        compiled_supports = torch.compile(impl.supports_args, backend="eager")
+        # Create fake args with unbacked symint dimensions
         fake_args = _make_fake_args_for_op(op)
 
-        # Should not raise Dynamo errors
+        # Wrap with torch.compile and call
+        # This verifies both:
+        # 1. Dynamo can trace supports_args
+        # 2. supports_args doesn't concretize unbacked symints
         try:
-            compiled_supports(*fake_args)
-        except Exception as e:
-            pytest.fail(
-                f"supports_args for {op_name}:{provider} is not Dynamo compatible: {e}"
-            )
-
-    @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
-    def test_supports_args_no_batch_specialization(self, op_name, provider):
-        """
-        Verify supports_args does not specialize on batch size.
-        Uses unbacked SymInt to ensure the function doesn't depend on concrete values.
-        """
-        from torch._dynamo.utils import create_unbacked_symint
-
-        op = IrOp.registry[op_name]
-        impl = op.impls[provider]
-
-        if impl._supports_args is None:
-            pytest.skip("No supports_args defined for this provider")
-
-        # Create fake args with unbacked symint for batch dimension
-        x_meta = torch.empty(8, 16, device="meta", dtype=torch.bfloat16)
-
-        # Get the unbacked symint - this represents an unknown batch size
-        unbacked_symint = create_unbacked_symint()
-
-        # Replace the first dimension with unbacked symint
-        # This simulates an unknown batch size
-        try:
-            # Call supports_args with unbacked symint in shape
-            # If supports_args checks concrete values, this will fail
-            result = impl.supports_args(x_meta, None, 1e-5)
+            compiled = torch.compile(impl.supports_args, backend="eager")
+            result = compiled(*fake_args)
             assert isinstance(result, bool), (
                 f"supports_args should return bool, got {type(result)}"
             )
         except torch._dynamo.exc.Unsupported as e:
-            if "concretization" in str(e).lower() or "cannot" in str(e).lower():
+            if "concretization" in str(e).lower():
                 pytest.fail(
-                    f"supports_args for {op_name}:{provider} appears to specialize "
+                    f"supports_args for {op_name}:{provider} specializes "
                     f"on concrete values: {e}"
                 )
             raise
@@ -352,44 +327,3 @@ class TestE2ELowering:
             )
 
 
-# ============================================================
-# Additional tests for unbacked SymInt
-# ============================================================
-
-
-class TestUnbackedSymInt:
-    """
-    Tests specifically for verifying unbacked SymInt compatibility.
-    These tests ensure supports_args functions don't depend on concrete values.
-    """
-
-    def test_unbacked_symint_rms_norm_supports_args(self):
-        """
-        Test rms_norm supports_args with unbacked symint.
-        This is the primary test mentioned in the issue.
-        """
-        from torch._dynamo.utils import create_unbacked_symint
-
-        for provider in ops.rms_norm.supported_providers():
-            impl = ops.rms_norm.impls[provider]
-            if impl._supports_args is None:
-                continue
-
-            # Create unbacked symint
-            unbacked_bs = create_unbacked_symint()
-
-            # Create meta tensors
-            x = torch.empty(8, 16, device="meta", dtype=torch.bfloat16)
-            weight = torch.empty(16, device="meta", dtype=torch.bfloat16)
-
-            try:
-                # This should work without concretization errors
-                result = impl.supports_args(x, weight, 1e-5)
-                assert isinstance(result, bool)
-            except torch._dynamo.exc.Unsupported as e:
-                if "concretization" in str(e).lower():
-                    pytest.fail(
-                        f"rms_norm:{provider} supports_args specializes on "
-                        f"concrete values: {e}"
-                    )
-                raise
