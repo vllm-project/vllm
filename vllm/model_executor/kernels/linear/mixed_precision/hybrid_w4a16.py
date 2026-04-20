@@ -195,7 +195,41 @@ def triton_w4a16_skinny_fmt_gemm(
 
     c = torch.empty((M, N), dtype=a.dtype, device=a.device)
 
-    if on_gfx1x():
+    cap = current_platform.get_device_capability()
+    if cap is not None and cap.major >= 12:
+        # Tuned on gfx1201 (Radeon AI PRO R9700, 32 CUs, 32-wide wavefronts)
+        # using Llama-3.1-8B AWQ weight shapes with group_size=128.
+        if M <= 32:
+            BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 16, 16, 128, 4
+        elif M <= 64:
+            if K >= 2 * N:  # tall K (e.g. down_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 128, 8
+            elif N > K:  # wide N (e.g. qkv_proj, gate_up_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 32, 64, 8
+            else:  # N ~= K (e.g. o_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 32, 64, 128, 4
+        elif M <= 128:
+            if K >= 2 * N:  # tall K (e.g. down_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 16, 64, 1
+            elif N >= 2 * K:  # very wide N (e.g. gate_up_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 128, 64, 8
+            else:  # N ~= K (e.g. o_proj, qkv_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 64, 64, 8
+        elif M <= 512:
+            if K >= 2 * N:  # tall K (e.g. down_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
+            elif N >= 4 * K:  # very wide N (e.g. gate_up_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 128, 64, 8
+            else:
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 64, 128, 64, 8
+        else:
+            if K >= 2 * N:  # tall K (e.g. down_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 64, 64, 8
+            elif N >= 4 * K:  # very wide N (e.g. gate_up_proj)
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 256, 64, 64, 8
+            else:
+                BLOCK_M, BLOCK_N, BLOCK_K, num_warps = 128, 128, 32, 8
+    elif on_gfx1x():
         # Tuned on gfx1151 (Strix Halo, 40 CUs, 32-wide wavefronts)
         # using Qwen3-4B weight shapes with group_size=128.
         if M <= 32:
