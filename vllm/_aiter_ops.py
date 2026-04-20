@@ -8,11 +8,17 @@ from torch._ops import OpOverload
 
 import vllm.envs as envs
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
     rocm_aiter_sparse_attn_indexer,
     rocm_aiter_sparse_attn_indexer_fake,
 )
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = PlaceholderModule("pandas")
 
 # fp8_dtype is not cached.
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
@@ -54,6 +60,29 @@ def is_aiter_found_and_supported() -> bool:
 
         return on_mi3xx()
     return False
+
+
+@functools.cache
+def _load_gemm_tuned_configs(
+    q_dtype_w: torch.dtype, csv_path: str
+) -> set[tuple[int, int, int]]:
+    try:
+        df = pd.read_csv(csv_path).drop_duplicates()
+        df = df[df["q_dtype_w"] == str(q_dtype_w)]
+        return set(zip(df["N"].astype(int), df["K"].astype(int), df["M"].astype(int)))
+    except Exception:
+        return set()
+
+
+def _check_kernel_tuned(N: int, K: int, q_dtype_w: torch.dtype, csv_path: str) -> bool:
+    configs = _load_gemm_tuned_configs(q_dtype_w, csv_path)
+    l_m = (
+        [1, 2, 4]
+        + list(range(8, 513, 8))
+        + [1024, 1536]
+        + [2**i for i in range(11, 19)]
+    )
+    return any((N, K, M) in configs for M in l_m)
 
 
 def if_aiter_supported(func: Callable) -> Callable:
@@ -468,7 +497,7 @@ def _rocm_aiter_mla_decode_fwd_fake(
     pass
 
 
-def _rocm_aiter_gemm_a8w8_impl(
+def _rocm_aiter_w8a8_gemm_impl(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -485,7 +514,7 @@ def _rocm_aiter_gemm_a8w8_impl(
     return gemm_a8w8_CK(A, B, As, Bs, bias, output_dtype)
 
 
-def _rocm_aiter_gemm_a8w8_fake(
+def _rocm_aiter_w8a8_gemm_fake(
     A: torch.Tensor,
     B: torch.Tensor,
     As: torch.Tensor,
@@ -497,6 +526,35 @@ def _rocm_aiter_gemm_a8w8_fake(
     n = B.shape[0]
     Y = torch.empty(m, n, dtype=output_dtype, device=A.device)
     return Y
+
+
+def _rocm_aiter_preshuffled_per_token_w8a8_gemm_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    from aiter import gemm_a8w8_bpreshuffle
+
+    output = gemm_a8w8_bpreshuffle(A, B, As, Bs, None, output_dtype)
+    if bias is not None:
+        output.add_(bias)
+    return output
+
+
+def _rocm_aiter_preshuffled_per_token_w8a8_gemm_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    return torch.empty(m, n, dtype=output_dtype, device=A.device)
 
 
 def _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
@@ -902,6 +960,37 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     out = torch.empty((M, N_out), dtype=x.dtype, device=x.device)
     residual_out = torch.empty_like(residual)
     return out, residual_out
+
+
+def _fused_mla_dual_rms_norm_impl(
+    x1: torch.Tensor,
+    x1_weight: torch.Tensor,
+    x2: torch.Tensor,
+    x2_weight: torch.Tensor,
+    x1_epsilon: float,
+    x2_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
+
+    return fused_qk_rmsnorm(
+        q=x1,
+        q_weight=x1_weight,
+        q_eps=x1_epsilon,
+        k=x2,
+        k_weight=x2_weight,
+        k_eps=x2_epsilon,
+    )
+
+
+def _fused_mla_dual_rms_norm_fake(
+    x1: torch.Tensor,
+    x1_weight: torch.Tensor,
+    x2: torch.Tensor,
+    x2_weight: torch.Tensor,
+    x1_epsilon: float,
+    x2_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (torch.empty_like(x1), torch.empty_like(x2))
 
 
 def _rocm_aiter_gemm_a8wfp4_impl(
@@ -1313,11 +1402,15 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_gemm_a8w8",
-                op_func=_rocm_aiter_gemm_a8w8_impl,
-                mutates_args=[],
-                fake_impl=_rocm_aiter_gemm_a8w8_fake,
-                dispatch_key=current_platform.dispatch_key,
+                op_name="rocm_aiter_w8a8_gemm",
+                op_func=_rocm_aiter_w8a8_gemm_impl,
+                fake_impl=_rocm_aiter_w8a8_gemm_fake,
+            )
+
+            direct_register_custom_op(
+                op_name="_rocm_aiter_preshuffled_per_token_w8a8_gemm",
+                op_func=_rocm_aiter_preshuffled_per_token_w8a8_gemm_impl,
+                fake_impl=_rocm_aiter_preshuffled_per_token_w8a8_gemm_fake,
             )
 
             direct_register_custom_op(
@@ -1429,6 +1522,13 @@ class rocm_aiter_ops:
                 fake_impl=_triton_rotary_embedding_fake,
             )
 
+            direct_register_custom_op(
+                op_name="fused_mla_dual_rms_norm",
+                op_func=_fused_mla_dual_rms_norm_impl,
+                mutates_args=[],
+                fake_impl=_fused_mla_dual_rms_norm_fake,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -1476,6 +1576,10 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
 
     @staticmethod
+    def get_fused_mla_dual_rms_norm_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm.default
+
+    @staticmethod
     def rms_norm(
         x: torch.Tensor, weight: torch.Tensor, variance_epsilon: float
     ) -> torch.Tensor:
@@ -1493,7 +1597,7 @@ class rocm_aiter_ops:
         )
 
     @staticmethod
-    def gemm_a8w8(
+    def w8a8_gemm(
         A: torch.Tensor,
         B: torch.Tensor,
         As: torch.Tensor,
@@ -1501,7 +1605,20 @@ class rocm_aiter_ops:
         bias: torch.Tensor | None = None,
         output_dtype: torch.dtype = torch.float16,
     ) -> torch.Tensor:
-        return torch.ops.vllm.rocm_aiter_gemm_a8w8(A, B, As, Bs, bias, output_dtype)
+        return torch.ops.vllm.rocm_aiter_w8a8_gemm(A, B, As, Bs, bias, output_dtype)
+
+    @staticmethod
+    def preshuffled_per_token_w8a8_gemm(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm(
+            A, B, As, Bs, bias, output_dtype
+        )
 
     @staticmethod
     def triton_gemm_a8w8_blockscale(
@@ -1919,6 +2036,24 @@ class rocm_aiter_ops:
             (8192, 14336),
             (8192, 3584),
         ]
+
+    @staticmethod
+    def is_shuffled_per_token_w8a8_gemm_tuned(
+        N: int, K: int, q_dtype_w: torch.dtype
+    ) -> bool:
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = (
+            aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE_FILE
+        )
+        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
+
+    @staticmethod
+    def is_per_token_w8a8_gemm_tuned(N: int, K: int, q_dtype_w: torch.dtype) -> bool:
+        import aiter.ops.gemm_op_a8w8 as aiter_gemm_a8w8_ops
+
+        csv_path = aiter_gemm_a8w8_ops.AITER_CONFIGS.AITER_CONFIG_GEMM_A8W8_FILE
+        return _check_kernel_tuned(N, K, q_dtype_w, csv_path)
 
     @staticmethod
     def shuffle_weight(

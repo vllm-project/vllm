@@ -264,6 +264,7 @@ pull_request_rules:
       - files=\.buildkite/ci_config_intel.yaml
       - files=vllm/model_executor/layers/fused_moe/xpu_fused_moe.py
       - files=vllm/model_executor/kernels/linear/mixed_precision/xpu.py
+      - files=vllm/model_executor/kernels/linear/mxfp8/xpu.py
       - files=vllm/model_executor/kernels/linear/scaled_mm/xpu.py
       - files=vllm/distributed/device_communicators/xpu_communicator.py
       - files=vllm/v1/attention/backends/mla/xpu_mla_sparse.py
@@ -271,6 +272,7 @@ pull_request_rules:
       - files=vllm/v1/worker/xpu_worker.py
       - files=vllm/v1/worker/xpu_model_runner.py
       - files=vllm/_xpu_ops.py
+      - files=vllm/kernels/xpu_ops.py
       - files~=^vllm/lora/ops/xpu_ops
       - files=vllm/lora/punica_wrapper/punica_xpu.py
       - files=vllm/platforms/xpu.py
@@ -278,7 +280,6 @@ pull_request_rules:
       - title~=(?i)XPU
       - title~=(?i)Intel
       - title~=(?i)BMG
-      - title~=(?i)Arc
   actions:
     label:
       add:
