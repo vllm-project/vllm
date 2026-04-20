@@ -142,6 +142,8 @@ class PassConfig:
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = None  # type: ignore[assignment]
     """Fuse the custom RMSNorm + padding ops."""
+    fuse_mla_dual_rms_norm: bool = None  # type: ignore[assignment]
+    """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
 
@@ -224,6 +226,7 @@ class PassConfig:
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",
+        "fuse_mla_dual_rms_norm",
         "fuse_rope_kvcache",
         mode="wrap",
     )
@@ -270,6 +273,12 @@ class PassConfig:
                 "The fusion will be disabled."
             )
             self.fuse_act_padding = False
+        if self.fuse_mla_dual_rms_norm and not current_platform.is_rocm():
+            logger.warning_once(
+                "MLA dual RMS norm fusion requires ROCm/AITER. "
+                "The fusion will be disabled."
+            )
+            self.fuse_mla_dual_rms_norm = False
         if self.fuse_rope_kvcache and not current_platform.is_rocm():
             logger.warning_once(
                 "KV cache fusion currently only enabled on ROCm. "
