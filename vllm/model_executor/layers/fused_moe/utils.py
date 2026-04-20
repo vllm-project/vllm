@@ -26,9 +26,34 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
 from vllm.platforms import current_platform
+from vllm.platforms.interface import Platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+
+def supports_triton_mxfp4_device(platform: Platform | None = None) -> bool:
+    """Return whether Triton MXFP4 MoE kernels support the current device.
+
+    CUDA support remains capped below SM110 until those kernels are validated.
+    ROCm uses a different capability mapping, so allow gfx11xx (reported as
+    11.x) while still excluding gfx12xx and newer pending validation.
+    """
+    if platform is None:
+        platform = current_platform
+
+    if not platform.is_cuda_alike():
+        return False
+
+    cap = platform.get_device_capability()
+    if cap is None:
+        return False
+
+    cap_tuple = (cap.major, cap.minor)
+    if platform.is_rocm():
+        return (9, 0) <= cap_tuple < (12, 0)
+
+    return (9, 0) <= cap_tuple < (11, 0)
 
 
 @triton.jit
