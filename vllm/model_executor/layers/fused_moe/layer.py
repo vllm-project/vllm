@@ -563,6 +563,7 @@ class FusedMoE(PluggableLayer):
             "GPTQMarlinMoEMethod",
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsW4A16FlydslMoEMethod",
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
@@ -1114,6 +1115,7 @@ class FusedMoE(PluggableLayer):
         if quant_method_name in (
             "CompressedTensorsWNA16MarlinMoEMethod",
             "CompressedTensorsWNA16MoEMethod",
+            "CompressedTensorsW4A16FlydslMoEMethod",
         ):
             if is_transposed:
                 loaded_weight = loaded_weight.t().contiguous()
