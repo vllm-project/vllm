@@ -990,6 +990,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_batched_activation_format(self):
+        # TODO(bnell): nixl also uses batched format
         return self.use_deepep_ll_kernels
 
     @property
