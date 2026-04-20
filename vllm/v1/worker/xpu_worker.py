@@ -39,11 +39,6 @@ class XPUWorker(Worker):
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
 
-        # XPU workers need the profiler to be created lazily in profile()
-        # because init_device() may adjust local_rank in DP mode.
-        if self.profiler_config.profiler not in ("torch", None):
-            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
-
     def init_device(self):
         # In DP mode, XPU workers see all visible devices.
         # Offset local_rank by the local DP shard.
@@ -147,7 +142,7 @@ class XPUWorker(Worker):
                 "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
             )
 
-        if is_start:
+        if is_start and self.profiler is None:
             from vllm.distributed.utils import get_worker_rank_suffix
 
             rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
@@ -155,18 +150,12 @@ class XPUWorker(Worker):
                 f"{profile_prefix}_{rank_suffix}" if profile_prefix else rank_suffix
             )
 
-            if self.profiler is None:
-                self.profiler = TorchProfilerWrapper(
-                    self.profiler_config,
-                    worker_name=trace_name,
-                    local_rank=self.local_rank,
-                    activities=["CPU", "XPU"],
-                )
-                logger.debug("Starting torch profiler with trace name: %s", trace_name)
+            self.profiler = TorchProfilerWrapper(
+                self.profiler_config,
+                worker_name=trace_name,
+                local_rank=self.local_rank,
+                activities=["CPU", "XPU"],
+            )
+            logger.debug("Starting torch profiler with trace name: %s", trace_name)
 
-            self.profiler.start()
-        else:
-            if self.profiler is None:
-                logger.warning("Profiler was not started, nothing to stop.")
-                return
-            self.profiler.stop()
+        super().profile(is_start=is_start, profile_prefix=profile_prefix)
