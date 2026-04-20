@@ -1,17 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
-
 import pytest
 import torch
-from vllm.vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
-    MLARoPEKVCacheCatFusionPass,
-)
 
 import vllm.config
 from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm.compilation.passes.fusion.mla_rope_kvcache_cat_fusion import (
+    MLARoPEKVCacheCatFusionPass,
+)
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import (
@@ -308,24 +306,6 @@ def test_mla_rope_kvcache_cat_fusion(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config):
-        # Initialize distributed environment for ColumnParallelLinear
-        if not torch.distributed.is_initialized():
-            os.environ.setdefault("MASTER_ADDR", "localhost")
-            os.environ.setdefault("MASTER_PORT", "29500")
-            os.environ.setdefault("RANK", "0")
-            os.environ.setdefault("WORLD_SIZE", "1")
-            from vllm.distributed.parallel_state import (
-                init_distributed_environment,
-                initialize_model_parallel,
-            )
-
-            init_distributed_environment(
-                world_size=1,
-                rank=0,
-                local_rank=0,
-            )
-            initialize_model_parallel()
-
         model = MLARoPEKVCacheCatTestModel(
             vllm_config=vllm_config,
             attn_backend=attn_backend,
