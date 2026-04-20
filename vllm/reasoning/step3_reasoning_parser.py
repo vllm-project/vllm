@@ -68,8 +68,9 @@ class Step3ReasoningParser(ReasoningParser):
         if len(delta_token_ids) == 1 and delta_token_ids[0] == self.think_end_token_id:
             return None
 
-        if self.think_end_token_id in delta_token_ids:
-            # </think> in delta, extract reasoning content and remaining content
+        if self.think_end_token in delta_text:
+            # Split based on visible text first. With buffered stop strings,
+            # the end-token ID may arrive before the literal `</think>` text.
             end_index = delta_text.find(self.think_end_token)
             reasoning = delta_text[:end_index]
             content = delta_text[end_index + len(self.think_end_token) :]
@@ -77,6 +78,10 @@ class Step3ReasoningParser(ReasoningParser):
                 reasoning=reasoning,
                 content=content if content else None,
             )
+        elif self.think_end_token_id in delta_token_ids:
+            # The end-token ID arrived but its text has not been flushed yet.
+            # Wait until `</think>` becomes visible so we can split correctly.
+            return None
         elif self.think_end_token_id in previous_token_ids:
             # </think> already seen in previous text, everything is content
             return DeltaMessage(content=delta_text)
