@@ -1352,8 +1352,10 @@ def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData
         ]
     elif modality == "image+video":
         prompts = [
-            f"<|im_start|>user <image>\n<video>\n{question}<|im_end|>"
-            f"<|im_start|>assistant\n"
+            (
+                f"<|im_start|>user <image>\n<video>\n{question}<|im_end|>"
+                f"<|im_start|>assistant\n"
+            )
             for question in questions
         ]
 
