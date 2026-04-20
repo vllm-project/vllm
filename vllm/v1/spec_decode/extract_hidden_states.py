@@ -145,7 +145,10 @@ class ExtractHiddenStatesProposer:
 
         # Return the sampled tokens as "draft" tokens
         # Shape: [batch_size, 1] to match num_speculative_tokens=1
-        return sampled_token_ids
+        # On decode steps with spec tokens, sampled_token_ids may have
+        # shape [batch_size, 2] (target + spec verification); slice to
+        # return only the target-sampled column.
+        return sampled_token_ids[:, :1]
 
     def _get_slot_mapping(
         self,
@@ -286,7 +289,6 @@ class ExtractHiddenStatesProposer:
 
     def prepare_next_token_ids_padded(
         self,
-        seq_lens: torch.Tensor,
         sampled_token_ids: torch.Tensor,
         requests: dict[str, CachedRequestState],
         gpu_input_batch: InputBatch,
@@ -303,7 +305,7 @@ class ExtractHiddenStatesProposer:
         device = sampled_token_ids.device
 
         # Compute backup tokens for discarded / invalid requests
-        seq_lens_list = seq_lens[:num_reqs].tolist()
+        seq_lens_list = (gpu_input_batch.num_tokens_no_spec[:num_reqs] - 1).tolist()
         backup_tokens_gpu = torch.tensor(
             [
                 requests[gpu_input_batch.req_ids[i]].get_token_id(seq_lens_list[i])

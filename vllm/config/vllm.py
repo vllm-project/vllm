@@ -13,10 +13,12 @@ from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
+from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import torch
+from packaging.version import Version
 from pydantic import ConfigDict, Field, model_validator
 
 import vllm.envs as envs
@@ -35,6 +37,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
+from .mamba import MambaConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -93,9 +96,11 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable if either RMS norm or quant FP8 custom op is active;
     otherwise Inductor handles fusion."""
 
-    return cfg.compilation_config.is_custom_op_enabled(
-        "rms_norm"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    return (
+        cfg.compilation_config.is_custom_op_enabled("rms_norm")
+        or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+        or cfg.kernel_config.ir_op_priority.rms_norm[0] != "native"
+    )
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
@@ -142,18 +147,19 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     return (
         rocm_aiter_ops.is_enabled()
         and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
-        and cfg.compilation_config.use_inductor_graph_partition
+        and (
+            cfg.compilation_config.use_inductor_graph_partition
+            or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+        )
     )
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if using AITER RMSNorm and AITER Triton GEMMs
-    and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+    """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
     from vllm._aiter_ops import rocm_aiter_ops
 
     return (
         rocm_aiter_ops.is_rmsnorm_enabled()
-        and not rocm_aiter_ops.is_triton_gemm_enabled()
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -188,7 +194,7 @@ OPTIMIZATION_LEVEL_01 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
-            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -244,15 +250,15 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
-@config(config=ConfigDict(arbitrary_types_allowed=True))  # type: ignore[arg-type,misc]
-class VllmConfig:  # type: ignore[misc]
+@config(config=ConfigDict(arbitrary_types_allowed=True))
+class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
     # TODO: use default_factory once default constructing ModelConfig doesn't
     # try to download a model
-    model_config: ModelConfig = Field(default=None)  # type: ignore[assignment]
+    model_config: ModelConfig = None  # type: ignore[assignment]
     """Model configuration."""
     cache_config: CacheConfig = Field(default_factory=CacheConfig)
     """Cache configuration."""
@@ -270,6 +276,8 @@ class VllmConfig:  # type: ignore[misc]
     """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    mamba_config: MambaConfig = Field(default_factory=MambaConfig)
+    """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
     """Kernel configuration."""
     lora_config: LoRAConfig | None = None
@@ -414,6 +422,10 @@ class VllmConfig:  # type: ignore[misc]
             vllm_factors.append(self.compilation_config.compute_hash())
         else:
             vllm_factors.append("None")
+        if self.kernel_config:
+            vllm_factors.append(self.kernel_config.compute_hash())
+        else:
+            vllm_factors.append(None)
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
         else:
@@ -523,7 +535,10 @@ class VllmConfig:  # type: ignore[misc]
                     f"method {model_config.quantization}. Supported dtypes: "
                     f"{supported_dtypes}"
                 )
-            quant_config.maybe_update_config(model_config.model)
+            quant_config.maybe_update_config(
+                model_config.model,
+                hf_config=model_config.hf_config,
+            )
             return quant_config
         return None
 
@@ -547,29 +562,50 @@ class VllmConfig:  # type: ignore[misc]
         if architectures is not None:
             hf_config = copy.deepcopy(hf_config)
             hf_config.architectures = architectures
+        elif hf_config.architectures is None:
+            from transformers.models.auto.modeling_auto import (
+                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+            )
+
+            if hf_config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
+                hf_config = copy.deepcopy(hf_config)
+                hf_config.architectures = [
+                    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[hf_config.model_type]
+                ]
 
         model_config = copy.deepcopy(self.model_config)
 
+        # In Transformers v5, tie_word_embeddings belongs to the config of the class
+        # that can see both layers to be tied. For example:
+        #
+        # SomeVLModel:
+        #   self.language_model = SomeLanguageModel(SomeVLTextConfig)
+        #   self.vision_model = SomeVisionModel(SomeVLVisionConfig)
+        #
+        # SomeVLModelForMultimodalLM:
+        #   self.model = SomeVLModel(SomeVLConfig)
+        #   self.lm_head = nn.Linear()
+        #
+        # Therefore, tie_word_embeddings is defined in SomeVLConfig and is not present
+        # in SomeVLTextConfig*. In vLLM, the lm_head belongs to the language_model, so
+        # we must ensure that tie_word_embeddings is set in the language_model's config.
+        #
+        # *For some models, SomeVLTextConfig may also have a tie_word_embeddings field.
+        # This is only the case if SomeVLTextConfig is also used for a text only version
+        # of the same model. For example:
+        #
+        # SomeVLModelForCausalLM:
+        #   self.model = SomeLanguageModel(SomeVLTextConfig)
+        #   self.lm_head = nn.Linear()
+        #
+        # Therefore, the presence of tie_word_embeddings in SomeVLTextConfig cannot
+        # be used as a signal for whether tie_word_embeddings should be copied from
+        # hf_config to the language_model config.
         if (
-            model_config.is_multimodal_model
+            Version(version("transformers")) >= Version("5.0.0")
+            and model_config.is_multimodal_model
             and hasattr(model_config.hf_config, "tie_word_embeddings")
-            and not hasattr(hf_config.get_text_config(), "tie_word_embeddings")
         ):
-            # In Transformers v5, tie_word_embeddings belongs to the config of the class
-            # that can see both layers to be tied. For example:
-            #
-            # SomeVLModel:
-            #   self.language_model = SomeLanguageModel()
-            #   self.vision_model = SomeVisionModel()
-            #
-            # SomeVLModelForMultimodalLM:
-            #   self.model = SomeVLModel()
-            #   self.lm_head = nn.Linear()
-            #
-            # Therefore, tie_word_embeddings is defined in SomeVLModelForMultimodalLM's
-            # config and is not present in SomeVLModel's config. In vLLM, the lm_head
-            # belongs to the language_model, so we must ensure that tie_word_embeddings
-            # is set in the language_model's config.
             tie_word_embeddings = model_config.hf_config.tie_word_embeddings
             hf_config.get_text_config().tie_word_embeddings = tie_word_embeddings
 
@@ -643,7 +679,11 @@ class VllmConfig:  # type: ignore[misc]
         )
 
         if kv_offloading_backend == "native":
-            self.kv_transfer_config.kv_connector = "OffloadingConnector"
+            if envs.VLLM_USE_SIMPLE_KV_OFFLOAD:
+                config_connector = "SimpleCPUOffloadConnector"
+            else:
+                config_connector = "OffloadingConnector"
+            self.kv_transfer_config.kv_connector = config_connector
             self.kv_transfer_config.kv_connector_extra_config.update(
                 {"cpu_bytes_to_use": kv_offloading_size * (1 << 30)}
             )
@@ -680,10 +720,41 @@ class VllmConfig:  # type: ignore[misc]
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.cache_config.mamba_ssm_cache_dtype != "float16"
+        ):
+            raise ValueError(
+                "Stochastic rounding for Mamba cache requires "
+                "the SSM cache to be float16. Please set it explicitly, "
+                "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
+                "stochastic rounding by not specifying "
+                "`--enable-mamba-cache-stochastic-rounding`."
+            )
+
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+
+        if (
+            self.quant_config is not None
+            and self.model_config is not None
+            and hasattr(self.quant_config, "use_deep_gemm")
+            and self.quant_config.use_deep_gemm is None
+        ):
+            from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
+
+            model_type = getattr(self.model_config.hf_text_config, "model_type", None)
+            if should_auto_disable_deep_gemm(model_type):
+                self.quant_config.use_deep_gemm = False
+                logger.warning_once(
+                    "Auto-disabled DeepGemm for model_type=%s on Blackwell. "
+                    "DeepGemm E8M0 scale format causes accuracy degradation "
+                    "for this architecture. Falling back to CUTLASS. "
+                    "To disable DeepGemm globally, set VLLM_USE_DEEP_GEMM=0.",
+                    model_type,
+                )
 
         from vllm.v1.executor.abstract import Executor
 
@@ -718,6 +789,16 @@ class VllmConfig:  # type: ignore[misc]
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
+                self.model_config is not None
+                and self.model_config.runner_type == "pooling"
+            ):
+                # The current implementation of asynchronous scheduling negatively
+                # impacts performance of pooling models, so we disable by default.
+                logger.debug(
+                    "Disabling asynchronous scheduling by default for pooling model."
+                )
+                self.scheduler_config.async_scheduling = False
+            elif (
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
@@ -850,6 +931,13 @@ class VllmConfig:  # type: ignore[misc]
             else:
                 self.compilation_config.mode = CompilationMode.NONE
 
+        # By default, enable torch wrapping only when using custom Inductor lowering
+        if self.compilation_config.ir_enable_torch_wrap is None:
+            self.compilation_config.ir_enable_torch_wrap = (
+                self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                and self.compilation_config.backend == "inductor"
+            )
+
         if all(s not in self.compilation_config.custom_ops for s in ("all", "none")):
             if (
                 self.compilation_config.backend == "inductor"
@@ -858,6 +946,11 @@ class VllmConfig:  # type: ignore[misc]
                 self.compilation_config.custom_ops.append("none")
             else:
                 self.compilation_config.custom_ops.append("all")
+
+        # This populates IR op priorities,
+        # must happen after compilation mode and backend are decided,
+        # but before fusion defaults are applied as those may depend on op priority.
+        self.kernel_config.set_platform_defaults(self)
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
@@ -899,7 +992,8 @@ class VllmConfig:  # type: ignore[misc]
 
                     tp_size = self.parallel_config.tensor_parallel_size
                     hidden_size = self.model_config.get_hidden_size()
-                    element_size = self.model_config.dtype.itemsize  # type: ignore[union-attr]
+                    assert isinstance(self.model_config.dtype, torch.dtype)
+                    element_size = self.model_config.dtype.itemsize
                     pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                         hidden_size, tp_size, element_size
                     )
@@ -1047,6 +1141,9 @@ class VllmConfig:  # type: ignore[misc]
             )
         current_platform.check_and_update_config(self)
 
+        if envs.VLLM_USE_V2_MODEL_RUNNER:
+            self._validate_v2_model_runner()
+
         # Re-compute compile ranges after platform-specific config updates
         # (e.g., XPU may lower max_num_batched_tokens when MLA is enabled)
         self._set_compile_ranges()
@@ -1148,6 +1245,12 @@ class VllmConfig:  # type: ignore[misc]
 
         if self.reasoning_config is not None and self.model_config is not None:
             self.reasoning_config.initialize_token_ids(self.model_config)
+            if not self.reasoning_config.enabled:
+                logger.warning_once(
+                    "Auto-initialization of reasoning token IDs failed. "
+                    "Please check whether your reasoning parser has implemented "
+                    "the `reasoning_start_str` and `reasoning_end_str`."
+                )
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
@@ -1160,9 +1263,6 @@ class VllmConfig:  # type: ignore[misc]
         # warning message here and will log it later.
         if not current_platform.support_hybrid_kv_cache():
             # Hybrid KV cache manager is not supported on non-GPU platforms.
-            need_disable_hybrid_kv_cache_manager = True
-        if self.kv_events_config is not None:
-            # Hybrid KV cache manager is not compatible with KV events.
             need_disable_hybrid_kv_cache_manager = True
         if (
             self.model_config is not None
@@ -1233,14 +1333,6 @@ class VllmConfig:  # type: ignore[misc]
                 )
             self.compilation_config.debug_dump_path = env_path
 
-        def has_blocked_weights():  # type: ignore[no-redef]
-            if self.quant_config is not None:
-                if hasattr(self.quant_config, "weight_block_size"):
-                    return self.quant_config.weight_block_size is not None
-                elif hasattr(self.quant_config, "has_blocked_weights"):
-                    return self.quant_config.has_blocked_weights()
-            return False
-
         # Enable quant_fp8 CUDA ops (TODO disable in follow up)
         # On H100 the CUDA kernel is faster than
         # native implementation
@@ -1296,6 +1388,26 @@ class VllmConfig:  # type: ignore[misc]
             if self.scheduler_config.max_num_scheduled_tokens is None:
                 self.scheduler_config.max_num_scheduled_tokens = (
                     max_num_batched_tokens - scheduled_token_delta
+                )
+
+            if self.scheduler_config.max_num_scheduled_tokens <= 0:
+                raise ValueError(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings, which does not allow"
+                    " any tokens to be scheduled. Increase max_num_batched_tokens"
+                    " to accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs."
+                )
+            if self.scheduler_config.max_num_scheduled_tokens < 8192:
+                logger.warning_once(
+                    "max_num_scheduled_tokens is set to"
+                    f" {self.scheduler_config.max_num_scheduled_tokens} based on"
+                    " the speculative decoding settings. This may lead to suboptimal"
+                    " performance. Consider increasing max_num_batched_tokens to"
+                    " accommodate the additional draft token slots, or decrease"
+                    " num_speculative_tokens or max_num_seqs.",
+                    scope="local",
                 )
 
             max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
@@ -1489,9 +1601,10 @@ class VllmConfig:  # type: ignore[misc]
             tp_size = self.parallel_config.tensor_parallel_size
             max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
             if max_size is not None:
+                assert isinstance(self.model_config.dtype, torch.dtype)
                 max_token_num = max_size // (
                     self.model_config.get_hidden_size()
-                    * self.model_config.dtype.itemsize  # type: ignore[union-attr]
+                    * self.model_config.dtype.itemsize
                 )
                 if compile_range_end is not None and max_token_num < compile_range_end:
                     computed_compile_ranges_endpoints.append(max_token_num)
@@ -1514,7 +1627,8 @@ class VllmConfig:  # type: ignore[misc]
 
                 tp_size = self.parallel_config.tensor_parallel_size
                 hidden_size = self.model_config.get_hidden_size()
-                element_size = self.model_config.dtype.itemsize  # type: ignore[union-attr]
+                assert isinstance(self.model_config.dtype, torch.dtype)
+                element_size = self.model_config.dtype.itemsize
                 pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
                     hidden_size, tp_size, element_size
                 )
@@ -1544,6 +1658,22 @@ class VllmConfig:  # type: ignore[misc]
                         "rope+kvcache fusion enabled for num_tokens <= %d.",
                         compile_range_end,
                     )
+
+        if compilation_config.pass_config.fuse_minimax_qk_norm:
+            from vllm.compilation.passes.fusion.minimax_qk_norm_fusion import (
+                MAX_TOKEN_NUM,
+            )
+
+            max_token_num = min(
+                MAX_TOKEN_NUM, self.scheduler_config.max_num_batched_tokens
+            )
+            if compile_range_end is not None and max_token_num < compile_range_end:
+                computed_compile_ranges_endpoints.append(max_token_num)
+            else:
+                logger.debug(
+                    "Max num batched tokens below MiniMax QK norm fusion threshold, "
+                    "MiniMax QK norm fusion enabled for all num_tokens."
+                )
 
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
@@ -1640,6 +1770,7 @@ class VllmConfig:  # type: ignore[misc]
             f"dcp_comm_backend={self.parallel_config.dcp_comm_backend}, "  # noqa
             f"disable_custom_all_reduce={self.parallel_config.disable_custom_all_reduce}, "  # noqa
             f"quantization={self.model_config.quantization}, "
+            f"quantization_config={self.model_config.quantization_config}, "  # noqa
             f"enforce_eager={self.model_config.enforce_eager}, "
             f"enable_return_routed_experts={self.model_config.enable_return_routed_experts}, "  # noqa
             f"kv_cache_dtype={self.cache_config.cache_dtype}, "
@@ -1651,8 +1782,52 @@ class VllmConfig:  # type: ignore[misc]
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
-            f"compilation_config={self.compilation_config!r}"
+            f"compilation_config={self.compilation_config!r}, "
+            f"kernel_config={self.kernel_config!r}"
         )
+
+    def _validate_v2_model_runner(self) -> None:
+        """Check for features not yet supported by the V2 model runner."""
+        unsupported: list[str] = []
+
+        if self.model_config is not None and self.model_config.has_inner_state:
+            unsupported.append("hybrid/mamba models")
+
+        if self.parallel_config.prefill_context_parallel_size > 1:
+            unsupported.append("prefill context parallelism")
+
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method not in ("eagle", "eagle3", "mtp")
+        ):
+            unsupported.append(f"speculative method '{self.speculative_config.method}'")
+
+        if self.parallel_config.enable_dbo:
+            unsupported.append("dual batch overlap")
+
+        if (
+            self.model_config is not None
+            and self.model_config.enable_return_routed_experts
+        ):
+            # Will be added by https://github.com/vllm-project/vllm/pull/38163
+            unsupported.append("routed experts capture")
+
+        if self.model_config is not None and self.model_config.logits_processors:
+            unsupported.append("custom logits processors")
+
+        if self.cache_config.kv_sharing_fast_prefill:
+            # Will be added by https://github.com/vllm-project/vllm/pull/35045
+            unsupported.append("KV sharing fast prefill")
+
+        if self.ec_transfer_config is not None:
+            # Will be added by https://github.com/vllm-project/vllm/pull/38390
+            unsupported.append("EC transfer")
+
+        if unsupported:
+            raise ValueError(
+                "VLLM_USE_V2_MODEL_RUNNER does not yet support: "
+                + ", ".join(unsupported)
+            )
 
     def validate_block_size(self) -> None:
         """Validate block_size against DCP and mamba constraints.
