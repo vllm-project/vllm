@@ -627,7 +627,7 @@ class OpenAIServing:
             and isinstance(request.tool_choice, ToolChoiceFunction)
         ):
             assert content is not None
-            # Forced Function Call
+            # Forced Function Call (Responses API)
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
@@ -636,14 +636,20 @@ class OpenAIServing:
             not use_mistral_tool_parser
             and request.tool_choice
             and isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
+            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
         ):
+            # Named function with standard JSON-based parsing
             assert content is not None
-            # Forced Function Call
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
             content = None  # Clear content since tool is called.
-        elif not use_mistral_tool_parser and request.tool_choice == "required":
+        elif (
+            not use_mistral_tool_parser
+            and request.tool_choice == "required"
+            and (tool_parser_cls is None or tool_parser_cls.supports_required_and_named)
+        ):
+            # "required" with standard JSON-based parsing
             tool_calls = []
             with contextlib.suppress(ValidationError):
                 content = content or ""
@@ -662,15 +668,30 @@ class OpenAIServing:
             use_mistral_tool_parser
             or (
                 enable_auto_tools
-                and (request.tool_choice == "auto" or request.tool_choice is None)
+                and (
+                    request.tool_choice == "auto"
+                    or request.tool_choice is None
+                    or (
+                        not tool_parser_cls.supports_required_and_named
+                        and request.tools
+                        and (
+                            request.tool_choice == "required"
+                            or isinstance(
+                                request.tool_choice,
+                                ChatCompletionNamedToolChoiceParam,
+                            )
+                        )
+                    )
+                )
             )
         ):
+            # Automatic Tool Call Parsing (also used as fallback for
+            # required/named when supports_required_and_named=False)
             if tokenizer is None:
                 raise ValueError(
                     "Tokenizer not available when `skip_tokenizer_init=True`"
                 )
 
-            # Automatic Tool Call Parsing
             try:
                 tool_parser = tool_parser_cls(tokenizer, request.tools)
             except RuntimeError as e:
