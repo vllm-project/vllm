@@ -14,7 +14,11 @@ from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    SupportsHMA,
+    supports_hma,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import (
     MultiConnector,
@@ -83,8 +87,43 @@ class MockConnector(KVConnectorBase_V1):
         pass
 
 
-# Register the mock connector
+class MockHMAConnector(KVConnectorBase_V1, SupportsHMA):
+    """Mock connector that supports HMA for testing."""
+
+    def __new__(cls, *args, **kwargs):
+        mock = MagicMock(spec_set=cls)
+        return mock
+
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+    def build_connector_meta(self, scheduler_output):
+        return None
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        return (0, False)
+
+    def update_state_after_alloc(self, request, blocks, num_tokens) -> None:
+        pass
+
+    def request_finished_all_groups(self, request, block_ids):
+        return (False, None)
+
+
+# Register mock connectors
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
+KVConnectorFactory.register_connector(
+    "MockHMAConnector", __name__, MockHMAConnector.__name__
+)
 
 
 @pytest.fixture
@@ -920,3 +959,68 @@ def test_multi_connector_worker_metadata(mc):
     mc.update_connector_output(kv_connector_output)
     assert_update_connector_output_called(mc)
     assert kv_connector_output.kv_connector_worker_meta == mc_worker_meta_01a_01b
+
+
+def _make_multi_connector(connector_names: list[str]) -> MultiConnector:
+    """Build a MultiConnector wrapping the given registered connectors."""
+    vllm_config = create_vllm_config()
+    connectors = [
+        {
+            "kv_connector": name,
+            "kv_role": "kv_both",
+            "kv_connector_module_path": "tests.v1.kv_connector.unit.test_multi_connector",  # noqa: E501
+        }
+        for name in connector_names
+    ]
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"connectors": connectors},
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[],
+    )
+    return MultiConnector(
+        vllm_config=vllm_config,
+        role=KVConnectorRole.WORKER,
+        kv_cache_config=kv_cache_config,
+    )
+
+
+def test_multi_connector_hma_opt_in():
+    """
+    MultiConnector currently assumes HMA is opt-in: it needs
+    --no-disable-hybrid-kv-cache-manager to be enabled.
+
+    At runtime, _all_support_hma is True only when every sub-connector
+    implements SupportsHMA. Test all combinations of HMA / non-HMA
+    sub-connectors.
+    """
+
+    assert supports_hma(MultiConnector)
+
+    # -- All non-HMA connectors => _all_support_hma is False --
+    mc_none = _make_multi_connector(["MockConnector", "MockConnector"])
+    assert not supports_hma(mc_none._connectors[0])
+    assert not supports_hma(mc_none._connectors[1])
+    assert mc_none._all_support_hma is False
+
+    # -- All HMA connectors => _all_support_hma is True --
+    mc_all = _make_multi_connector(["MockHMAConnector", "MockHMAConnector"])
+    assert supports_hma(mc_all._connectors[0])
+    assert supports_hma(mc_all._connectors[1])
+    assert mc_all._all_support_hma is True
+
+    # -- Mixed: first HMA, second non-HMA => _all_support_hma is False --
+    mc_mixed1 = _make_multi_connector(["MockHMAConnector", "MockConnector"])
+    assert supports_hma(mc_mixed1._connectors[0])
+    assert not supports_hma(mc_mixed1._connectors[1])
+    assert mc_mixed1._all_support_hma is False
+
+    # -- Mixed: first non-HMA, second HMA => _all_support_hma is False --
+    mc_mixed2 = _make_multi_connector(["MockConnector", "MockHMAConnector"])
+    assert not supports_hma(mc_mixed2._connectors[0])
+    assert supports_hma(mc_mixed2._connectors[1])
+    assert mc_mixed2._all_support_hma is False
