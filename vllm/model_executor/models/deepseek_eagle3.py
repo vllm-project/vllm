@@ -282,10 +282,13 @@ class DeepseekV2Eagle3Model(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
+                name_mapped = name.replace(weight_name, param_name)
+                if name_mapped not in params_dict:
+                    continue
+                param = params_dict[name_mapped]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                name = name_mapped
                 break
             else:
                 if name not in params_dict:
