@@ -921,6 +921,9 @@ class Gemma4ForConditionalGeneration(
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_tower = AutoModel.from_config(config=config.vision_config)
+            if getattr(config.vision_config, "standardize", False):
+                # std_bias reaches ~5.4e4; `h - std_bias` overflows fp16.
+                self.vision_tower = self.vision_tower.to(torch.bfloat16)
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config, config.text_config
             )
@@ -1087,9 +1090,10 @@ class Gemma4ForConditionalGeneration(
         # flat tensor of valid tokens. We process per-image to get
         # variable-length outputs matching the dynamic token count
         # from get_image_repl.
+        vt_dtype = next(vt.parameters()).dtype
         per_image_features = []
         for i in range(pixel_values.shape[0]):
-            pv = pixel_values[i].unsqueeze(0)  # (1, max_patches, patch_pixels)
+            pv = pixel_values[i].unsqueeze(0).to(vt_dtype)  # (1, max_patches, patch_pixels)
             pp = pixel_position_ids[i].unsqueeze(0)  # (1, max_patches, 2)
 
             # Derive the pooler's output_length from the total patch
