@@ -300,6 +300,10 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
+        if hf_config.architectures[0] == "NemotronH_Super_Omni_Reasoning_V3":
+            # Promote VLM's text_config so MTP detection below fires correctly
+            hf_config = hf_config.text_config
+
         if (
             hf_config.model_type in {"nemotron_h", "nemotron_h_puzzle"}
             and hasattr(hf_config, "num_nextn_predict_layers")
@@ -825,6 +829,7 @@ class SpeculativeConfig:
             "kimi_k2",
             "kimi_k25",
             "minimax_m2",
+            "gemma4",
         ]
         if (
             self.method in ("eagle3", "extract_hidden_states", "dflash")

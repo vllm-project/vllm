@@ -484,7 +484,7 @@ def test_extract_tool_calls_streaming_incremental(
     expected_content,
 ):
     """Verify the XLAM Parser streaming behavior by verifying each chunk is as expected."""  # noqa: E501
-    request = ChatCompletionRequest(model=MODEL, messages=[], tools=[])
+    request = ChatCompletionRequest(model=MODEL, messages=[])
 
     chunks = []
     for delta_message in stream_delta_message_generator(
