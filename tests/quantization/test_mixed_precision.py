@@ -43,7 +43,7 @@ TEST_CONFIGS = {
     "amd/Qwen3-8B-WMXFP4FP8-AMXFP4FP8-AMP-KVFP8": {"arc_challenge": 0.52, "mmlu": 0.72},
     # Non-mixed-precision (PTQ) model
     # - Reference for pipeline compatibility verification -> No conflicts or breakings
-    "amd/Llama-2-70b-chat-hf-FP8-MLPerf-fp8_attn_quark_format": {
+    "amd/Llama-2-70b-chat-hf_FP8_MLPerf_V2": {
         "arc_challenge": 0.53,
         "mmlu": 0.61,
     },

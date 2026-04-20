@@ -80,11 +80,7 @@ def _test_online_quant_peak_mem_impl(
     print(f"GPU memory used after loading weights: {model_memory_gib} GiB")
     print(f"Peak GPU memory usage while loading weights: {peak_memory_gib} GiB")
 
-    # model specific, allenai/OLMoE-1B-7B-0125-Instruct fp8 online quant
-    # bf16 checkpoint is ~12.89 GiB.
-    # CUDA (fp8_e4m3fn) uses ~6.65 GiB for weight loading.
-    # ROCm (fp8_e4m3fnuz on gfx950) uses ~7.45 GiB due to different fp8 dtype.
-    expected_model_memory_gib = 7.6 if current_platform.is_rocm() else 6.7
+    expected_model_memory_gib = 6.7
 
     # for allenai/OLMoE-1B-7B-0125-Instruct the number we see today is 9.06
     # GiB on CUDA, which is 1.36x above model_memory_gib. A slightly higher
