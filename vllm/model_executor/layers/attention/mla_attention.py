@@ -1029,14 +1029,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         num_decode_tokens = torch.ops.vllm.mla_split_batch(q, self.layer_name)
         # Prefill path
         # We need to hint compiler for unbacked sym int, num_decode_tokens.
-        D = num_decode_tokens
-        B_kv = kv_c_normed.size(0)
-        B_k = k_pe.size(0)
-        torch._check(B_kv >= D)
-        torch._check(B_k >= D)
+        batch_size_kv_c = kv_c_normed.size(0)
+        batch_size_k_pe = k_pe.size(0)
+        torch._check(batch_size_kv_c >= num_decode_tokens)
+        torch._check(batch_size_k_pe >= num_decode_tokens)
         # narrow(dim, start, length) - returns view, compile-friendly
-        prefill_kv_c = kv_c_normed.narrow(0, D, B_kv - D)
-        prefill_k_pe = k_pe.narrow(0, D, B_k - D)
+        prefill_kv_c = kv_c_normed.narrow(
+            0, num_decode_tokens, batch_size_kv_c - num_decode_tokens
+        )
+        prefill_k_pe = k_pe.narrow(
+            0, num_decode_tokens, batch_size_k_pe - num_decode_tokens
+        )
 
         # Prefill path: kv_b_proj GEMM on prefill tokens only (OPTIMIZED)
         kv_nope = self.kv_b_proj(prefill_kv_c)[0].view(
@@ -1054,17 +1057,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.layer_name,
         )
 
-        # Phase 1 Optimization 1b: Slice BEFORE W_UK_T BMM
+        # Decode path
         # Only process decode tokens (eliminates wasted computation on prefill tokens)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        # Slice to decode portion only (first D tokens)
-        # D already validated via torch._check_is_size(D) above
-        torch._check(D >= 0)  # This might create a guard that backs D
-        torch._check(q_nope.size(0) >= D)
-        torch._check(q_pe.size(0) >= D)
-        decode_q_nope = q_nope.narrow(0, 0, D)  # First D tokens
-        decode_q_pe = q_pe.narrow(0, 0, D)  # First D tokens
+        # Slice to decode portion only (first num_decode_tokens tokens)
+        torch._check(num_decode_tokens >= 0)
+        torch._check(q_nope.size(0) >= num_decode_tokens)
+        torch._check(q_pe.size(0) >= num_decode_tokens)
+        decode_q_nope = q_nope.narrow(0, 0, num_decode_tokens)
+        decode_q_pe = q_pe.narrow(0, 0, num_decode_tokens)
 
         decode_q_nope = decode_q_nope.view(-1, self.num_heads, self.qk_nope_head_dim)
         decode_q_nope = decode_q_nope.transpose(0, 1)
@@ -1096,8 +1098,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert not fp8_attention, "DCP not support fp8 kvcache now."
             decode_q_final = get_dcp_group().all_gather(decode_q_final, dim=1)
 
-        # Decode attention: returns attn_out and lse directly (zero-copy!)
-        # No pre-allocation needed - eliminates 2 allocations + 2 copies
         attn_out, lse = torch.ops.vllm.mla_attention_decode(
             decode_q_final,
             num_decode_tokens,
@@ -1115,13 +1115,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
             )
 
-        # v_up_proj BMM on full batch (CUDA-graph-safe, functional).
-        # Returns a new tensor so output is only mutated once (by the
-        # merge op below), satisfying auto-functionalization constraints.
-
         decode_result = self._v_up_proj_functional(attn_out)
 
-        # Single cudagraph_unsafe op merges decode[0:D] and prefill[D:B]
+        # Merge prefill and decode.
         torch.ops.vllm.mla_merge_prefill_decode_output(
             decode_result,
             prefill_result,
