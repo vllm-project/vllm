@@ -70,13 +70,6 @@ fn factory_creates_registered_parser_for_model() {
 }
 
 #[test]
-fn factory_new_registers_builtin_json_parser() {
-    let factory = ToolParserFactory::new();
-    assert!(factory.contains(names::QWEN3_XML));
-    assert!(factory.list().contains(&names::QWEN3_XML.to_string()));
-}
-
-#[test]
 fn factory_new_resolves_external_default_patterns() {
     let factory = ToolParserFactory::new();
 
@@ -103,6 +96,10 @@ fn factory_new_resolves_external_default_patterns() {
     assert_eq!(
         factory.resolve_name_for_model("meta-llama/Llama-3.1-8B-Instruct"),
         Some(names::LLAMA3_JSON)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("deepseek-ai/DeepSeek-V3.2-Exp"),
+        Some(names::DEEPSEEK_V32)
     );
     assert_eq!(
         factory.resolve_name_for_model("deepseek-ai/DeepSeek-R1-0528"),

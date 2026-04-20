@@ -7,13 +7,16 @@
 //! first, so later steps can attach adaptor-based implementations and then
 //! gradually replace them with native parsers as needed.
 
+mod deepseek_v32;
 mod external;
 mod gemma4;
 pub(super) mod streaming;
+mod utils;
 
 use std::collections::{BTreeMap, btree_map};
 
 use thiserror::Error;
+use thiserror_ext::Macro;
 
 use crate::parser::ParserFactory;
 use crate::request::{ChatRequest, ChatTool};
@@ -21,6 +24,7 @@ use crate::request::{ChatRequest, ChatTool};
 /// Result alias for tool parser operations.
 pub type Result<T> = std::result::Result<T, ToolParserError>;
 
+pub use deepseek_v32::DeepSeekV32ToolParser;
 pub use external::*;
 pub use gemma4::Gemma4ToolParser;
 
@@ -29,6 +33,7 @@ pub mod names {
     pub const COHERE: &str = "cohere";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V31: &str = "deepseek_v31";
+    pub const DEEPSEEK_V32: &str = "deepseek_v32";
     pub const GLM45: &str = "glm45";
     pub const GLM47: &str = "glm47";
     pub const GEMMA4: &str = "gemma4";
@@ -145,8 +150,10 @@ pub trait ToolParser: Send {
 }
 
 /// Errors produced while creating or running tool parsers.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Macro)]
 pub enum ToolParserError {
+    #[error("tool parser parsing failed: {message}")]
+    ParsingFailed { message: String },
     #[error(transparent)]
     External(#[from] tool_parser::errors::ParserError),
 }
@@ -166,6 +173,7 @@ impl ToolParserFactory {
             .register_parser::<CohereToolParser>(names::COHERE)
             .register_parser::<DeepSeekV3ToolParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV31ToolParser>(names::DEEPSEEK_V31)
+            .register_parser::<DeepSeekV32ToolParser>(names::DEEPSEEK_V32)
             .register_parser::<Glm45MoeToolParser>(names::GLM45)
             .register_parser::<Glm47MoeToolParser>(names::GLM47)
             .register_parser::<Gemma4ToolParser>(names::GEMMA4)
@@ -193,6 +201,7 @@ impl ToolParserFactory {
             .register_pattern("llama-3.1", names::LLAMA3_JSON)
             .register_pattern("llama-", names::JSON)
             .register_pattern("deepseek-r1", names::DEEPSEEK_V3)
+            .register_pattern("deepseek-v3.2", names::DEEPSEEK_V32)
             .register_pattern("deepseek-v3.1", names::DEEPSEEK_V31)
             .register_pattern("deepseek-v3", names::DEEPSEEK_V3)
             .register_pattern("deepseek-", names::PYTHONIC)

@@ -11,6 +11,7 @@ futures-async-stream.workspace = true
 minijinja.workspace = true
 minijinja-contrib.workspace = true
 openai-protocol.workspace = true # TODO: currently only serve as the input format for `tool-parser`
+regex.workspace = true
 serde.workspace = true
 serde-json-fmt.workspace = true
 serde_json.workspace = true

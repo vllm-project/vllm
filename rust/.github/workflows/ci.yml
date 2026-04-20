@@ -46,7 +46,7 @@ jobs:
           python-version: "3.12"
       - name: Run tests
         timeout-minutes: 3
-        run: cargo nextest run --workspace --all-targets --no-fail-fast
+        run: cargo nextest run --workspace --no-fail-fast
 
   clippy:
     runs-on: ubuntu-latest

@@ -4620,6 +4620,7 @@ dependencies = [
  "minijinja",
  "minijinja-contrib",
  "openai-protocol",
+ "regex",
  "rmp-serde",
  "serde",
  "serde-json-fmt",
