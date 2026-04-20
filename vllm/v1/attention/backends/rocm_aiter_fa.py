@@ -1224,21 +1224,23 @@ class AiterFlashAttentionImpl(AttentionImpl):
                             unified_attention,
                         )
 
-                        decode_cu_seqlens_q = (
-                            attn_metadata.decode_metadata.query_start_loc
+                        descale_shape = (
+                            num_decodes,
+                            key_cache.shape[2],
                         )
-                        descale_shape = (num_decodes, key_cache.shape[2])
                         unified_attention(
                             q=query[:num_decode_tokens],
                             k=key_cache,
                             v=value_cache,
                             out=output[:num_decode_tokens],
-                            cu_seqlens_q=decode_cu_seqlens_q,
+                            cu_seqlens_q=attn_metadata.query_start_loc[
+                                : num_decodes + 1
+                            ],
                             max_seqlen_q=decode_max_query_len,
                             seqused_k=attn_metadata.seq_lens[:num_decodes],
                             max_seqlen_k=attn_metadata.max_seq_len,
                             softmax_scale=self.scale,
-                            causal=attn_metadata.causal,
+                            causal=True,
                             alibi_slopes=self.alibi_slopes,
                             window_size=self.sliding_window,
                             block_table=attn_metadata.block_table[:num_decodes],
