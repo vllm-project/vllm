@@ -695,7 +695,7 @@ class CrossDPScheduler(Scheduler):
             """Return the max tokens a request on *cp_ranks* can schedule."""
             if cp_ranks is None:
                 if is_long_seq:
-                    return min(rank_budgets[r] for r in cp_ranks) * cp_size
+                    return min(rank_budgets) * self.cp_world_size
                 else:
                     return max(rank_budgets)
             else:
@@ -979,6 +979,13 @@ class CrossDPScheduler(Scheduler):
                         # If chunked_prefill is disabled,
                         # we can stop the scheduling here.
                         break
+
+                    if num_new_tokens <= 0 and self.waiting.is_long_request(request):
+                        # CP request too large — skip it and keep
+                        # looking for shorter DP requests.
+                        self.waiting.pop_request()
+                        skipped_waiting_requests.prepend_request(request)
+                        continue
 
                     num_new_tokens = min(num_new_tokens, effective_budget)
                     assert num_new_tokens > 0
