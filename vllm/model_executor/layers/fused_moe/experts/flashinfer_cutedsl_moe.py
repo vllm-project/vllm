@@ -26,7 +26,7 @@ from vllm.utils.flashinfer import (
     flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_grouped_gemm_nt_masked,
     has_flashinfer_cutedsl_moe_nvfp4,
-    has_flashinfer_cutedsl_sm12x_moe,
+    has_flashinfer_b12x_moe,
     scaled_fp4_grouped_quantize,
     silu_and_mul_scaled_nvfp4_experts_quantize,
 )
@@ -440,7 +440,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         return (
             p.is_cuda()
             and p.is_device_capability_family(120)
-            and has_flashinfer_cutedsl_sm12x_moe()
+            and has_flashinfer_b12x_moe()
         )
 
     @staticmethod
