@@ -134,8 +134,15 @@ class AttentionSpec(KVCacheSpec):
         Create a new KVCacheSpec from self but replacing the block size.
         """
         if self.page_size_padded is not None:
-            ratio = block_size // self.block_size
-            new_padded = self.page_size_padded * ratio
+            scaled_padded = self.page_size_padded * block_size
+            if scaled_padded % self.block_size != 0:
+                raise ValueError(
+                    "page_size_padded scaling must be divisible by original "
+                    f"block_size: page_size_padded={self.page_size_padded}, "
+                    f"old_block_size={self.block_size}, "
+                    f"new_block_size={block_size}"
+                )
+            new_padded = scaled_padded // self.block_size
             return replace(self, block_size=block_size, page_size_padded=new_padded)
         return super().copy_with_new_block_size(block_size)
 

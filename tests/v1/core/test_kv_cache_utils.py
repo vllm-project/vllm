@@ -177,6 +177,34 @@ def new_mamba_spec(
     )
 
 
+def test_attention_spec_copy_with_new_block_size_scales_padded_page_size():
+    spec = FullAttentionSpec(
+        block_size=32,
+        num_kv_heads=2,
+        head_size=64,
+        dtype=torch.int8,
+        page_size_padded=32 * 1024,
+    )
+
+    new_spec = spec.copy_with_new_block_size(16)
+
+    assert new_spec.block_size == 16
+    assert new_spec.page_size_padded == 16 * 1024
+
+
+def test_attention_spec_copy_with_new_block_size_raises_when_not_divisible():
+    spec = FullAttentionSpec(
+        block_size=10,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.int8,
+        page_size_padded=64,
+    )
+
+    with pytest.raises(ValueError, match="page_size_padded"):
+        spec.copy_with_new_block_size(3)
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_none_hash(monkeypatch, hash_fn):
     import vllm.v1.core.kv_cache_utils

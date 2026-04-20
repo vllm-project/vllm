@@ -191,6 +191,9 @@ from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunne
 from vllm.v1.worker.gpu.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
+from vllm.v1.worker.kv_cache_shape_utils import (
+    maybe_adjust_kv_cache_shape_for_padded_page_size,
+)
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
@@ -6554,37 +6557,36 @@ class GPUModelRunner(
                     )
                     kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
-                    kv_cache_shape = list(
+                    kv_cache_shape = tuple(
                         attn_backend.get_kv_cache_shape(
                             kernel_num_blocks,
                             kernel_block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size,
                             cache_dtype_str=self.cache_config.cache_dtype,
-                        ))
-                    if kv_cache_spec.page_size_padded is not None:
-                        from vllm.utils.torch_utils import get_dtype_size
-                        dtype_size = get_dtype_size(kv_cache_spec.dtype)
-                        num_elements_per_kv_block = (
-                            kv_cache_spec.page_size_padded // dtype_size)
-                        num_elements_per_kernel_block = (
-                            num_elements_per_kv_block //
-                            num_blocks_per_kv_block)
+                        )
+                    )
+                    padded_page_size_bytes = kv_cache_spec.page_size_padded
+                    if (
+                        padded_page_size_bytes is not None
+                        and num_blocks_per_kv_block > 1
+                    ):
+                        if padded_page_size_bytes % num_blocks_per_kv_block != 0:
+                            raise ValueError(
+                                "page_size_padded must be divisible by "
+                                "num_blocks_per_kv_block: "
+                                f"page_size_padded={padded_page_size_bytes}, "
+                                "num_blocks_per_kv_block="
+                                f"{num_blocks_per_kv_block}"
+                            )
+                        padded_page_size_bytes //= num_blocks_per_kv_block
 
-                        # Total elements in one kernel block shape
-                        total_elements_per_kernel_block_shape = 1
-                        for d in kv_cache_shape:
-                            total_elements_per_kernel_block_shape *= d
-                        total_elements_per_kernel_block_shape //= kernel_num_blocks
-
-                        current_last_dim = kv_cache_shape[-1]
-                        head_size_padded = (
-                            num_elements_per_kernel_block //
-                            (total_elements_per_kernel_block_shape //
-                             current_last_dim))
-                        kv_cache_shape[-1] = head_size_padded
-
-                    kv_cache_shape = tuple(kv_cache_shape)
+                    kv_cache_shape = maybe_adjust_kv_cache_shape_for_padded_page_size(
+                        kv_cache_shape=kv_cache_shape,
+                        num_blocks=kernel_num_blocks,
+                        padded_page_size_bytes=padded_page_size_bytes,
+                        dtype=kv_cache_spec.dtype,
+                    )
                     dtype = kv_cache_spec.dtype
                     try:
                         kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()

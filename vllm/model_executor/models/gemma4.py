@@ -433,10 +433,13 @@ class Gemma4Attention(nn.Module):
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Gemma4 has hybrid attention with global (512) and local (256) layers.
-        # Per-token-head quantization adds 4 bytes of scale per head.
+        # With per-token-head KV quantization, each head stores quantized data
+        # plus per-token scale metadata inline, so per-block page-size
+        # contributions differ between local/global layers.
         #  - Local: (256*1)*2 + 8 = 520 bytes
         #  - Global: (512*1)*2 + 8 = 1032 bytes
-        # 1032 is not divisible by 520, so we pad Global to 1040 (520*2).
+        # We pad global to 1040 so hybrid page-size unification can use an
+        # integer ratio. Keep this constant to preserve current Gemma4 behavior.
         kv_cache_page_size_padded = None
         if cache_config is not None and cache_config.cache_dtype in (
                 "int8_per_token_head", "fp8_per_token_head"):

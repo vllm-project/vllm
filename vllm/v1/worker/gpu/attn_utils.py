@@ -20,6 +20,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.worker.kv_cache_shape_utils import (
+    maybe_adjust_kv_cache_shape_for_padded_page_size,
+)
 from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 
@@ -160,50 +163,21 @@ def _reshape_kv_cache(
             num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
             attn_backend = attn_backends[layer_name]
-            kv_cache_shape = list(
+            kv_cache_shape = tuple(
                 attn_backend.get_kv_cache_shape(
                     num_blocks,
                     kv_cache_spec.block_size,
                     kv_cache_spec.num_kv_heads,
                     kv_cache_spec.head_size,
                     cache_dtype,
-                ))
-
-            if kv_cache_spec.page_size_padded is not None:
-                # Re-calculate the last dimension based on the actual
-                # padded page size.
-                # page_size = (product of all dims except last) *
-                #              last_dim * dtype_size
-                # For Triton/FA, the dims are (..., num_kv_heads, padded_head_size)
-                # or similar. The key is that page_size_padded is defined as the
-                # total bytes for ONE block (including all heads and K/V).
-                from vllm.utils.torch_utils import get_dtype_size
-                dtype_size = get_dtype_size(kv_cache_spec.dtype)
-                num_elements = kv_cache_spec.page_size_padded // dtype_size
-                # Divide by all other dimensions in the block
-                # (excluding num_blocks)
-                other_dims_product = 1
-                for d in kv_cache_shape[1:-1]:
-                    other_dims_product *= d
-                # For Triton, it's (num_blocks, 2, block_size, num_kv_heads, last)
-                # product of (2, block_size, num_kv_heads)
-                # For FA, it's (2, num_blocks, block_size, num_kv_heads, last)
-                # We need to be careful about where num_blocks is.
-                
-                # Actually, kv_cache_shape[0] is not always num_blocks (FA has 2 first).
-                # But the total elements in kv_cache_shape (excluding num_blocks)
-                # should match num_elements.
-                total_elements_in_shape = 1
-                for d in kv_cache_shape:
-                    total_elements_in_shape *= d
-                
-                # Correct logic: last_dim = num_elements / (total_elements / last_dim / num_blocks)
-                current_last_dim = kv_cache_shape[-1]
-                elements_per_block = total_elements_in_shape // num_blocks
-                head_size_padded = num_elements // (elements_per_block // current_last_dim)
-                kv_cache_shape[-1] = head_size_padded
-
-            kv_cache_shape = tuple(kv_cache_shape)
+                )
+            )
+            kv_cache_shape = maybe_adjust_kv_cache_shape_for_padded_page_size(
+                kv_cache_shape=kv_cache_shape,
+                num_blocks=num_blocks,
+                padded_page_size_bytes=kv_cache_spec.page_size_padded,
+                dtype=kv_cache_spec.dtype,
+            )
 
             # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
             try:

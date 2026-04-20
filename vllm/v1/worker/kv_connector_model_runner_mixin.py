@@ -24,6 +24,9 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.kv_cache_shape_utils import (
+    maybe_adjust_kv_cache_shape_for_padded_page_size,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -238,12 +241,32 @@ class KVConnectorModelRunnerMixin:
         kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
         attn_backend = attn_group.backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            kernel_num_blocks,
-            kernel_block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
+        kv_cache_shape = tuple(
+            attn_backend.get_kv_cache_shape(
+                kernel_num_blocks,
+                kernel_block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=cache_dtype,
+            )
+        )
+
+        padded_page_size_bytes = kv_cache_spec.page_size_padded
+        if padded_page_size_bytes is not None and num_blocks_per_kv_block > 1:
+            if padded_page_size_bytes % num_blocks_per_kv_block != 0:
+                raise ValueError(
+                    "page_size_padded must be divisible by "
+                    "num_blocks_per_kv_block: "
+                    f"page_size_padded={padded_page_size_bytes}, "
+                    f"num_blocks_per_kv_block={num_blocks_per_kv_block}"
+                )
+            padded_page_size_bytes //= num_blocks_per_kv_block
+
+        kv_cache_shape = maybe_adjust_kv_cache_shape_for_padded_page_size(
+            kv_cache_shape=kv_cache_shape,
+            num_blocks=kernel_num_blocks,
+            padded_page_size_bytes=padded_page_size_bytes,
+            dtype=kv_cache_spec.dtype,
         )
 
         # prepend a num_layers dimension into the shape
