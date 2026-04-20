@@ -12,7 +12,7 @@ import tempfile
 import warnings
 from argparse import Namespace
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 import uvloop
@@ -85,7 +85,10 @@ async def build_async_engine_client(
         # The executor is expected to be mp.
         # Pre-import heavy modules in the forkserver process
         logger.debug("Setup forkserver with pre-imports")
-        multiprocessing.set_start_method("forkserver")
+        # May already have been set by the CLI entry's async prewarm
+        # (vllm/entrypoints/cli/main.py); tolerate re-call.
+        with suppress(RuntimeError):
+            multiprocessing.set_start_method("forkserver", force=False)
         multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
         forkserver.ensure_running()
         logger.debug("Forkserver setup complete!")
