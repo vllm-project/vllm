@@ -2782,6 +2782,7 @@ def swap_blocks_batch(
     src_ptrs: torch.Tensor,
     dst_ptrs: torch.Tensor,
     sizes: torch.Tensor,
+    src_access_order_any: bool = False,
 ) -> None:
     """
     Batch version of swap_blocks: submit all copies in a single driver call.
@@ -2790,8 +2791,17 @@ def swap_blocks_batch(
     of sizes[i] bytes. All three tensors must be int64 CPU tensors.
     On CUDA 12.8+ this uses cuMemcpyBatchAsync for minimal submission
     overhead; on older CUDA it falls back to a loop of cudaMemcpyAsync.
+
+    src_access_order_any: if True, pass CU_MEMCPY_SRC_ACCESS_ORDER_ANY to
+        cuMemcpyBatchAsync, letting the DMA engine prefetch source bytes
+        out of stream order. Only safe when no GPU stream is concurrently
+        writing to the source (e.g. CPU->GPU, where the source is host
+        pinned memory). Defaults to False (STREAM ordering), which is
+        always safe.
     """
-    torch.ops._C_cache_ops.swap_blocks_batch(src_ptrs, dst_ptrs, sizes)
+    torch.ops._C_cache_ops.swap_blocks_batch(
+        src_ptrs, dst_ptrs, sizes, src_access_order_any
+    )
 
 
 def convert_fp8(
