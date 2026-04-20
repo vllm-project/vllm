@@ -62,7 +62,7 @@ def test_supports_batch_invariant_disables():
 
 @patch("vllm.envs.VLLM_BATCH_INVARIANT", False)
 @patch(
-    "vllm.utils.flashinfer.current_platform.is_device_capability",
+    "vllm.utils.flashinfer.current_platform.is_device_capability_family",
     return_value=True,
 )
 @patch("vllm.utils.flashinfer.has_nvidia_artifactory", return_value=True)
