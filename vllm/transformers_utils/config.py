@@ -16,12 +16,6 @@ from huggingface_hub import constants, get_safetensors_metadata
 from packaging.version import Version
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
 from transformers import GenerationConfig, PretrainedConfig
-from transformers.models.auto.image_processing_auto import get_image_processor_config
-from transformers.models.auto.modeling_auto import (
-    MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
-    MODEL_MAPPING_NAMES,
-)
-from transformers.models.auto.tokenization_auto import get_tokenizer_config
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
@@ -722,6 +716,10 @@ def get_config(
 
     # Special architecture mapping check for GGUF models
     if _is_gguf:
+        from transformers.models.auto.modeling_auto import (
+            MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
+        )
+
         if config.model_type not in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES:
             raise RuntimeError(f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
@@ -729,6 +727,8 @@ def get_config(
 
     # Architecture mapping for models without explicit architectures field
     if not config.architectures:
+        from transformers.models.auto.modeling_auto import MODEL_MAPPING_NAMES
+
         if config.model_type not in MODEL_MAPPING_NAMES:
             logger.warning(
                 "Model config does not have a top-level 'architectures' field: "
@@ -1041,6 +1041,10 @@ def get_hf_image_processor_config(
         model = Path(model).parent
     elif is_remote_gguf(model):
         model, _ = split_remote_gguf(model)
+    from transformers.models.auto.image_processing_auto import (
+        get_image_processor_config,
+    )
+
     return get_image_processor_config(
         model, token=hf_token, revision=revision, **kwargs
     )
@@ -1120,6 +1124,8 @@ def try_get_tokenizer_config(
     trust_remote_code: bool,
     revision: str | None = None,
 ) -> dict[str, Any] | None:
+    from transformers.models.auto.tokenization_auto import get_tokenizer_config
+
     try:
         return get_tokenizer_config(
             pretrained_model_name_or_path,
