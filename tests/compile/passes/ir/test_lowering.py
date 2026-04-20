@@ -68,13 +68,8 @@ def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
     return tuple(args)
 
 
-def _make_simple_model(op: IrOp) -> nn.Module:
-    """Create a simple model that calls the op with pre-generated arguments.
-
-    Arguments are created once at model construction time and captured via
-    closure for direct use in forward.
-    """
-    real_args = _make_args_for_op(op, use_fake=False)
+def _make_simple_model(op: IrOp, real_args: tuple) -> nn.Module:
+    """Create a simple model that calls the op with given arguments."""
 
     class SimpleModel(nn.Module):
         def forward(self, x):
@@ -133,7 +128,8 @@ class TestPerOpLowering:
             op.set_priority([provider, "native"]),
             ir.enable_torch_wrap(True),
         ):
-            model = _make_simple_model(op)
+            real_args = _make_args_for_op(op, use_fake=False)
+            model = _make_simple_model(op, real_args)
             x = torch.randn(8, 16, dtype=torch.bfloat16)
             compiled_model = torch.compile(model, backend=backend, fullgraph=True)
             output = compiled_model(x)
@@ -189,7 +185,8 @@ class TestLoweringUnit:
             torch.set_default_device(current_platform.device_type)
 
             with _test_selection_op.set_priority(["bf16_impl", "fp32_impl", "native"]):
-                model = _make_simple_model(_test_selection_op)
+                real_args = _make_args_for_op(_test_selection_op, use_fake=False)
+                model = _make_simple_model(_test_selection_op, real_args)
                 x = torch.randn(8, 16, dtype=torch.bfloat16)
                 compiled = torch.compile(model, backend=backend, fullgraph=True)
                 _ = compiled(x)
@@ -252,7 +249,8 @@ class TestLoweringUnit:
 
             # Set priority WITHOUT native - it will be auto-appended
             with _test_fallback_op.set_priority(["never_matches"]):
-                model = _make_simple_model(_test_fallback_op)
+                real_args = _make_args_for_op(_test_fallback_op, use_fake=False)
+                model = _make_simple_model(_test_fallback_op, real_args)
                 x = torch.randn(8, 16, dtype=torch.bfloat16)
                 compiled = torch.compile(model, backend=backend, fullgraph=True)
                 _ = compiled(x)
@@ -321,9 +319,9 @@ class TestE2ELowering:
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
     def test_e2e_output_consistency(self, op_name, provider, default_vllm_config):
         """
-        Compare lowering pipeline output with no-lowering output to verify
-        correctness. This tests that lowered implementations produce the
-        same results as the native implementation.
+        Compare lowering pipeline output with two baselines:
+        1. ir_enable_torch_wrap=False: implementations traced by Dynamo directly
+        2. No lowering at all: IR ops remain in the Inductor-produced artifact
         """
         op = IrOp.registry[op_name]
 
@@ -333,28 +331,39 @@ class TestE2ELowering:
 
         lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
         backend = TestBackend(lowering_pass)
-        backend_unlowered = TestBackend()
-        model = _make_simple_model(op)
 
         torch.set_default_device(current_platform.device_type)
+        x = torch.randn(8, 16, dtype=torch.bfloat16)
 
-        with (
-            op.set_priority([provider, "native"]),
-            ir.enable_torch_wrap(True),
-        ):
-            x = torch.randn(8, 16, dtype=torch.bfloat16)
+        # Generate real_args once so all models use the same inputs
+        real_args = _make_args_for_op(op, use_fake=False)
 
+        # Case 1: lowering enabled with torch_wrap=True
+        with op.set_priority([provider, "native"]), ir.enable_torch_wrap(True):
+            model = _make_simple_model(op, real_args)
             compiled_model = torch.compile(model, backend=backend, fullgraph=True)
-            compiled_unlowered = torch.compile(
-                model, backend=backend_unlowered, fullgraph=True
-            )
+            output = compiled_model(x.clone())
 
-            try:
-                output = compiled_model(x)
-                output_unlowered = compiled_unlowered(x)
-                torch.testing.assert_close(output_unlowered, output)
-            except Exception as e:
-                pytest.skip(f"E2E test skipped for {op_name}:{provider}: {e}")
+        # Case 2: torch_wrap=False - implementations traced by Dynamo directly
+        backend_no_wrap = TestBackend()
+        with op.set_priority([provider, "native"]), ir.enable_torch_wrap(False):
+            model_no_wrap = _make_simple_model(op, real_args)
+            compiled_no_wrap = torch.compile(
+                model_no_wrap, backend=backend_no_wrap, fullgraph=True
+            )
+            output_no_wrap = compiled_no_wrap(x.clone())
+
+        # Case 3: no lowering at all - IR ops remain in Inductor artifact
+        backend_no_lowering = TestBackend()
+        with op.set_priority([provider, "native"]):
+            model_no_lowering = _make_simple_model(op, real_args)
+            compiled_no_lowering = torch.compile(
+                model_no_lowering, backend=backend_no_lowering, fullgraph=True
+            )
+            output_no_lowering = compiled_no_lowering(x.clone())
+
+        torch.testing.assert_close(output, output_no_wrap)
+        torch.testing.assert_close(output, output_no_lowering)
 
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
     def test_lowering_dispatch_consistency(
@@ -382,7 +391,8 @@ class TestE2ELowering:
 
         torch.set_default_device(current_platform.device_type)
 
-        model = _make_simple_model(op)
+        real_args = _make_args_for_op(op, use_fake=False)
+        model = _make_simple_model(op, real_args)
 
         with (
             op.set_priority([provider, "native"]),
