@@ -65,9 +65,12 @@ class Granite4VisionProcessor(LlavaNextProcessor):
             patches_width = int(patches_width * ds_rate)
 
         unpadded_features, newline_features = self._get_unpadded_features(
-            orig_height, orig_width,
-            patches_height, patches_width,
-            scale_height, scale_width,
+            orig_height,
+            orig_width,
+            patches_height,
+            patches_width,
+            scale_height,
+            scale_width,
         )
         base_features = (
             patches_height * patches_width + self.num_additional_image_tokens

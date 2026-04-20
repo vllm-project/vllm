@@ -54,15 +54,16 @@ class Granite4VisionConfig(transformers.PretrainedConfig):
         self.use_image_newline_parameter = use_image_newline_parameter
         self.deepstack_layer_map = deepstack_layer_map or vision_layer_to_llm_layer
         self.use_spatial_sampling = (
-            use_spatial_sampling if use_checkerboard_sampling is None
+            use_spatial_sampling
+            if use_checkerboard_sampling is None
             else use_checkerboard_sampling
         )
         self.spatial_stride = (
-            spatial_stride if checkerboard_stride is None
-            else checkerboard_stride
+            spatial_stride if checkerboard_stride is None else checkerboard_stride
         )
         self.spatial_vision_layer = (
-            spatial_vision_layer if checkerboard_vision_layer is None
+            spatial_vision_layer
+            if checkerboard_vision_layer is None
             else checkerboard_vision_layer
         )
         self.spatial_target_layers = (
