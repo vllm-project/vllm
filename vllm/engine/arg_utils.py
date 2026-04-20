@@ -1256,13 +1256,6 @@ class EngineArgs:
             **compilation_kwargs["max_cudagraph_capture_size"],
         )
 
-        # For cp tokens, the max number of cp tokens in a batch.
-        compilation_group.add_argument(
-            "--cudagraph-capture-sizes-for-cp",
-            "-cccp",
-            **compilation_kwargs["cudagraph_capture_sizes_for_cp"],
-        )
-
         # Kernel arguments
         kernel_kwargs = get_kwargs(KernelConfig)
         kernel_group = parser.add_argument_group(
@@ -2158,7 +2151,6 @@ class EngineArgs:
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
-        # self.enable_chunked_prefill = False   # TODO(wangxiaochao): need to support chunkPrefill
 
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
