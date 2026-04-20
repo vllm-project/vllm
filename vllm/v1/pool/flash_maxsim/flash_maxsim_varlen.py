@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flash-MaxSim with variable-length sequences (no padding).
 
 Inspired by flash_attn_varlen_func: sequences packed contiguously,
@@ -21,6 +23,7 @@ from .flash_maxsim import _get_configs, _next_pow2, _prune_configs
 # Varlen kernel: one program per pair, uses cu_seqlens for boundaries
 # ---------------------------------------------------------------------------
 
+
 def _round_to_bucket(x):
     """Round up to nearest bucket: 32, 64, 128, 256, 512, 1024, 2048, 4096."""
     for b in [32, 64, 128, 256, 512, 1024, 2048, 4096]:
@@ -36,13 +39,22 @@ def _round_to_bucket(x):
 )
 @triton.jit
 def _maxsim_varlen_kernel(
-    Q_ptr, D_ptr, cu_q_ptr, cu_d_ptr, scores_ptr,
+    Q_ptr,
+    D_ptr,
+    cu_q_ptr,
+    cu_d_ptr,
+    scores_ptr,
     N: tl.constexpr,
-    max_Lq_bucket: tl.constexpr, max_Ld_bucket: tl.constexpr,
-    d: tl.constexpr, d_pad: tl.constexpr,
-    stride_q_t, stride_q_d,
-    stride_d_t, stride_d_d,
-    BLOCK_Q: tl.constexpr, BLOCK_D: tl.constexpr,
+    max_Lq_bucket: tl.constexpr,
+    max_Ld_bucket: tl.constexpr,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_q_t,
+    stride_q_d,
+    stride_d_t,
+    stride_d_d,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_D: tl.constexpr,
 ):
     """One program per pair. Q and D packed contiguously."""
     pid = tl.program_id(0)
@@ -68,12 +80,15 @@ def _maxsim_varlen_kernel(
         q_off = q_blk + tl.arange(0, BLOCK_Q)
         q_valid = q_off < q_len
 
-        Q_ptrs = (Q_ptr
-                  + (q_start + q_off[:, None]) * stride_q_t
-                  + k_off[None, :] * stride_q_d)
+        Q_ptrs = (
+            Q_ptr
+            + (q_start + q_off[:, None]) * stride_q_t
+            + k_off[None, :] * stride_q_d
+        )
         Q_block = tl.load(
             Q_ptrs,
-            mask=q_valid[:, None] & k_mask[None, :], other=0.0,
+            mask=q_valid[:, None] & k_mask[None, :],
+            other=0.0,
         ).to(tl.float16)
 
         m = tl.full([BLOCK_Q], float("-inf"), dtype=tl.float32)
@@ -82,12 +97,15 @@ def _maxsim_varlen_kernel(
             d_off = d_blk + tl.arange(0, BLOCK_D)
             d_valid = d_off < d_len
 
-            D_ptrs = (D_ptr
-                      + (d_start + d_off[:, None]) * stride_d_t
-                      + k_off[None, :] * stride_d_d)
+            D_ptrs = (
+                D_ptr
+                + (d_start + d_off[:, None]) * stride_d_t
+                + k_off[None, :] * stride_d_d
+            )
             D_block = tl.load(
                 D_ptrs,
-                mask=d_valid[:, None] & k_mask[None, :], other=0.0,
+                mask=d_valid[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float16)
 
             S = tl.dot(Q_block, tl.trans(D_block))
@@ -104,19 +122,33 @@ def _maxsim_varlen_kernel(
 # Shared-Q + packed-D kernel: one query scored against B variable-length docs
 # ---------------------------------------------------------------------------
 
-@triton.autotune(configs=_get_configs(), key=["Lq_bucket", "d_pad"],
-                 prune_configs_by={"early_config_prune": _prune_configs})
+
+@triton.autotune(
+    configs=_get_configs(),
+    key=["Lq_bucket", "d_pad"],
+    prune_configs_by={"early_config_prune": _prune_configs},
+)
 @triton.jit
 def _maxsim_packed_kernel(
-    Q_ptr, D_ptr, cu_d_ptr, scores_ptr,
-    Nq, B,
+    Q_ptr,
+    D_ptr,
+    cu_d_ptr,
+    scores_ptr,
+    Nq,
+    B,
     Lq_bucket: tl.constexpr,
     Lq,
-    d: tl.constexpr, d_pad: tl.constexpr,
-    stride_q_n, stride_q_l, stride_q_d,
-    stride_d_t, stride_d_d,
-    stride_s_n, stride_s_b,
-    BLOCK_Q: tl.constexpr, BLOCK_D: tl.constexpr,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_q_n,
+    stride_q_l,
+    stride_q_d,
+    stride_d_t,
+    stride_d_d,
+    stride_s_n,
+    stride_s_b,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_D: tl.constexpr,
 ):
     """One program per (q_chunk, doc) pair. Q batched, D packed."""
     pid = tl.program_id(0)
@@ -137,12 +169,16 @@ def _maxsim_packed_kernel(
         q_off = q_start + tl.arange(0, BLOCK_Q)
         q_valid = q_off < Lq
 
-        Q_ptrs = (Q_ptr + q_idx * stride_q_n
-                  + q_off[:, None] * stride_q_l
-                  + k_off[None, :] * stride_q_d)
+        Q_ptrs = (
+            Q_ptr
+            + q_idx * stride_q_n
+            + q_off[:, None] * stride_q_l
+            + k_off[None, :] * stride_q_d
+        )
         Q_block = tl.load(
             Q_ptrs,
-            mask=q_valid[:, None] & k_mask[None, :], other=0.0,
+            mask=q_valid[:, None] & k_mask[None, :],
+            other=0.0,
         ).to(tl.float16)
 
         m = tl.full([BLOCK_Q], float("-inf"), dtype=tl.float32)
@@ -153,12 +189,15 @@ def _maxsim_packed_kernel(
             d_off = d_blk + tl.arange(0, BLOCK_D)
             d_valid = d_off < doc_len
 
-            D_ptrs = (D_ptr
-                      + (d_start + d_off)[:, None] * stride_d_t
-                      + k_off[None, :] * stride_d_d)
+            D_ptrs = (
+                D_ptr
+                + (d_start + d_off)[:, None] * stride_d_t
+                + k_off[None, :] * stride_d_d
+            )
             D_block = tl.load(
                 D_ptrs,
-                mask=d_valid[:, None] & k_mask[None, :], other=0.0,
+                mask=d_valid[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float16)
 
             S = tl.dot(Q_block, tl.trans(D_block))
@@ -174,6 +213,7 @@ def _maxsim_packed_kernel(
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def flash_maxsim_packed(
     Q: torch.Tensor,
@@ -228,8 +268,10 @@ def flash_maxsim_packed(
         Q_pad = torch.zeros(Nq, actual_Lq, d_pad, device=Q.device, dtype=Q.dtype)
         Q_pad[:, :, :d] = Q_chunked
         D_pad = torch.zeros(
-            D_packed.shape[0], d_pad,
-            device=D_packed.device, dtype=D_packed.dtype,
+            D_packed.shape[0],
+            d_pad,
+            device=D_packed.device,
+            dtype=D_packed.dtype,
         )
         D_pad[:, :d] = D_packed
     else:
@@ -239,11 +281,23 @@ def flash_maxsim_packed(
     lq_bucket = _round_to_bucket(actual_Lq)
 
     _maxsim_packed_kernel[(Nq * B,)](
-        Q_pad, D_pad, cu_seqlens_d, scores,
-        Nq, B, lq_bucket, actual_Lq, d, d_pad,
-        Q_pad.stride(0), Q_pad.stride(1), Q_pad.stride(2),
-        D_pad.stride(0), D_pad.stride(1),
-        scores.stride(0), scores.stride(1),
+        Q_pad,
+        D_pad,
+        cu_seqlens_d,
+        scores,
+        Nq,
+        B,
+        lq_bucket,
+        actual_Lq,
+        d,
+        d_pad,
+        Q_pad.stride(0),
+        Q_pad.stride(1),
+        Q_pad.stride(2),
+        D_pad.stride(0),
+        D_pad.stride(1),
+        scores.stride(0),
+        scores.stride(1),
     )
     return scores.squeeze(0) if Nq == 1 else scores.sum(dim=0)  # [Nq, B] -> [B]
 
@@ -307,13 +361,17 @@ def flash_maxsim_varlen(
     # Pad Q/D to d_pad if needed
     if d < d_pad:
         Q_pad = torch.zeros(
-            Q_packed.shape[0], d_pad,
-            device=Q_packed.device, dtype=Q_packed.dtype,
+            Q_packed.shape[0],
+            d_pad,
+            device=Q_packed.device,
+            dtype=Q_packed.dtype,
         )
         Q_pad[:, :d] = Q_packed
         D_pad = torch.zeros(
-            D_packed.shape[0], d_pad,
-            device=D_packed.device, dtype=D_packed.dtype,
+            D_packed.shape[0],
+            d_pad,
+            device=D_packed.device,
+            dtype=D_packed.dtype,
         )
         D_pad[:, :d] = D_packed
     else:
@@ -326,10 +384,20 @@ def flash_maxsim_varlen(
     max_ld_bucket = _round_to_bucket(max_seqlen_d)
 
     _maxsim_varlen_kernel[(N,)](
-        Q_pad, D_pad, cu_seqlens_q, cu_seqlens_d, scores,
-        N, max_lq_bucket, max_ld_bucket, d, d_pad,
-        Q_pad.stride(0), Q_pad.stride(1),
-        D_pad.stride(0), D_pad.stride(1),
+        Q_pad,
+        D_pad,
+        cu_seqlens_q,
+        cu_seqlens_d,
+        scores,
+        N,
+        max_lq_bucket,
+        max_ld_bucket,
+        d,
+        d_pad,
+        Q_pad.stride(0),
+        Q_pad.stride(1),
+        D_pad.stride(0),
+        D_pad.stride(1),
     )
     return scores
 

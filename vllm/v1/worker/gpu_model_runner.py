@@ -3151,8 +3151,8 @@ class GPUModelRunner(
         use_zerocopy = (
             self.late_interaction_runner.has_pending_docs
             and not os.environ.get("VLLM_DISABLE_ZEROCOPY")
-            and hasattr(model.pooler, 'head')
-            and hasattr(model.pooler.head, 'project_batch')
+            and hasattr(model.pooler, "head")
+            and hasattr(model.pooler.head, "project_batch")
             and cursor is not None
             and not cursor.is_partial_prefill()
         )
@@ -3162,10 +3162,11 @@ class GPUModelRunner(
             # project_batch (no matryoshka truncation, activation on).
             for p in pooling_metadata.pooling_params:
                 lip = p.late_interaction_params
-                if (lip is not None
-                        and lip.mode == LATE_INTERACTION_MODE_SCORE_DOC
-                        and (p.dimensions is not None
-                             or p.use_activation is False)):
+                if (
+                    lip is not None
+                    and lip.mode == LATE_INTERACTION_MODE_SCORE_DOC
+                    and (p.dimensions is not None or p.use_activation is False)
+                ):
                     use_zerocopy = False
                     break
 
@@ -3185,15 +3186,15 @@ class GPUModelRunner(
             zerocopy_output: list[torch.Tensor | None] = []
             for i in range(num_reqs):
                 lip = params_list[i].late_interaction_params
-                if (lip is not None
-                        and lip.mode == LATE_INTERACTION_MODE_SCORE_DOC):
+                if lip is not None and lip.mode == LATE_INTERACTION_MODE_SCORE_DOC:
                     # View into projected_batch — no copy, no extra alloc
-                    zerocopy_output.append(
-                        projected_batch[firsts[i]:lasts[i] + 1])
+                    zerocopy_output.append(projected_batch[firsts[i] : lasts[i] + 1])
                 else:
                     zerocopy_output.append(
                         pooler.head.forward_chunk(  # type: ignore[operator,union-attr]
-                            pooled_data[i], params_list[i]))
+                            pooled_data[i], params_list[i]
+                        )
+                    )
             raw_pooler_output: PoolerOutput = zerocopy_output
             # Release AllPool views so hidden_states can be freed.
             # forward_chunk results are independent tensors; doc entries

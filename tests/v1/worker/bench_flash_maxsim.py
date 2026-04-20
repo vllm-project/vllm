@@ -9,6 +9,7 @@ Three levels of comparison:
   2. API-level: compute_maxsim_score_batched (includes stacking overhead)
   3. Zero-copy: flash_maxsim_rerank_direct (0 bytes doc memory)
 """
+
 import time
 
 import torch
@@ -59,8 +60,7 @@ def benchmark_kernel():
     print("=" * 70)
     print("  KERNEL: flash_maxsim vs vanilla bmm (docs pre-stacked)")
     print("=" * 70)
-    print(f"{'Config':>30} {'Vanilla (ms)':>14} {'Flash (ms)':>14} "
-          f"{'Speedup':>10}")
+    print(f"{'Config':>30} {'Vanilla (ms)':>14} {'Flash (ms)':>14} {'Speedup':>10}")
     print("-" * 70)
 
     configs = [
@@ -81,8 +81,7 @@ def benchmark_kernel():
         t_flash = _time_fn(flash_maxsim, Q, D) * 1000
         speedup = t_vanilla / t_flash if t_flash > 0 else float("inf")
 
-        print(f"{label:>30} {t_vanilla:>13.2f} {t_flash:>13.2f} "
-              f"{speedup:>9.1f}x")
+        print(f"{label:>30} {t_vanilla:>13.2f} {t_flash:>13.2f} {speedup:>9.1f}x")
 
 
 def benchmark_api():
@@ -91,8 +90,7 @@ def benchmark_api():
     print("=" * 70)
     print("  API: compute_maxsim_score_batched (1 query vs N docs)")
     print("=" * 70)
-    print(f"{'Config':>30} {'Vanilla (ms)':>14} {'Flash (ms)':>14} "
-          f"{'Speedup':>10}")
+    print(f"{'Config':>30} {'Vanilla (ms)':>14} {'Flash (ms)':>14} {'Speedup':>10}")
     print("-" * 70)
 
     for n, lq, ld, dim, label in [
@@ -104,17 +102,15 @@ def benchmark_api():
     ]:
         query = torch.randn(lq, dim, device="cuda", dtype=torch.float16)
         qs = [query] * n
-        ds = [torch.randn(ld, dim, device="cuda", dtype=torch.float16)
-              for _ in range(n)]
+        ds = [
+            torch.randn(ld, dim, device="cuda", dtype=torch.float16) for _ in range(n)
+        ]
 
-        t_vanilla = _time_fn(
-            _vanilla_compute_maxsim_score_batched, qs, ds
-        ) * 1000
+        t_vanilla = _time_fn(_vanilla_compute_maxsim_score_batched, qs, ds) * 1000
         t_flash = _time_fn(compute_maxsim_score_batched, qs, ds) * 1000
         speedup = t_vanilla / t_flash if t_flash > 0 else float("inf")
 
-        print(f"{label:>30} {t_vanilla:>13.2f} {t_flash:>13.2f} "
-              f"{speedup:>9.1f}x")
+        print(f"{label:>30} {t_vanilla:>13.2f} {t_flash:>13.2f} {speedup:>9.1f}x")
 
 
 def benchmark_memory():
@@ -123,8 +119,7 @@ def benchmark_memory():
     print("=" * 70)
     print("  MEMORY: kernel-level (Lq=128, Ld=1024, d=128)")
     print("=" * 70)
-    print(f"{'B':>10} {'Vanilla (MB)':>14} {'Flash (MB)':>14} "
-          f"{'Saved (MB)':>12}")
+    print(f"{'B':>10} {'Vanilla (MB)':>14} {'Flash (MB)':>14} {'Saved (MB)':>12}")
     print("-" * 52)
 
     for B in [64, 256, 1000, 5000]:
@@ -141,8 +136,10 @@ def benchmark_memory():
         flash_maxsim(Q, D)
         mem_flash = (torch.accelerator.max_memory_allocated() - base) / 1e6
 
-        print(f"{B:>10} {mem_vanilla:>13.1f} {mem_flash:>13.1f} "
-              f"{mem_vanilla - mem_flash:>11.1f}")
+        print(
+            f"{B:>10} {mem_vanilla:>13.1f} {mem_flash:>13.1f} "
+            f"{mem_vanilla - mem_flash:>11.1f}"
+        )
 
 
 def benchmark_zerocopy():
@@ -155,8 +152,7 @@ def benchmark_zerocopy():
     print("=" * 70)
     print("  ZERO-COPY: flash_maxsim_rerank_direct")
     print("=" * 70)
-    print(f"{'B':>10} {'Vanilla (MB)':>14} {'Zero-copy (MB)':>16} "
-          f"{'Time (ms)':>12}")
+    print(f"{'B':>10} {'Vanilla (MB)':>14} {'Zero-copy (MB)':>16} {'Time (ms)':>12}")
     print("-" * 55)
 
     Lq, dim = 128, 128
@@ -169,12 +165,8 @@ def benchmark_zerocopy():
         batch_tensor = torch.randn(
             total_tokens, dim, device="cuda", dtype=torch.float16
         )
-        offsets = torch.arange(
-            0, total_tokens, Ld, device="cuda", dtype=torch.int32
-        )
-        lengths = torch.full(
-            (B,), Ld, device="cuda", dtype=torch.int32
-        )
+        offsets = torch.arange(0, total_tokens, Ld, device="cuda", dtype=torch.int32)
+        lengths = torch.full((B,), Ld, device="cuda", dtype=torch.int32)
 
         # Vanilla memory: would need to stack [B, Ld, d]
         vanilla_doc_mem = B * Ld * dim * 4 / 1e6  # fp32
@@ -182,13 +174,13 @@ def benchmark_zerocopy():
         # Zero-copy: 0 extra bytes for docs
         torch.accelerator.reset_peak_memory_stats()
         base = torch.accelerator.memory_allocated()
-        t = _time_fn(
-            flash_maxsim_rerank_direct, Q, batch_tensor, offsets, lengths, Ld
-        ) * 1000
+        t = (
+            _time_fn(flash_maxsim_rerank_direct, Q, batch_tensor, offsets, lengths, Ld)
+            * 1000
+        )
         zerocopy_mem = (torch.accelerator.max_memory_allocated() - base) / 1e6
 
-        print(f"{B:>10} {vanilla_doc_mem:>13.1f} {zerocopy_mem:>15.1f} "
-              f"{t:>11.2f}")
+        print(f"{B:>10} {vanilla_doc_mem:>13.1f} {zerocopy_mem:>15.1f} {t:>11.2f}")
 
 
 def benchmark_correctness():
@@ -217,7 +209,7 @@ def benchmark_correctness():
     lens = torch.tensor([80, 120, 100], device="cuda", dtype=torch.int32)
     scores = flash_maxsim_rerank_direct(Q, batch, offs, lens, 120)
     for i in range(3):
-        doc = batch[offs[i]:offs[i]+lens[i]].unsqueeze(0)
+        doc = batch[offs[i] : offs[i] + lens[i]].unsqueeze(0)
         ref = _vanilla_bmm_maxsim(Q, doc)
         err = abs(scores[i].item() - ref.item())
         assert err < 1.0, f"zero-copy doc {i}: err={err}"

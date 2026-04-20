@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Fused Triton kernels for ColBERT/ColPali MaxSim scoring."""
 
 import torch
@@ -8,9 +10,11 @@ from vllm.triton_utils import tl, triton
 def _next_pow2(x):
     return 1 << (x - 1).bit_length()
 
+
 # ---------------------------------------------------------------------------
 # Hardware-aware autotune configs
 # ---------------------------------------------------------------------------
+
 
 def _detect_gpu():
     """Detect GPU architecture family via compute capability.
@@ -28,16 +32,16 @@ def _detect_gpu():
         return "generic"
     major, minor = torch.cuda.get_device_capability()
     if major == 9:
-        return "hopper"       # sm_90: H100, H200
+        return "hopper"  # sm_90: H100, H200
     if major >= 10:
-        return "blackwell"    # sm_100+: B200, RTX 5090, etc.
+        return "blackwell"  # sm_100+: B200, RTX 5090, etc.
     if major == 8:
         if minor == 0:
-            return "a100"     # sm_80: A100
+            return "a100"  # sm_80: A100
         if minor >= 9:
-            return "ada"      # sm_89: RTX 4090, L40S
-        return "ampere"       # sm_86: RTX 3090, A10, A40
-    return "generic"          # V100 (sm_70), T4 (sm_75), etc.
+            return "ada"  # sm_89: RTX 4090, L40S
+        return "ampere"  # sm_86: RTX 3090, A10, A40
+    return "generic"  # V100 (sm_70), T4 (sm_75), etc.
 
 
 def _get_configs(gpu=None):
@@ -140,16 +144,30 @@ _CONFIGS = _get_configs()
 # Fixed-config kernel for small inputs (no autotune overhead)
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def _maxsim_fwd_kernel_small(
-    Q_ptr, D_ptr, lengths_ptr, scores_ptr,
-    Nq, B,
-    Lq: tl.constexpr, Ld, d: tl.constexpr, d_pad: tl.constexpr,
-    stride_q_n, stride_q_l, stride_q_d,
-    stride_d_b, stride_d_l, stride_d_d,
-    stride_s_n, stride_s_b,
+    Q_ptr,
+    D_ptr,
+    lengths_ptr,
+    scores_ptr,
+    Nq,
+    B,
+    Lq: tl.constexpr,
+    Ld,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_q_n,
+    stride_q_l,
+    stride_q_d,
+    stride_d_b,
+    stride_d_l,
+    stride_d_d,
+    stride_s_n,
+    stride_s_b,
     shared_docs: tl.constexpr,
-    BLOCK_Q: tl.constexpr = 32, BLOCK_D: tl.constexpr = 64,
+    BLOCK_Q: tl.constexpr = 32,
+    BLOCK_D: tl.constexpr = 64,
 ):
     pid = tl.program_id(0)
     if shared_docs:
@@ -174,12 +192,16 @@ def _maxsim_fwd_kernel_small(
         q_off = q_start + tl.arange(0, BLOCK_Q)
         q_valid = q_off < Lq
 
-        Q_ptrs = (Q_ptr + q_idx * stride_q_n
-                  + q_off[:, None] * stride_q_l
-                  + k_off[None, :] * stride_q_d)
+        Q_ptrs = (
+            Q_ptr
+            + q_idx * stride_q_n
+            + q_off[:, None] * stride_q_l
+            + k_off[None, :] * stride_q_d
+        )
         Q_block = tl.load(
             Q_ptrs,
-            mask=q_valid[:, None] & k_mask[None, :], other=0.0,
+            mask=q_valid[:, None] & k_mask[None, :],
+            other=0.0,
         ).to(tl.float16)
 
         m = tl.full([BLOCK_Q], float("-inf"), dtype=tl.float32)
@@ -188,12 +210,16 @@ def _maxsim_fwd_kernel_small(
             d_off = d_start + tl.arange(0, BLOCK_D)
             d_valid = d_off < doc_len
 
-            D_ptrs = (D_ptr + d_batch * stride_d_b
-                      + d_off[:, None] * stride_d_l
-                      + k_off[None, :] * stride_d_d)
+            D_ptrs = (
+                D_ptr
+                + d_batch * stride_d_b
+                + d_off[:, None] * stride_d_l
+                + k_off[None, :] * stride_d_d
+            )
             D_block = tl.load(
                 D_ptrs,
-                mask=d_valid[:, None] & k_mask[None, :], other=0.0,
+                mask=d_valid[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float16)
 
             S = tl.dot(Q_block, tl.trans(D_block))
@@ -214,20 +240,39 @@ _SMALL_THRESHOLD = 500_000
 # Unified forward kernel (single-query & batched)
 # ---------------------------------------------------------------------------
 
-@triton.autotune(configs=_CONFIGS, key=["Lq", "d_pad"],
-                 prune_configs_by={"early_config_prune": _prune_configs})
+
+@triton.autotune(
+    configs=_CONFIGS,
+    key=["Lq", "d_pad"],
+    prune_configs_by={"early_config_prune": _prune_configs},
+)
 @triton.jit
 def _maxsim_fwd_kernel(
-    Q_ptr, D_ptr, lengths_ptr, q_lengths_ptr, scores_ptr, argmax_ptr,
-    Nq, B,
-    Lq: tl.constexpr, Ld, d: tl.constexpr, d_pad: tl.constexpr,
-    stride_q_n, stride_q_l, stride_q_d,
-    stride_d_b, stride_d_l, stride_d_d,
-    stride_s_n, stride_s_b,
+    Q_ptr,
+    D_ptr,
+    lengths_ptr,
+    q_lengths_ptr,
+    scores_ptr,
+    argmax_ptr,
+    Nq,
+    B,
+    Lq: tl.constexpr,
+    Ld,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_q_n,
+    stride_q_l,
+    stride_q_d,
+    stride_d_b,
+    stride_d_l,
+    stride_d_d,
+    stride_s_n,
+    stride_s_b,
     shared_docs: tl.constexpr,
     save_argmax: tl.constexpr,
     use_q_lengths: tl.constexpr,
-    BLOCK_Q: tl.constexpr, BLOCK_D: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_D: tl.constexpr,
 ):
     pid = tl.program_id(0)
     # Grid mapping: when shared_docs, use doc-major order so consecutive CTAs
@@ -257,12 +302,16 @@ def _maxsim_fwd_kernel(
         q_off = q_start + tl.arange(0, BLOCK_Q)
         q_valid = q_off < q_len
 
-        Q_ptrs = (Q_ptr + q_idx * stride_q_n
-                  + q_off[:, None] * stride_q_l
-                  + k_off[None, :] * stride_q_d)
+        Q_ptrs = (
+            Q_ptr
+            + q_idx * stride_q_n
+            + q_off[:, None] * stride_q_l
+            + k_off[None, :] * stride_q_d
+        )
         Q_block = tl.load(
             Q_ptrs,
-            mask=q_valid[:, None] & k_mask[None, :], other=0.0,
+            mask=q_valid[:, None] & k_mask[None, :],
+            other=0.0,
         ).to(tl.float16)
 
         m = tl.full([BLOCK_Q], float("-inf"), dtype=tl.float32)
@@ -272,12 +321,16 @@ def _maxsim_fwd_kernel(
             d_off = d_start + tl.arange(0, BLOCK_D)
             d_valid = d_off < doc_len
 
-            D_ptrs = (D_ptr + d_batch * stride_d_b
-                      + d_off[:, None] * stride_d_l
-                      + k_off[None, :] * stride_d_d)
+            D_ptrs = (
+                D_ptr
+                + d_batch * stride_d_b
+                + d_off[:, None] * stride_d_l
+                + k_off[None, :] * stride_d_d
+            )
             D_block = tl.load(
                 D_ptrs,
-                mask=d_valid[:, None] & k_mask[None, :], other=0.0,
+                mask=d_valid[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float16)
 
             S = tl.dot(Q_block, tl.trans(D_block))
@@ -295,7 +348,9 @@ def _maxsim_fwd_kernel(
 
         if save_argmax:
             tl.store(
-                argmax_ptr + pid * Lq + q_off, m_idx, mask=q_valid,
+                argmax_ptr + pid * Lq + q_off,
+                m_idx,
+                mask=q_valid,
             )
 
     tl.store(scores_ptr + q_idx * stride_s_n + doc_idx * stride_s_b, score_acc)
@@ -305,11 +360,20 @@ def _maxsim_fwd_kernel(
 # Backward kernels for training
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def _maxsim_bwd_dQ_kernel(
-    D_ptr, argmax_ptr, grad_s_ptr, grad_Q_ptr,
-    B: tl.constexpr, Lq: tl.constexpr, d: tl.constexpr, d_pad: tl.constexpr,
-    stride_d_b, stride_d_l, stride_d_d,
+    D_ptr,
+    argmax_ptr,
+    grad_s_ptr,
+    grad_Q_ptr,
+    B: tl.constexpr,
+    Lq: tl.constexpr,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_d_b,
+    stride_d_l,
+    stride_d_d,
 ):
     q_idx = tl.program_id(0)
     k = tl.arange(0, d_pad)
@@ -326,10 +390,19 @@ def _maxsim_bwd_dQ_kernel(
 
 @triton.jit
 def _maxsim_bwd_dD_kernel(
-    Q_ptr, argmax_ptr, grad_s_ptr, grad_D_ptr,
-    Lq: tl.constexpr, Ld, d: tl.constexpr, d_pad: tl.constexpr,
-    stride_d_b, stride_d_l, stride_d_d,
-    stride_q_l, stride_q_d,
+    Q_ptr,
+    argmax_ptr,
+    grad_s_ptr,
+    grad_D_ptr,
+    Lq: tl.constexpr,
+    Ld,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_d_b,
+    stride_d_l,
+    stride_d_d,
+    stride_q_l,
+    stride_q_d,
 ):
     doc_id = tl.program_id(0)
     k = tl.arange(0, d_pad)
@@ -341,7 +414,8 @@ def _maxsim_bwd_dD_kernel(
         qv = tl.load(qv_ptrs, mask=km, other=0.0).to(tl.float32)
         tl.atomic_add(
             grad_D_ptr + doc_id * stride_d_b + j * stride_d_l + k * stride_d_d,
-            (gs * qv).to(tl.float16), mask=km,
+            (gs * qv).to(tl.float16),
+            mask=km,
         )
 
 
@@ -349,14 +423,28 @@ def _maxsim_bwd_dD_kernel(
 # Helper: launch the unified kernel
 # ---------------------------------------------------------------------------
 
+
 def _launch_fwd(
-    Q, D, lengths, Nq, B, Lq, Ld, d, shared_docs, save_argmax, q_lengths=None,
+    Q,
+    D,
+    lengths,
+    Nq,
+    B,
+    Lq,
+    Ld,
+    d,
+    shared_docs,
+    save_argmax,
+    q_lengths=None,
 ):
     d_pad = _next_pow2(d)
     scores = torch.empty(Nq, B, device=Q.device, dtype=torch.float32)
     if save_argmax:
         argmax = torch.empty(
-            Nq * B, Lq, device=Q.device, dtype=torch.int32,
+            Nq * B,
+            Lq,
+            device=Q.device,
+            dtype=torch.int32,
         )
     else:
         argmax = Q  # dummy
@@ -368,21 +456,49 @@ def _launch_fwd(
     # Skip for large d — fixed block sizes exceed shared memory
     if not save_argmax and Nq * B < 500 and d <= 512:
         _maxsim_fwd_kernel_small[(Nq * B,)](
-            Q, D, lengths, scores,
-            Nq, B, Lq, Ld, d, d_pad,
-            Q.stride(-3) if Q.dim() == 3 else 0, Q.stride(-2), Q.stride(-1),
-            D.stride(0), D.stride(1), D.stride(2),
-            scores.stride(0), scores.stride(1),
+            Q,
+            D,
+            lengths,
+            scores,
+            Nq,
+            B,
+            Lq,
+            Ld,
+            d,
+            d_pad,
+            Q.stride(-3) if Q.dim() == 3 else 0,
+            Q.stride(-2),
+            Q.stride(-1),
+            D.stride(0),
+            D.stride(1),
+            D.stride(2),
+            scores.stride(0),
+            scores.stride(1),
             1 if shared_docs else 0,
         )
         return scores, argmax
 
     _maxsim_fwd_kernel[(Nq * B,)](
-        Q, D, lengths, q_lengths_t, scores, argmax,
-        Nq, B, Lq, Ld, d, d_pad,
-        Q.stride(-3) if Q.dim() == 3 else 0, Q.stride(-2), Q.stride(-1),
-        D.stride(0), D.stride(1), D.stride(2),
-        scores.stride(0), scores.stride(1),
+        Q,
+        D,
+        lengths,
+        q_lengths_t,
+        scores,
+        argmax,
+        Nq,
+        B,
+        Lq,
+        Ld,
+        d,
+        d_pad,
+        Q.stride(-3) if Q.dim() == 3 else 0,
+        Q.stride(-2),
+        Q.stride(-1),
+        D.stride(0),
+        D.stride(1),
+        D.stride(2),
+        scores.stride(0),
+        scores.stride(1),
         1 if shared_docs else 0,
         1 if save_argmax else 0,
         1 if use_q_lengths else 0,
@@ -400,9 +516,14 @@ def _default_lengths(B, Ld, device, doc_lengths=None):
 # Public API
 # ---------------------------------------------------------------------------
 
-def flash_maxsim(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
-                 query_chunk_size: int | None = 128,
-                 splitk: bool = False) -> torch.Tensor:
+
+def flash_maxsim(
+    Q: torch.Tensor,
+    D: torch.Tensor,
+    doc_lengths=None,
+    query_chunk_size: int | None = 128,
+    splitk: bool = False,
+) -> torch.Tensor:
     """Compute MaxSim scores.
 
     Supports two D layouts:
@@ -429,9 +550,11 @@ def flash_maxsim(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
 
     # Packed D path: D is [total_d, d], doc_lengths is cu_seqlens [B+1]
     if D.dim() == 2:
-        assert doc_lengths is not None, \
+        assert doc_lengths is not None, (
             "Packed D [total_d, d] requires doc_lengths as cu_seqlens [B+1]"
+        )
         from .flash_maxsim_varlen import flash_maxsim_packed
+
         return flash_maxsim_packed(Q, D, doc_lengths)
 
     assert D.dim() == 3 and Q.shape[1] == D.shape[2]
@@ -440,6 +563,7 @@ def flash_maxsim(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
 
     if splitk:
         from .flash_maxsim_advanced import flash_maxsim_splitk
+
         ns = min(Ld // 128, 16)
         ns = max(ns, 1)
         return flash_maxsim_splitk(Q, D, doc_lengths, num_splits=ns)
@@ -459,8 +583,11 @@ def flash_maxsim(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
         if Lq % C != 0:
             q_lengths[-1] = Lq % C
         return flash_maxsim_batched(
-            Q_chunked, D, doc_lengths=doc_lengths,
-            shared_docs=True, query_lengths=q_lengths,
+            Q_chunked,
+            D,
+            doc_lengths=doc_lengths,
+            shared_docs=True,
+            query_lengths=q_lengths,
         ).sum(dim=0)  # [num_chunks, B] -> [B]
 
     # Direct path
@@ -487,10 +614,15 @@ def _round_up_lq(Lq: int) -> int:
     return _next_pow2(Lq)
 
 
-def flash_maxsim_batched(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
-                         shared_docs: bool = True, query_lengths=None,
-                         pad_lq: bool = True,
-                         query_chunk_size: int | None = 128) -> torch.Tensor:
+def flash_maxsim_batched(
+    Q: torch.Tensor,
+    D: torch.Tensor,
+    doc_lengths=None,
+    shared_docs: bool = True,
+    query_lengths=None,
+    pad_lq: bool = True,
+    query_chunk_size: int | None = 128,
+) -> torch.Tensor:
     """Batched MaxSim. Q: [Nq, Lq, d], D: [B, Ld, d] -> [Nq, B].
 
     Args:
@@ -522,17 +654,24 @@ def flash_maxsim_batched(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
         Q_chunked = Q.view(Nq, num_chunks, C, d).reshape(Nq * num_chunks, C, d)
         # query_lengths for each chunk
         q_lens_chunk = torch.full(
-            (Nq * num_chunks,), C, device=Q.device, dtype=torch.int32,
+            (Nq * num_chunks,),
+            C,
+            device=Q.device,
+            dtype=torch.int32,
         )
         if Lq % C != 0:
             # last chunk of each query has fewer real tokens
             last_len = Lq % C
-            q_lens_chunk[num_chunks - 1::num_chunks] = last_len
+            q_lens_chunk[num_chunks - 1 :: num_chunks] = last_len
         # Launch: each "query" is now a chunk
         chunk_scores = flash_maxsim_batched(
-            Q_chunked, D, doc_lengths=doc_lengths,
-            shared_docs=shared_docs, query_lengths=q_lens_chunk,
-            pad_lq=pad_lq, query_chunk_size=None,  # no further chunking
+            Q_chunked,
+            D,
+            doc_lengths=doc_lengths,
+            shared_docs=shared_docs,
+            query_lengths=q_lens_chunk,
+            pad_lq=pad_lq,
+            query_chunk_size=None,  # no further chunking
         )  # [Nq*num_chunks, B]
         # Sum chunks per original query
         return chunk_scores.view(Nq, num_chunks, B).sum(dim=1)  # [Nq, B]
@@ -543,7 +682,10 @@ def flash_maxsim_batched(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
         if padded_Lq != Lq:
             if query_lengths is None:
                 query_lengths = torch.full(
-                    (Nq,), Lq, device=Q.device, dtype=torch.int32,
+                    (Nq,),
+                    Lq,
+                    device=Q.device,
+                    dtype=torch.int32,
                 )
             Q = torch.nn.functional.pad(Q, (0, 0, 0, padded_Lq - Lq))
             Lq = padded_Lq
@@ -556,10 +698,20 @@ def flash_maxsim_batched(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None,
     lengths = _default_lengths(total, Ld, D.device, doc_lengths)
     q_lens = (
         query_lengths.to(torch.int32).contiguous()
-        if query_lengths is not None else None
+        if query_lengths is not None
+        else None
     )
     scores, _ = _launch_fwd(
-        Q2, D2, lengths, Nq, B, Lq, Ld, d, shared_docs, False,
+        Q2,
+        D2,
+        lengths,
+        Nq,
+        B,
+        Lq,
+        Ld,
+        d,
+        shared_docs,
+        False,
         q_lengths=q_lens,
     )
     return scores
@@ -587,16 +739,33 @@ class _FlashMaxSimFn(torch.autograd.Function):
         grad_Q = torch.zeros_like(Q)
         d_pad = _next_pow2(d)
         _maxsim_bwd_dQ_kernel[(Lq,)](
-            D, argmax, grad_scores, grad_Q,
-            B, Lq, d, d_pad,
-            D.stride(0), D.stride(1), D.stride(2),
+            D,
+            argmax,
+            grad_scores,
+            grad_Q,
+            B,
+            Lq,
+            d,
+            d_pad,
+            D.stride(0),
+            D.stride(1),
+            D.stride(2),
         )
         grad_D = torch.zeros_like(D)
         _maxsim_bwd_dD_kernel[(B,)](
-            Q, argmax, grad_scores, grad_D,
-            Lq, Ld, d, d_pad,
-            D.stride(0), D.stride(1), D.stride(2),
-            Q.stride(0), Q.stride(1),
+            Q,
+            argmax,
+            grad_scores,
+            grad_D,
+            Lq,
+            Ld,
+            d,
+            d_pad,
+            D.stride(0),
+            D.stride(1),
+            D.stride(2),
+            Q.stride(0),
+            Q.stride(1),
         )
         return grad_Q, grad_D
 
@@ -616,6 +785,7 @@ def flash_maxsim_pairs(q_embs: list, d_embs: list) -> torch.Tensor:
 
     # Always use varlen — fast for both uniform and variable lengths
     from .flash_maxsim_varlen import flash_maxsim_varlen, pack_pairs
+
     Q_pk, D_pk, cu_q, cu_d, max_lq, max_ld = pack_pairs(q_embs, d_embs)
     return flash_maxsim_varlen(Q_pk, D_pk, cu_q, cu_d, max_lq, max_ld)
 
@@ -645,15 +815,28 @@ def maxsim_naive(Q: torch.Tensor, D: torch.Tensor, doc_lengths=None) -> torch.Te
 # to ~216 — recovering the 3-8x speedup hidden by launch overhead.
 # ---------------------------------------------------------------------------
 
+
 @triton.jit
 def _maxsim_persistent_fwd(
-    Q_ptr, D_ptr, lengths_ptr, scores_ptr,
-    total_work, grid_size,
-    Nq, B,
-    Lq, d: tl.constexpr, d_pad: tl.constexpr,
-    stride_q_n, stride_q_l, stride_q_d,
-    stride_d_b, stride_d_l, stride_d_d,
-    stride_s_n, stride_s_b,
+    Q_ptr,
+    D_ptr,
+    lengths_ptr,
+    scores_ptr,
+    total_work,
+    grid_size,
+    Nq,
+    B,
+    Lq,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_q_n,
+    stride_q_l,
+    stride_q_d,
+    stride_d_b,
+    stride_d_l,
+    stride_d_d,
+    stride_s_n,
+    stride_s_b,
     shared_docs: tl.constexpr,
     BLOCK_Q: tl.constexpr,
     BLOCK_D: tl.constexpr,
@@ -661,44 +844,48 @@ def _maxsim_persistent_fwd(
     pid = tl.program_id(0)
 
     # Constant register arrays — hoisted out of the work loop
-    k_off  = tl.arange(0, d_pad)
+    k_off = tl.arange(0, d_pad)
     k_mask = k_off < d
 
     # Grid-strided loop: each block claims a strided slice of all work items
     for work_idx in range(pid, total_work, grid_size):
-        q_idx   = work_idx // B
+        q_idx = work_idx // B
         doc_idx = work_idx % B
 
         # int64 for pointer arithmetic (avoids overflow at large N)
-        d_batch  = tl.cast(doc_idx if shared_docs else q_idx * B + doc_idx, tl.int64)
-        doc_len  = tl.load(lengths_ptr + d_batch).to(tl.int32)
+        d_batch = tl.cast(doc_idx if shared_docs else q_idx * B + doc_idx, tl.int64)
+        doc_len = tl.load(lengths_ptr + d_batch).to(tl.int32)
 
         score_acc = tl.zeros([], dtype=tl.float32)
 
         # Q loop — dynamic bound, masked on last block if Lq % BLOCK_Q != 0
         for q_start in range(0, Lq, BLOCK_Q):
-            q_off   = q_start + tl.arange(0, BLOCK_Q)
+            q_off = q_start + tl.arange(0, BLOCK_Q)
             q_valid = q_off < Lq
 
             Q_block = tl.load(
-                Q_ptr + tl.cast(q_idx, tl.int64) * stride_q_n
-                      + q_off[:, None] * stride_q_l
-                      + k_off[None, :] * stride_q_d,
-                mask=q_valid[:, None] & k_mask[None, :], other=0.0,
+                Q_ptr
+                + tl.cast(q_idx, tl.int64) * stride_q_n
+                + q_off[:, None] * stride_q_l
+                + k_off[None, :] * stride_q_d,
+                mask=q_valid[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float16)
 
             m = tl.full([BLOCK_Q], float("-inf"), dtype=tl.float32)
 
             # D loop — iterates over actual doc_len tokens, not padded max_Ld
             for d_start in range(0, doc_len, BLOCK_D):
-                d_off   = d_start + tl.arange(0, BLOCK_D)
+                d_off = d_start + tl.arange(0, BLOCK_D)
                 d_valid = d_off < doc_len
 
                 D_block = tl.load(
-                    D_ptr + d_batch * stride_d_b
-                          + d_off[:, None] * stride_d_l
-                          + k_off[None, :] * stride_d_d,
-                    mask=d_valid[:, None] & k_mask[None, :], other=0.0,
+                    D_ptr
+                    + d_batch * stride_d_b
+                    + d_off[:, None] * stride_d_l
+                    + k_off[None, :] * stride_d_d,
+                    mask=d_valid[:, None] & k_mask[None, :],
+                    other=0.0,
                 ).to(tl.float16)
 
                 S = tl.dot(Q_block, tl.trans(D_block))
@@ -709,8 +896,9 @@ def _maxsim_persistent_fwd(
             score_acc += tl.sum(m)
 
         tl.store(
-            scores_ptr + tl.cast(q_idx, tl.int64) * stride_s_n
-                       + tl.cast(doc_idx, tl.int64) * stride_s_b,
+            scores_ptr
+            + tl.cast(q_idx, tl.int64) * stride_s_n
+            + tl.cast(doc_idx, tl.int64) * stride_s_b,
             score_acc,
         )
 
@@ -746,15 +934,15 @@ def flash_maxsim_persistent(
     assert D.dim() == 3 and D.shape[2] == d
     B, Ld, _ = D.shape
 
-    d_pad  = _next_pow2(d)
+    d_pad = _next_pow2(d)
     scores = torch.empty(Nq, B, device=D.device, dtype=torch.float32)
 
     Q2 = (Q if batched else Q.unsqueeze(0)).contiguous()
     D2 = D.contiguous()
     lengths = _default_lengths(B, Ld, D.device, doc_lengths)
 
-    num_sms    = torch.cuda.get_device_properties(D.device).multi_processor_count
-    grid_size  = num_sms * grid_factor
+    num_sms = torch.cuda.get_device_properties(D.device).multi_processor_count
+    grid_size = num_sms * grid_factor
     total_work = Nq * B
 
     # Fixed config — no autotune overhead (that's the whole point)
@@ -762,16 +950,30 @@ def flash_maxsim_persistent(
     BLOCK_D = 64
 
     _maxsim_persistent_fwd[(grid_size,)](
-        Q2, D2, lengths, scores,
-        total_work, grid_size,
-        Nq, B,
-        Lq, d, d_pad,
-        Q2.stride(0), Q2.stride(1), Q2.stride(2),
-        D2.stride(0), D2.stride(1), D2.stride(2),
-        scores.stride(0), scores.stride(1),
-        1,          # shared_docs=True
-        BLOCK_Q, BLOCK_D,
-        num_warps=4, num_stages=2,
+        Q2,
+        D2,
+        lengths,
+        scores,
+        total_work,
+        grid_size,
+        Nq,
+        B,
+        Lq,
+        d,
+        d_pad,
+        Q2.stride(0),
+        Q2.stride(1),
+        Q2.stride(2),
+        D2.stride(0),
+        D2.stride(1),
+        D2.stride(2),
+        scores.stride(0),
+        scores.stride(1),
+        1,  # shared_docs=True
+        BLOCK_Q,
+        BLOCK_D,
+        num_warps=4,
+        num_stages=2,
     )
 
     return scores if batched else scores.squeeze(0)

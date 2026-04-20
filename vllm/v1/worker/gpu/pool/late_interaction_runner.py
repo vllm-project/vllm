@@ -33,6 +33,7 @@ class LateInteractionRunner:
             from vllm.v1.pool.flash_maxsim import (  # noqa: F401
                 flash_maxsim_rerank_direct,
             )
+
             self._has_flash_maxsim_rerank = True
         except ImportError:
             self._has_flash_maxsim_rerank = False
@@ -65,6 +66,7 @@ class LateInteractionRunner:
                 flash_maxsim_packed,
                 pack_docs,
             )
+
             device = torch.accelerator.current_device_index()
             # d=128 covers ColBERT (128) and ColPali (128).  Extend via
             # env var if running models with other embedding dims.
@@ -81,8 +83,7 @@ class LateInteractionRunner:
             for Lq in lq_buckets:
                 Q = torch.randn(Lq, d, device=device, dtype=torch.float16)
                 for Ld in ld_buckets:
-                    D = torch.randn(64, Ld, d, device=device,
-                                    dtype=torch.float16)
+                    D = torch.randn(64, Ld, d, device=device, dtype=torch.float16)
                     flash_maxsim(Q, D)
                     del D
                 del Q
@@ -91,12 +92,11 @@ class LateInteractionRunner:
             for Lq in lq_buckets:
                 Q = torch.randn(Lq, d, device=device, dtype=torch.float16)
                 for Ld in ld_buckets:
-                    batch = torch.randn(64 * Ld, d, device=device,
-                                        dtype=torch.float16)
-                    offs = torch.arange(0, 64 * Ld, Ld, device=device,
-                                        dtype=torch.int32)
-                    lens = torch.full((64,), Ld, device=device,
-                                      dtype=torch.int32)
+                    batch = torch.randn(64 * Ld, d, device=device, dtype=torch.float16)
+                    offs = torch.arange(
+                        0, 64 * Ld, Ld, device=device, dtype=torch.int32
+                    )
+                    lens = torch.full((64,), Ld, device=device, dtype=torch.int32)
                     flash_maxsim_rerank_direct(Q, batch, offs, lens, Ld)
                     del batch, offs, lens
                 del Q
@@ -105,9 +105,10 @@ class LateInteractionRunner:
             for Lq in lq_buckets:
                 Q = torch.randn(Lq, d, device=device, dtype=torch.float16)
                 for Ld in ld_buckets:
-                    docs = [torch.randn(Ld, d, device=device,
-                                        dtype=torch.float16)
-                            for _ in range(8)]
+                    docs = [
+                        torch.randn(Ld, d, device=device, dtype=torch.float16)
+                        for _ in range(8)
+                    ]
                     D_packed, cu_seqlens, max_ld = pack_docs(docs)
                     flash_maxsim_packed(Q, D_packed, cu_seqlens, max_ld)
                     del docs, D_packed, cu_seqlens
@@ -177,9 +178,11 @@ class LateInteractionRunner:
             return raw_pooler_output
 
         # Can we use zero-copy scoring?
-        use_zerocopy = (projected_batch is not None
-                        and pooling_cursor is not None
-                        and self._has_flash_maxsim_rerank)
+        use_zerocopy = (
+            projected_batch is not None
+            and pooling_cursor is not None
+            and self._has_flash_maxsim_rerank
+        )
 
         # Single GPU->CPU sync for offsets/lengths (avoids per-request
         # .item() calls which each trigger a sync).
@@ -251,12 +254,15 @@ class LateInteractionRunner:
             if use_zerocopy:
                 assert projected_batch is not None  # narrowed by use_zerocopy
                 score_values = self._score_zerocopy(
-                    score_queries, projected_batch,
-                    score_doc_offsets, score_doc_lengths,
+                    score_queries,
+                    projected_batch,
+                    score_doc_offsets,
+                    score_doc_lengths,
                 )
             else:
                 score_values = compute_maxsim_score_batched(
-                    score_queries, score_docs,
+                    score_queries,
+                    score_docs,
                 )
 
             for i, req_id, query_key, score in zip(
@@ -284,9 +290,7 @@ class LateInteractionRunner:
         device = projected_batch.device
 
         # Group by query identity (same cached tensor = same data_ptr)
-        groups: dict[
-            int, tuple[torch.Tensor, list[int], list[int], list[int]]
-        ] = {}
+        groups: dict[int, tuple[torch.Tensor, list[int], list[int], list[int]]] = {}
         for i, q in enumerate(queries):
             key = q.data_ptr()
             if key not in groups:

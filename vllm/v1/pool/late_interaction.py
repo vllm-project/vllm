@@ -14,6 +14,7 @@ try:
         flash_maxsim_packed,
         pack_docs,
     )
+
     _HAS_FLASH_MAXSIM = not os.environ.get("VLLM_FORCE_VANILLA_MAXSIM")
 except ImportError:
     _HAS_FLASH_MAXSIM = False
@@ -164,11 +165,12 @@ def compute_maxsim_score_batched(
     # Fall back to vanilla when flash-maxsim is unavailable, when
     # embedding dim < 16 (Triton tl.dot requires K >= 16), or when
     # tensors are on CPU (Triton requires CUDA).
-    if not _HAS_FLASH_MAXSIM or (
-        q_embs[0].shape[1] < 16 or not q_embs[0].is_cuda
-    ):
+    if not _HAS_FLASH_MAXSIM or (q_embs[0].shape[1] < 16 or not q_embs[0].is_cuda):
         return _vanilla_compute_maxsim_score_batched(
-            q_embs, d_embs, max_batch_size, max_score_matrix_elements,
+            q_embs,
+            d_embs,
+            max_batch_size,
+            max_score_matrix_elements,
         )
 
     # Group by query identity — queries sharing the same cached tensor

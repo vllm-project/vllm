@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Copy-paste demo: flash-maxsim vs vanilla MaxSim.
 
 Run:  python tests/v1/worker/demo_flash_maxsim.py
@@ -12,6 +14,7 @@ Three methods compared:
   3. Zero-Copy: reads docs directly from model output tensor (scattered),
      no torch.stack, no copy. This is the real serving path.
 """
+
 import time
 
 import torch
@@ -126,22 +129,21 @@ def main() -> None:
         offsets = torch.zeros(B, device=device, dtype=torch.int32)
         for i in range(B):
             start = i * gap
-            batch_tensor[start:start + Ld] = D[i]
+            batch_tensor[start : start + Ld] = D[i]
             offsets[i] = start
         lengths = torch.full((B,), Ld, device=device, dtype=torch.int32)
 
-        tzc = bench(flash_maxsim_rerank_direct, Q, batch_tensor,
-                    offsets, lengths, Ld)
+        tzc = bench(flash_maxsim_rerank_direct, Q, batch_tensor, offsets, lengths, Ld)
 
         # Verify correctness
         flash_scores = flash_maxsim(Q, D)
-        zc_scores = flash_maxsim_rerank_direct(
-            Q, batch_tensor, offsets, lengths, Ld
-        )
+        zc_scores = flash_maxsim_rerank_direct(Q, batch_tensor, offsets, lengths, Ld)
         err = (flash_scores - zc_scores).abs().max().item()
 
-        print(f"  {label:<28} {tf:>8.2f}ms {tzc:>8.2f}ms {tf / tzc:>9.1f}x"
-              f"  (err={err:.4f})")
+        print(
+            f"  {label:<28} {tf:>8.2f}ms {tzc:>8.2f}ms {tf / tzc:>9.1f}x"
+            f"  (err={err:.4f})"
+        )
 
     print()
     print("  Zero-copy advantage: no torch.stack, no copy, no extra memory.")

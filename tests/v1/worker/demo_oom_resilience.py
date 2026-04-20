@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Live OOM resilience demo: vanilla crashes, flash-maxsim survives.
 
 Run:
@@ -17,6 +19,7 @@ Run:
 Or use --auto to run both automatically:
   python tests/v1/worker/demo_oom_resilience.py --auto
 """
+
 import argparse
 import concurrent.futures
 import os
@@ -39,8 +42,7 @@ DOC_TEXT = (
 def gpu_mem():
     try:
         out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=memory.used",
-             "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"],
             text=True,
         ).strip()
         return int(out.split()[0])
@@ -90,15 +92,19 @@ def run_escalating_load(port, model, label):
     # Warmup
     print("  Warming up...", end=" ", flush=True)
     for warmup_docs in [5, 20]:
+
         def _warmup(_i, _d=warmup_docs):
             return send_request(url, model, _d, timeout=60)
+
         with concurrent.futures.ThreadPoolExecutor(16) as ex:
             list(ex.map(_warmup, range(30)))
     print("done.")
     print(f"  GPU mem after warmup: {gpu_mem()} MiB\n")
 
-    print(f"  {'Docs':>6} {'Reqs':>6} {'Conc':>6} {'OK':>6} "
-          f"{'Fail':>6} {'GPU MiB':>10} {'Status':>12}")
+    print(
+        f"  {'Docs':>6} {'Reqs':>6} {'Conc':>6} {'OK':>6} "
+        f"{'Fail':>6} {'GPU MiB':>10} {'Status':>12}"
+    )
     print(f"  {'-' * 58}")
 
     for n_docs in [50, 100, 200, 500]:
@@ -122,8 +128,10 @@ def run_escalating_load(port, model, label):
         else:
             status = "*** CRASHED ***"
 
-        print(f"  {n_docs:>6} {n_reqs:>6} {conc:>6} {ok:>6} "
-              f"{fail:>6} {mem_after:>10} {status:>12}")
+        print(
+            f"  {n_docs:>6} {n_reqs:>6} {conc:>6} {ok:>6} "
+            f"{fail:>6} {mem_after:>10} {status:>12}"
+        )
 
         if not alive:
             print(f"\n  Server crashed at {n_docs} docs/request!")
@@ -143,21 +151,31 @@ def start_server(port, flash=True, gpu_util=0.7):
 
     python = os.path.join(os.path.dirname(sys.executable), "python")
     cmd = [
-        python, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", MODEL,
-        "--runner", "pooling",
-        "--port", str(port),
+        python,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        MODEL,
+        "--runner",
+        "pooling",
+        "--port",
+        str(port),
         "--enforce-eager",
-        "--max-model-len", "4096",
-        "--max-num-batched-tokens", "131072",
-        "--dtype", "half",
+        "--max-model-len",
+        "4096",
+        "--max-num-batched-tokens",
+        "131072",
+        "--dtype",
+        "half",
         "--trust-remote-code",
-        "--gpu-memory-utilization", str(gpu_util),
+        "--gpu-memory-utilization",
+        str(gpu_util),
         "--disable-log-stats",
     ]
 
     proc = subprocess.Popen(
-        cmd, env=env,
+        cmd,
+        env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -188,15 +206,20 @@ def kill_server(proc):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=9256)
-    parser.add_argument("--auto", action="store_true",
-                        help="Automatically start/stop servers")
-    parser.add_argument("--gpu-util", type=float, default=0.7,
-                        help="GPU memory utilization (lower = more constrained)")
+    parser.add_argument(
+        "--auto", action="store_true", help="Automatically start/stop servers"
+    )
+    parser.add_argument(
+        "--gpu-util",
+        type=float,
+        default=0.7,
+        help="GPU memory utilization (lower = more constrained)",
+    )
     args = parser.parse_args()
 
     gpu_info = subprocess.check_output(
-        ["nvidia-smi", "--query-gpu=name,memory.total",
-         "--format=csv,noheader"], text=True,
+        ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,noheader"],
+        text=True,
     ).strip()
     print(f"GPU: {gpu_info}")
     print(f"Model: {MODEL}")
@@ -239,8 +262,7 @@ def main():
     else:
         # Manual mode — server already running
         if not check_server(args.port):
-            print(f"No server on port {args.port}. "
-                  f"Use --auto or start manually.")
+            print(f"No server on port {args.port}. Use --auto or start manually.")
             return
 
         run_escalating_load(args.port, MODEL, "Server on port " + str(args.port))

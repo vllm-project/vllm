@@ -74,12 +74,18 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         # the small weight [embed, hidden] instead.  Only the small
         # [N, embed_dim] output is cast to head_dtype afterwards.
         if self.projector is not None:
-            if (isinstance(self.projector, nn.Linear)
-                    and self.projector.weight.dtype != hidden_states.dtype):
+            if (
+                isinstance(self.projector, nn.Linear)
+                and self.projector.weight.dtype != hidden_states.dtype
+            ):
                 import torch.nn.functional as F
+
                 w = self.projector.weight.to(hidden_states.dtype)
-                b = (self.projector.bias.to(hidden_states.dtype)
-                     if self.projector.bias is not None else None)
+                b = (
+                    self.projector.bias.to(hidden_states.dtype)
+                    if self.projector.bias is not None
+                    else None
+                )
                 hidden_states = F.linear(hidden_states, w, b)
             else:
                 hidden_states = self.projector(hidden_states)

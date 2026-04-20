@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Flash-MaxSim rerank: one query vs scattered docs in a batch tensor.
 
 True zero-copy scoring: the kernel reads doc embeddings directly from the
@@ -34,21 +36,31 @@ def _round_to_bucket(x):
 # Kernel: shared Q, scattered D via (offset, length) per doc
 # ---------------------------------------------------------------------------
 
-@triton.autotune(configs=_get_configs(),
-                 key=["Lq_bucket", "max_Ld_bucket", "d_pad"],
-                 prune_configs_by={"early_config_prune": _prune_configs})
+
+@triton.autotune(
+    configs=_get_configs(),
+    key=["Lq_bucket", "max_Ld_bucket", "d_pad"],
+    prune_configs_by={"early_config_prune": _prune_configs},
+)
 @triton.jit
 def _maxsim_rerank_kernel(
-    Q_ptr, D_ptr,
-    doc_offsets_ptr, doc_lengths_ptr,
+    Q_ptr,
+    D_ptr,
+    doc_offsets_ptr,
+    doc_lengths_ptr,
     scores_ptr,
     B,
-    Lq, Lq_bucket: tl.constexpr,
+    Lq,
+    Lq_bucket: tl.constexpr,
     max_Ld_bucket: tl.constexpr,
-    d: tl.constexpr, d_pad: tl.constexpr,
-    stride_q_t, stride_q_d,
-    stride_d_t, stride_d_d,
-    BLOCK_Q: tl.constexpr, BLOCK_D: tl.constexpr,
+    d: tl.constexpr,
+    d_pad: tl.constexpr,
+    stride_q_t,
+    stride_q_d,
+    stride_d_t,
+    stride_d_d,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_D: tl.constexpr,
 ):
     """One program per doc. Q shared (read from same location). D scattered."""
     pid = tl.program_id(0)
@@ -70,7 +82,8 @@ def _maxsim_rerank_kernel(
 
         Q_block = tl.load(
             Q_ptr + q_off[:, None] * stride_q_t + k_off[None, :] * stride_q_d,
-            mask=q_valid[:, None] & k_mask[None, :], other=0.0,
+            mask=q_valid[:, None] & k_mask[None, :],
+            other=0.0,
         ).to(tl.float16)
 
         m = tl.full([BLOCK_Q], float("-inf"), dtype=tl.float32)
@@ -80,9 +93,11 @@ def _maxsim_rerank_kernel(
             d_valid = d_off < d_len
 
             D_block = tl.load(
-                D_ptr + (d_start + d_off[:, None]) * stride_d_t
+                D_ptr
+                + (d_start + d_off[:, None]) * stride_d_t
                 + k_off[None, :] * stride_d_d,
-                mask=d_valid[:, None] & k_mask[None, :], other=0.0,
+                mask=d_valid[:, None] & k_mask[None, :],
+                other=0.0,
             ).to(tl.float16)
 
             S = tl.dot(Q_block, tl.trans(D_block))
@@ -98,6 +113,7 @@ def _maxsim_rerank_kernel(
 # ---------------------------------------------------------------------------
 # Internal helper
 # ---------------------------------------------------------------------------
+
 
 def _run_rerank_kernel(Q, D_tensor, doc_offsets, doc_lengths, max_seqlen_d):
     """Common kernel launch for both rerank and rerank_direct."""
@@ -135,15 +151,21 @@ def _run_rerank_kernel(Q, D_tensor, doc_offsets, doc_lengths, max_seqlen_d):
     max_ld_bucket = _round_to_bucket(max_seqlen_d)
 
     _maxsim_rerank_kernel[(B,)](
-        Q_pad, D_pad,
-        doc_offsets, doc_lengths,
+        Q_pad,
+        D_pad,
+        doc_offsets,
+        doc_lengths,
         scores,
         B,
-        Lq, Lq_bucket,
+        Lq,
+        Lq_bucket,
         max_ld_bucket,
-        d, d_pad,
-        Q_pad.stride(0), Q_pad.stride(1),
-        D_pad.stride(0), D_pad.stride(1),
+        d,
+        d_pad,
+        Q_pad.stride(0),
+        Q_pad.stride(1),
+        D_pad.stride(0),
+        D_pad.stride(1),
     )
     return scores
 
@@ -151,6 +173,7 @@ def _run_rerank_kernel(Q, D_tensor, doc_offsets, doc_lengths, max_seqlen_d):
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def flash_maxsim_rerank(
     Q: torch.Tensor,
