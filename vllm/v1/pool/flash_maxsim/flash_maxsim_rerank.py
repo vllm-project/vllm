@@ -6,12 +6,8 @@ True zero-copy scoring: the kernel reads doc embeddings directly from the
 model's output tensor using per-doc (offset, length) pairs. No torch.stack,
 no torch.cat, no padding, no copies at all.
 
-Two entry points:
-  flash_maxsim_rerank(Q, D_packed, cu_d, max_ld)
-      For contiguous packed docs (from torch.cat). Same kernel, cu_seqlens API.
-
+Entry point:
   flash_maxsim_rerank_direct(Q, batch_tensor, doc_offsets, doc_lengths, max_ld)
-      TRUE zero-copy: reads from the model's batch output tensor directly.
       doc_offsets[i] = start token index of doc i in batch_tensor.
       doc_lengths[i] = number of tokens in doc i.
       Docs can be scattered (non-contiguous) in the batch tensor.
@@ -21,7 +17,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .flash_maxsim import _get_configs, _next_pow2, _prune_configs
+from ._common import _get_configs, _next_pow2, _prune_configs
 
 
 def _round_to_bucket(x):
@@ -173,32 +169,6 @@ def _run_rerank_kernel(Q, D_tensor, doc_offsets, doc_lengths, max_seqlen_d):
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
-
-
-def flash_maxsim_rerank(
-    Q: torch.Tensor,
-    D_packed: torch.Tensor,
-    cu_seqlens_d: torch.Tensor,
-    max_seqlen_d: int,
-) -> torch.Tensor:
-    """Score one query against contiguous packed docs.
-
-    Args:
-        Q: [Lq, d] — single query embedding
-        D_packed: [total_d_tokens, d] — all docs concatenated (e.g. via torch.cat)
-        cu_seqlens_d: [B+1] int32 — cumulative doc token counts (starts at 0)
-        max_seqlen_d: int — maximum doc length
-
-    Returns:
-        scores: [B] float32
-    """
-    assert Q.dim() == 2 and D_packed.dim() == 2
-    assert Q.shape[1] == D_packed.shape[1]
-
-    cu_d = cu_seqlens_d.to(torch.int32)
-    doc_offsets = cu_d[:-1]
-    doc_lengths = cu_d[1:] - cu_d[:-1]
-    return _run_rerank_kernel(Q, D_packed, doc_offsets, doc_lengths, max_seqlen_d)
 
 
 def flash_maxsim_rerank_direct(
