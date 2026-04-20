@@ -18,9 +18,7 @@ from vllm.model_executor.layers.quantization.turboquant.config import (
     TQ_PRESETS,
     TurboQuantConfig,
 )
-from vllm.model_executor.layers.quantization.turboquant.quantizer import (
-    generate_wht_signs,
-)
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import next_power_of_2
 
 # ============================================================================
@@ -345,7 +343,8 @@ class TestLloydMax:
 # Rotation matrix tests (GPU required)
 # ============================================================================
 
-CUDA_AVAILABLE = torch.cuda.is_available()
+GPGPU_AVAILABLE = torch.cuda.is_available() or torch.xpu.is_available()
+DEVICE_TYPE = current_platform.device_type
 
 
 def generate_rotation_matrix(d: int, seed: int, device: str = "cpu") -> torch.Tensor:
@@ -360,16 +359,16 @@ def generate_rotation_matrix(d: int, seed: int, device: str = "cpu") -> torch.Te
     return Q.to(device)
 
 
-@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+@pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
 class TestRotationMatrix:
     """Tests for the QR-based rotation (standalone benchmarks only)."""
 
     @pytest.mark.parametrize("dim", [64, 96, 128, 256])
     def test_rotation_matrix_shape_and_orthogonal(self, dim):
-        Pi = generate_rotation_matrix(dim, seed=42, device="cuda")
+        Pi = generate_rotation_matrix(dim, seed=42, device=DEVICE_TYPE)
         assert Pi.shape == (dim, dim)
         eye = Pi @ Pi.T
-        assert torch.allclose(eye, torch.eye(dim, device="cuda"), atol=1e-5), (
+        assert torch.allclose(eye, torch.eye(dim, device=DEVICE_TYPE), atol=1e-5), (
             f"Pi not orthogonal for dim={dim}"
         )
 
@@ -385,13 +384,13 @@ class TestRotationMatrix:
 
     def test_rotation_matrix_det_is_pm1(self):
         """Orthogonal matrix determinant must be +1 or -1."""
-        Pi = generate_rotation_matrix(128, seed=42, device="cuda")
+        Pi = generate_rotation_matrix(128, seed=42, device=DEVICE_TYPE)
         det = torch.linalg.det(Pi)
         assert abs(abs(det.item()) - 1.0) < 1e-4
 
 
 # ============================================================================
-# WHT rotation tests (serving path: generate_wht_signs + _build_hadamard)
+# Hadamard rotation tests (serving path: _build_hadamard)
 # ============================================================================
 
 
@@ -403,50 +402,26 @@ def _build_hadamard(d: int, device: str = "cpu") -> torch.Tensor:
     return (H / math.sqrt(d)).to(torch.device(device))
 
 
-@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
-class TestWHTRotation:
-    """Tests for the WHT rotation actually used in serving."""
+@pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
+class TestHadamardRotation:
+    """Tests for the Hadamard rotation used in serving."""
 
     @pytest.mark.parametrize("dim", [64, 128, 256])
-    def test_wht_orthonormal(self, dim):
-        """signs * H must be orthonormal: (signs*H) @ (signs*H)^T = I."""
-        signs = generate_wht_signs(dim, seed=42, device="cuda")
-        H = _build_hadamard(dim, "cuda")
-        PiT = (signs.unsqueeze(1) * H).contiguous()
-        eye = PiT @ PiT.T
-        assert torch.allclose(eye, torch.eye(dim, device="cuda"), atol=1e-5), (
-            f"WHT rotation not orthonormal for dim={dim}"
+    def test_hadamard_orthonormal(self, dim):
+        """H must be orthonormal: H @ H^T = I."""
+        H = _build_hadamard(dim, DEVICE_TYPE)
+        eye = H @ H.T
+        assert torch.allclose(eye, torch.eye(dim, device=DEVICE_TYPE), atol=1e-5), (
+            f"Hadamard not orthonormal for dim={dim}"
         )
 
     @pytest.mark.parametrize("dim", [64, 128, 256])
-    def test_wht_self_inverse(self, dim):
-        """PiT should be self-inverse: PiT @ PiT = I (up to sign flip)."""
-        signs = generate_wht_signs(dim, seed=42, device="cuda")
-        H = _build_hadamard(dim, "cuda")
-        PiT = (signs.unsqueeze(1) * H).contiguous()
-        Pi = PiT.T.contiguous()
-        # Pi @ PiT should be identity (rotation then inverse)
-        result = Pi @ PiT
-        assert torch.allclose(result, torch.eye(dim, device="cuda"), atol=1e-5), (
-            f"WHT rotation not self-inverse for dim={dim}"
+    def test_hadamard_symmetric(self, dim):
+        """Sylvester Hadamard must be symmetric: H = H^T."""
+        H = _build_hadamard(dim, DEVICE_TYPE)
+        assert torch.allclose(H, H.T, atol=1e-6), (
+            f"Hadamard not symmetric for dim={dim}"
         )
-
-    def test_wht_signs_deterministic(self):
-        """Same seed must produce identical signs."""
-        s1 = generate_wht_signs(128, seed=42)
-        s2 = generate_wht_signs(128, seed=42)
-        assert torch.equal(s1, s2)
-
-    def test_wht_signs_different_seeds(self):
-        """Different seeds must produce different signs."""
-        s1 = generate_wht_signs(128, seed=42)
-        s2 = generate_wht_signs(128, seed=99)
-        assert not torch.equal(s1, s2)
-
-    def test_wht_signs_are_pm1(self):
-        """All sign values must be exactly +1 or -1."""
-        signs = generate_wht_signs(128, seed=42)
-        assert torch.all(signs.abs() == 1.0)
 
 
 # ============================================================================
@@ -454,7 +429,7 @@ class TestWHTRotation:
 # ============================================================================
 
 
-@pytest.mark.skipif(not CUDA_AVAILABLE, reason="CUDA not available")
+@pytest.mark.skipif(not GPGPU_AVAILABLE, reason="GPGPU not available")
 class TestStoreDecodeRoundTrip:
     """End-to-end: store KV into TQ cache, decode, compare vs fp16 ref."""
 
@@ -487,13 +462,12 @@ class TestStoreDecodeRoundTrip:
         block_size = 16
         num_blocks = 1
 
-        device = torch.device("cuda")
+        device = torch.device(DEVICE_TYPE)
 
-        # Generate rotation
-        signs = generate_wht_signs(D, seed=42, device=device)
-        H = _build_hadamard(D, "cuda")
-        PiT = (signs.unsqueeze(1) * H).contiguous().float()
-        Pi = PiT.T.contiguous()
+        # Pure Hadamard rotation (symmetric: H = H^T, so Pi = PiT = H)
+        H = _build_hadamard(D, DEVICE_TYPE)
+        PiT = H
+        Pi = H
 
         # Generate centroids
         centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)

@@ -19,6 +19,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.abstract import (
     OffloadingManager,
     OffloadKey,
+    ReqContext,
     get_offload_block_hash,
     make_offload_key,
 )
@@ -74,6 +75,7 @@ class RequestOffloadState:
     config: SchedulerOffloadConfig
     req: Request
     group_states: tuple[RequestGroupState, ...] = field(init=False)
+    req_context: ReqContext = field(init=False)
     # number of hits in the GPU cache
     num_locally_computed_tokens: int = 0
 
@@ -81,6 +83,7 @@ class RequestOffloadState:
         self.group_states = tuple(
             RequestGroupState() for _ in self.config.kv_group_configs
         )
+        self.req_context = ReqContext(kv_transfer_params=self.req.kv_transfer_params)
 
     def update_offload_keys(self) -> None:
         for group_config, group_state in zip(
@@ -181,7 +184,10 @@ class OffloadingConnectorScheduler:
             return 0, False
 
         start_block_idx = num_computed_tokens // group_config.offloaded_block_size
-        hits = self.manager.lookup(offload_keys[start_block_idx:])
+        hits = self.manager.lookup(
+            offload_keys[start_block_idx:],
+            req_status.req_context,
+        )
         if hits is None:
             # indicates a lookup that should be tried later
             return None, False
@@ -249,7 +255,7 @@ class OffloadingConnectorScheduler:
         assert len(request.block_hashes) // self.config.block_size_factor >= num_blocks
         offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
 
-        src_spec = self.manager.prepare_load(offload_keys)
+        src_spec = self.manager.prepare_load(offload_keys, req_status.req_context)
         dst_spec = GPULoadStoreSpec(
             block_ids[num_computed_gpu_blocks:],
             group_sizes=(num_pending_gpu_blocks,),
@@ -304,7 +310,9 @@ class OffloadingConnectorScheduler:
             assert len(req.block_hashes) >= num_gpu_blocks
 
             new_offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
-            store_output = self.manager.prepare_store(new_offload_keys)
+            store_output = self.manager.prepare_store(
+                new_offload_keys, req_status.req_context
+            )
             if store_output is None:
                 logger.warning(
                     "Request %s: cannot store %s blocks", req_id, num_new_blocks
