@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from torch.fx import Node
 from collections import defaultdict
 from collections.abc import Iterable
 
@@ -12,7 +13,7 @@ from torch._inductor.pattern_matcher import (
 )
 
 from vllm.config import VllmConfig
-from vllm.ir.op import IrOp
+from vllm.ir.op import IrOp, IrOpImpl
 from vllm.logger import init_logger
 from vllm.logging_utils import lazy
 
@@ -20,6 +21,75 @@ from ..vllm_inductor_pass import VllmInductorPass
 from .utils import get_ir_op
 
 logger = init_logger(__name__)
+
+
+def get_default_overload(op: OpOverload | OpOverloadPacket) -> OpOverload:
+    if isinstance(op, OpOverloadPacket):
+        return op.default
+    assert isinstance(op, OpOverload), "Expected an OpOverload or OpOverloadPacket"
+    return op
+
+
+def get_ir_op(node: fx.Node) -> IrOp | None:
+    if node.op != "call_function":
+        return None
+
+    if not isinstance(node.target, (OpOverload, OpOverloadPacket)):
+        return None
+
+    op_overload = get_default_overload(node.target)
+    if op_overload.namespace != "vllm_ir":
+        return None
+
+    op_name = op_overload._opname
+    if op_name not in IrOp.registry:
+        logger.warning(
+            "Unknown vLLM IR op %s, there's likely an issue with torch registration, "
+            "or a torch custom op was registered in the vllm_ir namespace by mistake.",
+            op_name,
+        )
+        return None
+
+    ir_op = IrOp.registry[op_name]
+    return ir_op
+
+
+class VllmIROpLoweringRecorder:
+    """
+    Container to store metadata related to vllm ir lowering pass
+    """
+
+    def __init__(self):
+        # (op_name, provider) -> count
+        # store count of lowered op implementations
+        self.selected_impls_count: dict[str, dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        # (op_name, provider) -> list[Node]
+        # list fx.Graph nodes that were lowered to a specific op implementation
+        self.selected_impls: dict[str, dict[str, list[Node]]] = defaultdict(
+            lambda: defaultdict(list)
+        )
+
+    def record_op_lowering(self, node: Node, impl: IrOpImpl):
+        """Record data related to op lowering"""
+        self.selected_impls[impl.op.name][impl.provider].append(node)
+        self.selected_impls_count[impl.op.name][impl.provider] += 1
+
+    def lowered_count(self, op: str, provider: str | None) -> int:
+        """Count of lowered op impls"""
+        if provider:
+            return self.selected_impls_count[op][provider]
+        return sum(self.selected_impls_count[op].values())
+
+    def total_lowered(self):
+        return sum(
+            sum(op_counts.values()) for op_counts in self.selected_impls_count.values()
+        )
+
+    def reset(self):
+        self.selected_impls_count.clear()
+        self.selected_impls.clear()
 
 
 class VllmIRLoweringPass(VllmInductorPass):
@@ -32,6 +102,7 @@ class VllmIRLoweringPass(VllmInductorPass):
         self.patterns = PatternMatcherPass(self.pass_name)
         self.selected_impls: dict[str, dict[str, str]] = defaultdict(lambda: {})
         self.ops = [ir_op.torch_op for ir_op in IrOp.registry.values()]
+        self.recorder = VllmIROpLoweringRecorder()
 
         # Look for any call_function node where the target is a vLLM IR op.
         # Then, lower_matched_op will select, trace, and insert the implementation.
@@ -52,7 +123,9 @@ class VllmIRLoweringPass(VllmInductorPass):
         # Select and record the implementation, using fake args
         fake_args = fx.map_arg(node.args, lambda arg: arg.meta["val"])
         ir_op_impl = ir_op.dispatch(*fake_args)
-        self.selected_impls[ir_op.name][node.name] = ir_op_impl.provider
+
+        # record op lowering
+        self.recorder.record_op_lowering(node, ir_op_impl)
 
         # replace_by_example wants node args, not the fake tensors
         # use func_impl_fn to properly handle in-place implementations
@@ -71,7 +144,7 @@ class VllmIRLoweringPass(VllmInductorPass):
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         # clear at the beginning instead of end, so that tests can inspect
-        self.selected_impls.clear()
+        self.recorder.reset()
 
         count = self.patterns.apply(graph)
         logger.debug("VllmIRLoweringPass lowered %d vLLM IR nodes", count)
