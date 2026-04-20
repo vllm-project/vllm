@@ -4,14 +4,14 @@
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-VL/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
-from transformers.image_processing_utils_fast import BaseImageProcessorFast
+from transformers.image_processing_backends import TorchvisionBackend
 from transformers.image_utils import PILImageResampling
 from transformers.processing_utils import ProcessorMixin
 
 from vllm.tokenizers.qwen_vl import QwenVLTokenizer
 
 
-class QwenVLImageProcessorFast(BaseImageProcessorFast):
+class QwenVLImageProcessor(TorchvisionBackend):
     """
     Port of https://huggingface.co/Qwen/Qwen-VL/blob/main/visual.py#L354
     to HF Transformers.
@@ -31,7 +31,7 @@ class QwenVLProcessor(ProcessorMixin):
 
     def __init__(
         self,
-        image_processor: QwenVLImageProcessorFast,
+        image_processor: QwenVLImageProcessor,
         tokenizer: QwenVLTokenizer,
     ) -> None:
         self.image_processor = image_processor

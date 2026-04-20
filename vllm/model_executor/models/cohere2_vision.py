@@ -10,8 +10,8 @@ import torch
 from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.cohere2_vision import Cohere2VisionConfig
-from transformers.models.cohere2_vision.image_processing_cohere2_vision_fast import (  # noqa: E501
-    Cohere2VisionImageProcessorFast,
+from transformers.models.cohere2_vision.image_processing_cohere2_vision import (  # noqa: E501
+    Cohere2VisionImageProcessor,
 )
 from transformers.models.cohere2_vision.processing_cohere2_vision import (
     Cohere2VisionProcessor,
@@ -173,7 +173,7 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         Calculate the number of image patches for a given image.
         Uses the HF processor to determine the actual number of patches.
         """
-        image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
+        image_processor: Cohere2VisionImageProcessor = processor.image_processor
 
         return image_processor.get_number_of_image_patches(
             image_height,

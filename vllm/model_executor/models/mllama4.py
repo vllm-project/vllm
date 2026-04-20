@@ -26,7 +26,7 @@ from torch import nn
 from transformers import BatchFeature, Llama4Config, Llama4VisionConfig
 from transformers.image_utils import SizeDict
 from transformers.models.llama4 import Llama4Processor
-from transformers.models.llama4.image_processing_llama4_fast import (
+from transformers.models.llama4.image_processing_llama4 import (
     find_supported_resolutions,
     get_best_fit,
 )
@@ -101,7 +101,7 @@ class Llama4ImagePatchInputs(TensorSchema):
     patches_per_image: Annotated[torch.Tensor, TensorShape("batch_size")]
     """
     The number of total patches for each image in the batch.
-    
+
     This is used to split the embeddings which has the first two dimensions
     flattened just like `pixel_values`.
     """

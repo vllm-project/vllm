@@ -15,7 +15,7 @@ from transformers.models.gemma3n import (
     Gemma3nTextConfig,
     Gemma3nVisionConfig,
 )
-from transformers.models.siglip import SiglipImageProcessorFast
+from transformers.models.siglip import SiglipImageProcessor
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -183,7 +183,7 @@ class Gemma3nDummyInputsBuilder(BaseDummyInputsBuilder[Gemma3nProcessingInfo]):
             processor.feature_extractor
         )
         audio_len = audio_feature_extractor.fft_length
-        image_processor: SiglipImageProcessorFast = processor.image_processor
+        image_processor: SiglipImageProcessor = processor.image_processor
         img_width = image_processor.size.get("width", 224)
         img_height = image_processor.size.get("height", 224)
 
