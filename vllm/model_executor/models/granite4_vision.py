@@ -869,9 +869,9 @@ class Granite4VisionForConditionalGeneration(
             ]
 
         for level_idx in range(len(self._ds_layer_indices)):
-            buf_data = torch.zeros(N, lm_h, dtype=inputs_embeds.dtype, device=inputs_embeds.device)
-            buf_data[is_multimodal] = level_features[level_idx]
-            self._ds_buffers[level_idx][:N].copy_(buf_data)
+            target = self._ds_buffers[level_idx][:N]
+            target.zero_()
+            target[is_multimodal] = level_features[level_idx]
 
         self._ds_num_tokens = N
         return inputs_embeds

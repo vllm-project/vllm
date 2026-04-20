@@ -97,7 +97,7 @@ def _granite4_vision_vllm_to_hf_output(vllm_output, model):
     hf_output_ids = [
         token_id
         for idx, token_id in enumerate(output_ids)
-        if token_id != mm_token_id or output_ids[idx - 1] != mm_token_id
+        if token_id != mm_token_id or idx == 0 or output_ids[idx - 1] != mm_token_id
     ]
     hf_output_str = output_str[1:] if output_str and output_str[0] == " " else output_str
     eos_token_id = 100257
