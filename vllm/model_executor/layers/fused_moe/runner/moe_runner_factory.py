@@ -29,8 +29,9 @@ def create_moe_runner(
     gate: torch.nn.Module | None,
     shared_experts: SharedExperts | None,
     quant_method: FusedMoEMethodBase,
-    reduce_results: bool,
     enable_dbo: bool,
+    routed_output_transform: torch.nn.Module | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> MoERunner:
     return DefaultMoERunner(
         layer_name,
@@ -40,6 +41,7 @@ def create_moe_runner(
         gate,
         shared_experts,
         quant_method,
-        reduce_results,
         enable_dbo,
+        routed_output_transform=routed_output_transform,
+        routed_scaling_factor=routed_scaling_factor,
     )
