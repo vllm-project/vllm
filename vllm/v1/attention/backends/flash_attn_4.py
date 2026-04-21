@@ -9,12 +9,27 @@ via `page_table`, matching vLLM's block table format directly:
   K: (num_blocks, block_size, num_kv_heads, head_dim)
   V: (num_blocks, block_size, num_kv_heads, head_dim)
   page_table: (batch_size, max_blocks_per_seq)
+
+Kernel source is loaded in this order so the backend is usable
+regardless of the upstream flash-attn-4 merge/release status:
+
+1. ``blake-snc/flash-attn-4-sm120-sncbl`` from the HuggingFace
+   Kernels Hub — a pre-validated SM120 bundle of five open upstream
+   PRs (#2336/#2348/#2349/#2389/#2439). Requires the ``kernels``
+   Python package (``pip install kernels``).
+2. Local ``flash_attn.cute.interface`` — used only if the Hub load
+   is disabled via ``VLLM_FLASH_ATTN_4_USE_LOCAL=1`` or the
+   ``kernels`` package is unavailable. Requires ``flash-attn-4``
+   installed.
 """
 
 from __future__ import annotations
 
+import functools
+import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import torch
 
@@ -31,6 +46,56 @@ from vllm.v1.attention.backend import (
 )
 
 logger = init_logger(__name__)
+
+
+_HF_KERNEL_ID = "blake-snc/flash-attn-4-sm120-sncbl"
+
+
+@functools.cache
+def _get_flash_attn_varlen_func() -> Callable[..., Any]:
+    """Resolve flash_attn_varlen_func from HF Kernels Hub or local install.
+
+    Cached so the lookup + any one-time Hub download runs once per
+    process. Order:
+      1. Hub bundle (``blake-snc/flash-attn-4-sm120-sncbl``) via the
+         ``kernels`` package — unless ``VLLM_FLASH_ATTN_4_USE_LOCAL=1``.
+      2. Local ``flash_attn.cute.interface`` — fallback.
+    """
+    use_local = os.environ.get("VLLM_FLASH_ATTN_4_USE_LOCAL", "0") == "1"
+    if not use_local:
+        try:
+            from kernels import get_kernel  # type: ignore[import-not-found]
+
+            module = get_kernel(_HF_KERNEL_ID)
+            logger.info_once(
+                "FlashAttention4 backend loaded from HF Kernels Hub: %s",
+                _HF_KERNEL_ID,
+            )
+            return module.flash_attn_varlen_func
+        except ImportError:
+            logger.debug_once(
+                "FlashAttention4: `kernels` package not installed; "
+                "falling back to local flash-attn-4 install. Install "
+                "`pip install kernels` to use the pre-built HF bundle."
+            )
+        except Exception as e:  # noqa: BLE001 — Hub load can fail many ways
+            logger.warning_once(
+                "FlashAttention4: HF Kernels Hub load failed (%s); "
+                "falling back to local flash-attn-4 install.",
+                e,
+            )
+    try:
+        from flash_attn.cute.interface import flash_attn_varlen_func
+    except ImportError as e:
+        raise ImportError(
+            "FlashAttention4 backend requires either the `kernels` "
+            "package (for the HF-hosted bundle at "
+            f"`{_HF_KERNEL_ID}`) or `flash-attn-4` installed locally. "
+            "Install one: `pip install kernels` or "
+            "`pip install flash-attn-4`."
+        ) from e
+    logger.info_once("FlashAttention4 backend loaded from local flash-attn-4 install")
+    return flash_attn_varlen_func
 
 
 @dataclass
@@ -205,7 +270,7 @@ class FlashAttention4Impl(AttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
-        from flash_attn.cute.interface import flash_attn_varlen_func
+        flash_attn_varlen_func = _get_flash_attn_varlen_func()
 
         num_actual_tokens = attn_metadata.num_actual_tokens
         q_actual = query[:num_actual_tokens]

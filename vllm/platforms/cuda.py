@@ -134,11 +134,18 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TURBOQUANT,
             ]
         elif device_capability.major == 12:
-            # SM120 (consumer Blackwell): flash-attn-4 CuTe DSL kernels
-            # have native SM120 support. FlashInfer is fallback.
+            # SM120 (consumer Blackwell): FlashInfer is the default —
+            # its fmha_v2 HMMA path is validated on SM120 and is what
+            # existing vLLM users expect. FLASH_ATTN_4 exposes FA4's
+            # CuTe DSL kernels (split-KV, block-sparse, TMA forward,
+            # FA4 dropout) as an opt-in via
+            # `--attention-backend FLASH_ATTN_4`; it requires
+            # `enforce_eager=True` (no CUDA graph support yet) and
+            # loads its kernels via the HF Kernels Hub, so installing
+            # `flash-attn-4` upstream is not required.
             return [
-                AttentionBackendEnum.FLASH_ATTN_4,
                 AttentionBackendEnum.FLASHINFER,
+                AttentionBackendEnum.FLASH_ATTN_4,
                 AttentionBackendEnum.TRITON_ATTN,
                 AttentionBackendEnum.FLEX_ATTENTION,
             ]
