@@ -1,20 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# Copyright 2025 The vLLM team.
-# Copyright 2025 Google Inc. HuggingFace Inc. team. All rights reserved.
 #
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# RNJ-1 model: Gemma3-based architecture with chunked (block-local) attention.
+# Chunked attention restricts local layers to attend within aligned blocks,
+# with lookback to one previous block.
 from collections.abc import Iterable
 from itertools import islice
 
@@ -27,10 +16,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
-from vllm.model_executor.layers.attention import (
-    Attention,
-    EncoderOnlyAttention,
-)
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -64,7 +50,7 @@ from .utils import (
 logger = init_logger(__name__)
 
 
-class Gemma3MLP(nn.Module):
+class Rnj1MLP(nn.Module):
     def __init__(
         self,
         hidden_size: int,
@@ -90,7 +76,7 @@ class Gemma3MLP(nn.Module):
         )
         if hidden_activation != "gelu_pytorch_tanh":
             raise ValueError(
-                "Gemma3 uses `gelu_pytorch_tanh` as the hidden activation "
+                "RNJ-1 uses `gelu_pytorch_tanh` as the hidden activation "
                 "function. Please set `hidden_act` and `hidden_activation` to "
                 "`gelu_pytorch_tanh`."
             )
@@ -103,7 +89,7 @@ class Gemma3MLP(nn.Module):
         return x
 
 
-class Gemma3Attention(nn.Module):
+class Rnj1Attention(nn.Module):
     def __init__(
         self,
         config: Gemma3TextConfig,
@@ -126,12 +112,8 @@ class Gemma3Attention(nn.Module):
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
-            # Number of KV heads is greater than TP size, so we partition
-            # the KV heads across multiple tensor parallel GPUs.
             assert self.total_num_kv_heads % tp_size == 0
         else:
-            # Number of KV heads is less than TP size, so we replicate
-            # the KV heads across multiple tensor parallel GPUs.
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = head_dim
@@ -161,22 +143,16 @@ class Gemma3Attention(nn.Module):
 
         layer_idx = extract_layer_index(prefix)
         layer_type = config.layer_types[layer_idx]
-        self.is_sliding = layer_type == "sliding_attention"
-        sliding_window = config.sliding_window if self.is_sliding else None
+        self.is_chunked = layer_type == "chunked_attention"
+        self.chunk_lookback = 1 if self.is_chunked else -1
+        sliding_window = config.sliding_window if self.is_chunked else None
 
         # Initialize the rotary embedding.
+        # Expects v5-style rope_parameters keyed by layer type.
         if layer_type in config.rope_parameters:
-            # Transformers v5 rope config.
             rope_parameters = config.rope_parameters[layer_type]
         else:
-            # Transformers v4 rope config.
-            # Global attention. Use the values in config.json.
             rope_parameters = config.rope_parameters
-            # Local attention. Override the values in config.json.
-            if self.is_sliding:
-                rope_parameters = dict(
-                    rope_type="default", rope_theta=config.rope_local_base_freq
-                )
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -185,27 +161,17 @@ class Gemma3Attention(nn.Module):
             is_neox_style=True,
         )
 
-        if getattr(config, "is_causal", True):
-            attn_type = AttentionType.DECODER
-        else:
-            attn_type = AttentionType.ENCODER_ONLY
-
-        attn_cls = (
-            EncoderOnlyAttention
-            if attn_type == AttentionType.ENCODER_ONLY
-            else Attention
-        )
-
-        self.attn = attn_cls(
+        self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
-            attn_type=attn_type,
+            attn_type=AttentionType.DECODER,
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
+            chunk_lookback=self.chunk_lookback,
             prefix=f"{prefix}.attn",
         )
 
@@ -231,7 +197,7 @@ class Gemma3Attention(nn.Module):
         return output
 
 
-class Gemma3DecoderLayer(nn.Module):
+class Rnj1DecoderLayer(nn.Module):
     def __init__(
         self,
         config: Gemma3TextConfig,
@@ -241,7 +207,7 @@ class Gemma3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.self_attn = Gemma3Attention(
+        self.self_attn = Rnj1Attention(
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -254,7 +220,7 @@ class Gemma3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
         self.hidden_size = config.hidden_size
-        self.mlp = Gemma3MLP(
+        self.mlp = Rnj1MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_activation=config.hidden_activation,
@@ -300,7 +266,7 @@ class Gemma3DecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class Gemma3Model(nn.Module):
+class Rnj1Model(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -317,17 +283,13 @@ class Gemma3Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Gemma3DecoderLayer(
+            lambda prefix: Rnj1DecoderLayer(
                 config, cache_config, quant_config, prefix=prefix
             ),
             prefix=f"{prefix}.layers",
         )
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Normalize the embedding by sqrt(hidden_size)
-        # The normalizer's data type should be downcasted to the model's
-        # data type such as bfloat16, not float32.
-        # See https://github.com/huggingface/transformers/pull/29402
         normalizer = self.config.hidden_size**0.5
         self.register_buffer("normalizer", torch.tensor(normalizer), persistent=False)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
@@ -335,8 +297,6 @@ class Gemma3Model(nn.Module):
         )
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        # NOTE(woosuk): Only apply the normalizer to the output of
-        # vocab embedding. Don't apply it to the vision embedding.
         return self.embed_tokens(input_ids) * self.normalizer
 
     def forward(
@@ -383,8 +343,6 @@ class Gemma3Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
-            # Revert +1 during llama.cpp conversion
-            # see: https://github.com/ggml-org/llama.cpp/blob/be7c3034108473beda214fd1d7c98fd6a7a3bdf5/convert_hf_to_gguf.py#L3397-L3400
             if (
                 self.quant_config
                 and self.quant_config.get_name() == "gguf"
@@ -395,7 +353,6 @@ class Gemma3Model(nn.Module):
             if self.quant_config is not None and (
                 scale_name := self.quant_config.get_cache_scale(name)
             ):
-                # Loading kv cache scales for compressed-tensors quantization
                 param = params_dict[scale_name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 loaded_weight = loaded_weight[0]
@@ -403,12 +360,9 @@ class Gemma3Model(nn.Module):
                 loaded_params.add(scale_name)
                 continue
 
-            # Check if this is a scale parameter that needs remapping first
             if name.endswith((".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
-                # Try to remap the scale name first
                 remapped_name = maybe_remap_kv_scale_name(name, params_dict)
                 if remapped_name is not None and remapped_name in params_dict:
-                    # Successfully remapped, use the remapped name
                     param = params_dict[remapped_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
@@ -416,13 +370,11 @@ class Gemma3Model(nn.Module):
                     weight_loader(param, loaded_weight)
                     loaded_params.add(remapped_name)
                     continue
-                # If remapping failed, continue with normal processing
 
             for param_name, shard_name, shard_id in stacked_params_mapping:
                 if shard_name not in name:
                     continue
                 name = name.replace(shard_name, param_name)
-                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 if is_pp_missing_parameter(name, self):
@@ -432,10 +384,8 @@ class Gemma3Model(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
@@ -449,7 +399,7 @@ class Gemma3Model(nn.Module):
         return loaded_params
 
 
-class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
+class Rnj1ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -469,7 +419,7 @@ class Gemma3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = Gemma3Model(
+        self.model = Rnj1Model(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
 
