@@ -12,6 +12,7 @@ from torch.fx.experimental.proxy_tensor import make_fx
 
 import vllm.ir.op
 from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
+from vllm.ir.ops.layernorm import rms_norm
 
 # This should not exist
 assert "_custom_add" not in IrOp.registry
@@ -571,3 +572,40 @@ class TestTolerance:
         op = IrOp("_tol_test_unknown", _test_native)
         with pytest.raises(ValueError, match="No tolerance defined"):
             op.get_tolerance(torch.complex64)
+
+
+class TestEnableSymbolic:
+    def test_enable_symbolic_context_manager(self):
+        """Test context manager toggles symbolic mode on/off."""
+        assert rms_norm._symbolic_mode is False
+
+        with rms_norm.enable_symbolic():
+            assert rms_norm._symbolic_mode is True
+
+        assert rms_norm._symbolic_mode is False
+
+    def test_generate_inputs_symbolic_replaces_first_dim(self):
+        """Test symbolic mode replaces first dim with SymInt."""
+        from torch import SymInt
+
+        # Normal mode
+        result = rms_norm.generate_inputs(
+            num_tokens=128, hidden_size=64, dtype=torch.float32
+        )
+        assert result[0].shape == (128, 64)
+        assert result[1].shape == (64,)
+
+        # Symbolic mode
+        with rms_norm.enable_symbolic():
+            result = rms_norm.generate_inputs(
+                num_tokens=128, hidden_size=64, dtype=torch.float32
+            )
+            # First dim is SymInt
+            assert isinstance(result[0].shape[0], SymInt)
+            # Remaining dims preserved
+            assert result[0].shape[1:] == (64,)
+            # Meta device
+            assert result[0].device.type == "meta"
+            assert result[1].device.type == "meta"
+            # dtype preserved
+            assert result[0].dtype == torch.float32
