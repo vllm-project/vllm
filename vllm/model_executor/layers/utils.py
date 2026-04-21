@@ -342,14 +342,22 @@ _maybe_override_inductor_is_big_gpu()
 
 
 # State for the torch.compile-wrapped BF16 linear fast path.
-# Keyed by (x.ndim, weight.shape, bias_is_not_none); each distinct shape
-# triggers one inductor compile with mode="max-autotune-no-cudagraphs",
-# letting inductor pick between triton/aten/cutlass without compiling
-# the whole model.
+# Each unique (shape, stride, dtype, device) combination gets its own
+# statically-compiled kernel via dynamic=False + fullgraph=True.  This
+# generates tighter code than dynamic=True at the cost of more compiles,
+# which is fine for LLM serving where weight shapes are fixed and batch
+# sizes cycle through a small set of CUDA graph capture sizes.
+import itertools as _itertools
+import torch.nn.functional as _F
+
 _unquant_bf16_linear_cache: dict[tuple, Callable] = {}
+_unquant_bf16_linear_compile_id = _itertools.count()
 _unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
 _unquant_bf16_linear_torch_compile_configured = False
 _unquant_bf16_linear_torch_compile_disabled = False
+
+_DYNAMO_CACHE_SIZE_LIMIT = 65536
+_DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT = 1048576
 
 
 def _configure_unquant_bf16_linear_torch_compile_once() -> None:
@@ -364,19 +372,32 @@ def _configure_unquant_bf16_linear_torch_compile_once() -> None:
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.fx_graph_cache = True
 
-    torch._dynamo.config.accumulated_cache_size_limit = 1024
+    # Large cache limits needed because dynamic=False creates a separate
+    # compiled kernel per distinct tensor shape.
+    torch._dynamo.config.accumulated_cache_size_limit = max(
+        getattr(torch._dynamo.config, "accumulated_cache_size_limit", 0),
+        _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
+    )
     if hasattr(torch._dynamo.config, "cache_size_limit"):
-        torch._dynamo.config.cache_size_limit = 1024
+        torch._dynamo.config.cache_size_limit = max(
+            torch._dynamo.config.cache_size_limit,
+            _DYNAMO_CACHE_SIZE_LIMIT,
+        )
+    torch._dynamo.config.recompile_limit = max(
+        getattr(torch._dynamo.config, "recompile_limit", 0),
+        _DYNAMO_CACHE_SIZE_LIMIT,
+    )
+    if hasattr(torch._dynamo.config, "accumulated_recompile_limit"):
+        torch._dynamo.config.accumulated_recompile_limit = max(
+            torch._dynamo.config.accumulated_recompile_limit,
+            _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
+        )
+    if hasattr(torch._dynamo.config, "fail_on_recompile_limit_hit"):
+        torch._dynamo.config.fail_on_recompile_limit_hit = False
+    if hasattr(torch._dynamo.config, "fail_on_cache_limit_hit"):
+        torch._dynamo.config.fail_on_cache_limit_hit = False
 
     _unquant_bf16_linear_torch_compile_configured = True
-
-
-def _unquant_bf16_linear_eager(
-    x: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-) -> torch.Tensor:
-    return torch.nn.functional.linear(x, weight, bias)
 
 
 def _unquant_bf16_linear_cache_key(
@@ -384,28 +405,85 @@ def _unquant_bf16_linear_cache_key(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> tuple:
-    return (x.ndim, tuple(weight.shape), bias is not None)
+    return (
+        tuple(x.shape),
+        tuple(x.stride()),
+        x.dtype,
+        tuple(weight.shape),
+        tuple(weight.stride()),
+        weight.dtype,
+        None if bias is None else tuple(bias.shape),
+        None if bias is None else tuple(bias.stride()),
+        None if bias is None else bias.dtype,
+        x.device.type,
+        x.device.index,
+    )
 
 
-def _get_or_create_unquant_bf16_linear_kernel(
-    key: tuple, allow_new_compile: bool
-) -> Callable | None:
-    compiled = _unquant_bf16_linear_cache.get(key)
-    if compiled is not None:
+def _compile_linear_for_args(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> Callable:
+    """Create a statically-compiled F.linear for the exact shapes of x/weight/bias.
+
+    Each compile gets a unique function name (via exec) to avoid Dynamo guard
+    collisions between different shape specializations.
+    """
+    _configure_unquant_bf16_linear_torch_compile_once()
+    compile_id = next(_unquant_bf16_linear_compile_id)
+    ns = {"F": _F, "torch": torch}
+
+    if bias is None:
+        fn_name = f"_linear_no_bias_{compile_id}"
+        exec(
+            f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:\n"
+            "    return F.linear(x, weight, None)\n",
+            ns,
+        )
+        compiled = torch.compile(
+            ns[fn_name],
+            fullgraph=True,
+            dynamic=False,
+            mode="max-autotune-no-cudagraphs",
+        )
+        compiled(x, weight)  # trigger compilation now
         return compiled
 
-    if not allow_new_compile:
-        return None
-
-    _configure_unquant_bf16_linear_torch_compile_once()
-    compiled = torch.compile(
-        _unquant_bf16_linear_eager,
-        backend="inductor",
-        mode="max-autotune-no-cudagraphs",
-        dynamic=True,
+    fn_name = f"_linear_with_bias_{compile_id}"
+    exec(
+        f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:\n"
+        "    return F.linear(x, weight, bias)\n",
+        ns,
     )
-    _unquant_bf16_linear_cache[key] = compiled
+    compiled = torch.compile(
+        ns[fn_name],
+        fullgraph=True,
+        dynamic=False,
+        mode="max-autotune-no-cudagraphs",
+    )
+    compiled(x, weight, bias)  # trigger compilation now
     return compiled
+
+
+def _get_or_invoke_compiled_linear(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+) -> torch.Tensor | None:
+    key = _unquant_bf16_linear_cache_key(x, weight, bias)
+    compiled = _unquant_bf16_linear_cache.get(key)
+    if compiled is None:
+        if torch.cuda.is_current_stream_capturing():
+            return None  # never compile during CUDA graph capture
+        compiled = _compile_linear_for_args(x, weight, bias)
+        _unquant_bf16_linear_cache[key] = compiled
+        # Already called during _compile_linear_for_args, return result
+        # by calling again (result is cached by inductor)
+
+    if bias is None:
+        return compiled(x, weight)
+    return compiled(x, weight, bias)
 
 
 def _should_use_unquant_bf16_linear_torch_compile(
@@ -443,14 +521,8 @@ def _apply_unquant_bf16_linear_torch_compile(
     if is_capturing and key not in _unquant_bf16_linear_capture_safe_keys:
         return None
 
-    compiled = _get_or_create_unquant_bf16_linear_kernel(
-        key, allow_new_compile=not is_capturing
-    )
-    if compiled is None:
-        return None
-
     try:
-        output = compiled(x, weight, bias)
+        output = _get_or_invoke_compiled_linear(x, weight, bias)
     except Exception:
         if is_capturing:
             return None
@@ -460,6 +532,9 @@ def _apply_unquant_bf16_linear_torch_compile(
             exc_info=True,
         )
         _unquant_bf16_linear_torch_compile_disabled = True
+        return None
+
+    if output is None:
         return None
 
     if not is_capturing:
