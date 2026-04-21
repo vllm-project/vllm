@@ -13,7 +13,7 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-from typing import TypeVar
+from typing import TypeVar, cast
 
 import torch
 
@@ -71,6 +71,9 @@ from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
     MarlinMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.xpu import (
+    XPUMxFp8LinearKernel,
+)
 from vllm.model_executor.kernels.linear.nvfp4 import (
     NvFp4LinearKernel,
     NvFp4LinearLayerConfig,
@@ -102,6 +105,8 @@ from vllm.model_executor.kernels.linear.scaled_mm import (
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
     AiterFp8BlockScaledMMKernel,
     AiterInt8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUInt8ScaledMMLinearKernel,
@@ -119,6 +124,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
+    MarlinFP8BlockScaledMMLinearKernel,
     MarlinFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.pytorch import (
@@ -161,6 +167,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterPerTokenFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -184,6 +192,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
+        MarlinFP8BlockScaledMMLinearKernel,
         TritonFp8BlockScaledMMKernel,
     ],
     PlatformEnum.ROCM: [
@@ -240,6 +249,10 @@ _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
         EmulationMxfp8LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        EmulationMxfp8LinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUMxFp8LinearKernel,
         EmulationMxfp8LinearKernel,
     ],
 }
@@ -364,21 +377,27 @@ def init_fp8_linear_kernel(
         out_dtype=out_dtype,
     )
 
-    if activation_quant_key.scale.group_shape.is_per_group():
-        kernel_type = choose_scaled_mm_linear_kernel(
-            config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
-            force_kernel=force_kernel,
-        )
-    else:
-        kernel_type = choose_scaled_mm_linear_kernel(
-            config=scaled_mm_linear_kernel_config,
-            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[misc]
-            force_kernel=force_kernel,
-        )
+    possible_kernels = (
+        _POSSIBLE_FP8_BLOCK_KERNELS
+        if activation_quant_key.scale.group_shape.is_per_group()
+        else _POSSIBLE_FP8_KERNELS,
+    )
 
-        return kernel_type(
-            scaled_mm_linear_kernel_config,
+    kernel_type = cast(
+        type[FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel],
+        choose_scaled_mm_linear_kernel(
+            config=scaled_mm_linear_kernel_config,
+            possible_kernels=possible_kernels,  # type: ignore[arg-type]
+            force_kernel=force_kernel,
+        ),
+    )
+
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
         )
 
     return kernel_type(scaled_mm_linear_kernel_config)
@@ -560,7 +579,13 @@ def init_nvfp4_linear_kernel() -> NvFp4LinearKernel:
 
     # Env-var overrides.
     force_kernel: type[NvFp4LinearKernel] | None = None
-    if envs.VLLM_USE_FBGEMM:
+    if envs.VLLM_BATCH_INVARIANT:
+        logger.info_once(
+            "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+            "emulation backend for deterministic execution."
+        )
+        force_kernel = EmulationNvFp4LinearKernel
+    elif envs.VLLM_USE_FBGEMM:
         force_kernel = FbgemmNvFp4LinearKernel
     elif envs.VLLM_USE_NVFP4_CT_EMULATIONS:
         force_kernel = EmulationNvFp4LinearKernel
@@ -678,6 +703,8 @@ __all__ = [
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
     "ScaledMMLinearLayerConfig",
+    "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
+    "AiterPerTokenFp8ScaledMMLinearKernel",
     "NvFp4LinearKernel",
     "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
@@ -708,6 +735,7 @@ __all__ = [
     "Mxfp8LinearLayerConfig",
     "FlashInferCutlassMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
+    "XPUMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",

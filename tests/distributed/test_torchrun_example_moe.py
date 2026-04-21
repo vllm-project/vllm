@@ -38,6 +38,8 @@ llm = LLM(
     distributed_executor_backend="external_launcher",
     gpu_memory_utilization=random.uniform(0.7, 0.9),
     seed=0,
+    max_model_len=1024,
+    max_num_seqs=16,
 )
 
 outputs = llm.generate(prompts, sampling_params)

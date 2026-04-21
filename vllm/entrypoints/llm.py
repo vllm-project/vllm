@@ -48,7 +48,7 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     load_chat_template,
 )
-from vllm.entrypoints.pooling.io_processor_factories import init_pooling_io_processors
+from vllm.entrypoints.pooling.factories import init_pooling_io_processors
 from vllm.entrypoints.pooling.scoring.io_processor import ScoringIOProcessor
 from vllm.entrypoints.pooling.scoring.typing import ScoreInput
 from vllm.entrypoints.pooling.typing import OfflineInputsContext, OfflineOutputsContext
@@ -452,6 +452,7 @@ class LLM:
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -479,6 +480,7 @@ class LLM:
                 of `prompts`, where each priority value corresponds to the prompt
                 at the same index.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            mm_processor_kwargs: Overrides for `processor.__call__`.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -503,6 +505,7 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
     def enqueue(
@@ -513,6 +516,7 @@ class LLM:
         priority: list[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         """Enqueue prompts for generation without waiting for completion.
 
@@ -527,6 +531,7 @@ class LLM:
             priority: The priority of the requests, if any.
             use_tqdm: If True, shows a tqdm progress bar while adding requests.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
+            mm_processor_kwargs: Overrides for `processor.__call__`.
 
         Returns:
             A list of request IDs for the enqueued requests.
@@ -545,6 +550,7 @@ class LLM:
             lora_request=lora_request,
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
 
     @overload
@@ -843,6 +849,7 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
@@ -862,15 +869,29 @@ class LLM:
         tok_params = renderer.default_cmpl_tok_params.with_kwargs(
             **(tokenization_kwargs or {})
         )
+        prompt_extras = (
+            None
+            if mm_processor_kwargs is None
+            else {"mm_processor_kwargs": mm_processor_kwargs}
+        )
 
-        return renderer.render_cmpl(parsed_prompts, tok_params)
+        return renderer.render_cmpl(
+            parsed_prompts,
+            tok_params,
+            prompt_extras=prompt_extras,
+        )
 
     def _preprocess_cmpl_one(
         self,
         prompt: PromptType,
         tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> EngineInput:
-        (engine_input,) = self._preprocess_cmpl([prompt], tokenization_kwargs)
+        (engine_input,) = self._preprocess_cmpl(
+            [prompt],
+            tokenization_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
         return engine_input
 
     def _preprocess_chat(
@@ -908,16 +929,22 @@ class LLM:
                     tokenize=is_mistral_tokenizer(renderer.tokenizer),
                 ),
             ),
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         tok_params = renderer.default_chat_tok_params.with_kwargs(
             **(tokenization_kwargs or {})
+        )
+        prompt_extras = (
+            None
+            if mm_processor_kwargs is None
+            else {"mm_processor_kwargs": mm_processor_kwargs}
         )
 
         _, engine_inputs = renderer.render_chat(
             conversations,
             chat_params,
             tok_params,
-            prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
+            prompt_extras=prompt_extras,
         )
 
         return engine_inputs
@@ -1571,15 +1598,20 @@ class LLM:
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
-        seq_priority = self._priority_to_seq(priority, len(prompts))
+        seq_priority = self._priority_to_seq(priority, len(seq_prompts))
 
         return self._render_and_add_requests(
             prompts=(
-                self._preprocess_cmpl_one(prompt, tokenization_kwargs)
+                self._preprocess_cmpl_one(
+                    prompt,
+                    tokenization_kwargs,
+                    mm_processor_kwargs=mm_processor_kwargs,
+                )
                 for prompt in maybe_tqdm(
                     seq_prompts,
                     use_tqdm=use_tqdm,
@@ -1603,6 +1635,7 @@ class LLM:
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ):
         self._add_completion_requests(
             prompts=prompts,
@@ -1611,6 +1644,7 @@ class LLM:
             lora_request=lora_request,
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
+            mm_processor_kwargs=mm_processor_kwargs,
         )
         return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 
@@ -1638,6 +1672,17 @@ class LLM:
         seq_params = self._params_to_seq(params, len(seq_convs))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
 
+        # When thinking is enabled or tools are provided, and the model
+        # uses special tokens for structured output (e.g. Gemma4's
+        # <|channel>, <|tool_call>, <|"|>), automatically set
+        # skip_special_tokens=False so these tokens are preserved in
+        # output.text for downstream parsing.
+        needs_parsing = (
+            chat_template_kwargs and chat_template_kwargs.get("enable_thinking")
+        ) or tools
+        if needs_parsing:
+            self._adjust_params_for_parsing(seq_params)
+
         return self._render_and_run_requests(
             prompts=(
                 self._preprocess_chat_one(
@@ -1662,6 +1707,53 @@ class LLM:
             lora_requests=seq_lora_requests,
             use_tqdm=use_tqdm,
         )
+
+    def _adjust_params_for_parsing(
+        self, params: Sequence[SamplingParams | PoolingParams]
+    ) -> None:
+        """Set ``skip_special_tokens=False`` when the model encodes
+        structured output syntax as special tokens.
+
+        Models like Gemma4 register thinking delimiters
+        (``<|channel>``/``<channel|>``) and tool call tokens
+        (``<|tool_call>``/``<tool_call|>``/``<|"|>``) as special tokens.
+        The default ``skip_special_tokens=True`` strips them from
+        ``output.text``, breaking parsing of both reasoning blocks and
+        tool calls.
+
+        This is a no-op for models whose structured tokens are regular
+        text tokens (e.g. DeepSeek's ``<think>``/``</think>``).
+        """
+        # The offline API currently lacks a unified rendering pipeline.
+        # Until the planned Renderer refactor is complete, we hardcode
+        # this token preservation logic specifically for Gemma4 models
+        # to avoid regressions on other models.
+        hf_config = getattr(self.model_config, "hf_config", None)
+        architectures = getattr(hf_config, "architectures", [])
+
+        if any("Gemma4" in arch for arch in architectures):
+            tokenizer = self.renderer.get_tokenizer()
+            vocab = tokenizer.get_vocab()
+            special_ids = set(getattr(tokenizer, "all_special_ids", []))
+
+            # Tokens used for thinking delimiters and tool call syntax
+            # that some models (Gemma4) register as special tokens.
+            structured_tokens = (
+                "<|channel>",
+                "<channel|>",  # thinking delimiters
+                "<|tool_call>",
+                "<tool_call|>",  # tool call delimiters
+                '<|"|>',  # string quoting in tool args
+            )
+            needs_special = any(
+                vocab.get(tok) in special_ids
+                for tok in structured_tokens
+                if tok in vocab
+            )
+            if needs_special:
+                for sp in params:
+                    if isinstance(sp, SamplingParams) and sp.skip_special_tokens:
+                        sp.skip_special_tokens = False
 
     def _render_and_run_requests(
         self,
