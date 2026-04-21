@@ -1017,13 +1017,11 @@ class NixlConnectorWorker:
             # Remote tp_size > local tp_size: read from multiple remote ranks.
             # Logically "split" own regions into |tp_ratio| chunks. Mind that
             # we only do this once per remote tp_size (replica-friendly).
-            abs_tp = -tp_ratio
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
             for handle_data in self.transfer_policy.build_src_split_handles(
                 self.src_blocks_data,
                 self.num_descs,
-                abs_tp,
                 transfer_config=transfer_topo.get_engine_info(engine_id),
                 tp_size=transfer_topo.tp_size,
                 is_mla=transfer_topo.is_mla,
