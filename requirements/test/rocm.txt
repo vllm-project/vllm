@@ -275,7 +275,7 @@ fastar==0.10.0
     # via fastapi-cloud-cli
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors==0.2.2
+fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@65d80088fca7a8f567fba30415fbcc80f7d2259c
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
@@ -662,7 +662,6 @@ numba==0.61.2
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
     #   librosa
-    #   resampy
 numkong==7.1.1
     # via albucore
 numpy==2.2.6
@@ -708,7 +707,6 @@ numpy==2.2.6
     #   pytrec-eval-terrier
     #   pywavelets
     #   rasterio
-    #   resampy
     #   rioxarray
     #   rouge-score
     #   runai-model-streamer
@@ -1193,8 +1191,6 @@ requests==2.32.5
     #   tacoreader
     #   tiktoken
     #   wandb
-resampy==0.4.3
-    # via -r requirements/test/rocm.in
 responses==0.26.0
     # via genai-perf
 rfc3339-validator==0.1.4

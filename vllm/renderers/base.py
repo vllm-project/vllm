@@ -435,6 +435,11 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
+            if not isinstance(prompt.get("prompt"), str):
+                raise TypeError(
+                    "Expected prompt['prompt'] to be a string before tokenization; "
+                    "use 'prompt_token_ids' for token ID inputs"
+                )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = self._tokenize_prompt(prompt, params)
 
@@ -466,6 +471,11 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
+            if not isinstance(prompt.get("prompt"), str):
+                raise TypeError(
+                    "Expected prompt['prompt'] to be a string before tokenization; "
+                    "use 'prompt_token_ids' for token ID inputs"
+                )
             prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = await self._tokenize_prompt_async(prompt, params)
 
