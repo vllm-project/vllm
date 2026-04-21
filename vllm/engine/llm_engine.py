@@ -1520,10 +1520,10 @@ class LLMEngine:
             num_branches = sampling_params.tree_search_params.branching_factor
             if self._should_create_branches(
                 seq, logprobs[lp_idx], sampling_params):
-                probs = torch.exp(logprobs[lp_idx])
-                _, new_token_ids = torch.topk(probs, num_branches, dim=-1)
+                top_logprobs, new_token_ids = torch.topk(logprobs[lp_idx], num_branches, dim=-1)
                 new_token_ids = new_token_ids.tolist()
-                current_group.add_tree_branches(request_id, new_token_ids, self)
+                branch_logprobs = top_logprobs.tolist()
+                current_group.add_tree_branches(request_id, new_token_ids, branch_logprobs, self)
 
     def _should_create_branches(self, seq, logprobs, sampling_params):
         if seq.tree_depth >= sampling_params.tree_search_params.max_tree_depth:
@@ -1533,10 +1533,10 @@ class LLMEngine:
     
     def _calculate_entropy(self, logprobs):
         """Calculate the entropy of the logits."""
-        # Convert logits to probabilities
-        probs = torch.exp(logprobs)
-        # Calculate entropy
-        entropy = -torch.sum(probs * logprobs, dim=-1)
+        finite_mask = torch.isfinite(logprobs)
+        safe_logprobs = torch.where(finite_mask, logprobs, torch.zeros_like(logprobs))
+        probs = torch.where(finite_mask, torch.exp(logprobs), torch.zeros_like(logprobs))
+        entropy = -torch.sum(probs * safe_logprobs, dim=-1)
         return entropy.item()
 
     # def _add_branch_to_scheduler(self, branch_group, virtual_engine):

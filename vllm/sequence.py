@@ -511,6 +511,7 @@ class Sequence:
         self.parent_req_id: Optional[str] = None
         self.parent_seq_id: Optional[int] = None
         self.is_leaf = True
+        self.branch_logprob: Optional[float] = None
         # Token ID whose text should be prepended to this sequence's output
         # (set on child sequences created by add_tree_branches).
         self.new_branch_token_id: Optional[int] = None
@@ -1558,7 +1559,12 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
         group.streaming = params.output_kind == RequestOutputKind.DELTA
         group.output_produced = False
 
-    def add_tree_branches(self, parent_req_id: str, new_token_ids: list[int], engine):
+    def add_tree_branches(self, parent_req_id: str, new_token_ids: list[int], branch_logprobs: list[float], engine):
+        if len(new_token_ids) != len(branch_logprobs):
+            raise ValueError(
+                "new_token_ids and branch_logprobs must have the same length: "
+                f"{len(new_token_ids)} != {len(branch_logprobs)}"
+            )
         original_seqs_length = len(self.assembled_seq_group.seqs)
         parent_seq_group = self.to_be_finished[parent_req_id]
         parent_seq = parent_seq_group.seqs[0]
@@ -1598,6 +1604,7 @@ class ParallelSampleSequenceGroup(SequenceGroupBase):
             child_seq.parent_req_id = parent_req_id
             child_seq.parent_seq_id = parent_seq.seq_id
             child_seq.new_branch_token_id = token_id
+            child_seq.branch_logprob = float(branch_logprobs[i])
             self.assembled_seq_group.seqs.append(child_seq)
 
     def get_unfinished_seqs(self) -> list[Sequence]:

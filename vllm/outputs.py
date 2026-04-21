@@ -54,6 +54,7 @@ class CompletionOutput:
     is_leaf: bool = True
     tree_text: str = ""
     tree_ids: GenericSequence[int] = ()
+    branch_logprob: Optional[float] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -72,7 +73,8 @@ class CompletionOutput:
                 f"seq_id={self.seq_id}, "
                 f"is_leaf={self.is_leaf}, "
                 f"tree_text={self.tree_text!r}, "
-                f"tree_ids={self.tree_ids})")
+                f"tree_ids={self.tree_ids}, "
+                f"branch_logprob={self.branch_logprob})")
 
 
 @dataclass
@@ -325,6 +327,7 @@ class RequestOutput:
                 output.is_leaf = getattr(seq, 'is_leaf', True)
                 output.tree_text = tree_text
                 output.tree_ids = tree_ids
+                output.branch_logprob = getattr(seq, 'branch_logprob', None)
 
             else:
                 output = CompletionOutput(
@@ -341,7 +344,8 @@ class RequestOutput:
                     seq.seq_id,
                     getattr(seq, 'is_leaf', True),
                     tree_text=tree_text,
-                    tree_ids=tree_ids)
+                    tree_ids=tree_ids,
+                    branch_logprob=getattr(seq, 'branch_logprob', None))
 
             outputs.append(output)
 
