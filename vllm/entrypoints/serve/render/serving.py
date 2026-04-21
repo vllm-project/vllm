@@ -170,8 +170,10 @@ class OpenAIServingRender:
 
         request_id = f"chatcmpl-{random_uuid()}"
 
-        tokenizer = self.renderer.get_tokenizer()
-        prompt_text = tokenizer.decode(token_ids)
+        prompt_text = prompt_components.text
+        if prompt_text is None:
+            async_tokenizer = self.renderer.get_async_tokenizer()
+            prompt_text = await async_tokenizer.decode(token_ids)
 
         return GenerateRequest(
             request_id=request_id,
@@ -285,7 +287,6 @@ class OpenAIServingRender:
         if isinstance(result, ErrorResponse):
             return result
         generate_requests: list[GenerateRequest] = []
-        tokenizer = self.renderer.get_tokenizer()
         for engine_input in result:
             prompt_components = extract_prompt_components(
                 self.model_config, engine_input
@@ -308,7 +309,10 @@ class OpenAIServingRender:
             )
 
             request_id = f"cmpl-{random_uuid()}"
-            prompt_text = tokenizer.decode(token_ids)
+            prompt_text = prompt_components.text
+            if prompt_text is None:
+                async_tokenizer = self.renderer.get_async_tokenizer()
+                prompt_text = await async_tokenizer.decode(token_ids)
 
             generate_requests.append(
                 GenerateRequest(
