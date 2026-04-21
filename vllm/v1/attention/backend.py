@@ -303,13 +303,7 @@ class AttentionBackend(ABC):
             else:
                 invalid_reasons.append("non-sparse not supported")
         if use_per_head_quant_scales and not cls.supports_per_head_quant_scales():
-            if cls.get_name() == "FLASHINFER":
-                invalid_reasons.append(
-                    "Per-attention-head KV-cache quantization is currently "
-                    "supported only with FLASH_ATTN, not FLASHINFER"
-                )
-            else:
-                invalid_reasons.append("per-head quant scales not supported")
+            invalid_reasons.append("per-head quant scales not supported")
         if not cls.supports_compute_capability(device_capability):
             invalid_reasons.append("compute capability not supported")
         if not cls.supports_attn_type(attn_type):

@@ -424,6 +424,48 @@ class FlashInferBackend(AttentionBackend):
         return supports_trtllm_attention()
 
     @classmethod
+    def validate_configuration(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        use_per_head_quant_scales: bool,
+        device_capability: DeviceCapability,
+        attn_type: str,
+        use_non_causal: bool = False,
+    ) -> list[str]:
+        invalid_reasons = super().validate_configuration(
+            head_size=head_size,
+            dtype=dtype,
+            kv_cache_dtype=kv_cache_dtype,
+            block_size=block_size,
+            use_mla=use_mla,
+            has_sink=has_sink,
+            use_sparse=use_sparse,
+            use_mm_prefix=use_mm_prefix,
+            use_per_head_quant_scales=use_per_head_quant_scales,
+            device_capability=device_capability,
+            attn_type=attn_type,
+            use_non_causal=use_non_causal,
+        )
+        if use_per_head_quant_scales and not cls.supports_per_head_quant_scales():
+            invalid_reasons = [
+                (
+                    "Per-attention-head KV-cache quantization is currently "
+                    "supported only with FLASH_ATTN, not FLASHINFER"
+                )
+                if reason == "per-head quant scales not supported"
+                else reason
+                for reason in invalid_reasons
+            ]
+        return invalid_reasons
+
+    @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
         capability = current_platform.get_device_capability()
         if capability is not None and capability.major == 10:

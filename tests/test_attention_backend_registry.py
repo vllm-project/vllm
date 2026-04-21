@@ -175,10 +175,10 @@ def test_register_custom_mamba_backend_with_class_path():
 
 
 @pytest.mark.parametrize(
-    ("backend_cls", "expected_match"),
+    ("backend", "expected_match"),
     [
         (
-            AttentionBackendEnum.FLASHINFER.get_class(),
+            AttentionBackendEnum.FLASHINFER,
             "Per-attention-head KV-cache quantization is currently supported only with FLASH_ATTN, not FLASHINFER",
         ),
         (
@@ -188,9 +188,16 @@ def test_register_custom_mamba_backend_with_class_path():
     ],
 )
 def test_validate_configuration_reports_per_head_quant_scale_support(
-    backend_cls: type[AttentionBackend],
+    backend: AttentionBackendEnum | type[AttentionBackend],
     expected_match: str,
 ):
+    if isinstance(backend, AttentionBackendEnum):
+        if backend == AttentionBackendEnum.FLASHINFER:
+            pytest.importorskip("flashinfer")
+        backend_cls = backend.get_class()
+    else:
+        backend_cls = backend
+
     invalid_reasons = backend_cls.validate_configuration(
         head_size=128,
         dtype=torch.bfloat16,
@@ -207,6 +214,6 @@ def test_validate_configuration_reports_per_head_quant_scale_support(
 
     assert any(expected_match in reason for reason in invalid_reasons)
 
-    if backend_cls is CustomAttentionBackend:
+    if backend is CustomAttentionBackend:
         assert all("FLASH_ATTN" not in reason for reason in invalid_reasons)
         assert all("FLASHINFER" not in reason for reason in invalid_reasons)
