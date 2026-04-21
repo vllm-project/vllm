@@ -205,7 +205,9 @@ def flash_maxsim_packed(
     return scores.squeeze(0) if Nq == 1 else scores.sum(dim=0)  # [Nq, B] -> [B]
 
 
-def pack_docs(d_embs: list):
+def pack_docs(
+    d_embs: list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Pack variable-length docs into a contiguous buffer with cu_seqlens.
 
     Args:
