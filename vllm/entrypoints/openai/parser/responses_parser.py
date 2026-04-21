@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import logging
 from collections.abc import Callable
+from typing import Any
 
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
 from openai.types.responses.response_function_tool_call_output_item import (
@@ -36,7 +37,7 @@ class ResponsesParser:
         self,
         *,
         tokenizer: TokenizerLike,
-        reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
+        reasoning_parser_cls: Callable[..., ReasoningParser],
         response_messages: list[ResponseInputOutputItem],
         request: ResponsesRequest,
         tool_parser_cls: type[ToolParser] | None,
@@ -49,7 +50,10 @@ class ResponsesParser:
         self.tokenizer = tokenizer
         self.request = request
 
-        self.reasoning_parser_instance = reasoning_parser_cls(tokenizer)
+        self.reasoning_parser_instance = reasoning_parser_cls(
+            tokenizer,
+            chat_template_kwargs=_effective_chat_template_kwargs(request),
+        )
         self.tool_parser_instance = None
         if tool_parser_cls is not None:
             self.tool_parser_instance = tool_parser_cls(tokenizer, request.tools)
@@ -159,7 +163,7 @@ class ResponsesParser:
 def get_responses_parser_for_simple_context(
     *,
     tokenizer: TokenizerLike,
-    reasoning_parser_cls: Callable[[TokenizerLike], ReasoningParser],
+    reasoning_parser_cls: Callable[..., ReasoningParser],
     response_messages: list[ResponseInputOutputItem],
     request: ResponsesRequest,
     tool_parser_cls,
@@ -177,3 +181,12 @@ def get_responses_parser_for_simple_context(
         request=request,
         tool_parser_cls=tool_parser_cls,
     )
+
+
+def _effective_chat_template_kwargs(
+    request: ResponsesRequest,
+) -> dict[str, Any]:
+    return request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    ).chat_template_kwargs

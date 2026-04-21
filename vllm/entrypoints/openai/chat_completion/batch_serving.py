@@ -117,10 +117,8 @@ class OpenAIServingChatBatch(OpenAIServingChat):
 
         reasoning_parser: ReasoningParser | None = None
         if self.reasoning_parser_cls:
-            chat_template_kwargs = self._prepare_extra_chat_template_kwargs(
-                request.chat_template_kwargs,
-                self.default_chat_template_kwargs,
-            )
+            parser_request = request.to_chat_completion_request(request.messages[0])
+            chat_template_kwargs = self._effective_chat_template_kwargs(parser_request)
             reasoning_parser = self.reasoning_parser_cls(
                 tokenizer,
                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
