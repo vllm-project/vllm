@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -126,7 +126,9 @@ class ModelBlockTransferPolicy(ABC):
     @abstractmethod
     def get_block_descs_ids(
         self,
+        # Input
         block_ids: BlockIds,
+        # Block geometry
         num_regions: int,
         dst_num_blocks: int,
         block_len_per_layer: list[int],
@@ -264,7 +266,7 @@ class ModelBlockTransferPolicy(ABC):
         local_block_ids: BlockIds,
         remote_block_ids: BlockIds,
         remote_ranks: list[int],
-        transfer_config: Any | None = None,
+        remote_info: EngineTransferInfo,
     ) -> list[ReadSpec]:
         """Compute the full set of read operations needed for a request.
 
@@ -559,8 +561,9 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         local_block_ids,
         remote_block_ids,
         remote_ranks,
-        transfer_config=None,
+        remote_info,
     ):
+        assert isinstance(remote_info, EngineTransferInfo)
         return [
             ReadSpec(
                 remote_rank=rank,
@@ -1009,10 +1012,10 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         local_block_ids,
         remote_block_ids,
         remote_ranks,
-        transfer_config=None,
+        remote_info,
     ):
-        assert isinstance(transfer_config, MambaEngineTransferInfo)
-        info = transfer_config
+        assert isinstance(remote_info, MambaEngineTransferInfo)
+        info = remote_info
         specs: list[ReadSpec] = []
         for rank in remote_ranks:
             filtered_local, filtered_remote = self.filter_block_ids_for_rank(
