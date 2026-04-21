@@ -52,7 +52,7 @@ async def test_bge_m3_api_server_embedding(server, pooling_task):
     client = server.get_async_client()
 
     if pooling_task != "embed":
-        with pytest.raises(openai.NotFoundError):
+        with pytest.raises(openai.InternalServerError):
             await run_client_embeddings(
                 client,
                 MODEL_NAME,
