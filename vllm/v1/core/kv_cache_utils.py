@@ -979,7 +979,7 @@ def unify_kv_cache_spec_page_size(
             # Layer had the original max page size but target was padded up.
             # Use page_size_padded to pad this layer to target.
             try:
-                new_spec = replace(layer_spec, page_size_padded=target_page_size)
+                new_spec = replace(layer_spec, page_size_padded=target_page_size)  # type: ignore[call-arg]
             except TypeError as e:
                 raise NotImplementedError(
                     f"Cannot pad page size for {type(layer_spec).__name__}: "
