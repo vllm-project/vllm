@@ -91,7 +91,7 @@ async def fanout_encoder_primer(
     mm_items = extract_mm_items(orig_request)
     if not mm_items:
         logger.info("[%s] No multimodal items, skipping encoder", req_id)
-        return {}  # nothing to do
+        return orig_request  # nothing to do
 
     logger.debug("[%s] got %d multimodal items...", req_id, len(mm_items))
 
