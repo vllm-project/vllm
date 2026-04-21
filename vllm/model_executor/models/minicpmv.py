@@ -98,6 +98,39 @@ from .utils import AutoWeightsLoader, flatten_bn, maybe_prefix
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
 
+_MINICPM_TOKENIZER_ID_ATTRS = (
+    ("im_start_id", "im_start_token", "<image>"),
+    ("im_end_id", "im_end_token", "</image>"),
+    ("slice_start_id", "slice_start_token", "<slice>"),
+    ("slice_end_id", "slice_end_token", "</slice>"),
+)
+
+
+def _ensure_minicpm_tokenizer_compat(
+    tokenizer: object,
+    image_processor: object,
+) -> None:
+    convert_tokens_to_ids = getattr(tokenizer, "convert_tokens_to_ids", None)
+    if not callable(convert_tokens_to_ids):
+        return
+
+    unk_token = getattr(tokenizer, "unk_token", None)
+    unk_token_id = getattr(tokenizer, "unk_token_id", None)
+
+    for attr_name, proc_attr_name, default_token in _MINICPM_TOKENIZER_ID_ATTRS:
+        if hasattr(tokenizer, attr_name):
+            continue
+
+        token = getattr(image_processor, proc_attr_name, default_token)
+        token_id = convert_tokens_to_ids(token)
+
+        if not isinstance(token_id, int):
+            continue
+        if token != unk_token and token_id == unk_token_id:
+            continue
+
+        setattr(tokenizer, attr_name, token_id)
+
 
 class MiniCPMVImagePixelInputs(TensorSchema):
     """
@@ -553,6 +586,10 @@ class MiniCPMVProcessingInfo(BaseProcessingInfo):
             val = getattr(image_processor, attr, None)
             if isinstance(val, np.ndarray):
                 setattr(image_processor, attr, val.tolist())
+
+        tokenizer = getattr(hf_processor, "tokenizer", None)
+        if tokenizer is not None:
+            _ensure_minicpm_tokenizer_compat(tokenizer, image_processor)
 
         return hf_processor
 
