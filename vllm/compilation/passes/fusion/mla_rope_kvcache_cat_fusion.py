@@ -23,7 +23,7 @@ from .matcher_utils import MatcherDeepseekScalingRotaryEmbedding, MatcherRotaryE
 logger = init_logger(__name__)
 
 
-def fused_concat_and_cache_mla_rope_impl(
+def fused_rope_unified_mla_kv_cache_update_impl(
     positions: torch.Tensor,
     q_pe: torch.Tensor,
     k_pe: torch.Tensor,
@@ -58,7 +58,7 @@ def fused_concat_and_cache_mla_rope_impl(
     return torch.empty(0, device=kv_c.device, dtype=kv_c.dtype)
 
 
-def fused_concat_and_cache_mla_rope_fake(
+def fused_rope_unified_mla_kv_cache_update_fake(
     positions: torch.Tensor,
     q_pe: torch.Tensor,
     k_pe: torch.Tensor,
@@ -73,15 +73,15 @@ def fused_concat_and_cache_mla_rope_fake(
 
 
 direct_register_custom_op(
-    op_name="fused_concat_and_cache_mla_rope",
-    op_func=fused_concat_and_cache_mla_rope_impl,
-    fake_impl=fused_concat_and_cache_mla_rope_fake,
+    op_name="fused_rope_unified_mla_kv_cache_update",
+    op_func=fused_rope_unified_mla_kv_cache_update_impl,
+    fake_impl=fused_rope_unified_mla_kv_cache_update_fake,
     mutates_args=["q_pe", "k_pe"],
 )
 
 
 class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
-    FUSED_OP = torch.ops.vllm.fused_concat_and_cache_mla_rope.default
+    FUSED_OP = torch.ops.vllm.fused_rope_unified_mla_kv_cache_update.default
 
     def __init__(
         self,

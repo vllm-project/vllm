@@ -219,7 +219,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
         return ops
 
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
-        return [torch.ops.vllm.fused_concat_and_cache_mla_rope.default]
+        return [torch.ops.vllm.fused_rope_unified_mla_kv_cache_update.default]
 
 
 if current_platform.is_cuda():
@@ -353,7 +353,9 @@ def test_mla_rope_kvcache_cat_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_unfused, kv_c_unfused, k_pe_unfused, dummy = model(qkv_unfused, pos_unfused)
+            q_unfused, kv_c_unfused, k_pe_unfused, dummy = model(
+                qkv_unfused, pos_unfused
+            )
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache.clone()
         del dummy
