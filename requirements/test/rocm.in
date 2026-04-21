@@ -81,3 +81,6 @@ plotly # required for perf comparison html report
 rapidfuzz
 torchgeo==0.7.0
 multiprocess==0.70.16
+
+# Required for faster safetensors model loading
+fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@0.2.2
