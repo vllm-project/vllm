@@ -18,8 +18,10 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
+    GPULoadStoreSpec,
     OffloadingManager,
+    OffloadingSpec,
     OffloadKey,
     ReqContext,
     get_offload_block_hash,

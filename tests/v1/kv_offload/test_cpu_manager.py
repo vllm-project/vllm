@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import pytest
 
-from vllm.v1.kv_offload.abstract import (
+from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
     OffloadingEvent,
     OffloadKey,
@@ -14,10 +14,12 @@ from vllm.v1.kv_offload.abstract import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
+from vllm.v1.kv_offload.cpu.manager import (
+    CPUOffloadingManager,
+    FilterReusedOffloadingManager,
+)
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
-from vllm.v1.kv_offload.mediums import CPULoadStoreSpec
-from vllm.v1.kv_offload.reuse_manager import FilterReusedOffloadingManager
+from vllm.v1.kv_offload.cpu.spec import CPULoadStoreSpec
 
 
 def make_req_context(kv_transfer_params: dict | None = None) -> ReqContext:
