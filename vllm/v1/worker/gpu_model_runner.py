@@ -4752,6 +4752,7 @@ class GPUModelRunner(
         logger.info_once(
             "Starting to load model %s...",
             self.model_config.model,
+            scope="global",
         )
 
         if self.parallel_config.enable_eplb:
