@@ -1017,8 +1017,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self.impl.dcp_world_size == -1:
             self.impl.dcp_world_size = get_dcp_group().world_size
 
-        fp8_attention = self.kv_cache_dtype.startswith("fp8")
-
         # Write to KV cache via custom op
         dummy_tensor = torch.ops.vllm.mla_write_kv_cache(
             kv_c_normed,
@@ -1027,18 +1025,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         num_decode_tokens = torch.ops.vllm.mla_split_batch(q, self.layer_name)
+        torch._constrain_as_size(num_decode_tokens, min=0)
+
         # Prefill path
-        # We need to hint compiler for unbacked sym int, num_decode_tokens.
-        batch_size_kv_c = kv_c_normed.size(0)
-        batch_size_k_pe = k_pe.size(0)
-        torch._check(batch_size_kv_c >= num_decode_tokens)
-        torch._check(batch_size_k_pe >= num_decode_tokens)
-        # narrow(dim, start, length) - returns view, compile-friendly
         prefill_kv_c = kv_c_normed.narrow(
-            0, num_decode_tokens, batch_size_kv_c - num_decode_tokens
+            0, num_decode_tokens, kv_c_normed.size(0) - num_decode_tokens
         )
         prefill_k_pe = k_pe.narrow(
-            0, num_decode_tokens, batch_size_k_pe - num_decode_tokens
+            0, num_decode_tokens, k_pe.size(0) - num_decode_tokens
         )
 
         # Prefill path: kv_b_proj GEMM on prefill tokens only (OPTIMIZED)
@@ -1047,12 +1041,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, prefill_k_pe)
-        # Prefill attention (cudagraph_unsafe): slices to prefill portion
-        prefill_result = torch.ops.vllm.mla_attention_prefill_with_output(
+        # Prefill attention (cudagraph_unsafe): writes directly into
+        # output[num_decode_tokens:] — no intermediate buffer needed.
+        torch.ops.vllm.mla_attention_prefill_with_output(
             q,
             k,
             v,
             num_decode_tokens,
+            output,
             dummy_tensor,
             self.layer_name,
         )
@@ -1061,10 +1057,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Only process decode tokens (eliminates wasted computation on prefill tokens)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
 
-        # Slice to decode portion only (first num_decode_tokens tokens)
-        torch._check(num_decode_tokens >= 0)
-        torch._check(q_nope.size(0) >= num_decode_tokens)
-        torch._check(q_pe.size(0) >= num_decode_tokens)
         decode_q_nope = q_nope.narrow(0, 0, num_decode_tokens)
         decode_q_pe = q_pe.narrow(0, 0, num_decode_tokens)
 
@@ -1084,22 +1076,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             ql_nope = torch.bmm(decode_q_nope, self.W_UK_T)
             ql_nope = ql_nope.transpose(0, 1)
 
-        if fp8_attention:
-            decode_q0 = torch.cat([ql_nope, decode_q_pe], dim=-1)
-            decode_q_final, _ = ops.scaled_fp8_quant(
-                decode_q0.view(decode_q0.shape[0], -1),
-                self._q_scale,
-            )
-            decode_q_final = decode_q_final.view(decode_q0.shape)
-        else:
-            decode_q_final = torch.cat([ql_nope, decode_q_pe], dim=-1)
-
-        if self.dcp_world_size > 1:
-            assert not fp8_attention, "DCP not support fp8 kvcache now."
-            decode_q_final = get_dcp_group().all_gather(decode_q_final, dim=1)
-
         attn_out, lse = torch.ops.vllm.mla_attention_decode(
-            decode_q_final,
+            ql_nope,
+            decode_q_pe,
             num_decode_tokens,
             self.num_heads,
             self.kv_lora_rank,
@@ -1107,23 +1086,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.layer_name,
         )
 
-        if self.dcp_world_size > 1:
-            attn_out = cp_lse_ag_out_rs(
-                attn_out,
-                lse,
-                get_dcp_group(),
-                is_lse_base_on_e=not getattr(self, "_use_fi_prefill", False),
-            )
-
-        decode_result = self._v_up_proj_functional(attn_out)
-
-        # Merge prefill and decode.
-        torch.ops.vllm.mla_merge_prefill_decode_output(
-            decode_result,
-            prefill_result,
-            output,
-            num_decode_tokens,
-        )
+        # V up-projection writes directly into output[0:D] — decode and
+        # prefill slices are non-overlapping so no merge op is needed.
+        decode_output = output.narrow(0, 0, num_decode_tokens)
+        self._v_up_proj(attn_out, out=decode_output)
 
         return output
 
@@ -1288,19 +1254,17 @@ def mla_write_kv_cache(
     """
     attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
 
-    if attn_metadata is None or kv_cache.numel() == 0:
-        return kv_c_normed.flatten()[0:1].clone()
+    if attn_metadata is not None and kv_cache.numel() > 0:
+        ops.concat_and_cache_mla(
+            kv_c_normed,
+            k_pe.squeeze(1),
+            kv_cache,
+            attn_metadata.slot_mapping.flatten(),
+            kv_cache_dtype=attn_layer.kv_cache_dtype,
+            scale=attn_layer._k_scale,
+        )
 
-    ops.concat_and_cache_mla(
-        kv_c_normed,
-        k_pe.squeeze(1),
-        kv_cache,
-        attn_metadata.slot_mapping.flatten(),
-        kv_cache_dtype=attn_layer.kv_cache_dtype,
-        scale=attn_layer._k_scale,
-    )
-
-    return kv_c_normed.flatten()[0:1].clone()
+    return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
 
 def mla_write_kv_cache_fake(
@@ -1309,9 +1273,7 @@ def mla_write_kv_cache_fake(
     layer_name: str,
 ) -> torch.Tensor:
     """Fake implementation for torch.compile."""
-    # Return a scalar tensor that depends on input for ordering
-    # return kv_c_normed.sum().unsqueeze(0)
-    return kv_c_normed.flatten()[0:1].clone()
+    return torch.empty(0, device=kv_c_normed.device, dtype=kv_c_normed.dtype)
 
 
 direct_register_custom_op(
@@ -1325,41 +1287,62 @@ direct_register_custom_op(
 
 
 def mla_attention_decode(
-    decode_q: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
     num_decode_tokens: int,
     num_heads: int,
     kv_lora_rank: int,
     dummy_tensor: torch.Tensor,
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Decode attention - returns (attn_out, lse) directly (zero-copy)."""
-    _ = dummy_tensor + 0
-
+    """Decode attention - handles cat/FP8/DCP internally."""
     attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
-    if attn_layer.kv_cache_dtype.startswith("fp8"):
+    fp8_attention = attn_layer.kv_cache_dtype.startswith("fp8")
+    if fp8_attention:
         kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
     if num_decode_tokens == 0:
-        # Return empty tensors for zero decode tokens
         return (
-            decode_q.new_zeros(0, num_heads, kv_lora_rank),
-            decode_q.new_zeros(0, num_heads, dtype=torch.float32),
+            ql_nope.new_zeros(0, num_heads, kv_lora_rank),
+            ql_nope.new_zeros(0, num_heads, dtype=torch.float32),
         )
 
-    # decode_q is already D-sized from Phase 1b slicing - use directly
+    decode_q: torch.Tensor | tuple[torch.Tensor, torch.Tensor]
+    if fp8_attention and attn_layer.impl.supports_quant_query_input:
+        decode_q = attn_layer._decode_concat_quant_fp8_op(
+            ql_nope, q_pe, attn_layer._q_scale
+        )
+    else:
+        decode_q = (ql_nope, q_pe)
+
+    if attn_layer.dcp_world_size is not None and attn_layer.dcp_world_size > 1:
+        assert not fp8_attention, "DCP not support fp8 kvcache now."
+        if isinstance(decode_q, tuple):
+            decode_q = torch.cat(decode_q, dim=-1)
+        decode_q = get_dcp_group().all_gather(decode_q, dim=1)
+
     attn_out, lse = attn_layer._forward_decode(
         decode_q, kv_cache, attn_metadata, attn_layer
     )
 
-    # Return directly - no copy, no intermediate allocation!
+    if attn_layer.dcp_world_size is not None and attn_layer.dcp_world_size > 1:
+        assert lse is not None
+        attn_out = cp_lse_ag_out_rs(
+            attn_out,
+            lse,
+            get_dcp_group(),
+            is_lse_base_on_e=not getattr(attn_layer, "_use_fi_prefill", False),
+        )
+
     if lse is None:
-        lse = decode_q.new_zeros(num_decode_tokens, num_heads, dtype=torch.float32)
+        lse = ql_nope.new_zeros(num_decode_tokens, num_heads, dtype=torch.float32)
 
     return attn_out, lse
 
 
 def mla_attention_decode_fake(
-    decode_q: torch.Tensor,
+    ql_nope: torch.Tensor,
+    q_pe: torch.Tensor,
     num_decode_tokens: int,
     num_heads: int,
     kv_lora_rank: int,
@@ -1367,8 +1350,8 @@ def mla_attention_decode_fake(
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fake implementation for torch.compile - returns tuple."""
-    attn_out = decode_q.new_empty(num_decode_tokens, num_heads, kv_lora_rank)
-    lse = decode_q.new_empty(num_decode_tokens, num_heads, dtype=torch.float32)
+    attn_out = ql_nope.new_empty(num_decode_tokens, num_heads, kv_lora_rank)
+    lse = ql_nope.new_empty(num_decode_tokens, num_heads, dtype=torch.float32)
     return attn_out, lse
 
 
@@ -1387,11 +1370,10 @@ def mla_attention_prefill_with_output(
     k: torch.Tensor,
     v: torch.Tensor,
     num_decode_tokens: int,
+    output: torch.Tensor,
     dummy_tensor: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
-    _ = dummy_tensor.sum() * 0
-
+) -> None:
     attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
     if attn_layer.kv_cache_dtype.startswith("fp8"):
         kv_cache = kv_cache.view(current_platform.fp8_dtype())
@@ -1400,11 +1382,10 @@ def mla_attention_prefill_with_output(
     k = k[num_decode_tokens:]
     v = v[num_decode_tokens:]
     num_prefill = q.shape[0]
-    out_dim = v.shape[-2] * v.shape[-1]
     if attn_metadata is None or num_prefill == 0:
-        return q.new_zeros(num_prefill, out_dim)
+        return
     if attn_metadata.prefill is None or attn_metadata.num_prefills == 0:
-        return q.new_zeros(num_prefill, out_dim)
+        return
     assert attn_metadata.prefill is not None
     prefill_metadata = attn_metadata.prefill
     has_context = prefill_metadata.chunked_context is not None
@@ -1416,6 +1397,7 @@ def mla_attention_prefill_with_output(
         v=v,
         return_softmax_lse=has_context,
     )
+    prefill_out = output[num_decode_tokens : num_decode_tokens + num_prefill]
     if has_context:
         suffix_output, suffix_lse = output_prefill
         assert attn_layer.dcp_world_size is not None
@@ -1444,10 +1426,10 @@ def mla_attention_prefill_with_output(
             suffix_output=suffix_output,
             suffix_lse=suffix_lse,
         )
-        return result.flatten(start_dim=-2)
+        prefill_out.copy_(result.flatten(start_dim=-2))
     else:
         assert isinstance(output_prefill, torch.Tensor)
-        return output_prefill[..., : v.shape[-1]].flatten(start_dim=-2)
+        prefill_out.copy_(output_prefill[..., : v.shape[-1]].flatten(start_dim=-2))
 
 
 def mla_attention_prefill_with_output_fake(
@@ -1455,19 +1437,18 @@ def mla_attention_prefill_with_output_fake(
     k: torch.Tensor,
     v: torch.Tensor,
     num_decode_tokens: int,
+    output: torch.Tensor,
     dummy_tensor: torch.Tensor,
     layer_name: str,
-) -> torch.Tensor:
+) -> None:
     """Fake implementation for torch.compile."""
-    num_prefill = q.shape[0] - num_decode_tokens
-    out_dim = v.shape[-2] * v.shape[-1]
-    return q.new_empty(num_prefill, out_dim)
+    return
 
 
 direct_register_custom_op(
     op_name="mla_attention_prefill_with_output",
     op_func=mla_attention_prefill_with_output,
-    mutates_args=[],
+    mutates_args=["output"],
     fake_impl=mla_attention_prefill_with_output_fake,
     dispatch_key=current_platform.dispatch_key,
     tags=(torch._C.Tag.cudagraph_unsafe,),
