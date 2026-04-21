@@ -84,6 +84,8 @@ logger = init_logger(__name__)
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
 _VIDEO_MAX_FRAMES = 32  # max sampled frames per video
+# Keep video peak memory low during startup profiling on smaller GPUs.
+_VIDEO_VISION_BATCH_SIZE = 1
 
 
 # ---------------------------------------------------------------------------
@@ -1080,6 +1082,7 @@ class Gemma4ForConditionalGeneration(
         self,
         pixel_values: torch.Tensor,
         pixel_position_ids: torch.Tensor,
+        max_items_per_batch: int | None = None,
     ) -> list[torch.Tensor]:
         """Run the Gemma4 vision tower on a batch and split flat outputs.
 
@@ -1091,6 +1094,18 @@ class Gemma4ForConditionalGeneration(
         """
         if pixel_values.shape[0] == 0:
             return []
+
+        if (max_items_per_batch is not None
+                and pixel_values.shape[0] > max_items_per_batch):
+            embeddings: list[torch.Tensor] = []
+            for start in range(0, pixel_values.shape[0], max_items_per_batch):
+                end = start + max_items_per_batch
+                embeddings.extend(
+                    self._process_vision_batch(
+                        pixel_values[start:end],
+                        pixel_position_ids[start:end],
+                    ))
+            return embeddings
 
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
         max_patches = pixel_values.shape[1]
@@ -1153,7 +1168,14 @@ class Gemma4ForConditionalGeneration(
 
         per_video_embeddings = []
         for pv_chunk, pp_chunk in zip(pv_per_video, pp_per_video):
-            frame_embs = self._process_vision_batch(pv_chunk, pp_chunk)
+            # Startup profiling runs a maximum-feature-size video item through
+            # this path. Chunk frames to avoid the batched vision tower peak
+            # regressing small-GPU startup memory.
+            frame_embs = self._process_vision_batch(
+                pv_chunk,
+                pp_chunk,
+                max_items_per_batch=_VIDEO_VISION_BATCH_SIZE,
+            )
             # Concatenate all frames of this video into one tensor.
             per_video_embeddings.append(torch.cat(frame_embs, dim=0))
 
