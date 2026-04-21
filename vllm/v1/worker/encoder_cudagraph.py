@@ -94,7 +94,7 @@ class EncoderCudaGraphManager:
 
         if multimodal_config.get_limit_per_prompt("video") == 0:
             self.max_frames_per_batch = 0
-        elif user_max_frames is not None and user_max_frames > 0:
+        elif user_max_frames is not None:
             self.max_frames_per_batch = user_max_frames
         else:
             # Set it to the model-specific value according to its `processing_info`.
