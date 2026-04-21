@@ -157,7 +157,10 @@ def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
 def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     """Enable if use_inductor_graph_partition is enabled."""
 
-    return cfg.compilation_config.use_inductor_graph_partition
+    return (
+        cfg.compilation_config.use_inductor_graph_partition
+        or not cfg.compilation_config.splitting_ops_contain_kv_cache_update()
+    )
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
