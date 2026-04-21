@@ -12,5 +12,5 @@ OLMoE-1B-7B-0125-Instruct.yaml
 Phi-Tiny-MoE-Instruct.yaml
 Sarvam-30B.yaml
 ERNIE-4.5-VL-28B-A3B-Thinking.yaml
-# This model times out in weight loading.
+# This model times out in weight loading. See #40535
 #moe-refactor/Llama-4-Scout-BF16-triton.yaml
