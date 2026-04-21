@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.olmoe import OlmoeAttention, OlmoeForCausalLM
-from vllm.transformers_utils.configs import FlexOlmoConfig
+from vllm.transformers_utils.configs.flex_olmo import FlexOlmoConfig
 
 logger = init_logger(__name__)
 
@@ -76,7 +76,6 @@ class FlexOlmoMoE(nn.Module):
             top_k=hf_config.num_experts_per_tok,
             hidden_size=hf_config.hidden_size,
             intermediate_size=hf_config.intermediate_size,
-            reduce_results=True,
             renormalize=False,
             quant_config=None,
             tp_size=tp_size,

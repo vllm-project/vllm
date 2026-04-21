@@ -8,9 +8,8 @@ This is similar in concept to the `functools` module.
 
 import inspect
 import threading
-import warnings
 from collections.abc import Callable, Mapping
-from functools import lru_cache, partial, wraps
+from functools import lru_cache
 from typing import Any, TypeVar
 
 from typing_extensions import ParamSpec
@@ -42,81 +41,6 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
 
     wrapper.has_run = False  # type: ignore[attr-defined]
     wrapper.lock = threading.Lock()  # type: ignore[attr-defined]
-    return wrapper
-
-
-def deprecate_args(
-    start_index: int,
-    is_deprecated: bool | Callable[[], bool] = True,
-    additional_message: str | None = None,
-) -> Callable[[F], F]:
-    if not callable(is_deprecated):
-        is_deprecated = partial(identity, is_deprecated)
-
-    def wrapper(fn: F) -> F:
-        params = inspect.signature(fn).parameters
-        pos_types = (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        )
-        pos_kws = [kw for kw, param in params.items() if param.kind in pos_types]
-
-        @wraps(fn)
-        def inner(*args, **kwargs):
-            if is_deprecated():
-                deprecated_args = pos_kws[start_index : len(args)]
-                if deprecated_args:
-                    msg = (
-                        f"The positional arguments {deprecated_args} are "
-                        "deprecated and will be removed in a future update."
-                    )
-                    if additional_message is not None:
-                        msg += f" {additional_message}"
-
-                    warnings.warn(
-                        DeprecationWarning(msg),
-                        stacklevel=3,  # The inner function takes up one level
-                    )
-
-            return fn(*args, **kwargs)
-
-        return inner  # type: ignore
-
-    return wrapper
-
-
-def deprecate_kwargs(
-    *kws: str,
-    is_deprecated: bool | Callable[[], bool] = True,
-    additional_message: str | None = None,
-) -> Callable[[F], F]:
-    deprecated_kws = set(kws)
-
-    if not callable(is_deprecated):
-        is_deprecated = partial(identity, is_deprecated)
-
-    def wrapper(fn: F) -> F:
-        @wraps(fn)
-        def inner(*args, **kwargs):
-            if is_deprecated():
-                deprecated_kwargs = kwargs.keys() & deprecated_kws
-                if deprecated_kwargs:
-                    msg = (
-                        f"The keyword arguments {deprecated_kwargs} are "
-                        "deprecated and will be removed in a future update."
-                    )
-                    if additional_message is not None:
-                        msg += f" {additional_message}"
-
-                    warnings.warn(
-                        DeprecationWarning(msg),
-                        stacklevel=3,  # The inner function takes up one level
-                    )
-
-            return fn(*args, **kwargs)
-
-        return inner  # type: ignore
-
     return wrapper
 
 

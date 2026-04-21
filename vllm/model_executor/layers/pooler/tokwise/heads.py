@@ -68,36 +68,40 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
 
         if self.head_dtype is not None:
             pooled_data = pooled_data.to(self.head_dtype)
-        # pooled_data shape: [n_tokens, hidden_dimension]
+        # pooled_data shape: [n_tokens, hidden_size]
 
         # Apply ST projector
         if self.projector is not None:
-            pooled_data = self.projector(pooled_data)
-        # pooled_data shape: [n_tokens, embedding_dimension]
+            embeddings = self.projector(pooled_data)
+        else:
+            embeddings = pooled_data
+        # embeddings shape: [n_tokens, embedding_size]
 
         # for matryoshka representation
-        pooled_data = pooled_data[..., : pooling_param.dimensions]
+        embeddings = embeddings[..., : pooling_param.dimensions]
 
         # for normalize
         if self.activation is not None and pooling_param.use_activation:
-            pooled_data = self.activation(pooled_data)
+            embeddings = self.activation(embeddings)
 
-        # pooled_data shape: [n_tokens, embedding_dimension]
-        return pooled_data
+        # embeddings shape: [n_tokens, embedding_size]
+        return embeddings
 
 
 class TokenClassifierPoolerHead(TokenPoolerHead):
     def __init__(
         self,
         classifier: ClassifierFn | None = None,
-        logit_bias: float | None = None,
+        logit_mean: float | None = None,
+        logit_sigma: float | None = None,
         head_dtype: torch.dtype | str | None = None,
         activation: ActivationFn | None = None,
     ) -> None:
         super().__init__()
 
         self.classifier = classifier
-        self.logit_bias = logit_bias
+        self.logit_mean = logit_mean
+        self.logit_sigma = logit_sigma
         self.head_dtype = head_dtype
         self.activation = activation
 
@@ -118,16 +122,19 @@ class TokenClassifierPoolerHead(TokenPoolerHead):
         # hidden_states shape: [n_token, hidden_size]
 
         if self.classifier is not None:
-            scores = self.classifier(pooled_data)
+            logits = self.classifier(pooled_data)
         else:
-            scores = pooled_data
-        # scores shape: [n_token, num_labels]
+            logits = pooled_data
+        # logits shape: [n_token, num_labels]
 
-        if self.logit_bias is not None:
-            scores -= self.logit_bias
+        # Affine score calibration: activation((logit - mean) / sigma)
+        if self.logit_mean is not None:
+            logits = logits - self.logit_mean
+        if self.logit_sigma is not None:
+            logits = logits / self.logit_sigma
 
         if self.activation is not None and pooling_param.use_activation:
-            scores = self.activation(scores)
+            logits = self.activation(logits)
 
-        # scores shape: [n_token, num_labels]
-        return scores
+        # logits shape: [n_token, num_labels]
+        return logits
