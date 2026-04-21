@@ -4,10 +4,8 @@ import torch
 from torch import Tensor
 
 from vllm import ir
-from vllm.ir.ops.quant import get_fp8_min_max
+from vllm.ir.ops.quant import get_fp8_min_max, make_group_quant_scales
 from vllm.platforms import current_platform
-
-from .vllm_c import make_group_quant_scales
 
 current_platform.import_kernels()
 

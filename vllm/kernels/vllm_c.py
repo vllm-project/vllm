@@ -4,9 +4,8 @@ import torch
 from torch import Tensor
 
 from vllm import ir
-from vllm.ir.ops.quant import get_fp8_min_max
+from vllm.ir.ops.quant import get_fp8_min_max, make_group_quant_scales
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import get_tma_aligned_size
 
 current_platform.import_kernels()
 
@@ -16,34 +15,6 @@ CUDA_ALIKE = current_platform.is_cuda_alike()
 CUDA_ONLY = current_platform.is_cuda()
 
 GPGPU_DEVICE = CUDA_ALIKE or current_platform.is_xpu()
-
-
-def make_group_quant_scales(
-    x: Tensor,
-    group_size: int,
-    column_major: bool,
-    scale_alignment: int,
-) -> Tensor:
-    """Allocate the output scale tensor for group FP8 quantization.
-    Handles row-major, column-major, and TMA-aligned column-major layouts."""
-    if column_major:
-        if scale_alignment > 1:
-            m = x.shape[-2]
-            sf_k = x.shape[-1] // group_size
-            tma_aligned_m = get_tma_aligned_size(m, scale_alignment)
-            shape = x.shape[:-2] + (m, sf_k)
-            stride = (1, tma_aligned_m)
-            return torch.empty_strided(
-                shape, stride, device=x.device, dtype=torch.float32
-            )
-        else:
-            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
-            return torch.empty(shape, device=x.device, dtype=torch.float32).permute(
-                -1, -2
-            )
-    else:
-        shape = x.shape[:-1] + (x.shape[-1] // group_size,)
-        return torch.empty(shape, device=x.device, dtype=torch.float32)
 
 
 rms_no_var_size = (

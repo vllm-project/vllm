@@ -1,10 +1,44 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import torch
 import torch.nn.functional as F
 from torch import Tensor
 
 from ..op import register_op
+
+
+def get_tma_aligned_size(x: int, element_size: int) -> int:
+    align = 16 // element_size
+    return (x + align - 1) // align * align
+
+
+def make_group_quant_scales(
+    x: Tensor,
+    group_size: int,
+    column_major: bool,
+    scale_alignment: int,
+) -> Tensor:
+    """Allocate the output scale tensor for group FP8 quantization.
+    Handles row-major, column-major, and TMA-aligned column-major layouts."""
+    if column_major:
+        if scale_alignment > 1:
+            m = x.shape[-2]
+            sf_k = x.shape[-1] // group_size
+            tma_aligned_m = get_tma_aligned_size(m, scale_alignment)
+            shape = x.shape[:-2] + (m, sf_k)
+            stride = (1, tma_aligned_m)
+            return torch.empty_strided(
+                shape, stride, device=x.device, dtype=torch.float32
+            )
+        else:
+            shape = x.shape[:-2] + (x.shape[-1] // group_size, x.shape[-2])
+            return torch.empty(shape, device=x.device, dtype=torch.float32).permute(
+                -1, -2
+            )
+    else:
+        shape = x.shape[:-1] + (x.shape[-1] // group_size,)
+        return torch.empty(shape, device=x.device, dtype=torch.float32)
 
 
 def get_fp8_min_max(fp8_dtype: torch.dtype) -> tuple[float, float]:
@@ -140,9 +174,7 @@ def dynamic_group_quant_fp8(
         x_quant = x_quant[..., :hidden_dim]
     x_quant = x_quant.view(orig_shape)
 
-    scales = scales.squeeze(-1)
-    scales = scales.reshape(orig_shape[:-1] + (num_groups,))
-    if column_major:
-        scales = scales.transpose(-2, -1).contiguous().transpose(-1, -2)
+    x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)
+    x_s.copy_(scales.squeeze(-1).reshape(x_s.shape))
 
-    return x_quant, scales
+    return x_quant, x_s

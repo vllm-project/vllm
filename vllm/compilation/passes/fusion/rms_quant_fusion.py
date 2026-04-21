@@ -11,7 +11,7 @@ from torch._ops import OpOverload
 
 import vllm.ir.ops
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.kernels.vllm_c import make_group_quant_scales
+from vllm.ir.ops.quant import make_group_quant_scales
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
