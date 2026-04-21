@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 
 from vllm import ir
-from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
+from vllm.ir.ops.quant import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import get_tma_aligned_size
 
@@ -14,8 +14,6 @@ CUDA_ALIKE = current_platform.is_cuda_alike()
 """Most kernels in this file are supported on all CUDA-alike platforms."""
 
 CUDA_ONLY = current_platform.is_cuda()
-
-_FP8_MIN, _FP8_MAX = get_fp8_min_max()
 
 
 def make_group_quant_scales(
@@ -178,8 +176,7 @@ def dynamic_group_quant_fp8(
         x_s,
         group_size,
         1e-10,
-        _FP8_MIN,
-        _FP8_MAX,
+        *get_fp8_min_max(fp8_dtype),
         use_ue8m0,
         column_major,
         scale_alignment > 1,

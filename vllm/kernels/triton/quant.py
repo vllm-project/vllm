@@ -4,14 +4,12 @@ import torch
 from torch import Tensor
 
 from vllm import ir
+from vllm.ir.ops.quant import get_fp8_min_max
 from vllm.kernels.vllm_c import make_group_quant_scales
-from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 TRITON_SUPPORTED = current_platform.is_cuda_alike()
-
-_FP8_MIN, _FP8_MAX = get_fp8_min_max()
 
 
 @triton.jit
@@ -175,6 +173,7 @@ def dynamic_group_quant_fp8(
     x_q = torch.empty(x.shape, device=x.device, dtype=fp8_dtype)
     x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)
 
+    fp8_min, fp8_max = get_fp8_min_max(fp8_dtype)
     if column_major:
         _per_token_group_quant_fp8_colmajor[(M,)](
             x,
@@ -185,8 +184,8 @@ def dynamic_group_quant_fp8(
             x.stride(-2),
             x_s.stride(-1),
             eps,
-            fp8_min=_FP8_MIN,
-            fp8_max=_FP8_MAX,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
             use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,
@@ -201,8 +200,8 @@ def dynamic_group_quant_fp8(
             x.shape[-1],
             x.stride(-2),
             eps,
-            fp8_min=_FP8_MIN,
-            fp8_max=_FP8_MAX,
+            fp8_min=fp8_min,
+            fp8_max=fp8_max,
             use_ue8m0=use_ue8m0,
             BLOCK=BLOCK,
             num_warps=num_warps,
