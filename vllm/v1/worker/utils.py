@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import math
 from collections import defaultdict
 from collections.abc import Iterable
@@ -9,6 +10,7 @@ from typing import Any
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -35,6 +37,30 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
+
+
+def with_gpu_sync_check(fn):
+    """Decorator that enables `torch.cuda.set_sync_debug_mode` around `fn` when
+    `VLLM_GPU_SYNC_CHECK` is set. No-op (returns `fn` unchanged) otherwise."""
+    if not current_platform.is_cuda_alike():
+        return fn
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        # Re-check mode inside the wrapper to support dynamic disabling
+        # (e.g. via os.environ.pop in VllmConfig)
+        mode = envs.VLLM_GPU_SYNC_CHECK
+        if mode is None:
+            return fn(*args, **kwargs)
+
+        prev_mode = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode(mode.lower())
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            torch.cuda.set_sync_debug_mode(prev_mode)
+
+    return wrapper
 
 
 @triton.jit

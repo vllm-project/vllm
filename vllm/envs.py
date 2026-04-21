@@ -82,6 +82,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -523,6 +524,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
+    # the worker's `execute_model` and `sample_tokens` calls. Valid values
+    # are "warn" (print a warning on each sync) or "error" (raise on sync).
+    # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
+    "VLLM_GPU_SYNC_CHECK": env_with_choices(
+        "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"], case_sensitive=False
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
