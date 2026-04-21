@@ -2110,15 +2110,15 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
