@@ -239,13 +239,28 @@ fi
 # --- Docker housekeeping ---
 cleanup_docker
 
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin "$REGISTRY"
+
 # --- Build or pull test image ---
-if [[ -n "${IMAGE_TAG_XPU:-}" ]]; then
-  echo "Using prebuilt XPU image: ${IMAGE_TAG_XPU}"
-  docker pull "${IMAGE_TAG_XPU}"
+IMAGE="${IMAGE_TAG_XPU:-${image_name}}"
+
+echo "Using image: ${IMAGE}"
+
+if docker image inspect "${IMAGE}" >/dev/null 2>&1; then
+  echo "Image already exists locally, skipping pull"
 else
-  echo "Using prebuilt XPU image: ${image_name}"
-  docker pull "${image_name}"
+  echo "Image not found locally, waiting for lock..."
+
+  flock /tmp/docker-pull.lock bash -c "
+    if docker image inspect '${IMAGE}' >/dev/null 2>&1; then
+      echo 'Image already pulled by another runner'
+    else
+      echo 'Pulling image...'
+      timeout 900 docker pull '${IMAGE}'
+    fi
+  "
+
+  echo "Pull step completed"
 fi
 
 remove_docker_container() {
@@ -267,6 +282,7 @@ docker run \
     --ipc=host \
     --privileged \
     -v /dev/dri/by-path:/dev/dri/by-path \
+    -v ${HOME}/.cache/huggingface:/root/.cache/huggingface \
     --entrypoint="" \
     -e "HF_TOKEN=${HF_TOKEN:-}" \
     -e "ZE_AFFINITY_MASK=${ZE_AFFINITY_MASK:-}" \

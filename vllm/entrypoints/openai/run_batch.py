@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import contextlib
+import json
 import sys
 import tempfile
 from argparse import Namespace
@@ -13,12 +15,14 @@ from urllib.parse import urlparse
 
 import aiohttp
 import pybase64 as base64
+import pydantic
 import torch
 from fastapi import UploadFile
 from prometheus_client import start_http_server
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
 from starlette.datastructures import State
+from starlette.responses import JSONResponse
 from tqdm import tqdm
 from urllib3.util import parse_url
 
@@ -49,7 +53,7 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
 )
-from vllm.entrypoints.pooling.score.protocol import (
+from vllm.entrypoints.pooling.scoring.protocol import (
     RerankRequest,
     RerankResponse,
     ScoreRequest,
@@ -180,6 +184,18 @@ class BatchRequestInput(OpenAIBaseModel):
         return TypeAdapter(BatchRequestInputBody).validate_python(value)
 
 
+AllResponse: TypeAlias = (
+    ChatCompletionResponse
+    | EmbeddingResponse
+    | ScoreResponse
+    | RerankResponse
+    | TranscriptionResponse
+    | TranscriptionResponseVerbose
+    | TranslationResponse
+    | TranslationResponseVerbose
+)
+
+
 class BatchResponseData(OpenAIBaseModel):
     # HTTP status code of the response.
     status_code: int = 200
@@ -188,17 +204,7 @@ class BatchResponseData(OpenAIBaseModel):
     request_id: str
 
     # The body of the response.
-    body: (
-        ChatCompletionResponse
-        | EmbeddingResponse
-        | ScoreResponse
-        | RerankResponse
-        | TranscriptionResponse
-        | TranscriptionResponseVerbose
-        | TranslationResponse
-        | TranslationResponseVerbose
-        | None
-    ) = None
+    body: AllResponse | None = None
 
 
 class BatchRequestOutput(OpenAIBaseModel):
@@ -536,19 +542,13 @@ async def run_request(
     except Exception as e:
         response = create_error_response(e)
 
-    if isinstance(
-        response,
-        (
-            ChatCompletionResponse,
-            EmbeddingResponse,
-            ScoreResponse,
-            RerankResponse,
-            TranscriptionResponse,
-            TranscriptionResponseVerbose,
-            TranslationResponse,
-            TranslationResponseVerbose,
-        ),
-    ):
+    if isinstance(response, JSONResponse):
+        with contextlib.suppress(pydantic.ValidationError):
+            response = TypeAdapter(AllResponse | ErrorResponse).validate_python(
+                json.loads(response.body)
+            )
+
+    if isinstance(response, AllResponse):
         batch_output = BatchRequestOutput(
             id=f"vllm-{random_uuid()}",
             custom_id=request.custom_id,
@@ -745,14 +745,14 @@ async def build_endpoint_registry(
         "score": {
             "url_matcher": lambda url: url.endswith("/score"),
             "handler_getter": lambda: (
-                serving_scores.create_score if serving_scores is not None else None
+                serving_scores if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },
         "rerank": {
             "url_matcher": lambda url: url.endswith("/rerank"),
             "handler_getter": lambda: (
-                serving_scores.do_rerank if serving_scores is not None else None
+                serving_scores if serving_scores is not None else None
             ),
             "wrapper_fn": None,
         },

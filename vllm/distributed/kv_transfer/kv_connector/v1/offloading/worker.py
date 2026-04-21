@@ -83,6 +83,8 @@ class OffloadingConnectorWorker:
             if layer_name in layers
         }
 
+        num_blocks = self.spec.kv_cache_config.num_blocks
+
         # layer_name -> list of matching KV cache tensors
         # such that each tensor starts with the num_blocks dimension.
         # FlashAttention layers which use the (2, num_blocks, ...) layout
@@ -132,7 +134,6 @@ class OffloadingConnectorWorker:
                         num_blocks_logical_dim
                     )
                     if num_blocks_physical_dim == 0:
-                        num_blocks = layer_kv_cache.shape[num_blocks_logical_dim]
                         storage = layer_kv_cache.untyped_storage()
                         page = layer_kv_cache_spec.page_size_bytes
                         tensors_per_block[layer_name] = (
@@ -154,7 +155,6 @@ class OffloadingConnectorWorker:
                         assert num_blocks_physical_dim == 1
 
                         # unbind the tensor to separate K and V tensors
-                        num_blocks = layer_kv_cache.shape[num_blocks_logical_dim]
                         half_page_size = layer_kv_cache_spec.page_size_bytes // 2
                         storage = layer_kv_cache.untyped_storage()
                         raw = (
@@ -181,7 +181,6 @@ class OffloadingConnectorWorker:
                     assert len(state_tensors) > 0
                     first_state_tensor = state_tensors[0]
                     assert first_state_tensor.storage_offset() == 0
-                    num_blocks = first_state_tensor.shape[0]
                     tensor = (
                         torch.tensor(
                             [],
@@ -395,3 +394,13 @@ class OffloadingConnectorWorker:
         kv_connector_stats = self.kv_connector_stats
         self.kv_connector_stats = OffloadingConnectorStats()
         return kv_connector_stats
+
+    def shutdown(self) -> None:
+        # Drop deferred store jobs: there is no point in submitting
+        # them during shutdown.
+        self._unsubmitted_store_jobs.clear()
+        self._jobs.clear()
+        self._load_job.clear()
+        self._store_jobs.clear()
+        self._finished_reqs_waiting_for_store.clear()
+        self.worker.shutdown()
