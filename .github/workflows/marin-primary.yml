@@ -1,0 +1,102 @@
+name: Marin Primary Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      nightly_tag:
+        description: Optional nightly tag to promote. Defaults to the marin-nightly alias.
+        required: false
+        type: string
+
+concurrency:
+  group: marin-primary
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote Marin Primary
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve nightly source
+        id: source
+        run: |
+          SOURCE_TAG="${{ inputs.nightly_tag }}"
+          if [[ -z "$SOURCE_TAG" ]]; then
+            SOURCE_TAG="marin-nightly"
+          fi
+          echo "SOURCE_TAG=${SOURCE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download nightly assets
+        run: |
+          bash .github/scripts/marin_release.sh download-release-assets \
+            "$GITHUB_REPOSITORY" \
+            "${{ steps.source.outputs.SOURCE_TAG }}" \
+            nightly \
+            "*.whl" \
+            "marin-build.json" \
+            "marin-release-pair.json"
+
+      - name: Promote immutable primary release
+        id: immutable
+        run: |
+          SHORT_SHA=$(jq -r '.short_sha' nightly/marin-build.json)
+          SHA=$(jq -r '.sha' nightly/marin-build.json)
+          DATE=$(date -u +%Y%m%d)
+          TAG="marin-primary-${DATE}-${SHORT_SHA}"
+          TITLE="Marin primary ${DATE} (${SHORT_SHA})"
+
+          cat > /tmp/marin-primary-notes.md <<EOF
+          Primary promotion of nightly source \`${{ steps.source.outputs.SOURCE_TAG }}\`.
+
+          Commit: \`$SHA\`
+          EOF
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "$GITHUB_REPOSITORY" \
+            "$TAG" \
+            "$SHA" \
+            false \
+            "$TITLE" \
+            /tmp/marin-primary-notes.md \
+            nightly/*.whl \
+            nightly/marin-build.json \
+            nightly/marin-release-pair.json
+
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "SHA=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Update primary alias
+        run: |
+          cat > /tmp/marin-primary-alias-notes.md <<EOF
+          Moving alias for the latest Marin primary release.
+
+          Current immutable release: \`${{ steps.immutable.outputs.TAG }}\`
+          Commit: \`${{ steps.immutable.outputs.SHA }}\`
+          EOF
+
+          bash .github/scripts/marin_release.sh move-tag \
+            "$GITHUB_REPOSITORY" \
+            "marin-primary" \
+            "${{ steps.immutable.outputs.SHA }}"
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "$GITHUB_REPOSITORY" \
+            "marin-primary" \
+            "${{ steps.immutable.outputs.SHA }}" \
+            false \
+            "Marin primary (latest)" \
+            /tmp/marin-primary-alias-notes.md \
+            nightly/*.whl \
+            nightly/marin-build.json \
+            nightly/marin-release-pair.json

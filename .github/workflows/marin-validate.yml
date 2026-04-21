@@ -1,0 +1,93 @@
+name: Marin Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: marin-validate-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Build And Validate Marin Wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
+
+      - name: Determine build metadata
+        id: vars
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y%m%d)
+          VERSION="0.0.0.dev${DATE}+${SHORT_SHA}"
+          {
+            echo "SHA=${GITHUB_SHA}"
+            echo "SHORT_SHA=${SHORT_SHA}"
+            echo "DATE=${DATE}"
+            echo "VERSION=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build TPU wheel
+        env:
+          VLLM_TARGET_DEVICE: tpu
+          VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
+        run: uv build --wheel
+
+      - name: Write build metadata
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+
+          wheel_name = next(pathlib.Path("dist").glob("*.whl")).name
+          payload = {
+              "repo": "marin-community/vllm",
+              "sha": "${{ steps.vars.outputs.SHA }}",
+              "short_sha": "${{ steps.vars.outputs.SHORT_SHA }}",
+              "date": "${{ steps.vars.outputs.DATE }}",
+              "version": "${{ steps.vars.outputs.VERSION }}",
+              "wheel": wheel_name,
+          }
+          pathlib.Path("dist/marin-build.json").write_text(
+              json.dumps(payload, indent=2) + "\n")
+          PY
+
+      - name: Inspect wheel metadata
+        run: |
+          python .github/scripts/wheel_metadata.py \
+            --wheel dist/*.whl \
+            --requirements-out /tmp/vllm-wheel-reqs.txt \
+            --forbid-prefix tpu-inference \
+            --forbid-prefix tpu_inference \
+            --error-on-forbidden
+
+      - name: Install wheel in clean environment
+        run: |
+          uv venv .marin-validate
+          . .marin-validate/bin/activate
+          uv pip install -r /tmp/vllm-wheel-reqs.txt dist/*.whl
+          python -c "import vllm; from vllm import SamplingParams"
+
+      - name: Upload validated wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: marin-validate-dist
+          path: |
+            dist/*.whl
+            dist/marin-build.json
+          retention-days: 14

@@ -1,0 +1,113 @@
+name: Marin Nightly Release
+
+on:
+  schedule:
+    - cron: '10 6 * * *'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Optional SHA or ref to publish. Defaults to the latest successful marin-validate run on main.
+        required: false
+        type: string
+
+concurrency:
+  group: marin-nightly
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish:
+    name: Publish Marin Nightly
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve requested SHA
+        id: ref
+        run: |
+          TARGET_SHA=""
+          if [[ -n "${{ inputs.ref }}" ]]; then
+            git fetch origin "${{ inputs.ref }}" --depth=1 || true
+            TARGET_SHA=$(git rev-parse "${{ inputs.ref }}^{commit}")
+          fi
+          echo "TARGET_SHA=${TARGET_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Download validated artifact
+        run: |
+          RUN_ID=$(bash .github/scripts/marin_release.sh resolve-validate-run \
+            "$GITHUB_REPOSITORY" \
+            "marin-validate.yml" \
+            "main" \
+            "${{ steps.ref.outputs.TARGET_SHA }}")
+          bash .github/scripts/marin_release.sh download-validate-artifact \
+            "$GITHUB_REPOSITORY" \
+            "$RUN_ID" \
+            "marin-validate-dist" \
+            validated
+
+      - name: Publish immutable nightly release
+        id: immutable
+        run: |
+          SHORT_SHA=$(jq -r '.short_sha' validated/marin-build.json)
+          DATE=$(jq -r '.date' validated/marin-build.json)
+          SHA=$(jq -r '.sha' validated/marin-build.json)
+          TAG="marin-nightly-${DATE}-${SHORT_SHA}"
+          TITLE="Marin nightly ${DATE} (${SHORT_SHA})"
+
+          cat > /tmp/marin-nightly-notes.md <<EOF
+          Auto-published nightly release for \`$SHA\`.
+
+          This release reuses the exact wheel produced by the latest successful \`marin-validate.yml\` run on \`main\`.
+
+          The paired \`tpu-inference\` manifest is attached after the corresponding nightly in \`marin-community/tpu-inference\` completes.
+          EOF
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "$GITHUB_REPOSITORY" \
+            "$TAG" \
+            "$SHA" \
+            true \
+            "$TITLE" \
+            /tmp/marin-nightly-notes.md \
+            validated/*.whl \
+            validated/marin-build.json
+
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "SHA=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "DATE=${DATE}" >> "$GITHUB_OUTPUT"
+          echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Update nightly alias
+        run: |
+          cat > /tmp/marin-nightly-alias-notes.md <<EOF
+          Moving alias for the latest Marin nightly release.
+
+          Current immutable release: \`${{ steps.immutable.outputs.TAG }}\`
+          Commit: \`${{ steps.immutable.outputs.SHA }}\`
+          EOF
+
+          bash .github/scripts/marin_release.sh move-tag \
+            "$GITHUB_REPOSITORY" \
+            "marin-nightly" \
+            "${{ steps.immutable.outputs.SHA }}"
+
+          bash .github/scripts/marin_release.sh upsert-release \
+            "$GITHUB_REPOSITORY" \
+            "marin-nightly" \
+            "${{ steps.immutable.outputs.SHA }}" \
+            true \
+            "Marin nightly (latest)" \
+            /tmp/marin-nightly-alias-notes.md \
+            validated/*.whl \
+            validated/marin-build.json
