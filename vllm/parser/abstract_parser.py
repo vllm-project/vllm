@@ -436,7 +436,7 @@ class DelegatingParser(Parser):
 
         if request.tool_choice and isinstance(request.tool_choice, ToolChoiceFunction):
             # Forced Function Call (Responses API style)
-            assert content is not None
+            content = content or ""
             function_calls.append(
                 FunctionCall(name=request.tool_choice.name, arguments=content)
             )
@@ -446,7 +446,7 @@ class DelegatingParser(Parser):
             request.tool_choice, ChatCompletionNamedToolChoiceParam
         ):
             # Forced Function Call (Chat Completion API style)
-            assert content is not None
+            content = content or ""
             function_calls.append(
                 FunctionCall(name=request.tool_choice.function.name, arguments=content)
             )
