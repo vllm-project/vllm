@@ -157,6 +157,7 @@ class IrOp:
         self._schema_str = infer_schema(native_impl, mutates_args=[])
         self._input_generator: InputGenerator | None = None
         self._tolerance_overrides: ToleranceSpec = {}
+        self._symbolic_mode: bool = False
 
         # native implementation
         self.impls["native"] = IrOpImpl(
@@ -383,13 +384,57 @@ class IrOp:
         self._input_generator = fn
         return fn
 
+    @contextlib.contextmanager
+    def enable_symbolic(self, enabled: bool = True):
+        """
+        Context manager to enable/disable symbolic mode for input generation.
+
+        In symbolic mode, generate_inputs() replaces the first dimension
+        (num_tokens) of input tensors with a SymInt, making them suitable
+        for torch.compile graph tracing.
+
+        Example:
+            with rms_norm.enable_symbolic():
+                inputs = rms_norm.generate_inputs(
+                    num_tokens=128, hidden_size=4096, dtype=torch.float16
+                )
+                # inputs[0].shape[0] is a SymInt, not a concrete number
+        """
+        old = self._symbolic_mode
+        try:
+            self._symbolic_mode = enabled
+            yield
+        finally:
+            self._symbolic_mode = old
+
+    def _make_symbolic(self, args: tuple) -> tuple[Any, ...]:
+        """Replace the first dimension of tensors in args with a SymInt."""
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        shape_env = ShapeEnv()
+        sym_num_tokens = shape_env.create_unbacked_symint()
+
+        result: list[Any] = []
+        for arg in args:
+            if isinstance(arg, torch.Tensor) and arg.dim() >= 1:
+                new_shape = (sym_num_tokens,) + arg.shape[1:]
+                result.append(
+                    torch.empty(new_shape, device="meta", dtype=arg.dtype)
+                )
+            else:
+                result.append(arg)
+        return tuple(result)
+
     def generate_inputs(self, **kwargs: Any) -> tuple[Any, ...]:
         if self._input_generator is None:
             raise RuntimeError(
                 f"No input generator registered for op '{self.name}'. "
                 f"Use @ir.ops.{self.name}.register_input_generator"
             )
-        return self._input_generator(**kwargs)
+        args = self._input_generator(**kwargs)
+        if self._symbolic_mode:
+            return self._make_symbolic(args)
+        return args
 
     def override_tolerance(
         self, dtype: torch.dtype, *, atol: float, rtol: float
