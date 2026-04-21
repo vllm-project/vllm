@@ -862,12 +862,15 @@ class NixlConnectorWorker:
         local_base_addresses = self.kv_caches_base_addr[self.engine_id][self.tp_rank]
 
         blocks_data = self.transfer_policy.build_local_descs(
+            # Memory
             base_addresses=local_base_addresses,
-            block_len_per_layer=self.block_len_per_layer,
+            device_id=self.device_id,
+            # Block geometry
             num_blocks=self.num_blocks,
             logical_num_blocks=self._logical_num_blocks,
             block_size_ratio=block_size_ratio,
-            device_id=self.device_id,
+            block_len_per_layer=self.block_len_per_layer,
+            # Layout
             is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
         )
         logger.debug(
