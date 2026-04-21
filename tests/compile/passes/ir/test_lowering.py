@@ -30,9 +30,13 @@ def _get_op_provider_pairs() -> list[tuple[str, str]]:
 def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
     """Create arguments for an op, with optional unbacked symint dimensions.
 
+    In vLLM, tensors are organized by num_tokens rather than batch size
+    due to continuous batching. The first dimension represents the total
+    number of tokens across all sequences.
+
     Args:
         op: The IrOp to create arguments for.
-        use_fake: If True, use unbacked SymInt for batch dimension to verify
+        use_fake: If True, use unbacked SymInt for num_tokens dimension to verify
             supports_args does not specialize on concrete tensor shapes.
             Must be called outside of torch.compile context.
             If False, use concrete shapes for E2E lowering tests.
@@ -45,8 +49,8 @@ def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
             if use_fake:
                 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-                batch = ShapeEnv().create_unbacked_symint()
-                args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
+                num_tokens = ShapeEnv().create_unbacked_symint()
+                args.append(torch.empty(num_tokens, 16, device="meta", dtype=torch.bfloat16))
             else:
                 args.append(torch.randn(8, 16, dtype=torch.bfloat16))
         elif ann in (int, "int"):
@@ -57,8 +61,8 @@ def _make_args_for_op(op: IrOp, *, use_fake: bool = False) -> tuple[Any, ...]:
             if use_fake:
                 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
-                batch = ShapeEnv().create_unbacked_symint()
-                args.append(torch.empty(batch, 16, device="meta", dtype=torch.bfloat16))
+                num_tokens = ShapeEnv().create_unbacked_symint()
+                args.append(torch.empty(num_tokens, 16, device="meta", dtype=torch.bfloat16))
             else:
                 args.append(torch.randn(8, 16, dtype=torch.bfloat16))
         elif "int | None" in str(ann) or "Optional[int]" in str(ann):
