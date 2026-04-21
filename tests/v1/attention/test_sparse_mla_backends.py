@@ -718,14 +718,13 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
 
 
 PREFILL_BATCH_SPECS = {
-    "prefill_with_context": BatchSpec(seq_lens=[128, 256], query_lens=[32, 64]),
     "pure_prefill": BatchSpec(seq_lens=[64, 128], query_lens=[64, 128]),
 }
 
 
 @pytest.mark.skipif(
     torch.cuda.get_device_capability()[0] < 10,
-    reason="Sparse MLA forward_mha with context requires FA4 (SM100+)",
+    reason="Sparse MLA forward_mha requires FA4 (SM100+)",
 )
 @pytest.mark.parametrize("batch_name", list(PREFILL_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto"])

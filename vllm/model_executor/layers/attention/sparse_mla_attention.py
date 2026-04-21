@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 import numpy as np
 import torch
 
-import vllm._custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
 from vllm.triton_utils import tl, triton
@@ -88,9 +87,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_query_len,
             has_context,
             prefill_query_lens_cpu,
-            prefill_cu_seq_lens_kv,
-            prefill_max_kv_len,
-            prefill_block_table,
         ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
 
         return self.metadata_cls(
@@ -112,9 +108,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_query_len=prefill_max_query_len,
             has_context=has_context,
             prefill_query_lens_cpu=prefill_query_lens_cpu,
-            prefill_cu_seq_lens_kv=prefill_cu_seq_lens_kv,
-            prefill_max_kv_len=prefill_max_kv_len,
-            prefill_block_table=prefill_block_table,
         )
 
     @staticmethod
@@ -127,12 +120,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         int,  # prefill_max_query_len
         bool,  # has_context
         torch.Tensor | None,  # prefill_query_lens_cpu
-        torch.Tensor | None,  # prefill_cu_seq_lens_kv
-        int,  # prefill_max_kv_len
-        torch.Tensor | None,  # prefill_block_table
     ]:
         if num_prefills == 0:
-            return None, 0, False, None, None, 0, None
+            return None, 0, False, None
 
         offset = common_attn_metadata.query_start_loc[num_decodes]
         prefill_query_start_loc = (
@@ -152,33 +142,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         ]
         has_context = bool(context_lens_cpu.max().item() > 0)
 
-        prefill_cu_seq_lens_kv = None
-        prefill_max_kv_len = 0
-        prefill_block_table = None
-        if has_context:
-            prefill_seq_lens = common_attn_metadata.seq_lens[
-                num_decodes : num_decodes + num_prefills
-            ]
-            seq_lens_t = prefill_seq_lens.to(torch.int32)
-            prefill_cu_seq_lens_kv = torch.zeros(
-                num_prefills + 1,
-                dtype=torch.int32,
-                device=common_attn_metadata.seq_lens.device,
-            )
-            torch.cumsum(seq_lens_t, dim=0, out=prefill_cu_seq_lens_kv[1:])
-            prefill_max_kv_len = int(seq_lens_t.max().item())
-            prefill_block_table = common_attn_metadata.block_table_tensor[
-                num_decodes : num_decodes + num_prefills
-            ]
-
         return (
             prefill_query_start_loc,
             prefill_max_query_len,
             has_context,
             prefill_query_lens,
-            prefill_cu_seq_lens_kv,
-            prefill_max_kv_len,
-            prefill_block_table,
         )
 
 
@@ -329,55 +297,6 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             k[..., k_nope.shape[-1] :] = k_pe
         return k
 
-    def _gather_and_decompress_all(
-        self,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        block_table: torch.Tensor,
-        seq_lens_t: torch.Tensor,
-        cu_seq_lens: torch.Tensor,
-        total_tokens: int,
-        k_scale: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Gather all positions from paged cache and decompress to (k, v)."""
-        device = kv_c_and_k_pe_cache.device
-        head_size = kv_c_and_k_pe_cache.shape[-1]
-        num_reqs = seq_lens_t.shape[0]
-
-        workspace = torch.empty(
-            total_tokens,
-            head_size,
-            dtype=kv_c_and_k_pe_cache.dtype,
-            device=device,
-        )
-        token_to_seq = torch.repeat_interleave(
-            torch.arange(num_reqs, dtype=torch.int32, device=device),
-            seq_lens_t,
-        )
-
-        ops.gather_and_maybe_dequant_cache(
-            src_cache=kv_c_and_k_pe_cache,
-            dst=workspace,
-            block_table=block_table,
-            cu_seq_lens=cu_seq_lens,
-            token_to_seq=token_to_seq,
-            num_tokens=total_tokens,
-            kv_cache_dtype=self.kv_cache_dtype,
-            scale=k_scale,
-        )
-
-        kv_c = workspace[..., : self.kv_lora_rank]
-        k_pe = workspace[..., self.kv_lora_rank :]
-
-        kv_nope = self.kv_b_proj(kv_c)[0].view(
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-        )
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-
-        k_pe = k_pe.unsqueeze(1).expand(-1, self.num_heads, -1)
-        k = self._concat_k_nope_k_pe(k_nope, k_pe)
-
-        return k, v
-
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -407,36 +326,16 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         prefill_max_ql = attn_metadata.prefill_max_query_len
         num_decode_tokens = attn_metadata.num_decode_tokens
 
-        if not attn_metadata.has_context:
-            kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-            )
-            k_nope_new, v_new = kv_nope.split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1
-            )
-            k, v = self._concat_k_nope_k_pe(k_nope_new, k_pe), v_new
-            cu_seqlens_k = prefill_qsl
-            max_q_len = prefill_max_ql
-            max_kv_len = prefill_max_ql
-        else:
-            cu_seqlens_k = attn_metadata.prefill_cu_seq_lens_kv
-            assert cu_seqlens_k is not None
-            prefill_block_table = attn_metadata.prefill_block_table
-            assert prefill_block_table is not None
-            total_kv_tokens = int(cu_seqlens_k[-1].item())
-            max_kv_len = attn_metadata.prefill_max_kv_len
-
-            seq_lens_t = (cu_seqlens_k[1:] - cu_seqlens_k[:-1]).to(torch.int32)
-            k, v = self._gather_and_decompress_all(
-                kv_c_and_k_pe_cache,
-                prefill_block_table,
-                seq_lens_t,
-                cu_seqlens_k,
-                total_kv_tokens,
-                k_scale,
-            )
-
-            max_q_len = prefill_max_ql
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
+        )
+        k_nope_new, v_new = kv_nope.split(
+            [self.qk_nope_head_dim, self.v_head_dim], dim=-1
+        )
+        k, v = self._concat_k_nope_k_pe(k_nope_new, k_pe), v_new
+        cu_seqlens_k = prefill_qsl
+        max_q_len = prefill_max_ql
+        max_kv_len = prefill_max_ql
 
         assert self.topk_indices_buffer is not None
         topk = self.topk_indices_buffer.shape[1]

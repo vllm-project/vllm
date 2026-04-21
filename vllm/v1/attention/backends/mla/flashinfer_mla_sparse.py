@@ -169,9 +169,6 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     prefill_max_query_len: int = 0
     has_context: bool = False
     prefill_query_lens_cpu: torch.Tensor | None = None
-    prefill_cu_seq_lens_kv: torch.Tensor | None = None
-    prefill_max_kv_len: int = 0
-    prefill_block_table: torch.Tensor | None = None
 
 
 class FlashInferMLASparseMetadataBuilder(
