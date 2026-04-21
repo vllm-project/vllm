@@ -258,6 +258,24 @@ def _apply_inductor_autotune_config() -> None:
         if backend not in backend_tokens:
             backend_tokens.append(backend)
     inductor_config.max_autotune_gemm_backends = ",".join(backend_tokens)
+
+    # Ensure CUTLASS source dir is set so the inductor backend can find it.
+    # The default points to ../third_party/cutlass/ (developer source tree),
+    # which does not exist in pip-installed or container environments.
+    from pathlib import Path
+    configured_cutlass_dir = Path(inductor_config.cuda.cutlass_dir)
+    if not configured_cutlass_dir.exists():
+        fallback_candidates = [
+            Path("/tmp/vllm/.deps/cutlass-src"),
+            Path(__file__).resolve().parents[3] / ".deps" / "cutlass-src",
+        ]
+        for fallback in fallback_candidates:
+            if fallback.exists():
+                inductor_config.cuda.cutlass_dir = str(fallback.resolve())
+                inductor_config.cutlass.cutlass_dir = str(fallback.resolve())
+                logger.info("Set inductor cutlass_dir to %s", fallback)
+                break
+
     if hasattr(inductor_config, "triton") and hasattr(
         inductor_config.triton, "enable_persistent_tma_matmul"
     ):
