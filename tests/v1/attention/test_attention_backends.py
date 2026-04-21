@@ -16,7 +16,7 @@ from tests.v1.attention.utils import (
     try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
@@ -272,24 +272,37 @@ def run_attention_backend(
         )
 
     # Instantiate implementation
-    num_heads = vllm_config.model_config.get_num_attention_heads(
-        vllm_config.parallel_config
-    )
-    num_kv_heads = vllm_config.model_config.get_num_kv_heads(
-        vllm_config.parallel_config
-    )
-    head_size = vllm_config.model_config.get_head_size()
-    scale = 1.0 / (head_size**0.5)
-    impl = impl_cls(
-        num_heads=num_heads,
-        head_size=head_size,
-        scale=scale,
-        num_kv_heads=num_kv_heads,
-        alibi_slopes=None,
-        sliding_window=sliding_window,
-        attn_type=attn_type,
-        kv_cache_dtype="auto",
-    )
+    # Wrap in set_current_vllm_config so backends (e.g. FlashInfer) that read
+    # the global config at __init__ time can access it.
+    with set_current_vllm_config(vllm_config):
+        num_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        num_kv_heads = vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        )
+        head_size = vllm_config.model_config.get_head_size()
+        scale = 1.0 / (head_size**0.5)
+        extra_impl_kwargs: dict = {}
+        if actual_backend.get_class().supports_skip_softmax():
+            ac = vllm_config.attention_config
+            extra_impl_kwargs["skip_softmax_threshold_scale_factor_prefill"] = (
+                ac.skip_softmax_threshold_scale_factor_prefill
+            )
+            extra_impl_kwargs["skip_softmax_threshold_scale_factor_decode"] = (
+                ac.skip_softmax_threshold_scale_factor_decode
+            )
+        impl = impl_cls(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=None,
+            sliding_window=sliding_window,
+            attn_type=attn_type,
+            kv_cache_dtype="auto",
+            **extra_impl_kwargs,
+        )
 
     # Create mock layer and output buffer
     mock_layer = MockAttentionLayer(device)
@@ -320,6 +333,8 @@ def _test_backend_correctness(
     atol: float = 1e-2,
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
+    skip_softmax_threshold_prefill: float | None = None,
+    skip_softmax_threshold_decode: float | None = None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -367,6 +382,12 @@ def _test_backend_correctness(
         block_size=block_size,
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
+    )
+    vllm_config.attention_config.skip_softmax_threshold_scale_factor_prefill = (
+        skip_softmax_threshold_prefill
+    )
+    vllm_config.attention_config.skip_softmax_threshold_scale_factor_decode = (
+        skip_softmax_threshold_decode
     )
     device = torch.device(f"{DEVICE_TYPE}:0")
 
@@ -561,8 +582,30 @@ def _test_backend_correctness(
 )
 @pytest.mark.parametrize("model", ["meta-llama/Meta-Llama-3-8B"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
+@pytest.mark.parametrize(
+    ("skip_softmax_threshold_prefill", "skip_softmax_threshold_decode"),
+    [
+        (None, None),
+        (0.0, 0.0),
+        (0.025, 0.025),
+        (0.025, None),
+        (None, 0.025),
+    ],
+    ids=[
+        "skip_sm_off",
+        "skip_sm_pf0.0_dc0.0",
+        "skip_sm_pf0.025_dc0.025",
+        "skip_sm_pf0.025_dcOff",
+        "skip_sm_pfOff_dc0.025",
+    ],
+)
 def test_causal_backend_correctness(
-    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config,
+    batch_spec_name: str,
+    model: str,
+    tensor_parallel_size: int,
+    skip_softmax_threshold_prefill: float | None,
+    skip_softmax_threshold_decode: float | None,
 ):
     """Test backend's correctness with causal attention."""
 
@@ -603,6 +646,8 @@ def test_causal_backend_correctness(
         SMALL_BLOCK_BACKENDS,
         causal_mask_mod,
         tensor_parallel_size=tensor_parallel_size,
+        skip_softmax_threshold_prefill=skip_softmax_threshold_prefill,
+        skip_softmax_threshold_decode=skip_softmax_threshold_decode,
     )
 
     # Fast FlexAttention needs to run with block_size=128
@@ -614,6 +659,8 @@ def test_causal_backend_correctness(
             causal_mask_mod,
             block_size=128,
             tensor_parallel_size=tensor_parallel_size,
+            skip_softmax_threshold_prefill=skip_softmax_threshold_prefill,
+            skip_softmax_threshold_decode=skip_softmax_threshold_decode,
         )
 
 

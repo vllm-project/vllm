@@ -578,6 +578,15 @@ def run_attention_backend(
         )
         head_size = vllm_config.model_config.get_head_size()
         scale = 1.0 / (head_size**0.5)
+        extra_impl_kwargs: dict = {}
+        if backend.get_class().supports_skip_softmax():
+            ac = vllm_config.attention_config
+            extra_impl_kwargs["skip_softmax_threshold_scale_factor_prefill"] = (
+                ac.skip_softmax_threshold_scale_factor_prefill
+            )
+            extra_impl_kwargs["skip_softmax_threshold_scale_factor_decode"] = (
+                ac.skip_softmax_threshold_scale_factor_decode
+            )
         impl = impl_cls(
             num_heads=num_heads,
             head_size=head_size,
@@ -596,6 +605,7 @@ def run_attention_backend(
             qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
             v_head_dim=v_head_dim,
             kv_b_proj=mock_kv_b_proj,
+            **extra_impl_kwargs,
         )
 
         # Process weights on the impl
@@ -669,6 +679,11 @@ def run_attention_backend(
 @pytest.mark.parametrize("tensor_parallel_size", [1, 4, 8, 16])
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
+@pytest.mark.parametrize(
+    "skip_softmax_threshold",
+    [None, 0.0, 0.025],
+    ids=["skip_sm_off", "skip_sm_0.0", "skip_sm_0.025"],
+)
 def test_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -678,6 +693,7 @@ def test_backend_correctness(
     kv_cache_dtype: str,
     q_scale: float,
     k_scale: float,
+    skip_softmax_threshold: float | None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -751,6 +767,11 @@ def test_backend_correctness(
         hf_config_override=hf_config_override,
     )
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    # MLA is decode-only, so bind the threshold to the decode field; leave
+    # the prefill field at its default (None).
+    vllm_config.attention_config.skip_softmax_threshold_scale_factor_decode = (
+        skip_softmax_threshold
+    )
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
