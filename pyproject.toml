@@ -176,3 +176,4 @@ ure = "ure"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]
+# CI test: verify fork GitHub Actions workflows
