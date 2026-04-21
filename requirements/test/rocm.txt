@@ -76,9 +76,7 @@ attrs==26.1.0
 audioread==3.0.1
     # via librosa
 av==16.1.0
-    # via
-    #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
+    # via -r requirements/test/rocm.in
 azure-core==1.39.0
     # via
     #   azure-identity
@@ -1333,7 +1331,6 @@ sortedcontainers==2.4.0
     # via hypothesis
 soundfile==0.13.1
     # via
-    #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
     #   genai-perf
     #   librosa

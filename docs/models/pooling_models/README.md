@@ -286,10 +286,10 @@ Pooling models now support token-wise task.
 
 ### Score task
 
-`score` task is deprecated and will be removed in v0.20. Please use `classify` instead. Only when a
-classification model outputs num_labels equal to 1 can it be used as a scoring model and have its scoring API enabled.
+`score` task have has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
+equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling multitask support
 
-Pooling multitask support is deprecated and will be removed in v0.20. When the default pooling task is not what you want,
+Pooling multitask support has been removed in v0.21. When the default pooling task is not what you want,
 you need to manually specify it via `PoolerConfig(task=<task>)` offline or `--pooler-config.task <task>` online.
