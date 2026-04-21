@@ -280,7 +280,7 @@ class AttentionBackend(ABC):
         device_capability: "DeviceCapability",
         attn_type: str,
         use_non_causal: bool = False,
-        is_batch_invariant: bool = False,
+        use_batch_invariant: bool = False,
     ) -> list[str]:
         invalid_reasons = []
         if not cls.supports_head_size(head_size):
@@ -315,7 +315,7 @@ class AttentionBackend(ABC):
             invalid_reasons.append(f"attention type {attn_type} not supported")
         if use_non_causal and not cls.supports_non_causal():
             invalid_reasons.append("non-causal attention not supported")
-        if is_batch_invariant and not cls.supports_batch_invariance():
+        if use_batch_invariant and not cls.supports_batch_invariance():
             invalid_reasons.append("batch invariance not supported")
         combination_reason = cls.supports_combination(
             head_size,

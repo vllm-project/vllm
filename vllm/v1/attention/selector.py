@@ -18,11 +18,6 @@ from vllm.v1.attention.backends.registry import (
 
 logger = init_logger(__name__)
 
-_DECODE_INVARIANT_ATTN_BACKEND_NAMES = {
-    "FLASH_ATTN",
-    "TRITON_ATTN",
-}
-
 
 class AttentionSelectorConfig(NamedTuple):
     head_size: int
@@ -36,7 +31,7 @@ class AttentionSelectorConfig(NamedTuple):
     use_per_head_quant_scales: bool = False
     attn_type: str = AttentionType.DECODER
     use_non_causal: bool = False
-    is_batch_invariant: bool = False
+    use_batch_invariant: bool = False
 
     def __repr__(self):
         return (
@@ -51,7 +46,7 @@ class AttentionSelectorConfig(NamedTuple):
             f"use_per_head_quant_scales={self.use_per_head_quant_scales}, "
             f"attn_type={self.attn_type}, "
             f"use_non_causal={self.use_non_causal}, "
-            f"is_batch_invariant={self.is_batch_invariant})"
+            f"use_batch_invariant={self.use_batch_invariant})"
         )
 
 
@@ -103,7 +98,7 @@ def get_attn_backend(
         use_per_head_quant_scales=use_per_head_quant_scales,
         attn_type=attn_type or AttentionType.DECODER,
         use_non_causal=use_non_causal,
-        is_batch_invariant=envs.VLLM_BATCH_INVARIANT,
+        use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
     )
 
     return _cached_get_attn_backend(
@@ -131,17 +126,6 @@ def _cached_get_attn_backend(
             f"Invalid attention backend for {current_platform.device_name}"
         )
     backend = resolve_obj_by_qualname(attention_cls)
-
-    if (
-        envs.VLLM_BATCH_INVARIANT
-        and backend.supports_batch_invariance()
-        and backend.get_name() not in _DECODE_INVARIANT_ATTN_BACKEND_NAMES
-    ):
-        warning = (
-            "You are using a non-decode-invariant form of batch invariance. "
-            "This will not be invariant between prefill and decode."
-        )
-        logger.warning_once(warning, scope="local")
 
     # Adjust kv cache layout if the selected backend requires a specific one
     required_layout = backend.get_required_kv_cache_layout()
