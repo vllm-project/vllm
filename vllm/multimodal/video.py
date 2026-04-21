@@ -504,7 +504,9 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
                 frame_recovery=frame_recovery,
             )
         elif backend == "pyav":
-            assert not frame_recovery, "frame_recovery is only available for `opencv` backend"
+            assert not frame_recovery, (
+                "frame_recovery is only available for `opencv` backend"
+            )
             with av.open(BytesIO(data)) as container:
                 source = cls._prepare_source(cls.get_metadata(container))
                 frame_idx = cls.compute_frames_index_to_sample(
