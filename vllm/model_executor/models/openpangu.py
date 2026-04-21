@@ -44,7 +44,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -200,7 +200,7 @@ class OpenPanguMoE(nn.Module):
         else:
             self.shared_experts = None
 
-        self.experts = SharedFusedMoE(
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -1149,7 +1149,7 @@ class OpenPanguModel(nn.Module):
         ]
         has_experts = hasattr(self.config, "n_routed_experts")
         if has_experts:
-            expert_merge_mapping = SharedFusedMoE.make_expert_params_mapping(
+            expert_merge_mapping = FusedMoE.make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
