@@ -414,12 +414,9 @@ class EngineCore:
     def _maybe_update_async_draft_token_ids(
         self, model_executed: bool
     ) -> "DraftTokenIds | None":
-        """Consume variable-length draft metadata from the just-completed
+        """
+        Consume variable-length draft metadata from the just-completed
         batch and apply it to scheduler request state.
-
-        Returns the fetched ``DraftTokenIds`` payload (or ``None``) so that
-        callers with a deferred structured-output path can reuse it instead
-        of fetching twice.
         """
         if not (self.async_scheduling and self.use_spec_decode and model_executed):
             return None

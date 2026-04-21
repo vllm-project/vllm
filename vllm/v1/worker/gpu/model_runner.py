@@ -1233,11 +1233,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            # Speculators that can produce fewer than `num_speculative_steps`
-            # real drafts (e.g. ngram_gpu on a no-match row) expose a
-            # `get_num_valid_draft_tokens` accessor. When present, the
-            # companion tensor is shipped to the scheduler via the same
-            # async D2H copy stream as the draft tokens themselves.
             num_valid_draft_tokens: torch.Tensor | None = None
             get_num_valid = getattr(self.speculator, "get_num_valid_draft_tokens", None)
             if get_num_valid is not None:
