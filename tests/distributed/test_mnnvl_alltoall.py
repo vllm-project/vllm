@@ -27,6 +27,7 @@ from ..utils import init_test_distributed_environment
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _has_sys_ptrace() -> bool:
     """Check for SYS_PTRACE capability (bit 19 in CapEff)."""
     try:
@@ -57,8 +58,7 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
     for rank in range(world_size):
         p = mp.Process(
             target=_run_worker,
-            args=(rank, world_size, port, worker_fn, dp_size, dp_port,
-                  err_queue),
+            args=(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue),
         )
         p.start()
         procs.append(p)
@@ -75,8 +75,7 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
         pytest.fail("Worker(s) failed:\n" + "\n---\n".join(errors))
 
 
-def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port,
-                err_queue):
+def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
     """Per-process setup: device, distributed env, then call worker_fn.
 
     Args:
@@ -99,6 +98,7 @@ def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port,
         # Don't re-raise: the parent reads errors from err_queue.
         # A non-zero exit from the re-raise would be redundant.
         import sys
+
         sys.exit(1)
 
 
@@ -156,6 +156,7 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
         """Minimal placeholder so set_forward_context's
         ``attn_metadata is not None`` guard (forward_context.py:334)
         is satisfied. The real DPMetadata is built from num_tokens_across_dp."""
+
         dp_metadata = None
 
     vllm_config = VllmConfig()
@@ -196,7 +197,7 @@ requires_ptrace = pytest.mark.skipif(
 
 # NOTE: No module-level pytestmark here. The FlashInfer lifecycle tests have
 # their own @requires_two_sided / @requires_one_sided decorators, and
-# test_agrs_dispatch_combine uses only standard torch.distributed ops and
+# test_args_dispatch_combine uses only standard torch.distributed ops and
 # should run even when FlashInfer NVLink backends are not installed.
 
 
@@ -299,8 +300,10 @@ def _one_sided_lifecycle_worker(rank, world_size):
     assert manager.world_size == world_size
 
     init_kwargs = dict(
-        max_num_tokens=1024, top_k=2,
-        num_experts=world_size * 8, hidden_size=4096,
+        max_num_tokens=1024,
+        top_k=2,
+        num_experts=world_size * 8,
+        hidden_size=4096,
     )
 
     # Initialize
@@ -333,7 +336,9 @@ def _one_sided_lifecycle_worker(rank, world_size):
 def test_one_sided_manager_lifecycle(world_size):
     """Test init, cleanup, and reinit with different params."""
     _spawn_workers(
-        _one_sided_lifecycle_worker, world_size, dp_size=world_size,
+        _one_sided_lifecycle_worker,
+        world_size,
+        dp_size=world_size,
     )
 
 
@@ -348,7 +353,7 @@ def test_one_sided_manager_lifecycle(world_size):
 # ---------------------------------------------------------------------------
 
 
-def _agrs_dispatch_combine_worker(rank, world_size):
+def _args_dispatch_combine_worker(rank, world_size):
     from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
     from vllm.forward_context import get_forward_context
 
@@ -364,19 +369,27 @@ def _agrs_dispatch_combine_worker(rank, world_size):
     # Deterministic per-rank data: rank r has value (r + 1)
     hidden = torch.full(
         (tokens_per_rank, hidden_size),
-        float(rank + 1), device=device, dtype=torch.float32,
+        float(rank + 1),
+        device=device,
+        dtype=torch.float32,
     )
     router = torch.full(
         (tokens_per_rank, num_experts),
-        float(rank + 1) * 10, device=device, dtype=torch.float32,
+        float(rank + 1) * 10,
+        device=device,
+        dtype=torch.float32,
     )
     weights = torch.full(
         (tokens_per_rank, experts_per_token),
-        float(rank + 1) * 100, device=device, dtype=torch.float32,
+        float(rank + 1) * 100,
+        device=device,
+        dtype=torch.float32,
     )
     ids = torch.full(
         (tokens_per_rank, experts_per_token),
-        rank, device=device, dtype=torch.long,
+        rank,
+        device=device,
+        dtype=torch.long,
     )
 
     with _make_forward_context(rank, world_size, tokens_per_rank):
@@ -386,7 +399,9 @@ def _agrs_dispatch_combine_worker(rank, world_size):
         with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
             # -- dispatch_router_logits --
             d_hidden, d_router = manager.dispatch_router_logits(
-                hidden.clone(), router.clone(), is_sequence_parallel=True,
+                hidden.clone(),
+                router.clone(),
+                is_sequence_parallel=True,
             )
             assert d_hidden.shape == (total_tokens, hidden_size)
             assert d_router.shape == (total_tokens, num_experts)
@@ -405,7 +420,9 @@ def _agrs_dispatch_combine_worker(rank, world_size):
 
             # -- dispatch --
             d_hidden2, d_weights, d_ids = manager.dispatch(
-                hidden.clone(), weights.clone(), ids.clone(),
+                hidden.clone(),
+                weights.clone(),
+                ids.clone(),
                 is_sequence_parallel=True,
             )
             assert d_hidden2.shape == (total_tokens, hidden_size)
@@ -446,9 +463,9 @@ def _agrs_dispatch_combine_worker(rank, world_size):
 
 @requires_multi_gpu
 @pytest.mark.parametrize("world_size", [2])
-def test_agrs_dispatch_combine(world_size):
+def test_args_dispatch_combine(world_size):
     """Validate dispatch gathers all-rank data and combine reduces correctly."""
-    _spawn_workers(_agrs_dispatch_combine_worker, world_size)
+    _spawn_workers(_args_dispatch_combine_worker, world_size)
 
 
 # ---------------------------------------------------------------------------
@@ -468,17 +485,16 @@ def _two_sided_data_worker(rank, world_size):
     from vllm.distributed.device_communicators.all2all import (
         FlashInferNVLinkTwoSidedManager,
     )
+    from vllm.distributed.parallel_state import get_dp_group
     from vllm.forward_context import get_forward_context
     from vllm.model_executor.layers.fused_moe.config import (
         FusedMoEQuantConfig,
         FusedMoEQuantDesc,
     )
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (
+    from vllm.model_executor.layers.fused_moe.prepare_finalize.flashinfer_nvlink_two_sided import (  # noqa: E501
         flashinfer_alltoall_combine,
         flashinfer_alltoall_dispatch,
     )
-
-    from vllm.distributed.parallel_state import get_dp_group
 
     # Use DP group because MnnvlMoe workspace allocation calls get_dp_group()
     # internally and requires dp_size == ep_size.
@@ -501,21 +517,33 @@ def _two_sided_data_worker(rank, world_size):
     # Create deterministic per-rank test data
     torch.manual_seed(rank + 42)
     hidden = torch.randn(
-        tokens_per_rank, hidden_size, device=device, dtype=torch.bfloat16,
+        tokens_per_rank,
+        hidden_size,
+        device=device,
+        dtype=torch.bfloat16,
     )
     # Assign each token to experts spread across ranks so tokens move between GPUs
     topk_ids = torch.randint(
-        0, num_experts, (tokens_per_rank, experts_per_token),
-        device=device, dtype=torch.int32,
+        0,
+        num_experts,
+        (tokens_per_rank, experts_per_token),
+        device=device,
+        dtype=torch.int32,
     )
     topk_weights = torch.rand(
-        tokens_per_rank, experts_per_token, device=device, dtype=torch.float32,
+        tokens_per_rank,
+        experts_per_token,
+        device=device,
+        dtype=torch.float32,
     )
 
     # Unquantized config: quant_dtype=None means moe_kernel_quantize_input is a no-op
     no_quant = FusedMoEQuantDesc()
     quant_config = FusedMoEQuantConfig(
-        _a1=no_quant, _a2=no_quant, _w1=no_quant, _w2=no_quant,
+        _a1=no_quant,
+        _a2=no_quant,
+        _w1=no_quant,
+        _w2=no_quant,
     )
     assert quant_config.quant_dtype is None  # sanity: no quantization
 
@@ -564,7 +592,8 @@ def _two_sided_data_worker(rank, world_size):
             expert_ranks = topk_ids // experts_per_rank  # (tokens, top_k)
             num_distinct = torch.tensor(
                 [len(set(row.tolist())) for row in expert_ranks],
-                device=device, dtype=torch.float32,
+                device=device,
+                dtype=torch.float32,
             ).unsqueeze(1)  # (tokens, 1)
             expected = (hidden.float() * num_distinct).to(hidden.dtype)
             torch.testing.assert_close(combined, expected)
@@ -580,9 +609,7 @@ def _two_sided_data_worker(rank, world_size):
                 token_count=tokens_per_rank,
                 alltoall_info=alltoall_info,
             )
-            expected_scaled = (
-                hidden.float() * num_distinct * scale
-            ).to(hidden.dtype)
+            expected_scaled = (hidden.float() * num_distinct * scale).to(hidden.dtype)
             torch.testing.assert_close(combined_scaled, expected_scaled)
 
             torch.distributed.barrier()
@@ -648,20 +675,31 @@ def _one_sided_data_worker(rank, world_size):
             #   a1q_scale: (tokens, hidden_size // 16) — fp8 scaling factors
             torch.manual_seed(rank + 42)
             a1q = torch.randint(
-                0, 256, (tokens_per_rank, hidden_size // 2),
-                device=device, dtype=torch.uint8,
+                0,
+                256,
+                (tokens_per_rank, hidden_size // 2),
+                device=device,
+                dtype=torch.uint8,
             )
             a1q_scale = torch.randint(
-                0, 256, (tokens_per_rank, hidden_size // 16),
-                device=device, dtype=torch.uint8,
+                0,
+                256,
+                (tokens_per_rank, hidden_size // 16),
+                device=device,
+                dtype=torch.uint8,
             )
             topk_ids = torch.randint(
-                0, num_experts, (tokens_per_rank, experts_per_token),
-                device=device, dtype=torch.int32,
+                0,
+                num_experts,
+                (tokens_per_rank, experts_per_token),
+                device=device,
+                dtype=torch.int32,
             )
             topk_weights = torch.rand(
-                tokens_per_rank, experts_per_token,
-                device=device, dtype=torch.float32,
+                tokens_per_rank,
+                experts_per_token,
+                device=device,
+                dtype=torch.float32,
             )
 
             # --- One-sided dispatch ---
@@ -682,8 +720,11 @@ def _one_sided_data_worker(rank, world_size):
             # contributions. With constant expert output (all 1s):
             #   result[i] = 1.0 * num_distinct_expert_ranks(i)
             expert_output = torch.ones(
-                world_size, runtime_max_tokens, hidden_size,
-                device=device, dtype=torch.bfloat16,
+                world_size,
+                runtime_max_tokens,
+                hidden_size,
+                device=device,
+                dtype=torch.bfloat16,
             )
             combined = manager.moe_alltoall.combine(
                 payload=expert_output,
@@ -695,7 +736,8 @@ def _one_sided_data_worker(rank, world_size):
             expert_ranks = topk_ids // experts_per_rank  # (tokens, top_k)
             num_distinct = torch.tensor(
                 [len(set(row.tolist())) for row in expert_ranks],
-                device=device, dtype=torch.bfloat16,
+                device=device,
+                dtype=torch.bfloat16,
             ).unsqueeze(1)  # (tokens, 1)
             expected = num_distinct.expand_as(combined)
             torch.testing.assert_close(combined, expected)
