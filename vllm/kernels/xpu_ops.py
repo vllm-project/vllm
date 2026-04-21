@@ -4,14 +4,12 @@ import torch
 from torch import Tensor
 
 from vllm import ir
-from vllm.model_executor.layers.quantization.utils.quant_utils import get_fp8_min_max
+from vllm.ir.ops.quant import get_fp8_min_max
 from vllm.platforms import current_platform
 
 from .vllm_c import make_group_quant_scales
 
 current_platform.import_kernels()
-
-_FP8_MIN, _FP8_MAX = get_fp8_min_max()
 
 
 def is_xpu_kernels_found() -> bool:
@@ -75,7 +73,7 @@ def dynamic_group_quant_fp8(
     x_q = torch.empty(x.shape, device=x.device, dtype=fp8_dtype)
     x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)
     torch.ops._C.per_token_group_fp8_quant(
-        x, x_q, x_s, group_size, 1e-10, _FP8_MIN, _FP8_MAX, use_ue8m0
+        x, x_q, x_s, group_size, 1e-10, *get_fp8_min_max(fp8_dtype), use_ue8m0
     )
     if use_ue8m0:
         x_s = x_s.to(torch.float8_e8m0fnu)
