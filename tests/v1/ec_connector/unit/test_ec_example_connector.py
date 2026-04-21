@@ -123,6 +123,20 @@ class TestECExampleConnectorBasics:
         assert scheduler_connector.role == ECConnectorRole.SCHEDULER
         assert worker_connector.role == ECConnectorRole.WORKER
 
+    def test_request_finished_default_noop(
+        self, mock_vllm_config_producer, mock_request_with_3_mm
+    ):
+        """ECExampleConnector inherits the base request_finished no-op."""
+        connector = ECExampleConnector(
+            vllm_config=mock_vllm_config_producer,
+            role=ECConnectorRole.SCHEDULER,
+        )
+
+        delay_free_blocks, params = connector.request_finished(mock_request_with_3_mm)
+
+        assert not delay_free_blocks
+        assert params is None
+
 
 class TestCacheExistence:
     """Test cache existence checking using has_cache_item() API."""

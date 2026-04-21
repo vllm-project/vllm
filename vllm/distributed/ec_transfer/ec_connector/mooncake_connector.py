@@ -605,6 +605,9 @@ class MooncakeECConnectorWorker:
         # after store_tensor returns to avoid deadlock if the pool evicts
         # internally and calls back into _on_pool_free.
         with self._mm_lock:
+            old_addr = self.local_mm_addrs.get(mm_hash)
+            if old_addr is not None:
+                self._addr_to_mm_hash.pop(old_addr, None)
             self.local_mm_addrs[mm_hash] = addr
             self._addr_to_mm_hash[addr] = mm_hash
             logger.debug(
@@ -620,7 +623,8 @@ class MooncakeECConnectorWorker:
         with self._mm_lock:
             mm_hash = self._addr_to_mm_hash.pop(addr, None)
             if mm_hash is not None:
-                self.local_mm_addrs.pop(mm_hash, None)
+                if self.local_mm_addrs.get(mm_hash) == addr:
+                    self.local_mm_addrs.pop(mm_hash, None)
             else:
                 logger.debug(
                     "[EC_WORKER] Pool freed unknown addr=0x%x (not in tracking)", addr
