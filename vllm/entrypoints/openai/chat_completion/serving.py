@@ -238,9 +238,10 @@ class OpenAIServingChat(OpenAIServing):
         - ``chat_template_kwargs.enable_thinking``: true / false
         - Default: think mode enabled
 
-        Think mode:     temperature=1.0, top_p=0.95
-        Non-think mode: temperature=0.6, top_p=0.95
-        Common constraints: presence_penalty=0, frequency_penalty=0, n=1
+        Temperature must be between 0 and 1 (inclusive).
+        Defaults: think mode -> 1.0, non-think mode -> 0.6
+        Common constraints: top_p=0.95, presence_penalty=0,
+        frequency_penalty=0, n=1
         """
         is_thinking = True
         if request.chat_template_kwargs:
@@ -259,11 +260,10 @@ class OpenAIServingChat(OpenAIServing):
         errors = []
 
         req_temp = request.temperature
-        if req_temp is not None and req_temp != expected_temperature:
-            mode_label = "think" if is_thinking else "non-think"
+        if req_temp is not None and not (0.0 <= req_temp <= 1.0):
             errors.append(
-                f"temperature must be {expected_temperature} "
-                f"in {mode_label} mode, got {req_temp}"
+                f"temperature must be between 0 and 1 (inclusive), "
+                f"got {req_temp}"
             )
 
         req_top_p = request.top_p
