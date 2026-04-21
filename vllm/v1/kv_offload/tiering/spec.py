@@ -11,11 +11,6 @@ Configuration via kv_connector_extra_config:
   - block_size: (optional) Block size for offloaded blocks (default: GPU block size)
   - eviction_policy: (optional) Primary tier eviction policy: "lru" or
     "arc" (default: "lru")
-  - store_threshold: (optional) How many times a block must appear in lookup()
-    before it is eligible for CPU offloading. Values < 2 disable filtering
-    (default: 0)
-  - max_tracker_size: (optional) Maximum number of blocks tracked for
-    store_threshold filtering (default: 64000)
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
       - type: (required) Type of secondary tier (e.g., "dummy", "storage", "network")
@@ -74,6 +69,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
         super().__init__(vllm_config, kv_cache_config)
+        # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
+        self._manager: OffloadingManager | None = None
 
         # Parse secondary tier configurations
         self.secondary_tier_configs = self.extra_config.get("secondary_tiers", [])
@@ -192,9 +189,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 secondary_tiers=secondary_tiers,
                 enable_events=enable_events,
             )
-            # PRNOTE: should the store_filter apply to the TieringOffloadingManager or
-            # to the primary CPU manager?
-            self._manager = self._maybe_apply_store_filter(tiering_manager)
+            if int(self.extra_config.get("store_threshold", 0)) >= 2:
+                raise ValueError(
+                    "store_threshold is not supported for TieringOffloadingSpec"
+                )
+            self._manager = tiering_manager
 
             logger.info(
                 "Created TieringOffloadingManager with primary tier "
