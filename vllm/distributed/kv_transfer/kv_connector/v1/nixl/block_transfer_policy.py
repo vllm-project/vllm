@@ -308,6 +308,16 @@ class ModelBlockTransferPolicy(ABC):
         return range(start, max(start, stop))
 
     @staticmethod
+    def _fa_descs_ids(
+        block_ids_arr: np.ndarray,
+        num_regions: int,
+        stride: int,
+    ) -> np.ndarray:
+        """FA descriptor IDs: region_id * stride + block_id."""
+        region_ids = np.arange(num_regions)[:, None]
+        return (region_ids * stride + block_ids_arr[None, :]).flatten()
+
+    @staticmethod
     def _should_skip_fa(info: EngineTransferInfo, remote_rank: int) -> bool:
         """Whether to skip FA groups for this remote rank.
 
@@ -461,9 +471,7 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        region_ids = np.arange(num_regions)[:, None]
-        block_ids_arr = np.concatenate(block_ids)[None, :]
-        return (region_ids * num_blocks + block_ids_arr).flatten()
+        return self._fa_descs_ids(np.concatenate(block_ids), num_regions, num_blocks)
 
     def build_remote_descs(
         self,
@@ -678,7 +686,6 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        region_ids = np.arange(num_regions)[:, None]
         ratio = physical_blocks_per_logical
         logical_blocks = num_blocks // ratio
         num_fa_descs = num_regions * num_blocks
@@ -695,16 +702,18 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         )[:, None]
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
-            group_arr = np.asarray(group)[None, :]
+            group_arr = np.asarray(group)
             if self._is_mamba_group[i]:
                 # Mamba blocks are 1:1 logical-to-physical (no expansion).
                 all_descs.append(
                     (
-                        mamba_region_ids * logical_blocks + group_arr + num_fa_descs
+                        mamba_region_ids * logical_blocks
+                        + group_arr[None, :]
+                        + num_fa_descs
                     ).flatten()
                 )
             else:
-                all_descs.append((region_ids * num_blocks + group_arr).flatten())
+                all_descs.append(self._fa_descs_ids(group_arr, num_regions, num_blocks))
         return np.concatenate(all_descs)
 
     def build_local_descs(
