@@ -150,8 +150,6 @@ def rocm_aiter_grouped_topk(
         topk_weights = torch.empty((token, topk), dtype=torch.float32, device=device)
 
     if e_score_correction_bias is not None:
-        if e_score_correction_bias.dtype != gating_output.dtype:
-            e_score_correction_bias = e_score_correction_bias.to(gating_output.dtype)
         rocm_aiter_ops.biased_grouped_topk(
             gating_output,
             e_score_correction_bias,

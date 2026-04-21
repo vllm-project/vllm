@@ -134,10 +134,6 @@ def fused_topk_bias(
                 dtype=torch.int32 if indices_type is None else indices_type,
                 device=hidden_states.device,
             )
-            if e_score_correction_bias.dtype != gating_output.dtype:
-                e_score_correction_bias = e_score_correction_bias.to(
-                    gating_output.dtype
-                )
             rocm_aiter_ops.biased_grouped_topk(
                 gating_output,
                 e_score_correction_bias,
