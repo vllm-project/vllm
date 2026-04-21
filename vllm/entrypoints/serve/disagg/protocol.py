@@ -62,6 +62,14 @@ class GenerateRequest(BaseModel):
             "through out the inference process and return in response."
         ),
     )
+    prompt: str | None = Field(
+        default=None,
+        description=(
+            "The rendered prompt text (detokenized from token_ids). "
+            "Useful for debugging and introspection of the preprocessing "
+            "pipeline. Populated by the render endpoints."
+        ),
+    )
     token_ids: list[int]
     """The token ids to generate text from."""
 

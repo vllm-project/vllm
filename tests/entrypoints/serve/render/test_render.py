@@ -53,10 +53,13 @@ async def test_completion_render_basic(client):
     assert "sampling_params" in first_prompt
     assert "model" in first_prompt
     assert "request_id" in first_prompt
+    assert "prompt" in first_prompt
     assert isinstance(first_prompt["token_ids"], list)
     assert len(first_prompt["token_ids"]) > 0
     assert first_prompt["model"] == MODEL_NAME
     assert first_prompt["request_id"].startswith("cmpl-")
+    assert isinstance(first_prompt["prompt"], str)
+    assert len(first_prompt["prompt"]) > 0
 
 
 @pytest.mark.asyncio
@@ -91,6 +94,11 @@ async def test_chat_completion_render_basic(client):
     token_ids = data["token_ids"]
     assert all(isinstance(tid, int) for tid in token_ids)
     assert token_ids[0] == 1
+
+    # Verify rendered prompt text is included
+    assert "prompt" in data
+    assert isinstance(data["prompt"], str)
+    assert len(data["prompt"]) > 0
 
 
 @pytest.mark.asyncio
