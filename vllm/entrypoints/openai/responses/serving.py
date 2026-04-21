@@ -32,13 +32,13 @@ from openai.types.responses import (
     ResponseTextDoneEvent,
     response_text_delta_event,
 )
+from openai.types.responses.response_error import ResponseError
 from openai.types.responses.response_output_text import Logprob, LogprobTopLogprob
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
 from openai.types.responses.tool import Mcp, Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
-from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config.utils import replace
@@ -86,6 +86,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseFailedEvent,
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
@@ -2032,9 +2033,25 @@ class OpenAIServingResponses(OpenAIServing):
                 ):
                     yield event_data
             except GenerationError as e:
-                error_json = self._convert_generation_error_to_streaming_response(e)
+                failed_response = ResponsesResponse.from_request(
+                    request,
+                    sampling_params,
+                    model_name=model_name,
+                    created_time=created_time,
+                    output=[],
+                    status="failed",
+                    usage=None,
+                    error=ResponseError(
+                        code="server_error",
+                        message=str(e),
+                    ),
+                )
                 yield _increment_sequence_number_and_return(
-                    TypeAdapter(StreamingResponsesResponse).validate_json(error_json)
+                    ResponseFailedEvent(
+                        type="response.failed",
+                        sequence_number=-1,
+                        response=failed_response,
+                    )
                 )
                 return
 
