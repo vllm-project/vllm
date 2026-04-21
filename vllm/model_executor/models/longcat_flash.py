@@ -300,7 +300,6 @@ class LongcatMoe(nn.Module):
             top_k=top_k,
             hidden_size=hidden_size,
             intermediate_size=intermediate_size,
-            reduce_results=True,
             params_dtype=params_dtype,
             renormalize=False,
             quant_config=quant_config,
