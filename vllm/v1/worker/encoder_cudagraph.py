@@ -92,6 +92,7 @@ class EncoderCudaGraphManager:
                 else max_budget // min_budget
             )
 
+        assert multimodal_config is not None
         if multimodal_config.get_limit_per_prompt("video") == 0:
             self.max_frames_per_batch = 0
         elif user_max_frames is not None:
