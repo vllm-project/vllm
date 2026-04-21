@@ -610,7 +610,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
 
-        # source_layer is FusedMoE or SharedFusedMoE
+        # source_layer is FusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
 
 
@@ -772,5 +772,5 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        # source_layer is FusedMoE or SharedFusedMoE
+        # source_layer is FusedMoE
         return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
