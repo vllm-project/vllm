@@ -273,3 +273,91 @@ def test_gemma4_previous_turn_reasoning_is_reasoning_end(generic_tokenizer):
     )
     is_reasoning_end = parser.is_reasoning_end(output_tokens)
     assert not is_reasoning_end
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for is_reasoning_end with a mock tokenizer (no network access)
+# These directly test the fix for #39885 without requiring the real tokenizer.
+# ---------------------------------------------------------------------------
+
+# Stable synthetic token IDs for the mock vocab
+_CHANNEL_START = 10  # <|channel>
+_CHANNEL_END = 11  # <channel|>
+_TURN = 12  # <|turn>
+_TOOL_CALL = 13  # <|tool_call>
+_TOOL_RESP = 14  # <|tool_response>
+_TEXT_A = 20  # generic text token
+_TEXT_B = 21  # generic text token
+
+
+@pytest.fixture(scope="module")
+def mock_gemma4_tokenizer():
+    """Mock tokenizer with synthetic Gemma4 special tokens."""
+    from unittest.mock import MagicMock
+
+    tokenizer = MagicMock()
+    tokenizer.get_vocab.return_value = {
+        "<|channel>": _CHANNEL_START,
+        "<channel|>": _CHANNEL_END,
+        "<|turn>": _TURN,
+        "<|tool_call>": _TOOL_CALL,
+        "<|tool_response>": _TOOL_RESP,
+    }
+    return tokenizer
+
+
+@pytest.fixture(scope="module")
+def mock_parser(mock_gemma4_tokenizer):
+    return ReasoningParserManager.get_reasoning_parser(parser_name)(
+        mock_gemma4_tokenizer
+    )
+
+
+@pytest.mark.parametrize(
+    "input_ids, expected, description",
+    [
+        # Single tool_call with no prior context → current-turn tool call
+        ([_TOOL_CALL], True, "bare tool_call (current turn)"),
+        # Active reasoning followed by tool_call → True
+        ([_CHANNEL_START, _TEXT_A, _TOOL_CALL], True, "channel start + tool_call"),
+        # Turn boundary before tool_call → prior-turn tool call → False
+        (
+            [_TURN, _TEXT_A, _TOOL_CALL, _TEXT_B],
+            False,
+            "prior-turn tool_call (turn boundary)",
+        ),
+        # Tool response before tool_call → prior-turn → False
+        (
+            [_TOOL_CALL, _TEXT_A, _TOOL_RESP, _TEXT_B],
+            False,
+            "prior-turn tool_call (tool_response boundary)",
+        ),
+        # Channel end token in sequence → reasoning ended → True
+        ([_CHANNEL_START, _TEXT_A, _CHANNEL_END], True, "channel end"),
+        # Channel start without end → reasoning active → False
+        ([_CHANNEL_START, _TEXT_A], False, "active reasoning"),
+        # Empty sequence → False
+        ([], False, "empty"),
+        # Regular text only → False
+        ([_TEXT_A, _TEXT_B], False, "plain text"),
+        # Multi-turn: prior tool call then turn then model text → False
+        # (This is the exact #39885 A4B scenario: prompt ends with
+        #  <|turn>model\n<|tool_call> where turn boundary comes before tool_call
+        #  in the backwards scan, i.e. <|tool_call> is to the right of <|turn>)
+        (
+            [_TURN, _TEXT_A, _TOOL_CALL, _TEXT_B, _TURN, _TEXT_B],
+            False,
+            "A4B-style: tool_call inside prior turn, new turn at end",
+        ),
+    ],
+)
+def test_is_reasoning_end_mock(mock_parser, input_ids, expected, description):
+    """Test is_reasoning_end with synthetic token IDs (no real tokenizer needed).
+
+    Covers the #39885 regression: prior-turn <|tool_call> in the prompt must
+    not cause is_reasoning_end to return True prematurely.
+    """
+    result = mock_parser.is_reasoning_end(input_ids)
+    assert result == expected, (
+        f"is_reasoning_end({input_ids}) expected {expected} for case: {description}"
+    )

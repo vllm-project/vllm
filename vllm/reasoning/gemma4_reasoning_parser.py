@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
@@ -85,7 +85,32 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             if input_ids[i] == start_token_id:
                 return False
             if input_ids[i] == tool_call_token_id:
-                # We're generating a tool call, so reasoning must be ended.
+                # A <|tool_call> token ends reasoning only when it belongs to
+                # the current generation turn. Scan further back to check:
+                # - if we find a <|channel> start → active reasoning is
+                #   ending (return True).
+                # - if we find a turn boundary (<|turn> or <|tool_response>)
+                #   before any channel start → this is a prior-turn tool call
+                #   in the prompt, not the current generation (return False).
+                # - if we find neither → the tool call is in the current
+                #   context with no prior reasoning block (return True).
+                # This avoids false positives from prior-turn tool calls in
+                # multi-turn prompts, which is the root cause of #39885 on
+                # the MoE A4B model variant where the generation prefix ends
+                # with a priming <|tool_call> token and the backwards scan
+                # finds the prior-turn <|tool_call> before hitting <|turn>.
+                for j in range(i - 1, -1, -1):
+                    if input_ids[j] == start_token_id:
+                        # found the channel start — tool call ends reasoning
+                        return True
+                    if input_ids[j] in (
+                        new_turn_token_id,
+                        tool_response_token_id,
+                    ):
+                        # hit a turn boundary before finding channel start —
+                        # this is a prior-turn tool call, not the current one
+                        return False
+                # no turn boundary found — tool call is in the current context
                 return True
             if input_ids[i] in (new_turn_token_id, tool_response_token_id):
                 # We found a new turn or tool response token so don't consider
@@ -95,6 +120,15 @@ class Gemma4ReasoningParser(BaseThinkingReasoningParser):
             if input_ids[i] == end_token_id:
                 return True
         return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+    ) -> bool:
+        # During streaming we are already confirmed to be in the reasoning
+        # phase (the caller tracks this). Any channel-end or tool-call token
+        # in the current delta ends reasoning without needing further context.
+        delta_list = list(delta_ids)
+        return self.end_token_id in delta_list or self.tool_call_token_id in delta_list
 
     # ------------------------------------------------------------------
     # Non-streaming path

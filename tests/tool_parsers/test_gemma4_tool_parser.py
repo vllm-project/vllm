@@ -17,6 +17,26 @@ from vllm.tool_parsers.gemma4_tool_parser import (
 )
 
 # ---------------------------------------------------------------------------
+# Real-tokenizer fixture (requires network access to download model weights)
+# Used only by tests that need actual Gemma4 token IDs.
+# ---------------------------------------------------------------------------
+try:
+    from vllm.tokenizers.registry import get_tokenizer as _get_tokenizer
+
+    @pytest.fixture(scope="module")
+    def gemma4_tokenizer():
+        try:
+            return _get_tokenizer("google/gemma-4-E2B-it")
+        except Exception:
+            pytest.skip("Gemma4 tokenizer unavailable (network or version issue)")
+
+except Exception:
+
+    @pytest.fixture(scope="module")
+    def gemma4_tokenizer():
+        pytest.skip("Gemma4 tokenizer unavailable")
+
+# ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
 
@@ -684,3 +704,229 @@ class TestStreamingExtraction:
         }
 
         assert args_text.count("replace_all") == 1
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #39885
+# ---------------------------------------------------------------------------
+
+
+class TestStreamingReasoningAutoToolIssue39885:
+    """Regression tests for #39885.
+
+    Verifies that reasoning tokens don't leak into delta.content when
+    tool_choice='auto' is used in a multi-turn conversation that has a
+    prior tool result. The auto-tool streaming branch (elif parser is
+    not None in serving.py) must run reasoning extraction before passing
+    text to the tool parser, same as the required and named tool branches.
+    """
+
+    def _run_fixed_streaming_path(
+        self,
+        reasoning_parser,
+        tool_parser,
+        prompt_token_ids: list[int],
+        model_chunks: list[tuple[list[int], str]],
+        mock_request,
+    ) -> tuple[str, str]:
+        """Simulate the auto-tool streaming branch from serving.py.
+
+        Mirrors the logic in the elif parser is not None block:
+        run reasoning extraction first, then hand off to the tool parser
+        once reasoning has ended.
+
+        Returns (accumulated_content, accumulated_reasoning).
+        """
+        reasoning_ended = reasoning_parser.is_reasoning_end(prompt_token_ids)
+
+        content_acc = ""
+        reasoning_acc = ""
+        previous_text = ""
+        previous_token_ids: list[int] = []
+
+        for delta_token_ids, delta_text in model_chunks:
+            current_text = previous_text + delta_text
+            current_token_ids = previous_token_ids + delta_token_ids
+
+            if not reasoning_ended:
+                delta_message = reasoning_parser.extract_reasoning_streaming(
+                    previous_text,
+                    current_text,
+                    delta_text,
+                    previous_token_ids,
+                    current_token_ids,
+                    delta_token_ids,
+                )
+                if reasoning_parser.is_reasoning_end(delta_token_ids):
+                    reasoning_ended = True
+                    if delta_message and delta_message.content:
+                        current_text = delta_message.content
+                        delta_message.content = None
+                    else:
+                        current_text = ""
+            else:
+                delta_message = tool_parser.extract_tool_calls_streaming(
+                    previous_text=previous_text,
+                    current_text=current_text,
+                    delta_text=delta_text,
+                    previous_token_ids=previous_token_ids,
+                    current_token_ids=current_token_ids,
+                    delta_token_ids=delta_token_ids,
+                    request=mock_request,
+                )
+
+            if delta_message:
+                if delta_message.content:
+                    content_acc += delta_message.content
+                if delta_message.reasoning:
+                    reasoning_acc += delta_message.reasoning
+
+            previous_text = current_text
+            previous_token_ids = current_token_ids
+
+        return content_acc, reasoning_acc
+
+    def test_reasoning_not_leaked_into_content_multiturn(self, gemma4_tokenizer):
+        """Reasoning must not appear in delta.content in multi-turn tool streaming.
+
+        When the prompt has a prior tool call token, is_reasoning_end could
+        return True before the generation even starts, skipping reasoning
+        extraction and leaking thought tokens into content. Regression for
+        #39885.
+        """
+        from vllm.reasoning import ReasoningParserManager
+
+        reasoning_parser_cls = ReasoningParserManager.get_reasoning_parser("gemma4")
+        reasoning_parser = reasoning_parser_cls(gemma4_tokenizer)
+        tool_parser = Gemma4ToolParser(gemma4_tokenizer)
+
+        vocab = gemma4_tokenizer.get_vocab()
+        channel_start_id = vocab["<|channel>"]
+        channel_end_id = vocab["<channel|>"]
+        tool_call_start_id = vocab["<|tool_call>"]
+        tool_response_id = vocab["<|tool_response>"]
+        new_turn_id = vocab["<|turn>"]
+
+        def enc(text: str) -> list[int]:
+            tok = getattr(gemma4_tokenizer, "tokenizer", gemma4_tokenizer)
+            try:
+                return tok.encode(text, add_special_tokens=False)
+            except TypeError:
+                return tok.encode(text)
+
+        # prompt ends with a prior tool call + tool response + new turn,
+        # which is the pattern that exposed the bug in is_reasoning_end
+        prompt_token_ids = (
+            enc("user\nSearch for something\n")
+            + [new_turn_id]
+            + enc("model\n")
+            + [tool_call_start_id]  # prior tool call in prompt
+            + enc("call:ToolA{x:<|")
+            + [tool_response_id]
+            + enc("response:ToolA{content:Success}")
+            + [new_turn_id]  # generation prompt boundary
+            + enc("model\n")
+        )
+
+        # model output: reasoning block followed by a tool call
+        tool_call_content = 'call:ToolB{query:<|"|>find data protection laws<|"|>}'
+        model_chunks: list[tuple[list[int], str]] = [
+            # <|channel> arrives as a special token; with
+            # skip_special_tokens=False the text render is "" here.
+            ([channel_start_id], ""),
+            (enc("thought\n"), "thought\n"),
+            (enc("Actual reasoning"), "Actual reasoning"),
+            ([channel_end_id], ""),  # <channel|>
+            ([tool_call_start_id], TOOL_CALL_START),
+            (enc(tool_call_content), tool_call_content),
+            (enc(TOOL_CALL_END), TOOL_CALL_END),
+        ]
+
+        mock_req = MagicMock(spec=ChatCompletionRequest)
+        mock_req.tools = []
+        mock_req.tool_choice = "auto"
+
+        content_acc, reasoning_acc = self._run_fixed_streaming_path(
+            reasoning_parser,
+            tool_parser,
+            prompt_token_ids,
+            model_chunks,
+            mock_req,
+        )
+
+        assert "thought" not in content_acc, (
+            f"reasoning leaked into content: {content_acc!r}"
+        )
+        assert "Actual reasoning" not in content_acc, (
+            f"reasoning leaked into content: {content_acc!r}"
+        )
+        assert "Actual reasoning" in reasoning_acc, (
+            f"expected reasoning in reasoning field, got: {reasoning_acc!r}"
+        )
+
+    def test_no_reasoning_parser_still_works(self):
+        """Tool streaming without a reasoning parser still works correctly.
+
+        When there is no reasoning parser, the auto-tool path falls straight
+        through to extract_tool_calls_streaming with no reasoning checks.
+        """
+        mock_tokenizer = MagicMock()
+        mock_tokenizer.encode.return_value = [1, 2, 3]
+        mock_tokenizer.get_vocab.return_value = {
+            TOOL_CALL_START: 48,
+            TOOL_CALL_END: 49,
+        }
+
+        tool_parser = Gemma4ToolParser(mock_tokenizer)
+        mock_req = MagicMock(spec=ChatCompletionRequest)
+        mock_req.tools = []
+        mock_req.tool_choice = "auto"
+
+        # no reasoning prefix, tool call arrives immediately
+        chunks = [
+            TOOL_CALL_START,
+            'call:MyTool{param:<|"|>hello<|"|>}',
+            TOOL_CALL_END,
+        ]
+        previous_text = ""
+        previous_token_ids: list[int] = []
+        func_name: str | None = None
+        args_acc = ""
+        for chunk in chunks:
+            current_text = previous_text + chunk
+            delta_token_ids = (
+                [48]
+                if TOOL_CALL_START in chunk
+                else [49]
+                if TOOL_CALL_END in chunk
+                else [0]
+            )
+            current_token_ids = previous_token_ids + delta_token_ids
+            delta = tool_parser.extract_tool_calls_streaming(
+                previous_text=previous_text,
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=previous_token_ids,
+                current_token_ids=current_token_ids,
+                delta_token_ids=delta_token_ids,
+                request=mock_req,
+            )
+            if delta and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    fn = tc.function
+                    name = fn.name if hasattr(fn, "name") else (fn or {}).get("name")
+                    if name:
+                        func_name = name
+                    arg = (
+                        fn.arguments
+                        if hasattr(fn, "arguments")
+                        else (fn or {}).get("arguments", "")
+                    )
+                    if arg:
+                        args_acc += arg
+            previous_text = current_text
+            previous_token_ids = list(current_token_ids)
+
+        assert func_name == "MyTool"
+        parsed = json.loads(args_acc)
+        assert parsed == {"param": "hello"}

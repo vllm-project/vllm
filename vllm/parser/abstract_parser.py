@@ -611,7 +611,9 @@ class DelegatingParser(Parser):
                 delta_token_ids=delta_token_ids,
             )
             # Hand off remaining content to tool parser
-            if self._tool_parser and self.is_reasoning_end(delta_token_ids):
+            if self._tool_parser and self.is_reasoning_end_streaming(
+                current_token_ids, delta_token_ids
+            ):
                 state.reasoning_ended = True
                 current_token_ids = self.extract_content_ids(delta_token_ids)
                 if delta_message and delta_message.content:
