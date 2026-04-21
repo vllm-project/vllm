@@ -15,6 +15,8 @@ CUDA_ALIKE = current_platform.is_cuda_alike()
 
 CUDA_ONLY = current_platform.is_cuda()
 
+GPGPU_DEVICE = CUDA_ALIKE or current_platform.is_xpu()
+
 
 def make_group_quant_scales(
     x: Tensor,
@@ -73,7 +75,7 @@ _vllm_c_static_quant_fp8_args = (
 
 
 @ir.ops.static_quant_fp8.register_impl(
-    "vllm_c", supports_args=_vllm_c_static_quant_fp8_args, supported=CUDA_ALIKE
+    "vllm_c", supports_args=_vllm_c_static_quant_fp8_args, supported=GPGPU_DEVICE
 )
 def static_quant_fp8(
     x: Tensor,
@@ -96,7 +98,7 @@ _vllm_c_static_group_quant_fp8_args = (
 
 
 @ir.ops.static_group_quant_fp8.register_impl(
-    "vllm_c", supports_args=_vllm_c_static_group_quant_fp8_args, supported=CUDA_ALIKE
+    "vllm_c", supports_args=_vllm_c_static_group_quant_fp8_args, supported=GPGPU_DEVICE
 )
 def static_group_quant_fp8(
     x: Tensor,
@@ -121,7 +123,7 @@ _vllm_c_dynamic_quant_fp8_args = (
 
 
 @ir.ops.dynamic_quant_fp8.register_impl(
-    "vllm_c", supports_args=_vllm_c_dynamic_quant_fp8_args, supported=CUDA_ALIKE
+    "vllm_c", supports_args=_vllm_c_dynamic_quant_fp8_args, supported=GPGPU_DEVICE
 )
 def dynamic_quant_fp8(
     x: Tensor,
