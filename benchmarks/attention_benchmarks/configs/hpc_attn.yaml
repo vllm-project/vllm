@@ -1,7 +1,4 @@
 # HPC attention backend benchmark configuration
-# Uses Meta-Llama-3-8B parameters (32 Q heads, 8 KV heads, GQA ratio=4)
-# HPC_ATTN constraints: bfloat16 only, block_size must be 32 or 64,
-#                       decoder attention only, no CUDA graphs.
 
 description: "HPC attention backend benchmark"
 
