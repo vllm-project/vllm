@@ -3248,10 +3248,12 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
 
 #endif
 
+// clang-format off
 #define LAUNCH_CUSTOM_ATTENTION_MFMA16(GQA_RATIO)                              \
-  paged_attention_ll4mi_QKV_mfma16_kernel < T, KVT, KV_DTYPE, OUTT,            \
-      BLOCK_SIZE, HEAD_SIZE, NTHR, ALIBI_ENABLED, GQA_RATIO, MFMA_TYPE,        \
-      USE_INTERLEAVED_V_CACHE<<<grid, block, 0, stream>>>(                     \
+  paged_attention_ll4mi_QKV_mfma16_kernel<                                     \
+      T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE, HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
+      GQA_RATIO, MFMA_TYPE, USE_INTERLEAVED_V_CACHE>                           \
+      <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
@@ -3259,14 +3261,16 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
-  paged_attention_ll4mi_QKV_mfma4_kernel < T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE, \
-      HEAD_SIZE, NTHR, ALIBI_ENABLED, GQA_RATIO,                               \
-      USE_INTERLEAVED_V_CACH<<<grid, block, 0, stream>>>(                      \
+  paged_attention_ll4mi_QKV_mfma4_kernel<                                      \
+      T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE, HEAD_SIZE, NTHR, ALIBI_ENABLED,      \
+      GQA_RATIO, USE_INTERLEAVED_V_CACHE>                                      \
+      <<<grid, block, 0, stream>>>(                                            \
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
           kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
           max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+// clang-format on
 
 #define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
   paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE,        \
@@ -3604,7 +3608,7 @@ void paged_attention_custom_launcher_navi(
   }
 }
 
-// USE_INTERLEAVED_V_CACHEs the V-cache read path at compile time.
+// USE_INTERLEAVED_V_CACHE gates the V-cache read path at compile time.
 // Currently only the GFX9 kernels (MI300x/MI325x/MI350x/MI355x) have the
 // actual interleaved V-fetch logic implemented.  The GFX11 (RDNA 3) and
 // GFX12 (RDNA 4) mfma16 kernels do NOT support interleaved V-cache addressing.
@@ -3738,7 +3742,8 @@ void paged_attention(
     torch::Tensor& v_scale,
     const std::optional<torch::Tensor>& fp8_out_scale,
     const std::string& mfma_type,
-    bool use_interleaved_v_cach clang-format on
+    bool use_interleaved_v_cache) {
+  // clang-format on
   bool is_navi = is_navi_gpu();
   const int head_size = query.size(2);
   if (kv_cache_dtype == "auto") {
