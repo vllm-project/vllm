@@ -71,6 +71,7 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from .gemma4_mm_utils import get_gemma4_pooled_token_counts
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -1066,65 +1067,57 @@ class Gemma4ForConditionalGeneration(
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
 
-        # The HF image processor now outputs pre-patchified data:
-        #   pixel_values:       (num_images, max_patches, patch_pixels)
-        #   pixel_position_ids: (num_images, max_patches, 2)
-        # We call the vision tower's forward() directly, which handles
-        # patch embedding, encoding, pooling, padding removal, and
-        # optional standardization internally.
-        vt = self.vision_tower
+        return self._process_vision_batch(pixel_values, pixel_position_ids)
+
+    @staticmethod
+    def _get_pooled_token_counts(
+        pixel_position_ids: torch.Tensor,
+        output_length: int,
+    ) -> torch.Tensor:
+        return get_gemma4_pooled_token_counts(pixel_position_ids, output_length)
+
+    def _process_vision_batch(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+    ) -> list[torch.Tensor]:
+        """Run the Gemma4 vision tower on a batch and split flat outputs.
+
+        The HF Gemma4VisionModel already supports batched inputs and returns a
+        single flat tensor with padding stripped in batch-major order. We keep
+        the dynamic per-item output contract by reconstructing each image's
+        token count from the pooled patch grid and splitting once after the
+        batch forward.
+        """
+        if pixel_values.shape[0] == 0:
+            return []
+
         pooling_k2 = self.config.vision_config.pooling_kernel_size**2
+        max_patches = pixel_values.shape[1]
+        output_length = max_patches // pooling_k2
+        token_counts = self._get_pooled_token_counts(pixel_position_ids,
+                                                     output_length)
 
-        # TODO: Move this per-image loop into the input processor to
-        # reduce dynamism at the model runner / engine core. This
-        # requires spatially padding all images to uniform (H_max,
-        # W_max) in _call_hf_processor() so they arrive as a single
-        # stacked tensor, tracking padded regions via image_sizes
-        # metadata, and validating numerical equivalence with the
-        # current per-image path.
-        #
-        # Process each image individually through the vision tower.
-        # The vision tower's forward() strips padding and returns a
-        # flat tensor of valid tokens. We process per-image to get
-        # variable-length outputs matching the dynamic token count
-        # from get_image_repl.
-        per_image_features = []
-        for i in range(pixel_values.shape[0]):
-            pv = pixel_values[i].unsqueeze(0)  # (1, max_patches, patch_pixels)
-            pp = pixel_position_ids[i].unsqueeze(0)  # (1, max_patches, 2)
-
-            # Derive the pooler's output_length from the total patch
-            # count (including padding).  The vision tower encoder
-            # processes ALL patches — padding patches get zero hidden
-            # states but still occupy sequence positions.  The pooler's
-            # _avg_pool_by_positions requires:
-            #     input_seq_len / output_length == k²
-            # where k == pooling_kernel_size.  The image processor
-            # allocates max_patches = max_soft_tokens * k² total slots,
-            # so output_length = max_patches / k² == max_soft_tokens.
-            # Without this, the pooler falls back to
-            # config.image_seq_length (e.g. 280), which fails when a
-            # different max_soft_tokens was used at preprocessing time.
-            max_patches = pv.shape[1]
-            output_length = max_patches // pooling_k2
-
-            vt_output = vt(pv, pp, output_length=output_length)
-            # last_hidden_state: (num_valid_tokens, hidden_size)
-            # — already flat with padding stripped by the vision tower
-            per_image_features.append(vt_output.last_hidden_state)
-
-        # Project each image's features into LM embedding space.
-        # Per-image loop is required because images have variable
-        # token counts after padding removal.
-        # Cast to match the projection layer's dtype (model may be
-        # bf16 while the vision tower outputs fp32).
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
-        return [
-            self.embed_vision(inputs_embeds=img.unsqueeze(0).to(target_dtype)).squeeze(
-                0
+        vt_output = self.vision_tower(
+            pixel_values,
+            pixel_position_ids,
+            output_length=output_length,
+        )
+        flat_features = vt_output.last_hidden_state
+        expected_tokens = int(token_counts.sum().item())
+        if flat_features.shape[0] != expected_tokens:
+            raise ValueError(
+                "Gemma4 vision tower output token count mismatch: "
+                f"expected {expected_tokens}, got {flat_features.shape[0]}."
             )
-            for img in per_image_features
-        ]
+
+        target_dtype = self.embed_vision.embedding_projection.weight.dtype
+        # HF strips padding with ``hidden_states[pooler_mask]``, which keeps
+        # valid tokens in batch-major order. Split that flat tensor once.
+        flat_embeddings = self.embed_vision(
+            inputs_embeds=flat_features.unsqueeze(0).to(target_dtype)
+        ).squeeze(0)
+        return list(flat_embeddings.split(token_counts.tolist(), dim=0))
 
     # ------------------------------------------------------------------ #
     # Video processing (frames through vision tower)
@@ -1149,10 +1142,6 @@ class Gemma4ForConditionalGeneration(
         pixel_position_ids = video_input["pixel_position_ids_videos"]
         frame_counts = video_input["video_frame_counts"]
 
-        vt = self.vision_tower
-        pooling_k2 = self.config.vision_config.pooling_kernel_size**2
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
-
         # Split flat tensors into per-video chunks
         if isinstance(frame_counts, torch.Tensor):
             fc_list = frame_counts.tolist()
@@ -1164,22 +1153,7 @@ class Gemma4ForConditionalGeneration(
 
         per_video_embeddings = []
         for pv_chunk, pp_chunk in zip(pv_per_video, pp_per_video):
-            frame_embs = []
-            for i in range(pv_chunk.shape[0]):
-                pv = pv_chunk[i].unsqueeze(0)
-                pp = pp_chunk[i].unsqueeze(0)
-
-                max_patches = pv.shape[1]
-                output_length = max_patches // pooling_k2
-
-                vt_output = vt(pv, pp, output_length=output_length)
-                frame_emb = self.embed_vision(
-                    inputs_embeds=(
-                        vt_output.last_hidden_state.unsqueeze(0).to(target_dtype)
-                    )
-                ).squeeze(0)
-                frame_embs.append(frame_emb)
-
+            frame_embs = self._process_vision_batch(pv_chunk, pp_chunk)
             # Concatenate all frames of this video into one tensor.
             per_video_embeddings.append(torch.cat(frame_embs, dim=0))
 
