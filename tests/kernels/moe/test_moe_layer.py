@@ -37,7 +37,7 @@ from vllm.distributed.parallel_state import (
     get_eplb_group,
 )
 from vllm.forward_context import set_forward_context
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE, fused_experts
+from vllm.model_executor.layers.fused_moe import FusedMoE, fused_experts
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
@@ -858,11 +858,7 @@ def make_fused_moe_layer(
     quant_config, qw = make_quant_config(quantization, w1, w2, global_num_experts)
 
     kwargs = dict()
-    if shared_experts is None:
-        builder = FusedMoE
-    else:
-        builder = SharedFusedMoE
-        kwargs["shared_experts"] = shared_experts
+    kwargs["shared_experts"] = shared_experts
 
     # Add gate and routed_input_transform if provided
     if gate is not None:
@@ -872,7 +868,7 @@ def make_fused_moe_layer(
         kwargs["routed_input_transform"] = routed_input_transform
         kwargs["routed_output_transform"] = routed_output_transform
 
-    layer = builder(
+    layer = FusedMoE(
         num_experts=global_num_experts,
         top_k=top_k,
         hidden_size=hidden_size,
