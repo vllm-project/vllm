@@ -5,24 +5,16 @@
 Uses GraniteForCausalLM as the language backbone with SigLIP vision encoder
 and deepstack feature injection via WindowQFormer projectors.
 
-LoRA support:
-- Full merge (--hf-overrides '{"adapter_path": "..."}') merges LM-only LoRA
-  deltas into base weights at load time.
-- Native LoRA (--enable-lora --default-mm-loras) lets vLLM runtime serve
-  LM LoRA deltas per-request.
-Both modes expect a LM-only adapter (no modules_to_save).
+LoRA support: use --enable-lora --default-mm-loras for LM-only LoRA adapters.
 """
 
-import json
 import math
-import os
 from collections.abc import Iterable, Mapping
 from fractions import Fraction
 from itertools import islice
 
 import torch
 import torch.nn as nn
-from safetensors.torch import load_file
 from transformers import BatchFeature
 from transformers.models.blip_2.configuration_blip_2 import Blip2QFormerConfig
 from transformers.models.llava_next.modeling_llava_next import (
@@ -33,11 +25,7 @@ from transformers.models.llava_next.modeling_llava_next import (
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed.parallel_state import (
-    get_pp_group,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -937,182 +925,6 @@ class Granite4VisionForConditionalGeneration(
         # LogitsProcessor(scale=1/logits_scaling)
         return self.language_model.compute_logits(hidden_states)
 
-    # ----- Full-merge LoRA support -----
-
-    # HF→vLLM key prefix mapping (same transforms as hf_to_vllm_mapper)
-    _ADAPTER_PREFIX_MAP = [
-        ("model.language_model.", "language_model.model."),
-    ]
-
-    # vLLM fuses q/k/v_proj into qkv_proj and gate/up_proj into gate_up_proj.
-    _STACKED_PARAMS_MAPPING = [
-        (".qkv_proj", ".q_proj", "q"),
-        (".qkv_proj", ".k_proj", "k"),
-        (".qkv_proj", ".v_proj", "v"),
-        (".gate_up_proj", ".gate_proj", 0),
-        (".gate_up_proj", ".up_proj", 1),
-    ]
-
-    @staticmethod
-    def _peft_to_vllm(peft_key: str) -> str:
-        """Strip 'base_model.model.' and apply HF→vLLM prefix mapping."""
-        name = peft_key
-        if name.startswith("base_model.model."):
-            name = name[len("base_model.model.") :]
-        for (
-            old_pfx,
-            new_pfx,
-        ) in Granite4VisionForConditionalGeneration._ADAPTER_PREFIX_MAP:
-            if name.startswith(old_pfx):
-                name = new_pfx + name[len(old_pfx) :]
-                break
-        return name
-
-    @staticmethod
-    def _load_adapter(adapter_path: str) -> tuple[dict, dict[str, torch.Tensor]]:
-        """Load adapter config and safetensors from a directory or HF hub ID."""
-        # Resolve HF hub IDs to local cache path
-        if not os.path.isdir(adapter_path):
-            from huggingface_hub import snapshot_download
-
-            adapter_path = snapshot_download(adapter_path)
-        config_path = os.path.join(adapter_path, "adapter_config.json")
-        weights_path = os.path.join(adapter_path, "adapter_model.safetensors")
-        if not os.path.exists(config_path):
-            raise FileNotFoundError(f"No adapter_config.json in {adapter_path}")
-        if not os.path.exists(weights_path):
-            raise FileNotFoundError(f"No adapter_model.safetensors in {adapter_path}")
-        with open(config_path) as f:
-            config = json.load(f)
-        weights = load_file(weights_path)
-        return config, weights
-
-    def _merge_lora_deltas(
-        self,
-        adapter_config: dict,
-        adapter_weights: dict[str, torch.Tensor],
-    ) -> int:
-        """Merge LM-only LoRA deltas into model weights: W += scaling * B @ A.
-
-        Uses _STACKED_PARAMS_MAPPING + module._get_shard_offset_mapping()
-        to handle packed QKV correctly (works with GQA automatically).
-        """
-        lora_alpha = adapter_config.get("lora_alpha", 1)
-        lora_r = adapter_config.get("r", 1)
-        scaling = lora_alpha / lora_r
-
-        # Collect lora_A / lora_B by vLLM module key
-        lora_a: dict[str, torch.Tensor] = {}
-        lora_b: dict[str, torch.Tensor] = {}
-        for peft_key, tensor in adapter_weights.items():
-            if ".lora_A." in peft_key:
-                module_key = self._peft_to_vllm(peft_key.replace(".lora_A.weight", ""))
-                lora_a[module_key] = tensor
-            elif ".lora_B." in peft_key:
-                module_key = self._peft_to_vllm(peft_key.replace(".lora_B.weight", ""))
-                lora_b[module_key] = tensor
-
-        params_dict = dict(self.named_parameters())
-        modules_dict = dict(self.named_modules())
-
-        def _add_delta(name: str, delta: torch.Tensor) -> bool:
-            # Try stacked/fused params first (qkv_proj, gate_up_proj)
-            for fused_name, orig_name, shard_id in self._STACKED_PARAMS_MAPPING:
-                if orig_name not in name:
-                    continue
-                fused_param_name = name.replace(orig_name, fused_name)
-                if fused_param_name not in params_dict:
-                    continue
-                param = params_dict[fused_param_name]
-                module_path = fused_param_name.rsplit(".weight", 1)[0]
-                module = modules_dict.get(module_path)
-                if module is None:
-                    continue
-
-                tp_rank = get_tensor_model_parallel_rank()
-                tp_size = get_tensor_model_parallel_world_size()
-
-                if hasattr(module, "_get_shard_offset_mapping"):
-                    # QKVParallelLinear: string shard_id ("q", "k", "v")
-                    shard_offset = module._get_shard_offset_mapping(shard_id)
-                    if shard_offset is not None:
-                        shard_size = delta.shape[0] // tp_size
-                        tp_delta = delta.narrow(0, tp_rank * shard_size, shard_size)
-                        shard = param.data[shard_offset : shard_offset + shard_size]
-                        param.data[shard_offset : shard_offset + shard_size] = (
-                            shard.float() + tp_delta.to(shard.device)
-                        ).to(shard.dtype)
-                        return True
-                elif hasattr(module, "output_sizes") and isinstance(shard_id, int):
-                    # MergedColumnParallelLinear: integer shard_id (0, 1)
-                    shard_size = module.output_sizes[shard_id] // tp_size
-                    shard_offset = sum(
-                        s // tp_size for s in module.output_sizes[:shard_id]
-                    )
-                    tp_delta = delta.narrow(
-                        0,
-                        tp_rank * (delta.shape[0] // tp_size),
-                        delta.shape[0] // tp_size,
-                    )
-                    shard = param.data[shard_offset : shard_offset + shard_size]
-                    param.data[shard_offset : shard_offset + shard_size] = (
-                        shard.float() + tp_delta.to(shard.device)
-                    ).to(shard.dtype)
-                    return True
-            # Direct param (o_proj, down_proj)
-            if name in params_dict:
-                param = params_dict[name]
-                # Under TP, param is already sharded but delta is full-size.
-                # Slice delta to match: dim 0 for column-parallel, dim 1 for
-                # row-parallel.
-                if delta.shape != param.data.shape:
-                    tp_rank = get_tensor_model_parallel_rank()
-                    for dim in range(delta.dim()):
-                        if delta.shape[dim] != param.data.shape[dim]:
-                            shard_size = param.data.shape[dim]
-                            offset = tp_rank * shard_size
-                            delta = delta.narrow(dim, offset, shard_size)
-                            break
-                merged = param.data.float() + delta.to(param.device)
-                param.data = merged.to(param.dtype)
-                return True
-            return False
-
-        merge_device = next(self.parameters()).device
-        merged = 0
-        for module_key in sorted(lora_a):
-            if module_key not in lora_b:
-                logger.warning("LoRA B missing for %s, skipping", module_key)
-                continue
-            A = lora_a[module_key].to(merge_device).float()
-            B = lora_b[module_key].to(merge_device).float()
-            delta = scaling * (B @ A)
-            if _add_delta(module_key + ".weight", delta):
-                merged += 1
-            else:
-                logger.debug("LoRA target not found on this PP rank: %s", module_key)
-
-        return merged
-
-    def _apply_adapter(self) -> None:
-        """Full-merge entry point: called when config.adapter_path is set."""
-        adapter_path = getattr(self.config, "adapter_path", None)
-        if not adapter_path:
-            return
-        logger.info("Full-merge LoRA from %s", adapter_path)
-        adapter_config, adapter_weights = self._load_adapter(adapter_path)
-
-        if adapter_config.get("modules_to_save"):
-            raise ValueError(
-                "Adapter has modules_to_save — only LM-only adapters "
-                "(no modules_to_save) are supported."
-            )
-
-        n = self._merge_lora_deltas(adapter_config, adapter_weights)
-        logger.info("Merged %d LoRA pairs into base weights", n)
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self._apply_adapter()
-        return loaded
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
