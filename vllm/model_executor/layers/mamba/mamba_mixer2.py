@@ -882,17 +882,27 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 # then chunk_stride = 2
                 chunk_stride = mamba_block_size // chunk_size
 
+                # The per-sequence loop below uses these as Python scalars
+                # (slice bounds, `if == 0` tests, `%`, etc). Pull them to
+                # CPU once so each iteration doesn't force a D2H sync.
+                # These are small (per-request) and are known-unavoidable
+                # D2H reads; allow the one-shot sync instead of paying a
+                # per-iteration D2H cost.
+                from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+                with gpu_sync_allowed():
+                    block_idx_first_cpu = block_idx_first_scheduled_token_p.tolist()
+                    block_idx_last_cpu = block_idx_last_scheduled_token_p.tolist()
+                    num_computed_tokens_p_cpu = num_computed_tokens_p.tolist()
+                    last_chunk_indices_p_cpu = last_chunk_indices_p.tolist()
+
                 # Save state for sequences with more than just final state
                 for seq_idx in range(num_prefills):
                     # Block index for the first scheduled token
-                    block_idx_first_scheduled_token = block_idx_first_scheduled_token_p[
-                        seq_idx
-                    ]
+                    block_idx_first_scheduled_token = block_idx_first_cpu[seq_idx]
 
                     # Block index for the last scheduled token
-                    block_idx_last_scheduled_token = block_idx_last_scheduled_token_p[
-                        seq_idx
-                    ]
+                    block_idx_last_scheduled_token = block_idx_last_cpu[seq_idx]
 
                     # Number of blocks that need to be written
                     n_blocks_to_fill = (
@@ -913,7 +923,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     if seq_idx == 0:
                         first_chunk = 0
                     else:
-                        first_chunk = 1 + last_chunk_indices_p[seq_idx - 1]
+                        first_chunk = 1 + last_chunk_indices_p_cpu[seq_idx - 1]
 
                     # First chunk that is aligned on the mamba block boundary
                     first_aligned_chunk = first_chunk + chunk_stride - 1
@@ -921,7 +931,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                     # Calculate the number of computed tokens that were not
                     # already cached
                     num_unaligned_computed_tokens = (
-                        num_computed_tokens_p[seq_idx] % mamba_block_size
+                        num_computed_tokens_p_cpu[seq_idx] % mamba_block_size
                     )
 
                     if num_unaligned_computed_tokens > 0:

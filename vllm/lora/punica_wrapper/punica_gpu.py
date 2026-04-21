@@ -14,6 +14,7 @@ import torch
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.utils import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 
 if HAS_TRITON:
@@ -83,9 +84,18 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         self.is_prefill = mapping.is_prefill
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
-        # Prepare cuda kernel metadata tensors
-        self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
-        self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
+        # This method has two unavoidable GPU->CPU syncs given the current
+        # design: (1) the `torch.all(... == -1)` no-lora check below, and
+        # (2) `torch.unique(...)` + reading `lora_ids.size(0)` as a Python
+        # int further down. Both ultimately stem from needing facts about
+        # `token_lora_mapping`'s contents on the host (is everything -1?
+        # how many distinct loras?). TODO: compute these on CPU upstream
+        # in `convert_mapping` where the mapping is still a Python list,
+        # then pass the results in.
+        with gpu_sync_allowed():
+            # Prepare cuda kernel metadata tensors
+            self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
+            self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
     def add_shrink(
         self,

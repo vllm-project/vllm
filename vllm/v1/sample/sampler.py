@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -331,9 +332,10 @@ class Sampler(nn.Module):
         # of the compiled batched_count_greater_than. mark_unbacked makes
         # the size fully symbolic so dynamo doesn't specialize when
         # batch_size transitions from 1 to >=2.
-        torch._dynamo.decorators.mark_unbacked(logprobs, 0)
-        torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
-        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
+        with gpu_sync_allowed(first_only=True):
+            torch._dynamo.decorators.mark_unbacked(logprobs, 0)
+            torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
+            token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)

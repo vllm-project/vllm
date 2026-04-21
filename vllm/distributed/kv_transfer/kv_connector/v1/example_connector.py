@@ -139,6 +139,10 @@ class ExampleConnector(KVConnectorBase_V1):
                     [num_tokens].
             """
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
+            # `slot_mapping` is built CPU-side in `ReqMeta.make_meta`; upload
+            # non-blocking so the advanced-index ops below don't force a
+            # synchronous H2D of the index tensor.
+            slot_mapping = slot_mapping.to(dst_kv_cache_layer.device, non_blocking=True)
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages = dst_kv_cache_layer_shape[0]
                 page_size = dst_kv_cache_layer_shape[1]
@@ -237,6 +241,10 @@ class ExampleConnector(KVConnectorBase_V1):
             Assume the shape of the layer is (2, num_pages, page_size, xxx)
             if MLA is not used, and (num_pages, page_size, xxx) otherwise.
             """
+            # `slot_mapping` is built CPU-side in `ReqMeta.make_meta`; upload
+            # non-blocking so the advanced-index ops below don't force a
+            # synchronous H2D of the index tensor.
+            slot_mapping = slot_mapping.to(layer.device, non_blocking=True)
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
@@ -247,6 +255,8 @@ class ExampleConnector(KVConnectorBase_V1):
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
         connector_metadata = self._get_connector_metadata()
         assert isinstance(connector_metadata, ExampleConnectorMetadata)
         for request in connector_metadata.requests:
@@ -255,7 +265,9 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache = extract_kv_from_layer(kv_layer, request.slot_mapping)
-                tensors = {"kv_cache": kv_cache.detach().cpu()}
+                # `.cpu()` is an unavoidable D2H to serialize the cache.
+                with gpu_sync_allowed():
+                    tensors = {"kv_cache": kv_cache.detach().cpu()}
                 safetensors.torch.save_file(tensors, filename)
 
     def wait_for_save(self):

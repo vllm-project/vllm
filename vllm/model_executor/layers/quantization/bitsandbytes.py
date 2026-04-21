@@ -290,6 +290,11 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         # only load the bitsandbytes module when needed
         from bitsandbytes import MatmulLtState, matmul
 
+        # BnB's `int8_vectorwise_quant` branches on `outliers.any()` which
+        # forces a D2H sync; this is third-party code we can't refactor,
+        # and it's a per-layer fixed cost in int8 quant mode.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
         original_type = x.dtype
         original_shape = x.shape
         reshape_after_matmul = False
@@ -333,9 +338,10 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
             new_x = bf_x.unsqueeze(0)
 
-            out[:, current_index : current_index + output_size] = matmul(
-                new_x, qweight[offsets[i] : offsets[i + 1]], state=matmul_states[i]
-            )
+            with gpu_sync_allowed():
+                out[:, current_index : current_index + output_size] = matmul(
+                    new_x, qweight[offsets[i] : offsets[i + 1]], state=matmul_states[i]
+                )
 
             current_index += output_size
 

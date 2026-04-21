@@ -804,6 +804,9 @@ ENV HF_XET_HIGH_PERFORMANCE 1
 # increase timeout for hf downloads (for testing)
 ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
+# Catch GPU<->CPU syncs in execute_model/sample_tokens
+ENV VLLM_GPU_SYNC_CHECK=error
+
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 

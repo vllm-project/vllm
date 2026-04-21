@@ -12,6 +12,7 @@ using Pivot-based Truncation and Selection" By Park et al.
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
 
@@ -1023,12 +1024,13 @@ def apply_top_k_top_p_triton(
     # Cache lookup table entries on each device.
     tables = _TRITON_TABLE_CACHE.get(logits.device)
     if tables is None:
-        normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
-        percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
-        _TRITON_TABLE_CACHE[logits.device] = (
-            normal_cdf_to_sigma_table,
-            percentile_to_std_table,
-        )
+        with gpu_sync_allowed():
+            normal_cdf_to_sigma_table = logits.new_tensor(_NORMAL_CDF_TO_SIGMA_TABLE)
+            percentile_to_std_table = logits.new_tensor(_PERCENTILE_TO_STD_TABLE)
+            _TRITON_TABLE_CACHE[logits.device] = (
+                normal_cdf_to_sigma_table,
+                percentile_to_std_table,
+            )
     else:
         normal_cdf_to_sigma_table, percentile_to_std_table = tables
 

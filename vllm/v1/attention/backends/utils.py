@@ -412,8 +412,13 @@ def make_kv_sharing_fast_prefill_common_attn_metadata(
 
     decode_query_start_loc[:1].fill_(0)  # Avoid sync from scalar assignment.
     decode_query_start_loc[1:] = torch.cumsum(num_decode_tokens, dim=0)
-    decode_max_query_len = int(num_decode_tokens.max().item())
-    total_num_decode_tokens = int(num_decode_tokens.sum().item())
+    # `.item()` reductions here are unavoidable — the CommonAttentionMetadata
+    # fields below need Python ints. Feature is opt-in (kv_sharing_fast_prefill).
+    from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+    with gpu_sync_allowed():
+        decode_max_query_len = int(num_decode_tokens.max().item())
+        total_num_decode_tokens = int(num_decode_tokens.sum().item())
 
     common_attn_metadata = CommonAttentionMetadata(
         query_start_loc=decode_query_start_loc,

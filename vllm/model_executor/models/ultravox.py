@@ -45,6 +45,7 @@ from vllm.multimodal.processing import (
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import (
@@ -692,15 +693,23 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
             embeddings.shape[0], -1
         )
         mask = indices < audio_token_len[:, None]
-        # Apply mask and flatten
-        flattened_embeddings = embeddings[mask]
+        # The boolean-mask gather, the `.item()` on per-group lengths, and the
+        # `.tolist()` feeding `torch.split` all force GPU->CPU syncs (output
+        # sizes are data-dependent). Suppress the sync check here; avoiding
+        # these syncs would require restructuring the downstream contract
+        # for per-audio flattened embeddings.
+        with gpu_sync_allowed():
+            # Apply mask and flatten
+            flattened_embeddings = embeddings[mask]
 
-        # Return one tensor per input audio
-        embed_lens = [
-            chunk_lens.sum().item()
-            for chunk_lens in audio_token_len.split(audio_input["num_chunks"].tolist())
-        ]
-        return flattened_embeddings.split(embed_lens)
+            # Return one tensor per input audio
+            embed_lens = [
+                chunk_lens.sum().item()
+                for chunk_lens in audio_token_len.split(
+                    audio_input["num_chunks"].tolist()
+                )
+            ]
+            return flattened_embeddings.split(embed_lens)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)

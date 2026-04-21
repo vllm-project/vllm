@@ -428,11 +428,19 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         feature_lens: torch.Tensor,
         aftercnn_lens: torch.Tensor,
     ):
-        # Compute chunk information
+        # Compute chunk information. `feature_lens` is small (per-audio) so
+        # pull to CPU once to compute total chunk count and split sizes
+        # without per-iteration D2H syncs.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
         chunk_num = torch.ceil(feature_lens / (self.n_window * 2)).long()
 
-        chunk_lengths = torch.tensor(
-            [self.n_window * 2] * chunk_num.sum(),
+        with gpu_sync_allowed():
+            total_chunks = int(chunk_num.sum())
+        # `torch.tensor([...], device=cuda)` forces a blocking H2D; use
+        # pinned CPU + non-blocking upload instead.
+        chunk_lengths = async_tensor_h2d(
+            [self.n_window * 2] * total_chunks,
             dtype=torch.long,
             device=feature_lens.device,
         )
@@ -441,15 +449,20 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         chunk_lengths[chunk_lengths == 0] = self.n_window * 2
 
         # Split input features into chunks and pad
-        chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
+        with gpu_sync_allowed():
+            chunk_lengths_list = chunk_lengths.tolist()
+        chunk_list = input_features.T.split(chunk_lengths_list, dim=0)
         padded_feature = nn.utils.rnn.pad_sequence(
             chunk_list, batch_first=True
         ).transpose(1, 2)
 
         # Compute feature lengths after CNN
         feature_lens_after_cnn = self._get_cnn_output_lengths(chunk_lengths)
-        # Vectorized mask creation: avoid creating many small tensors
-        max_len_after_cnn = feature_lens_after_cnn.max().item()
+        # Vectorized mask creation: avoid creating many small tensors. The
+        # `.item()` below is unavoidable — `torch.arange` needs a Python int
+        # for the output size. Runs once per audio forward.
+        with gpu_sync_allowed():
+            max_len_after_cnn = feature_lens_after_cnn.max().item()
         indices = torch.arange(max_len_after_cnn, device=padded_feature.device)
         padded_mask_after_cnn = indices.unsqueeze(0) < feature_lens_after_cnn.unsqueeze(
             1
@@ -488,16 +501,19 @@ class Qwen3OmniMoeAudioEncoder(nn.Module):
         )
         padded_embed = padded_embed + positional_embedding
 
-        # Extract valid hidden states and compute cu_seqlens
-        hidden_states = padded_embed[padded_mask_after_cnn]
+        # Boolean-mask indexing has a data-dependent output shape; syncs on
+        # CUDA. Runs once per audio forward.
+        with gpu_sync_allowed():
+            hidden_states = padded_embed[padded_mask_after_cnn]
+            # `aftercnn_lens.tolist()` is an unavoidable D2H below.
+            aftercnn_lens_list = aftercnn_lens.tolist()
 
         # Compute cumulative sequence lengths for chunked attention
         cu_chunk_lens = [0]
         window_aftercnn = padded_mask_after_cnn.shape[-1] * (
             self.n_window_infer // (self.n_window * 2)
         )
-        # Use tolist() for efficient batch conversion from tensor to Python
-        for cnn_len in aftercnn_lens.tolist():
+        for cnn_len in aftercnn_lens_list:
             num_full_chunks = cnn_len // window_aftercnn
             remainder = cnn_len % window_aftercnn
             cu_chunk_lens.extend([window_aftercnn] * num_full_chunks)

@@ -71,11 +71,14 @@ def get_fake_sample_fn() -> SamplerOutput:
             first_token_id_index = num_computed_tokens + 1
         if spec_decode_metadata is None:
             return SamplerOutput(
+                # Build on pinned CPU + non_blocking H2D rather than
+                # `torch.tensor(..., device=DEVICE_TYPE)` which would force
+                # a synchronous copy and trip the sync check.
                 sampled_token_ids=torch.tensor(
                     [[prompt_token_ids[first_token_id_index]]],
-                    device=DEVICE_TYPE,
+                    pin_memory=True,
                     dtype=torch.int32,
-                ),
+                ).to(DEVICE_TYPE, non_blocking=True),
                 logprobs_tensors=None,
             )
         accepted_tokens = prompt_token_ids[
@@ -86,9 +89,9 @@ def get_fake_sample_fn() -> SamplerOutput:
         return SamplerOutput(
             sampled_token_ids=torch.tensor(
                 [sampled_token_ids],
-                device=DEVICE_TYPE,
+                pin_memory=True,
                 dtype=torch.int32,
-            ),
+            ).to(DEVICE_TYPE, non_blocking=True),
             logprobs_tensors=None,
         )
 
@@ -126,29 +129,30 @@ def get_fake_propose_draft_token_ids_fn():
             ]
         ]
 
+        # Build on pinned CPU + non-blocking upload to avoid synchronous H2D.
         next_token_ids = torch.tensor(
             prompt_token_ids[
                 first_token_id_index - 1 : first_token_id_index
                 - 1
                 + num_accepted_tokens
             ],
-            device=DEVICE_TYPE,
             dtype=torch.int32,
-        )
+            pin_memory=True,
+        ).to(DEVICE_TYPE, non_blocking=True)
 
         valid_sampled_tokens_count = torch.tensor(
             [num_accepted_tokens],
-            device=DEVICE_TYPE,
             dtype=torch.int32,
-        )
+            pin_memory=True,
+        ).to(DEVICE_TYPE, non_blocking=True)
 
         self._copy_valid_sampled_token_count(next_token_ids, valid_sampled_tokens_count)
 
         return torch.tensor(
             proposed_draft_token_ids,
-            device=DEVICE_TYPE,
             dtype=torch.int32,
-        )
+            pin_memory=True,
+        ).to(DEVICE_TYPE, non_blocking=True)
 
     return fake_propose_draft_token_ids_fn
 

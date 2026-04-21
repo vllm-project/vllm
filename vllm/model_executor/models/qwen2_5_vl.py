@@ -88,6 +88,7 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphReplayBuffers
 
+from ...utils.gpu_sync_debug import gpu_sync_allowed
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle,
@@ -1450,8 +1451,13 @@ class Qwen2_5_VLForConditionalGeneration(
                 video_second_per_grid=video_second_per_grid_t.item(),
             ).to(emb.device, non_blocking=True)
 
-            emb = emb[retention_mask]
-            positions = positions[retention_mask]
+            # Boolean-mask indexing has a data-dependent output shape and
+            # always syncs on CUDA; runs once per video in the EVS path.
+            from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+            with gpu_sync_allowed():
+                emb = emb[retention_mask]
+                positions = positions[retention_mask]
             emb = torch.cat([emb, positions], dim=1)
             video_embeds_out.append(emb)
         return tuple(video_embeds_out)
@@ -1501,15 +1507,16 @@ class Qwen2_5_VLForConditionalGeneration(
             mm[:, -4:].permute(1, 0).long() for mm in multimodal_embeddings
         ]
 
-        positions, mrope_positions_delta = recompute_mrope_positions(
-            input_ids_t,
-            mm_embeddings_pos,
-            mrope_positions,
-            num_computed_tokens,
-            vision_start_token_id,
-            image_token_id,
-            video_token_id,
-        )
+        with gpu_sync_allowed():
+            positions, mrope_positions_delta = recompute_mrope_positions(
+                input_ids_t,
+                mm_embeddings_pos,
+                mrope_positions,
+                num_computed_tokens,
+                vision_start_token_id,
+                image_token_id,
+                video_token_id,
+            )
 
         return tuple(mm_embeddings_out), positions, mrope_positions_delta
 

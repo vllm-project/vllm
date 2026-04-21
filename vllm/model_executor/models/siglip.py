@@ -1112,31 +1112,41 @@ class SiglipEmbeddingModel(nn.Module, SupportsMultiModal, SupportsQuant):
         if len(features) == 1:
             return features
 
-        # Detect sequence boundaries where position_ids decrease
+        # Detect sequence boundaries where position_ids decrease.
+        # `torch.where(boundary_mask)` and `repeat_interleave(lengths)` both
+        # have data-dependent output shapes that always sync on CUDA. This
+        # runs once per pooling call. Compute boundaries on CPU (single D2H
+        # for `boundary_mask`) then upload the final flip-index tensor.
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
         position_diffs = position_ids[1:] - position_ids[:-1]
         boundary_mask = position_diffs <= 0
 
-        boundary_indices = torch.cat(
-            [
-                torch.tensor([0], device=features.device),
-                torch.where(boundary_mask)[0] + 1,
-                torch.tensor([len(features)], device=features.device),
-            ]
-        )
+        with gpu_sync_allowed():
+            boundary_mid_cpu = torch.where(boundary_mask.cpu())[0] + 1
+
+        zero = torch.zeros(1, dtype=boundary_mid_cpu.dtype)
+        end = torch.full((1,), len(features), dtype=boundary_mid_cpu.dtype)
+        boundary_indices_cpu = torch.cat([zero, boundary_mid_cpu, end])
 
         # For each sequence [start, end), position i flips to: start + end - 1 - i
-        lengths = boundary_indices[1:] - boundary_indices[:-1]
-        starts = boundary_indices[:-1]
-        ends = boundary_indices[1:]
+        lengths_cpu = boundary_indices_cpu[1:] - boundary_indices_cpu[:-1]
+        starts_cpu = boundary_indices_cpu[:-1]
+        ends_cpu = boundary_indices_cpu[1:]
 
         # Assign sequence ID to each element
-        sequence_ids = torch.arange(
-            len(lengths), device=features.device
-        ).repeat_interleave(lengths)
+        sequence_ids_cpu = torch.arange(
+            len(lengths_cpu), dtype=boundary_mid_cpu.dtype
+        ).repeat_interleave(lengths_cpu)
 
         # Calculate flipped indices for all positions at once
-        current_positions = torch.arange(len(features), device=features.device)
-        flip_indices = starts[sequence_ids] + ends[sequence_ids] - 1 - current_positions
+        current_positions_cpu = torch.arange(
+            len(features), dtype=boundary_mid_cpu.dtype
+        )
+        flip_indices_cpu = (
+            starts_cpu[sequence_ids_cpu] + ends_cpu[sequence_ids_cpu]
+        ) - (1 + current_positions_cpu)
+        flip_indices = flip_indices_cpu.to(features.device, non_blocking=True)
 
         return features[flip_indices]
 

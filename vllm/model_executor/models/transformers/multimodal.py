@@ -389,6 +389,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:
+            # The underlying HuggingFace `get_image_features` implementations
+            # contain model-internal syncs (e.g. Idefics3 filters all-zero
+            # padding images via boolean-mask indexing, LlavaOnevision
+            # branches on per-sample batch counts). These are third-party and
+            # not something we can refactor here.
+            from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
             # with flash_sdp and mem_efficient_sdp
             if current_platform.is_rocm():
@@ -400,16 +407,20 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                     "`mem_efficient_sdp` backends. See issue: "
                     "https://github.com/vllm-project/vllm/issues/30167"
                 )
-                with torch.nn.attention.sdpa_kernel(
-                    backends=[torch.nn.attention.SDPBackend.MATH]
+                with (
+                    torch.nn.attention.sdpa_kernel(
+                        backends=[torch.nn.attention.SDPBackend.MATH]
+                    ),
+                    gpu_sync_allowed(),
                 ):
                     vision_embeddings = self.model.get_image_features(
                         pixel_values, **kwargs
                     )
             else:
-                vision_embeddings = self.model.get_image_features(
-                    pixel_values, **kwargs
-                )
+                with gpu_sync_allowed():
+                    vision_embeddings = self.model.get_image_features(
+                        pixel_values, **kwargs
+                    )
 
             # Transformers `v5`, `self.get_image_features` returns a tuple
             # containing the features and optionally attentions/hidden_states
