@@ -4,6 +4,7 @@
 
 import copy
 import hashlib
+import math
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -930,8 +931,6 @@ def unify_kv_cache_spec_page_size(
     Returns:
         The updated KVCacheSpec with the same page_size_bytes.
     """
-    import math
-
     page_sizes = {layer.page_size_bytes for layer in kv_cache_spec.values()}
     if len(page_sizes) <= 1:
         # All layers have the same page size, no need to unify.
