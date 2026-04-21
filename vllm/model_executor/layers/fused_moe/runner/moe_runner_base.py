@@ -427,9 +427,6 @@ class MoERunnerBase(MoERunner):
         via the router, and the actual fused MoE computation. Returns
         (shared_expert_output, fused_expert_output).
         """
-        # Run this before quant_method to avoid inplace issues.
-        # TODO(bnell): probably not needed anymore since inplace is
-        # disabled when shared experts are present.
         self._maybe_apply_shared_experts(
             shared_experts_input, SharedExpertsOrder.NO_OVERLAP
         )
@@ -447,7 +444,7 @@ class MoERunnerBase(MoERunner):
             )
 
             # Passing shared_experts_input in case SharedExpertsOrder is
-            # NO_OVERLAP or MK_INTERNAL_OVERLAPPED.
+            # MK_INTERNAL_OVERLAPPED.
             fused_out = self.quant_method.apply(
                 layer=layer,
                 x=hidden_states,
@@ -490,6 +487,7 @@ class MoERunnerBase(MoERunner):
         #        parallel execution of shared experts with the FusedMoE via
         #        separate cuda stream)
         if self._shared_experts is not None:
+            assert shared_experts_input is not None
             self._shared_experts.maybe_sync_shared_experts_stream(shared_experts_input)
 
     def _maybe_add_zero_expert_output(
