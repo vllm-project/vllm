@@ -12,8 +12,8 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-  - vllm/lora
-  - tests/lora
+    - vllm/lora
+    - tests/lora
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -40,8 +40,8 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-  - vllm/lora
-  - tests/lora
+    - vllm/lora
+    - tests/lora
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -59,8 +59,8 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-  - vllm/lora
-  - tests/lora
+    - vllm/lora
+    - tests/lora
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -78,8 +78,8 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-  - vllm/lora
-  - tests/lora
+    - vllm/lora
+    - tests/lora
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -97,8 +97,8 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-  - vllm/lora
-  - tests/lora
+    - vllm/lora
+    - tests/lora
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
@@ -118,8 +118,8 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-  - vllm/lora
-  - tests/lora
+    - vllm/lora
+    - tests/lora
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
