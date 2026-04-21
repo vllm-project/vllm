@@ -26,7 +26,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, CrossAttentionSpec
 
 logger = init_logger(__name__)
 
-_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.S390X)
+_CPU_ARCH_PREFER_MIXED_BATCH = (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.S390X, CpuArchEnum.POWERPC)
 
 
 class CPUAttentionBackend(AttentionBackend):
@@ -482,8 +482,10 @@ def _get_attn_isa(
     if head_size is not None and head_size % 32 != 0 and head_size % 16 == 0:
         return "vec16"
     supports_amx = torch.cpu._is_amx_tile_supported()
-    supports_arm = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-    supports_vxe = current_platform.get_cpu_architecture() == CpuArchEnum.S390X
+    arch = current_platform.get_cpu_architecture()
+    supports_arm = arch == CpuArchEnum.ARM
+    supports_vxe = arch == CpuArchEnum.S390X
+    supports_vsx = arch == CpuArchEnum.POWERPC
     if supports_amx and dtype in (torch.bfloat16,) and block_size % 32 == 0:
         return "amx"
     elif block_size % 32 == 0:
@@ -492,6 +494,8 @@ def _get_attn_isa(
             return "neon"
         elif supports_vxe:
             return "vxe"
+        elif supports_vsx:
+            return "vsx"
         else:
             return "vec"
     else:

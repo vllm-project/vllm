@@ -10,8 +10,6 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
-DEVICE_TYPE = current_platform.device_type
-
 NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16]
@@ -116,7 +114,7 @@ def test_triton_unified_attn(
     q_dtype: torch.dtype | None,
     seq_threshold_3D: int,
 ) -> None:
-    torch.set_default_device(DEVICE_TYPE)
+    torch.set_default_device("cuda")
 
     set_random_seed(0)
     num_seqs = len(seq_lens)
@@ -251,7 +249,7 @@ def test_triton_unified_attn_fp16_input_fp8_output(
     seq_threshold_3D: int,
 ) -> None:
     """Test with fp16 input and fp8 output using output_scale."""
-    torch.set_default_device(DEVICE_TYPE)
+    torch.set_default_device("cuda")
 
     set_random_seed(0)
     num_seqs = len(seq_lens)

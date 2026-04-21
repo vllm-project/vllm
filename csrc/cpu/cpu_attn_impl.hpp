@@ -12,7 +12,7 @@
 #include "cpu/utils.hpp"
 
 namespace cpu_attention {
-enum class ISA { AMX, VEC, VEC16, NEON, VXE };
+enum class ISA { AMX, VEC, VEC16, NEON, VXE, VSX };
 
 template <ISA isa, typename scalar_t, int64_t head_dim>
 class AttentionImpl {};
@@ -149,6 +149,9 @@ struct AttentionMetadata {
         break;
       case ISA::VXE:
         ss << "VXE, ";
+        break;
+      case ISA::VSX:
+        ss << "VSX, ";
         break;
     }
     ss << "workitem_group_num: " << workitem_group_num

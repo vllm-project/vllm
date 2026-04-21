@@ -15,7 +15,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetric,
     PromMetricT,
 )
-from vllm.distributed.nixl_utils import nixlXferTelemetry
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
+    nixlXferTelemetry,
+)
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 

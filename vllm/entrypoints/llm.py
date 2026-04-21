@@ -452,7 +452,6 @@ class LLM:
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
         """Generates the completions for the input prompts.
 
@@ -480,7 +479,6 @@ class LLM:
                 of `prompts`, where each priority value corresponds to the prompt
                 at the same index.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
-            mm_processor_kwargs: Overrides for `processor.__call__`.
 
         Returns:
             A list of `RequestOutput` objects containing the
@@ -505,7 +503,6 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
-            mm_processor_kwargs=mm_processor_kwargs,
         )
 
     def enqueue(
@@ -516,7 +513,6 @@ class LLM:
         priority: list[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         """Enqueue prompts for generation without waiting for completion.
 
@@ -531,7 +527,6 @@ class LLM:
             priority: The priority of the requests, if any.
             use_tqdm: If True, shows a tqdm progress bar while adding requests.
             tokenization_kwargs: Overrides for `tokenizer.encode`.
-            mm_processor_kwargs: Overrides for `processor.__call__`.
 
         Returns:
             A list of request IDs for the enqueued requests.
@@ -550,7 +545,6 @@ class LLM:
             lora_request=lora_request,
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
-            mm_processor_kwargs=mm_processor_kwargs,
         )
 
     @overload
@@ -849,7 +843,6 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> Sequence[EngineInput]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
@@ -869,29 +862,15 @@ class LLM:
         tok_params = renderer.default_cmpl_tok_params.with_kwargs(
             **(tokenization_kwargs or {})
         )
-        prompt_extras = (
-            None
-            if mm_processor_kwargs is None
-            else {"mm_processor_kwargs": mm_processor_kwargs}
-        )
 
-        return renderer.render_cmpl(
-            parsed_prompts,
-            tok_params,
-            prompt_extras=prompt_extras,
-        )
+        return renderer.render_cmpl(parsed_prompts, tok_params)
 
     def _preprocess_cmpl_one(
         self,
         prompt: PromptType,
         tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> EngineInput:
-        (engine_input,) = self._preprocess_cmpl(
-            [prompt],
-            tokenization_kwargs,
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
+        (engine_input,) = self._preprocess_cmpl([prompt], tokenization_kwargs)
         return engine_input
 
     def _preprocess_chat(
@@ -929,22 +908,16 @@ class LLM:
                     tokenize=is_mistral_tokenizer(renderer.tokenizer),
                 ),
             ),
-            mm_processor_kwargs=mm_processor_kwargs,
         )
         tok_params = renderer.default_chat_tok_params.with_kwargs(
             **(tokenization_kwargs or {})
-        )
-        prompt_extras = (
-            None
-            if mm_processor_kwargs is None
-            else {"mm_processor_kwargs": mm_processor_kwargs}
         )
 
         _, engine_inputs = renderer.render_chat(
             conversations,
             chat_params,
             tok_params,
-            prompt_extras=prompt_extras,
+            prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
         )
 
         return engine_inputs
@@ -1598,7 +1571,6 @@ class LLM:
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
@@ -1607,11 +1579,7 @@ class LLM:
 
         return self._render_and_add_requests(
             prompts=(
-                self._preprocess_cmpl_one(
-                    prompt,
-                    tokenization_kwargs,
-                    mm_processor_kwargs=mm_processor_kwargs,
-                )
+                self._preprocess_cmpl_one(prompt, tokenization_kwargs)
                 for prompt in maybe_tqdm(
                     seq_prompts,
                     use_tqdm=use_tqdm,
@@ -1635,7 +1603,6 @@ class LLM:
         lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
-        mm_processor_kwargs: dict[str, Any] | None = None,
     ):
         self._add_completion_requests(
             prompts=prompts,
@@ -1644,7 +1611,6 @@ class LLM:
             lora_request=lora_request,
             priority=priority,
             tokenization_kwargs=tokenization_kwargs,
-            mm_processor_kwargs=mm_processor_kwargs,
         )
         return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 

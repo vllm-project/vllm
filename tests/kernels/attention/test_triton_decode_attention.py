@@ -4,11 +4,8 @@
 import pytest
 import torch
 
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
-
-DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.mark.parametrize("B", [3, 5])
@@ -28,35 +25,33 @@ def test_decode_attention(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE):
 
     num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
     req_to_page = torch.randint(
-        0, CACHE_SIZE // PAGE_SIZE, (B, num_pages_per_batch, 1), device=DEVICE_TYPE
+        0, CACHE_SIZE // PAGE_SIZE, (B, num_pages_per_batch, 1), device="cuda"
     )
     req_to_token = req_to_page * PAGE_SIZE
     req_to_token = req_to_token.expand(B, num_pages_per_batch, PAGE_SIZE)
-    req_to_token = req_to_token + torch.arange(PAGE_SIZE, device=DEVICE_TYPE).view(
-        1, 1, -1
-    )
+    req_to_token = req_to_token + torch.arange(PAGE_SIZE, device="cuda").view(1, 1, -1)
     req_to_token = req_to_token.view(B, -1)
     req_to_token = req_to_token[:, :seq_len].contiguous()
 
     # q represents the new token being generated, one per batch
-    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device="cuda")
 
     # k_buffer and v_buffer represent all previous tokens
     # Page size is 1.
-    k_buffer = torch.randn(CACHE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE)
-    v_buffer = torch.randn(CACHE_SIZE, H_KV, D_V, dtype=dtype, device=DEVICE_TYPE)
+    k_buffer = torch.randn(CACHE_SIZE, H_KV, D_QK, dtype=dtype, device="cuda")
+    v_buffer = torch.randn(CACHE_SIZE, H_KV, D_V, dtype=dtype, device="cuda")
 
     # o will have the same shape as q
-    o = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
+    o = torch.zeros(B, H_Q, D_V, dtype=dtype, device="cuda")
 
-    lse = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+    lse = torch.zeros(B, H_Q, dtype=dtype, device="cuda")
 
-    b_seq_len = torch.full((B,), seq_len, device=DEVICE_TYPE)
+    b_seq_len = torch.full((B,), seq_len, device="cuda")
 
     attn_logits = torch.empty(
         (B, H_Q, num_kv_splits, D_V + 1),
         dtype=torch.float32,
-        device=DEVICE_TYPE,
+        device="cuda",
     )
 
     # Call the original implementation.
@@ -132,27 +127,25 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
 
     num_pages_per_batch = cdiv(seq_len, PAGE_SIZE)
     req_to_page = torch.randint(
-        0, CACHE_SIZE // PAGE_SIZE, (B, num_pages_per_batch, 1), device=DEVICE_TYPE
+        0, CACHE_SIZE // PAGE_SIZE, (B, num_pages_per_batch, 1), device="cuda"
     )
     req_to_token = req_to_page * PAGE_SIZE
     req_to_token = req_to_token.expand(B, num_pages_per_batch, PAGE_SIZE)
-    req_to_token = req_to_token + torch.arange(PAGE_SIZE, device=DEVICE_TYPE).view(
-        1, 1, -1
-    )
+    req_to_token = req_to_token + torch.arange(PAGE_SIZE, device="cuda").view(1, 1, -1)
     req_to_token = req_to_token.view(B, -1)
     req_to_token = req_to_token[:, :seq_len].contiguous()
 
-    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device=DEVICE_TYPE)
+    q = torch.randn(B, H_Q, D_QK, dtype=dtype, device="cuda")
 
     # Create BF16 K/V as reference
-    k_bf16 = torch.randn(CACHE_SIZE, H_KV, D_QK, dtype=dtype, device=DEVICE_TYPE)
-    v_bf16 = torch.randn(CACHE_SIZE, H_KV, D_V, dtype=dtype, device=DEVICE_TYPE)
+    k_bf16 = torch.randn(CACHE_SIZE, H_KV, D_QK, dtype=dtype, device="cuda")
+    v_bf16 = torch.randn(CACHE_SIZE, H_KV, D_V, dtype=dtype, device="cuda")
 
     # --- BF16 reference ---
-    o_ref = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
-    lse_ref = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+    o_ref = torch.zeros(B, H_Q, D_V, dtype=dtype, device="cuda")
+    lse_ref = torch.zeros(B, H_Q, dtype=dtype, device="cuda")
     attn_logits = torch.empty(
-        (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+        (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device="cuda"
     )
 
     if PAGE_SIZE == 1:
@@ -163,7 +156,7 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
             o_ref,
             lse_ref,
             req_to_token,
-            b_seq_len=torch.full((B,), seq_len, device=DEVICE_TYPE),
+            b_seq_len=torch.full((B,), seq_len, device="cuda"),
             attn_logits=attn_logits,
             num_kv_splits=num_kv_splits,
             sm_scale=sm_scale,
@@ -178,7 +171,7 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
             o_ref,
             lse_ref,
             req_to_page,
-            b_seq_len=torch.full((B,), seq_len, device=DEVICE_TYPE),
+            b_seq_len=torch.full((B,), seq_len, device="cuda"),
             attn_logits=attn_logits,
             num_kv_splits=num_kv_splits,
             sm_scale=sm_scale,
@@ -189,10 +182,10 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
     k_fp8, k_scale = _quantize_to_fp8(k_bf16)
     v_fp8, v_scale = _quantize_to_fp8(v_bf16)
 
-    o_fp8 = torch.zeros(B, H_Q, D_V, dtype=dtype, device=DEVICE_TYPE)
-    lse_fp8 = torch.zeros(B, H_Q, dtype=dtype, device=DEVICE_TYPE)
+    o_fp8 = torch.zeros(B, H_Q, D_V, dtype=dtype, device="cuda")
+    lse_fp8 = torch.zeros(B, H_Q, dtype=dtype, device="cuda")
     attn_logits_fp8 = torch.empty(
-        (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device=DEVICE_TYPE
+        (B, H_Q, num_kv_splits, D_V + 1), dtype=torch.float32, device="cuda"
     )
 
     if PAGE_SIZE == 1:
@@ -203,7 +196,7 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
             o_fp8,
             lse_fp8,
             req_to_token,
-            b_seq_len=torch.full((B,), seq_len, device=DEVICE_TYPE),
+            b_seq_len=torch.full((B,), seq_len, device="cuda"),
             attn_logits=attn_logits_fp8,
             num_kv_splits=num_kv_splits,
             sm_scale=sm_scale,
@@ -220,7 +213,7 @@ def test_decode_attention_fp8(B, L, H_Q, H_KV, D_QK, D_V, CACHE_SIZE, PAGE_SIZE)
             o_fp8,
             lse_fp8,
             req_to_page,
-            b_seq_len=torch.full((B,), seq_len, device=DEVICE_TYPE),
+            b_seq_len=torch.full((B,), seq_len, device="cuda"),
             attn_logits=attn_logits_fp8,
             num_kv_splits=num_kv_splits,
             sm_scale=sm_scale,
