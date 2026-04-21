@@ -8,6 +8,45 @@ Drop this directory on PYTHONPATH.
 import os
 import sys
 
+# Scheduler profiling shim (env VLLM_PROFILE_SCHED=1). Installs a meta-path
+# finder that wraps Scheduler.schedule / update_from_output with timers.
+if os.environ.get("VLLM_PROFILE_SCHED") == "1":
+    try:
+        import importlib
+        import importlib.util as _util
+        _hook_dir = os.path.dirname(os.path.abspath(__file__))
+        _spec = _util.spec_from_file_location(
+            "_vllm_rs_profile_sched", os.path.join(_hook_dir, "_profile_sched.py")
+        )
+        if _spec and _spec.loader:
+            _mod = _util.module_from_spec(_spec)
+            _spec.loader.exec_module(_mod)
+
+            class _ProfHook:
+                _installed = False
+
+                def find_spec(self, name, path, target=None):
+                    if self._installed or name != "vllm.v1.core.sched.scheduler":
+                        return None
+                    self._installed = True
+                    sys.meta_path.remove(self)
+                    spec = importlib.util.find_spec(name)
+                    if spec is None or spec.loader is None:
+                        return None
+                    orig_exec = spec.loader.exec_module
+
+                    def exec_and_install(module):
+                        orig_exec(module)
+                        _mod.install()
+
+                    spec.loader.exec_module = exec_and_install  # type: ignore
+                    return spec
+
+            sys.meta_path.insert(0, _ProfHook())
+    except Exception as _e:
+        print(f"[sitecustomize] profile_sched hook failed: {_e!r}", file=sys.stderr)
+
+
 if os.environ.get("VLLM_USE_RUST_BLOCK_POOL") != "1":
     # Fall through to the rest of sitecustomize discovery.
     pass
