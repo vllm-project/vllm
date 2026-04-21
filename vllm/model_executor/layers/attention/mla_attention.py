@@ -240,6 +240,9 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer, has_nvidia_artifactory
 from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
     direct_register_custom_op,
     is_quantized_kv_cache,
     kv_cache_dtype_str_to_dtype,
@@ -473,7 +476,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
-            torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
+            torch.ops.vllm.maybe_calc_kv_scales(
+                q,
+                kv_c_normed,
+                k_pe,
+                _encode_layer_name(self.layer_name),
+            )
 
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -505,10 +513,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             return output
         else:
+            encoded = _encode_layer_name(self.layer_name)
             kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
                 kv_c_normed,
                 k_pe,
-                self.layer_name,
+                encoded,
                 self.kv_cache_dtype,
                 self._k_scale,
             )
@@ -518,7 +527,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 kv_c_normed,
                 k_pe,
                 output,
-                self.layer_name,
+                encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
             return output
@@ -900,7 +909,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 def unified_mla_kv_cache_update(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
@@ -908,6 +917,7 @@ def unified_mla_kv_cache_update(
     Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
+    layer_name = _resolve_layer_name(layer_name)
     forward_context = get_forward_context()
     attn_layer = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
@@ -939,7 +949,7 @@ def unified_mla_kv_cache_update(
 def unified_mla_kv_cache_update_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     kv_cache_dtype: str,
     k_scale: torch.Tensor,
 ) -> torch.Tensor:
@@ -959,7 +969,7 @@ def unified_mla_attention_with_output(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
@@ -968,6 +978,7 @@ def unified_mla_attention_with_output(
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
+    layer_name = _resolve_layer_name(layer_name)
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     layer.forward_impl(
         q,
@@ -986,7 +997,7 @@ def unified_mla_attention_with_output_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     output: torch.Tensor,
-    layer_name: str,
+    layer_name: LayerNameType,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
@@ -1432,6 +1443,19 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 scope="local",
             )
             return model_dtype
+        elif (
+            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
+            and backend_supports_prefill_query_quantization()
+        ):
+            logger.warning_once(
+                "FP8 KV cache is enabled but prefill queries are not "
+                "quantized to FP8. For long-context workloads (ISL >= 4K), "
+                "enabling FP8 prefill attention can significantly optimize "
+                "prefill latency. To enable, add: "
+                '--attention-config \'{"use_prefill_query_quantization"'
+                ": true}'",
+                scope="local",
+            )
 
         return model_dtype
 
