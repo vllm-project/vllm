@@ -23,7 +23,8 @@ class OnlineQuantScheme(Enum):
     # Linear layers remain unquantized.
     INT8_PER_CHANNEL_WEIGHT_ONLY = "int8_per_channel_weight_only"
 
-    # TODO(future PRs): add more online quant schemes here: mxfp8, etc
+    # mxfp8, weights scaled in blocks of 1x32 elements (microscaling FP8)
+    MXFP8 = "mxfp8"
 
 
 @config
