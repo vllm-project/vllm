@@ -47,6 +47,7 @@ from vllm.utils import is_moe_layer
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.workspace import lock_workspace, unlock_workspace
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -328,13 +329,22 @@ class ElasticEPScalingExecutor:
             staged_quant_method.moe_kernel.prepare_finalize.on_commit()
         self._staged_moe_quant_methods.clear()
 
+    def _refresh_dbo_graph_pool(self, wrapper: UBatchWrapper) -> None:
+        # DBO captures multi-stream FULL CUDA graphs. After those graphs are
+        # destroyed, reusing the same pool can trip CUDACachingAllocator's
+        # "use_count > 0" assert; start re-capture from a fresh pool.
+        new_pool = current_platform.graph_pool_handle()
+        current_platform.__class__._global_graph_pool = new_pool
+        if wrapper.cudagraph_wrapper is not None:
+            wrapper.cudagraph_wrapper.graph_pool = new_pool
+
     def _release_cuda_graphs(self) -> None:
-        if isinstance(self.worker.model_runner.model, CUDAGraphWrapper):
-            wrapper = self.worker.model_runner.model
+        wrapper = self.worker.model_runner.model
+        if isinstance(wrapper, CUDAGraphWrapper):
             wrapper.concrete_cudagraph_entries = {}
 
-        elif isinstance(self.worker.model_runner.model, UBatchWrapper):
-            raise RuntimeError("DBO is not yet supported in elastic EP")
+        elif isinstance(wrapper, UBatchWrapper):
+            wrapper.clear_graphs()
 
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
@@ -343,6 +353,9 @@ class ElasticEPScalingExecutor:
         gc.collect()
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
+
+        if isinstance(wrapper, UBatchWrapper):
+            self._refresh_dbo_graph_pool(wrapper)
 
     def switch_and_remove(self) -> None:
         self._release_cuda_graphs()
