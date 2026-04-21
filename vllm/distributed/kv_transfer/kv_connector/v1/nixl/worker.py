@@ -690,7 +690,7 @@ class NixlConnectorWorker:
         self.block_len_per_layer = list[int]()
         for layer_name, cache_or_caches in xfer_buffers.items():
             # NOTE (NickLucche) Hybrid SSM models assume a layout that is similar to
-            # that of FI, with block laid out as in `get_kv_block_len`.
+            # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
             # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
