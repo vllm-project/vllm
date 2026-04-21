@@ -143,12 +143,15 @@ class ModelBlockTransferPolicy(ABC):
     @abstractmethod
     def build_local_descs(
         self,
+        # Memory
         base_addresses: list[int],
-        block_len_per_layer: list[int],
+        device_id: int,
+        # Block geometry
         num_blocks: int,
         logical_num_blocks: int,
         block_size_ratio: int,
-        device_id: int,
+        block_len_per_layer: list[int],
+        # Layout
         is_blocks_first: bool,
     ) -> list[tuple[int, int, int]]:
         """Build local (src) descriptor tuples for NIXL registration."""
@@ -157,10 +160,10 @@ class ModelBlockTransferPolicy(ABC):
     def _build_fa_local_descs(
         self,
         base_addresses: list[int],
-        block_len_per_layer: list[int],
+        device_id: int,
         num_blocks: int,
         block_size_ratio: int,
-        device_id: int,
+        block_len_per_layer: list[int],
         is_blocks_first: bool,
     ) -> list[tuple[int, int, int]]:
         """Build FA local descriptors (shared by Dense and Mamba)."""
@@ -423,19 +426,19 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
     def build_local_descs(
         self,
         base_addresses,
-        block_len_per_layer,
+        device_id,
         num_blocks,
         logical_num_blocks,
         block_size_ratio,
-        device_id,
+        block_len_per_layer,
         is_blocks_first,
     ):
         return self._build_fa_local_descs(
             base_addresses,
-            block_len_per_layer,
+            device_id,
             num_blocks,
             block_size_ratio,
-            device_id,
+            block_len_per_layer,
             is_blocks_first,
         )
 
@@ -697,19 +700,19 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
     def build_local_descs(
         self,
         base_addresses,
-        block_len_per_layer,
+        device_id,
         num_blocks,
         logical_num_blocks,
         block_size_ratio,
-        device_id,
+        block_len_per_layer,
         is_blocks_first,
     ):
         fa_descs = self._build_fa_local_descs(
             base_addresses,
-            block_len_per_layer,
+            device_id,
             num_blocks,
             block_size_ratio,
-            device_id,
+            block_len_per_layer,
             is_blocks_first,
         )
         num_regions = len(base_addresses) * (2 if is_blocks_first else 1)
