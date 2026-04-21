@@ -1589,19 +1589,21 @@ class NixlConnectorWorker:
         remote_info = self.transfer_topo.get_engine_info(engine_id)
         tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
 
+        # TODO (ZhanqiuHu): Unify logical_to_kernel_block_ids
+        # and logical_to_remote_kernel_block_ids.
         if self._has_mamba:
             # Expand remote logical → kernel block IDs.
-            expanded_remote = self._logical_to_remote_kernel_block_ids(
+            remote_block_ids = self._logical_to_remote_kernel_block_ids(
                 meta.remote.block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
         else:
-            expanded_remote = self._logical_to_kernel_block_ids(meta.remote.block_ids)
+            remote_block_ids = self._logical_to_kernel_block_ids(meta.remote.block_ids)
         read_specs = self.transfer_policy.compute_read_specs(
             local_block_ids=meta.local_physical_block_ids,
-            remote_block_ids=expanded_remote,
+            remote_block_ids=remote_block_ids,
             remote_ranks=remote_ranks,
-            transfer_config=remote_info,
+            remote_info=remote_info,
         )
 
         # D may have to perform multiple reads from different remote ranks.
@@ -1611,12 +1613,15 @@ class NixlConnectorWorker:
             read_specs = read_specs[:1]
 
         for i, spec in enumerate(read_specs):
+            remote_rank = spec.remote_rank
+            local_block_ids = spec.local_block_ids
+            remote_block_ids = spec.remote_block_ids
             remote_block_size = remote_info.remote_block_size
             logger.debug(
                 "Remote agent %s available, calling _read_blocks"
                 " on remote rank %s with remote block size %s for req %s",
                 meta.remote.engine_id,
-                spec.remote_rank,
+                remote_rank,
                 remote_block_size,
                 req_id,
             )
@@ -1635,16 +1640,16 @@ class NixlConnectorWorker:
 
             # Destination handle: remote_engine_id -> remote_rank -> handle.
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
+                remote_rank
             ]
 
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
                 remote_request_id=meta.remote.request_id,
-                local_block_ids=spec.local_block_ids,
-                remote_block_ids=spec.remote_block_ids,
-                remote_rank=spec.remote_rank,
+                local_block_ids=local_block_ids,
+                remote_block_ids=remote_block_ids,
+                remote_rank=remote_rank,
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
@@ -1760,14 +1765,18 @@ class NixlConnectorWorker:
         # workers will issue xfers to parts of the P worker remote kv caches.
 
         # Get descs ids.
-        remote_block_descs_ids = self._get_block_descs_ids(
-            remote_block_ids,
-            self.dst_num_blocks[dst_engine_id],
+        remote_block_descs_ids = self.transfer_policy.get_block_descs_ids(
+            block_ids=remote_block_ids,
+            num_regions=self.num_regions,
+            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
+            block_len_per_layer=self.block_len_per_layer,
             physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
         )
-        local_block_descs_ids = self._get_block_descs_ids(
-            local_block_ids,
-            self.dst_num_blocks[self.engine_id],
+        local_block_descs_ids = self.transfer_policy.get_block_descs_ids(
+            block_ids=local_block_ids,
+            num_regions=self.num_regions,
+            dst_num_blocks=self.dst_num_blocks[self.engine_id],
+            block_len_per_layer=self.block_len_per_layer,
             block_size_ratio=block_size_ratio,
             physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
         )
@@ -1886,23 +1895,6 @@ class NixlConnectorWorker:
                 # Mamba blocks are 1:1 logical-to-physical (no expansion).
                 result.append(group)
         return result
-
-    def _get_block_descs_ids(
-        self,
-        block_ids: BlockIds,
-        dst_num_blocks: int,
-        block_size_ratio: float | None = None,
-        physical_blocks_per_logical: int = 1,
-    ) -> np.ndarray:
-        """Thin wrapper delegating to the block transfer policy."""
-        return self.transfer_policy.get_block_descs_ids(
-            block_ids=block_ids,
-            num_regions=self.num_regions,
-            dst_num_blocks=dst_num_blocks,
-            block_len_per_layer=self.block_len_per_layer,
-            block_size_ratio=block_size_ratio,
-            physical_blocks_per_logical=physical_blocks_per_logical,
-        )
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         """
