@@ -33,14 +33,19 @@ from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 
+logger = init_logger(__name__)
+
+MOONCAKE_IMPORT_ERROR_MSG = (
+    "Please install mooncake by following the instructions at "
+    "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+    "to run VLLM with MooncakeTransferEngine."
+)
+
 try:
     from mooncake.engine import TransferEngine
-except ImportError as e:
-    raise ImportError(
-        "Please install mooncake by following the instructions at "
-        "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
-        "to run VLLM with MooncakeTransferEngine."
-    ) from e
+except ImportError:
+    logger.warning(MOONCAKE_IMPORT_ERROR_MSG)
+    TransferEngine = None
 
 if TYPE_CHECKING:
     from vllm.v1.request import Request
@@ -50,8 +55,6 @@ ReqId = str
 
 TRANS_DONE = b"trans_done"
 TRANS_ERROR = b"trans_error"
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -262,6 +265,7 @@ class MooncakeECConnectorScheduler:
 
         assert vllm_config.ec_transfer_config is not None
         self.is_producer = vllm_config.ec_transfer_config.is_ec_producer
+        self.is_consumer = vllm_config.ec_transfer_config.is_ec_consumer
 
         # Track mm_hashes that need to be loaded from remote
         self._mm_hashes_need_recv: dict[Key, tuple[Request, int]] = {}
@@ -279,8 +283,8 @@ class MooncakeECConnectorScheduler:
 
         This approach aligns with KV transfer's optimistic scheduling strategy.
         """
-        if self.is_producer:
-            # Producer doesn't load remote cache
+        if not self.is_consumer:
+            # Producer-only nodes don't load remote cache.
             return False
 
         try:
@@ -434,6 +438,10 @@ class MooncakeECConnectorWorker:
     DEFAULT_BUFFER_SIZE = 1073741824
 
     def __init__(self, vllm_config: VllmConfig):
+        if TransferEngine is None:
+            logger.error("Mooncake is not available")
+            raise RuntimeError("Mooncake is not available")
+
         self.vllm_config = vllm_config
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
@@ -516,17 +524,20 @@ class MooncakeECConnectorWorker:
         self.mm_hashes_need_recv: set[MMHash] = set()
 
         self.is_producer = vllm_config.ec_transfer_config.is_ec_producer
+        self.is_consumer = vllm_config.ec_transfer_config.is_ec_consumer
+        self._mooncake_sender_t: threading.Thread | None = None
+        self._mooncake_receiver_t: threading.Thread | None = None
 
         if self.is_producer:
             # Background thread for sending cache to P.
-            self._mooncake_sender_t: threading.Thread | None = None
             # Background thread for processing new sending requests.
             self._sender_executor = ThreadPoolExecutor(
                 max_workers=self.num_workers,
                 thread_name_prefix="vllm-mooncake-ec-sender",
             )
             logger.debug("[EC_PRODUCER] Use %d workers for transfer", self.num_workers)
-        else:
+
+        if self.is_consumer:
             self.receiver_loop = asyncio.new_event_loop()
             self._mooncake_receiver_t = threading.Thread(
                 target=self._receiver_loop, args=(self.receiver_loop,), daemon=True
@@ -566,15 +577,24 @@ class MooncakeECConnectorWorker:
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
-        self.zmq_ctx.term()
-        self.async_zmq_ctx.term()
-        if self.is_producer:
+        if hasattr(self, "zmq_ctx"):
+            self.zmq_ctx.term()
+        if hasattr(self, "async_zmq_ctx"):
+            self.async_zmq_ctx.term()
+        if getattr(self, "is_producer", False) and hasattr(self, "_sender_executor"):
             self._sender_executor.shutdown(wait=False)
-            if self._mooncake_sender_t:
-                self._mooncake_sender_t.join()
-        elif self.receiver_loop.is_running():
-            self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
-            self._mooncake_receiver_t.join()
+            mooncake_sender_t = getattr(self, "_mooncake_sender_t", None)
+            if mooncake_sender_t:
+                mooncake_sender_t.join()
+        receiver_loop = getattr(self, "receiver_loop", None)
+        if (
+            getattr(self, "is_consumer", False)
+            and receiver_loop is not None
+            and receiver_loop.is_running()
+        ):
+            receiver_loop.call_soon_threadsafe(receiver_loop.stop)
+            if self._mooncake_receiver_t:
+                self._mooncake_receiver_t.join()
 
     def save_caches(
         self, encoder_cache: dict[str, torch.Tensor], mm_hash: str, **kwargs
@@ -782,7 +802,7 @@ class MooncakeECConnectorWorker:
             Tuple of (finished_sending, finished_recving, failed_recving)
         """
         fut = None
-        if not self.is_producer:
+        if self.is_consumer:
             fut = asyncio.run_coroutine_threadsafe(
                 self.fetch_finished_recving_mm_hashes(), self.receiver_loop
             )
