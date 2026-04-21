@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import (
     rocm_aiter_ops,
@@ -209,6 +210,90 @@ class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         return rocm_aiter_ops.preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, out_dtype
+        )
+
+
+class AiterHipbMMPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not envs.VLLM_ROCM_AITER_FORCE_HIPBMM_LINEAR:
+            return False, "requires VLLM_ROCM_AITER_FORCE_HIPBMM_LINEAR=1."
+
+        if not current_platform.is_rocm():
+            return False, "requires ROCm."
+        if not rocm_aiter_ops.is_linear_fp8_enabled():
+            return (
+                False,
+                "requires setting `VLLM_ROCM_USE_AITER=1` "
+                "and `VLLM_ROCM_USE_AITER_LINEAR=1`. "
+                "`VLLM_ROCM_USE_AITER_LINEAR` default is True.",
+            )
+        try:
+            import aiter  # noqa: F401
+        except Exception:
+            return False, "requires aiter library to be installed."
+
+        if not hasattr(aiter, "hipb_mm"):
+            return False, "requires aiter hipb_mm support."
+
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        is_ptpc = (
+            c.activation_quant_key.scale.group_shape.is_per_token()
+            and c.weight_quant_key.scale.group_shape.is_per_channel()
+        )
+        if c.weight_shape is None:
+            return False, "weight_shape is required for Aiter kernels"
+        N, K = c.weight_shape
+        fp8_dtype = current_platform.fp8_dtype()
+
+        if c.out_dtype is not torch.bfloat16:
+            return False, "requires bfloat16 output dtype."
+
+        if not is_ptpc:
+            return (
+                False,
+                "requires per token activation scales and per channel weight scales.",
+            )
+
+        if not (N >= 16 and N % 16 == 0 and K % 16 == 0):
+            return (
+                False,
+                f"requires N >= 16 and N/K divisible by 16, received N={N} and K={K}.",
+            )
+
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        w_name, *_ = self.layer_param_names
+        w, *_ = self._get_layer_params(layer)
+
+        replace_parameter(
+            layer,
+            w_name,
+            torch.nn.Parameter(
+                rocm_aiter_ops.shuffle_weight(w.t().contiguous()).data,
+                requires_grad=False,
+            ),
+        )
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        return rocm_aiter_ops.hipb_mm_fp8(A, B, As, Bs, bias, out_dtype).view(
+            *output_shape
         )
 
 

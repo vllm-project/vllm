@@ -111,6 +111,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
+    VLLM_ROCM_AITER_FORCE_HIPBMM_LINEAR: bool = False
     VLLM_ROCM_USE_AITER_MOE: bool = True
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
@@ -254,6 +255,7 @@ if TYPE_CHECKING:
     VLLM_ELASTIC_EP_SCALE_UP_LAUNCH: bool = False
     VLLM_ELASTIC_EP_DRAIN_REQUESTS: bool = False
     VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
+    VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING: bool = False
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
@@ -986,6 +988,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ROCM_USE_AITER_LINEAR": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_LINEAR", "True").lower() in ("true", "1")
     ),
+    "VLLM_ROCM_AITER_FORCE_HIPBMM_LINEAR": lambda: (
+        os.getenv("VLLM_ROCM_AITER_FORCE_HIPBMM_LINEAR", "False").lower()
+        in ("true", "1")
+    ),
     # Whether to use aiter moe ops.
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MOE": lambda: (
@@ -1090,6 +1096,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_LOG_BATCHSIZE_INTERVAL": lambda: float(
         os.getenv("VLLM_LOG_BATCHSIZE_INTERVAL", "-1")
+    ),
+    # Whether to use HIP online tuning for ROCm
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_HIP_ONLINE_TUNING", "False").lower()
+        in ("true", "1")
     ),
     "VLLM_DISABLE_COMPILE_CACHE": disable_compile_cache,
     # If set to "0", disable LayerName opaque type for layer_name

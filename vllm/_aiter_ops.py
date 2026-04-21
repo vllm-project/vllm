@@ -24,6 +24,16 @@ except ImportError:
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
+_HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+
+
+def _ensure_hipb_mm_extension_initialized() -> None:
+    import aiter
+
+    device = torch.accelerator.current_device_index()
+    if device not in _HIPB_MM_INITIALIZED_DEVICES:
+        aiter.hipb_create_extension()
+        _HIPB_MM_INITIALIZED_DEVICES.add(device)
 
 
 def is_aiter_found() -> bool:
@@ -567,6 +577,44 @@ def _rocm_aiter_preshuffled_per_token_w8a8_gemm_fake(
     Bs: torch.Tensor,
     bias: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    m = A.shape[0]
+    n = B.shape[0]
+    return torch.empty(m, n, dtype=output_dtype, device=A.device)
+
+
+def _rocm_aiter_hipb_mm_fp8_impl(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    from aiter import hipb_mm
+
+    _ensure_hipb_mm_extension_initialized()
+    scale_b = Bs.t().contiguous() if Bs.ndim > 1 else Bs
+    return hipb_mm(
+        A,
+        B.t().contiguous(),
+        solution_index=-1,
+        bias=bias,
+        out_dtype=output_dtype,
+        scaleA=As,
+        scaleB=scale_b,
+        scaleOut=None,
+        bpreshuffle=True,
+    )
+
+
+def _rocm_aiter_hipb_mm_fp8_fake(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    As: torch.Tensor,
+    Bs: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    output_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
     m = A.shape[0]
     n = B.shape[0]
@@ -1437,6 +1485,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_hipb_mm_fp8",
+                op_func=_rocm_aiter_hipb_mm_fp8_impl,
+                fake_impl=_rocm_aiter_hipb_mm_fp8_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_triton_gemm_a8w8_blockscale",
                 op_func=_rocm_aiter_triton_gemm_a8w8_blockscale_impl,
                 fake_impl=_rocm_aiter_triton_gemm_a8w8_blockscale_fake,
@@ -1642,6 +1696,17 @@ class rocm_aiter_ops:
         return torch.ops.vllm._rocm_aiter_preshuffled_per_token_w8a8_gemm(
             A, B, As, Bs, bias, output_dtype
         )
+
+    @staticmethod
+    def hipb_mm_fp8(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        output_dtype: torch.dtype = torch.bfloat16,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_hipb_mm_fp8(A, B, As, Bs, bias, output_dtype)
 
     @staticmethod
     def triton_gemm_a8w8_blockscale(
