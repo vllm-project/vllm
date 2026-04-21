@@ -67,6 +67,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -848,22 +849,23 @@ class Gemma4MultimodalEmbedder(nn.Module):
             or multimodal_config.hidden_size
         )
 
+        self.embedding_pre_projection_norm = RMSNorm(
+            embedding_dim,
+            eps=self.eps,
+            has_weight=False,
+        )
+
         self.embedding_projection = ReplicatedLinear(
             embedding_dim,
             self.text_hidden_size,
             bias=False,
         )
 
-        self.embedding_post_projection_norm = RMSNorm(
-            self.text_hidden_size,
-            eps=self.eps,
-            has_weight=False,
-        )
-
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Project soft tokens from a multimodal tower into LM space."""
-        embs_proj, _ = self.embedding_projection(inputs_embeds)
-        return self.embedding_post_projection_norm(embs_proj)
+        embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
+        embs_proj, _ = self.embedding_projection(embs_normed)
+        return embs_proj
 
 
 # ---------------------------------------------------------------------------
@@ -880,6 +882,7 @@ class Gemma4ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
     SupportsPP,
+    SupportsLoRA,
     SupportsEagle3,
 ):
     packed_modules_mapping = {
@@ -1358,10 +1361,16 @@ class Gemma4ForConditionalGeneration(
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal models."""
+        connectors = ["embed_vision"]
+        tower_models = ["vision_tower"]
+        if self.audio_tower is not None:
+            connectors.append("embed_audio")
+            tower_models.append("audio_tower")
+
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector=["embed_vision", "embed_audio"],
-            tower_model=["vision_tower", "audio_tower"],
+            connector=connectors,
+            tower_model=tower_models,
         )
 
     @classmethod
