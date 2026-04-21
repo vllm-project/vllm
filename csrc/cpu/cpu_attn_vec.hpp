@@ -10,6 +10,10 @@ namespace {
 // 8-2-16 pattern, 8 regs for A, 2 regs for B, 16 regs for C, [8, K] @ [k, 32]
 template <typename kv_cache_t>
 class TileGemm82 {
+  static constexpr bool fp8_kv =
+      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
@@ -47,6 +51,7 @@ class TileGemm82 {
     }
   }
 
+ private:
   template <int32_t M>
   static void gemm_micro(float* __restrict__ a_tile,
                          kv_cache_t* __restrict__ b_tile,
@@ -55,114 +60,7 @@ class TileGemm82 {
                          const int32_t block_size, const int32_t dynamic_k_size,
                          const bool accum_c) {
     static_assert(0 < M && M <= 8);
-    using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
 
-    kv_cache_t* __restrict__ curr_b_0 = b_tile;
-    kv_cache_t* __restrict__ curr_b_1 = b_tile + 16;
-    float* __restrict__ curr_c_0 = c_tile;
-    float* __restrict__ curr_c_1 = c_tile + 16;
-
-    vec_op::FP32Vec16 c_regs[M * 2];
-    if (accum_c) {
-      float* __restrict__ curr_m_c_0 = curr_c_0;
-      float* __restrict__ curr_m_c_1 = curr_c_1;
-      vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
-        c_regs[i * 2] = vec_op::FP32Vec16(curr_m_c_0);
-        c_regs[i * 2 + 1] = vec_op::FP32Vec16(curr_m_c_1);
-
-        // update
-        curr_m_c_0 += ldc;
-        curr_m_c_1 += ldc;
-      });
-    }
-
-    float* __restrict__ curr_a = a_tile;
-    for (int32_t k = 0; k < dynamic_k_size; ++k) {
-      load_vec_t b_0_reg(curr_b_0);
-      vec_op::FP32Vec16 fp32_b_0_reg(b_0_reg);
-      load_vec_t b_1_reg(curr_b_1);
-      vec_op::FP32Vec16 fp32_b_1_reg(b_1_reg);
-
-      float* __restrict__ curr_m_a = curr_a;
-      vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
-        float v = *curr_m_a;
-        vec_op::FP32Vec16 a_reg(v);
-        c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
-        c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
-
-        // update
-        curr_m_a += lda;
-      });
-
-      // update
-      curr_a += 1;
-      curr_b_0 += ldb;
-      curr_b_1 += ldb;
-    }
-
-    vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
-      c_regs[i * 2].save(curr_c_0);
-      c_regs[i * 2 + 1].save(curr_c_1);
-
-      // update
-      curr_c_0 += ldc;
-      curr_c_1 += ldc;
-    });
-  }
-};
-// Shared FP8 base for TileGemm82.
-// E4M3 and E5M2 differ only in the BF16Vec32 dequant tag.
-template <typename fp8_t>
-class TileGemm82FP8Base {
-  static_assert(std::is_same_v<fp8_t, c10::Float8_e4m3fn> ||
-                    std::is_same_v<fp8_t, c10::Float8_e5m2>,
-                "fp8_t must be Float8_e4m3fn or Float8_e5m2");
-
- public:
-  template <AttentionGemmPhase phase, int32_t k_size>
-  FORCE_INLINE static void gemm(
-      const int32_t m_size, float* __restrict__ a_tile,
-      fp8_t* __restrict__ b_tile, float* __restrict__ c_tile, const int64_t lda,
-      const int64_t ldb, const int64_t ldc, const int32_t block_size,
-      const int32_t dynamic_k_size, const bool accum_c) {
-    switch (m_size) {
-      case 1:
-        gemm_micro<1>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c);
-        break;
-      case 2:
-        gemm_micro<2>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c);
-        break;
-      case 3:
-      case 4:
-        gemm_micro<4>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c);
-        break;
-      case 5:
-      case 6:
-        gemm_micro<6>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c);
-        break;
-      case 7:
-      case 8:
-        gemm_micro<8>(a_tile, b_tile, c_tile, lda, ldb, ldc, block_size,
-                      dynamic_k_size, accum_c);
-        break;
-    }
-  }
-
- private:
-  template <int32_t M>
-  static void gemm_micro(float* __restrict__ a_tile, fp8_t* __restrict__ b_tile,
-                         float* __restrict__ c_tile, const int64_t lda,
-                         const int64_t ldb, const int64_t ldc,
-                         const int32_t block_size, const int32_t dynamic_k_size,
-                         const bool accum_c) {
-    static_assert(0 < M && M <= 8);
-
-    const uint8_t* __restrict__ curr_b_0 =
-        reinterpret_cast<const uint8_t*>(b_tile);
     float* __restrict__ curr_c_0 = c_tile;
     float* __restrict__ curr_c_1 = c_tile + 16;
 
@@ -179,28 +77,57 @@ class TileGemm82FP8Base {
     }
 
     float* __restrict__ curr_a = a_tile;
-    for (int32_t k = 0; k < dynamic_k_size; ++k) {
-      vec_op::BF16Vec32 fp16_b_reg = [&]() {
-        if constexpr (std::is_same_v<fp8_t, c10::Float8_e4m3fn>) {
-          return vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e4m3_tag{});
-        } else {
-          return vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e5m2_tag{});
-        }
-      }();
-      vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, 0);
-      vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, 1);
 
-      float* __restrict__ curr_m_a = curr_a;
-      vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
-        float v = *curr_m_a;
-        vec_op::FP32Vec16 a_reg(v);
-        c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
-        c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
-        curr_m_a += lda;
-      });
+    if constexpr (fp8_kv) {
+      const uint8_t* __restrict__ curr_b_0 =
+          reinterpret_cast<const uint8_t*>(b_tile);
+      for (int32_t k = 0; k < dynamic_k_size; ++k) {
+        vec_op::BF16Vec32 fp16_b_reg = [&]() {
+          if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+            return vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e4m3_tag{});
+          } else {
+            return vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e5m2_tag{});
+          }
+        }();
+        vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, 0);
+        vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, 1);
 
-      curr_a += 1;
-      curr_b_0 += ldb;
+        float* __restrict__ curr_m_a = curr_a;
+        vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
+          float v = *curr_m_a;
+          vec_op::FP32Vec16 a_reg(v);
+          c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
+          c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
+          curr_m_a += lda;
+        });
+
+        curr_a += 1;
+        curr_b_0 += ldb;
+      }
+    } else {
+      using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
+
+      kv_cache_t* __restrict__ curr_b_0 = b_tile;
+      kv_cache_t* __restrict__ curr_b_1 = b_tile + 16;
+      for (int32_t k = 0; k < dynamic_k_size; ++k) {
+        load_vec_t b_0_reg(curr_b_0);
+        vec_op::FP32Vec16 fp32_b_0_reg(b_0_reg);
+        load_vec_t b_1_reg(curr_b_1);
+        vec_op::FP32Vec16 fp32_b_1_reg(b_1_reg);
+
+        float* __restrict__ curr_m_a = curr_a;
+        vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
+          float v = *curr_m_a;
+          vec_op::FP32Vec16 a_reg(v);
+          c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
+          c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
+          curr_m_a += lda;
+        });
+
+        curr_a += 1;
+        curr_b_0 += ldb;
+        curr_b_1 += ldb;
+      }
     }
 
     vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
@@ -211,14 +138,6 @@ class TileGemm82FP8Base {
     });
   }
 };
-
-template <>
-class TileGemm82<c10::Float8_e4m3fn>
-    : public TileGemm82FP8Base<c10::Float8_e4m3fn> {};
-
-template <>
-class TileGemm82<c10::Float8_e5m2>
-    : public TileGemm82FP8Base<c10::Float8_e5m2> {};
 
 }  // namespace
 
@@ -244,10 +163,8 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_t_> {
   constexpr static int64_t MaxQHeadNumPerIteration = 8;
   constexpr static int64_t HeadDim = head_dim;
   constexpr static ISA ISAType = ISA::VEC;
-  // FP8: apply scale on logits; non-FP8: apply scale on q_buffer
   constexpr static bool scale_on_logits = fp8_kv;
 
-  // FP8 scales — only meaningful when fp8_kv=true.
   float k_scale = 1.0f;
   float v_scale = 1.0f;
 

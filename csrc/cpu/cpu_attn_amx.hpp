@@ -23,9 +23,7 @@ typedef struct __tile_config {
 // TILE 2, 3: load B matrix, row num should be 16
 // TILE 4, 5, 6, 7: store results C matrix, row num should be 16, 16, m - 16, m
 // - 16
-// q_buffer_t: type of A (Q/P) tile; kv_cache_t: type of B (K/V cache) tile.
-// When q_buffer_t == kv_cache_t: plain BF16/FP16 computation.
-// When q_buffer_t != kv_cache_t: dequant KV first, then BF16/FP16 computation.
+// q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
 template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm224 {
  public:
@@ -163,7 +161,7 @@ class TileGemm224<c10::BFloat16, c10::BFloat16> {
 // num should be 16
 // TILE 6, 7, (6, 7): store results C matrix, row num should be
 // m
-// q_buffer_t: type of A (Q/P) tile; kv_cache_t: type of B (K/V cache) tile.
+// q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
 template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm122 {
  public:
@@ -306,11 +304,9 @@ class TileGemm122<c10::BFloat16, c10::BFloat16> {
     _tile_loadconfig(&config);
   }
 };
-// Shared FP8 base for TileGemm224 (2-2-4 pattern).
-// E4M3 and E5M2 differ only in the BF16Vec32 dequant tag; everything else is
-// identical, so both specialisations inherit from this base.
+// Partial specialization for FP8 KV cache (2-2-4 pattern).
 template <typename fp8_t>
-class TileGemm224FP8Base {
+class TileGemm224<c10::BFloat16, fp8_t> {
   static_assert(std::is_same_v<fp8_t, c10::Float8_e4m3fn> ||
                     std::is_same_v<fp8_t, c10::Float8_e5m2>,
                 "fp8_t must be Float8_e4m3fn or Float8_e5m2");
@@ -433,18 +429,9 @@ class TileGemm224FP8Base {
   }
 };
 
-template <>
-class TileGemm224<c10::BFloat16, c10::Float8_e4m3fn>
-    : public TileGemm224FP8Base<c10::Float8_e4m3fn> {};
-
-template <>
-class TileGemm224<c10::BFloat16, c10::Float8_e5m2>
-    : public TileGemm224FP8Base<c10::Float8_e5m2> {};
-
-// Shared FP8 base for TileGemm122 (1-2-2 pattern).
-// E4M3 and E5M2 differ only in the BF16Vec32 dequant tag.
+// Partial specialization for FP8 KV cache (1-2-2 pattern).
 template <typename fp8_t>
-class TileGemm122FP8Base {
+class TileGemm122<c10::BFloat16, fp8_t> {
   static_assert(std::is_same_v<fp8_t, c10::Float8_e4m3fn> ||
                     std::is_same_v<fp8_t, c10::Float8_e5m2>,
                 "fp8_t must be Float8_e4m3fn or Float8_e5m2");
@@ -587,19 +574,10 @@ class TileGemm122FP8Base {
   }
 };
 
-template <>
-class TileGemm122<c10::BFloat16, c10::Float8_e4m3fn>
-    : public TileGemm122FP8Base<c10::Float8_e4m3fn> {};
-
-template <>
-class TileGemm122<c10::BFloat16, c10::Float8_e5m2>
-    : public TileGemm122FP8Base<c10::Float8_e5m2> {};
-
 }  // namespace
 
 template <typename scalar_t, int64_t head_dim, typename kv_cache_t_>
 class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
-  // fp8_kv: true when KV cache is FP8 (E4M3 or E5M2)
   static constexpr bool fp8_kv =
       std::is_same_v<kv_cache_t_, c10::Float8_e4m3fn> ||
       std::is_same_v<kv_cache_t_, c10::Float8_e5m2>;
@@ -620,11 +598,8 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
   constexpr static int64_t MaxQHeadNumPerIteration = 32;
   constexpr static int64_t HeadDim = head_dim;
   constexpr static ISA ISAType = ISA::AMX;
-  // AMX always applies scale on logits (after QK GEMM). For FP8 the scale is
-  // k_scale*bias; for non-FP8 it is the plain attention scale.
   constexpr static bool scale_on_logits = true;
 
-  // FP8 scales — only meaningful when fp8_kv=true.
   float k_scale = 1.0f;
   float v_scale = 1.0f;
 
@@ -643,8 +618,6 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
     }
   }
 
-  // Returns the v_scale that final_output applies after PV accumulation.
-  // For FP8 folds the exponent-rebiasing correction; non-FP8 returns 1.0f.
   float get_output_v_scale() const noexcept {
     if constexpr (fp8_kv) {
       constexpr float bias =
@@ -657,10 +630,8 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
   template <template <typename tile_gemm_t> typename attention>
   FORCE_INLINE void execute_attention(DEFINE_CPU_ATTENTION_PARAMS) {
     if constexpr (fp8_kv) {
-      // Fold k_scale and exponent-rebiasing correction into the attention
-      // scale. scale_on_logits=true applies it to QK logits.
-      // The correction factor (2^120 for E4M3, 2^112 for E5M2) compensates
-      // for the unscaled BF16 representation from the direct FP8→BF16 dequant.
+      // Compensates for unscaled BF16 from direct FP8→BF16 dequant (2^120 E4M3,
+      // 2^112 E5M2).
       const float bias =
           std::is_same_v<kv_cache_t, c10::Float8_e5m2> ? 0x1p112f : 0x1p120f;
       scale *= k_scale * bias;
