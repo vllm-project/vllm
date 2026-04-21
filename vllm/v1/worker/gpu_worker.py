@@ -374,10 +374,14 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
+            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager and not current_platform.is_rocm():
+            if (
+                not current_platform.is_rocm()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
@@ -452,7 +456,7 @@ class Worker(WorkerBase):
                 logger.info(
                     "CUDA graph memory profiling is enabled "
                     "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
-                    "This will become the default in v0.19. "
+                    "This will become the default in v0.21. "
                     "The current --gpu-memory-utilization=%.4f is equivalent "
                     "to --gpu-memory-utilization=%.4f without CUDA graph "
                     "memory profiling. To maintain the same effective KV "
@@ -468,7 +472,7 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.info(
-                    "In v0.19, CUDA graph memory profiling will be enabled "
+                    "In v0.21, CUDA graph memory profiling will be enabled "
                     "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
                     "which more accurately accounts for CUDA graph memory "
                     "during KV cache allocation. To try it now, set "
