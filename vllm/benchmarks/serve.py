@@ -1711,10 +1711,23 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             trust_remote_code=args.trust_remote_code,
         )
 
+    # Validate dataset name/path
     if args.dataset_name is None:
         raise ValueError(
             "Please specify '--dataset-name' and the corresponding "
             "'--dataset-path' if required."
+        )
+
+    if (
+        args.dataset_name
+        in ["random", "random-mm", "random-rerank", "prefix_repetition"]
+        and args.dataset_path is not None
+    ):
+        raise ValueError(
+            f"Cannot use '{args.dataset_name}' dataset with --dataset-path. "
+            "Please specify the appropriate --dataset-name (e.g., "
+            "'sharegpt', 'custom', 'sonnet') for your dataset file: "
+            f"{args.dataset_path}"
         )
 
     # Map general --input-len and --output-len to all dataset-specific arguments
