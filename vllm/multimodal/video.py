@@ -469,7 +469,7 @@ class VideoBackend(VideoLoader, OpenCVVideoBackendMixin, PyAVVideoBackendMixin):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "pyav",
+        backend: Literal["opencv", "pyav"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         """Load sampled frames from raw video bytes.
@@ -609,7 +609,7 @@ class DynamicVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav"] = "pyav",
+        backend: Literal["opencv", "pyav"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
