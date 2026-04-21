@@ -4821,6 +4821,23 @@ class GPUModelRunner(
                         )
 
                     self.model.set_aux_hidden_state_layers(aux_layers)
+
+                if (
+                    is_mixture_of_experts(self.model)
+                    and self.parallel_config.enable_eplb
+                    and not load_dummy_weights
+                ):
+                    logger.info_once(
+                        "EPLB is enabled for model %s.",
+                        self.model_config.model,
+                    )
+                    assert self.eplb_state is not None
+                    self.eplb_state.add_model(
+                        self.model,
+                        self.model_config,
+                    )
+                    eplb_models += 1
+
                 time_after_load = time.perf_counter()
             self.model_memory_usage = m.consumed_memory
         except torch.cuda.OutOfMemoryError as e:
@@ -4860,15 +4877,10 @@ class GPUModelRunner(
             is_mixture_of_experts(self.model)
             and self.parallel_config.enable_eplb
             and not load_dummy_weights
+            and self.eplb_state is not None
+            and self.eplb_state.is_async
         ):
-            logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
-            assert self.eplb_state is not None
-            self.eplb_state.add_model(
-                self.model,
-                self.model_config,
-            )
-            if self.eplb_state.is_async:
-                self.eplb_state.start_async_loop()
+            self.eplb_state.start_async_loop()
 
         if (
             self.vllm_config.compilation_config.mode
@@ -5841,7 +5853,7 @@ class GPUModelRunner(
         saved_override = self.cache_config.num_gpu_blocks_override
         self.cache_config.num_gpu_blocks_override = min_blocks
         minimal_config = get_kv_cache_config_from_groups(
-            self.vllm_config, kv_cache_groups, available_memory=0
+            self.vllm_config, kv_cache_groups, available_memory=0, suppress_log=True
         )
         self.cache_config.num_gpu_blocks_override = saved_override
 
