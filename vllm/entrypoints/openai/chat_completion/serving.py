@@ -1586,6 +1586,7 @@ class OpenAIServingChat(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            system_fingerprint=self.system_fingerprint,
             prompt_logprobs=clamp_prompt_logprobs(final_res.prompt_logprobs),
             prompt_token_ids=(
                 final_res.prompt_token_ids if request.return_token_ids else None

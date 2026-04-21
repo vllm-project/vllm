@@ -314,4 +314,5 @@ class OpenAIServingChatBatch(OpenAIServingChat):
             model=model_name,
             choices=choices,
             usage=usage,
+            system_fingerprint=self.system_fingerprint,
         )

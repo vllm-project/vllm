@@ -153,8 +153,17 @@ class BaseFrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
+    """
+    fingerprint_mode: Literal["full", "hash"] = "full"
+    """Controls the ``system_fingerprint`` field on non-streaming responses.
+
+    - ``full`` (default): human-readable, e.g.
+      ``vllm-0.11.0-H100-tp8-bf16-a3b21f94``. Encodes server version, short
+      hardware name, parallelism (tp/pp/dp/ep), dtype, quantization, kv-cache
+      dtype, and an 8-char config hash.
+    - ``hash``: opaque, e.g. ``vllm-a3b21f94``. Hides hardware and version.
     """
 
     @classmethod
