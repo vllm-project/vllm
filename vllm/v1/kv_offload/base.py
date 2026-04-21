@@ -128,7 +128,11 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_load(
         self,
+<<<<<<< HEAD
         keys: Sequence[OffloadKey],
+=======
+        keys: Iterable[OffloadKey],
+>>>>>>> 83731c08b (Refactor KV Offloading)
         req_context: ReqContext,
     ) -> LoadStoreSpec:
         """
@@ -147,7 +151,11 @@ class OffloadingManager(ABC):
         """
         pass
 
+<<<<<<< HEAD
     def touch(self, keys: Sequence[OffloadKey]):
+=======
+    def touch(self, keys: Iterable[OffloadKey]):
+>>>>>>> 83731c08b (Refactor KV Offloading)
         """
         Mark the given blocks as recently used.
         This could in practice mean moving them to the end of an LRU list.
@@ -169,7 +177,11 @@ class OffloadingManager(ABC):
     @abstractmethod
     def prepare_store(
         self,
+<<<<<<< HEAD
         keys: Sequence[OffloadKey],
+=======
+        keys: Iterable[OffloadKey],
+>>>>>>> 83731c08b (Refactor KV Offloading)
         req_context: ReqContext,
     ) -> PrepareStoreOutput | None:
         """
