@@ -1593,12 +1593,15 @@ class NixlConnectorWorker:
         # and logical_to_remote_kernel_block_ids.
         if self._has_mamba:
             # Expand remote logical → kernel block IDs.
-            remote_block_ids = self._logical_to_remote_kernel_block_ids(
+            meta.remote.block_ids = self._logical_to_remote_kernel_block_ids(
                 meta.remote.block_ids,
                 remote_info.remote_physical_blocks_per_logical,
             )
         else:
-            remote_block_ids = self._logical_to_kernel_block_ids(meta.remote.block_ids)
+            meta.remote.block_ids = self._logical_to_kernel_block_ids(
+                meta.remote.block_ids
+            )
+        remote_block_ids = meta.remote.block_ids
         read_specs = self.transfer_policy.compute_read_specs(
             local_block_ids=meta.local_physical_block_ids,
             remote_block_ids=remote_block_ids,
