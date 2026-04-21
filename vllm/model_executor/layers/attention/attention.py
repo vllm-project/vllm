@@ -259,7 +259,7 @@ class Attention(nn.Module, AttentionLayerBase):
             if skip:
                 kv_cache_dtype = "auto"
                 calculate_kv_scales = False
-            logger.info(
+            logger.debug(
                 "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
                 prefix,
                 kv_cache_dtype,
