@@ -146,7 +146,7 @@ class PassConfig:
     """Fuse paired q/kv RMS norms in MLA attention."""
     fuse_rope_kvcache: bool = None  # type: ignore[assignment]
     """Fuse the QK rope + KV cache ops."""
-    fuse_qk_norm_rope_kvcache: bool = Field(default=None)
+    fuse_qk_norm_rope_kvcache: bool = Field(default=None)  # type: ignore[assignment]
     """Fuse QK RMSNorm + RoPE + KV cache update into a single AITER HIP
     kernel. Supersedes both enable_qk_norm_rope_fusion and fuse_rope_kvcache
     for layers that support it. Auto-enabled at O1+ on ROCm for models
@@ -310,7 +310,7 @@ class PassConfig:
         fusion_prefixes = ("fuse_", "enable_")
         enabled_fusions = [
             f.name[len(prefix) :]
-            for f in fields(self)
+            for f in fields(self)  # type: ignore[arg-type]
             if getattr(self, f.name)
             for prefix in fusion_prefixes
             if f.name.startswith(prefix)
