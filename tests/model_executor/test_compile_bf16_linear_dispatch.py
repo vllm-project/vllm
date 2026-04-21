@@ -424,6 +424,7 @@ def test_big_gpu_override_sets_inductor_config(
     assert inductor_config.max_autotune_gemm is True
     assert "TRITON" in inductor_config.max_autotune_gemm_backends
     assert "ATEN" in inductor_config.max_autotune_gemm_backends
+    assert "CUTLASS" in inductor_config.max_autotune_gemm_backends
     if hasattr(inductor_config.triton, "enable_persistent_tma_matmul"):
         assert inductor_config.triton.enable_persistent_tma_matmul is True
 

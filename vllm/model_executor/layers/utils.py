@@ -231,9 +231,9 @@ def _patch_is_datacenter_blackwell_arch() -> bool:
 
 
 def _apply_inductor_autotune_config() -> None:
-    """Set global inductor config for max-autotune-gemm with Triton templates
-    and persistent TMA matmul (Blackwell-aware). Also bump dynamo cache limits
-    so many distinct shapes don't evict each other."""
+    """Set global inductor config for max-autotune-gemm with ATEN/TRITON/
+    CUTLASS templates and persistent TMA matmul (Blackwell-aware). Also bump
+    dynamo cache limits so many distinct shapes don't evict each other."""
     try:
         import torch._dynamo.config
         import torch._inductor.config as inductor_config
@@ -246,7 +246,18 @@ def _apply_inductor_autotune_config() -> None:
 
     inductor_config.max_autotune = True
     inductor_config.max_autotune_gemm = True
-    inductor_config.max_autotune_gemm_backends = "ATEN,TRITON"
+    existing_backends = getattr(
+        inductor_config, "max_autotune_gemm_backends", ""
+    )
+    backend_tokens = []
+    if isinstance(existing_backends, str) and existing_backends:
+        backend_tokens = [
+            token.strip().upper() for token in existing_backends.split(",")
+        ]
+    for backend in ("ATEN", "TRITON", "CUTLASS"):
+        if backend not in backend_tokens:
+            backend_tokens.append(backend)
+    inductor_config.max_autotune_gemm_backends = ",".join(backend_tokens)
     if hasattr(inductor_config, "triton") and hasattr(
         inductor_config.triton, "enable_persistent_tma_matmul"
     ):
@@ -271,7 +282,7 @@ def _maybe_override_inductor_is_big_gpu() -> None:
        edge Blackwell), which disables Blackwell-specific codegen paths.
 
     When `VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1`, monkey-patch both helpers and
-    set global inductor config to prefer Triton + ATEN templates with
+    set global inductor config to prefer Triton + ATEN + CUTLASS templates with
     persistent TMA matmul. All patches are global (affect every
     torch.compile call in the process) and one-shot. Must run before the
     first inductor autotune call, since both helpers are cached.
@@ -300,7 +311,7 @@ def _maybe_override_inductor_is_big_gpu() -> None:
     logger.info(
         "VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1: is_big_gpu patched=%s, "
         "is_datacenter_blackwell_arch patched=%s. Inductor config set to "
-        "max_autotune_gemm=True, backends=ATEN,TRITON, "
+        "max_autotune_gemm=True, backends include ATEN/TRITON/CUTLASS, "
         "persistent TMA matmul=True. For FP32 GEMMs (e.g. Nemotron "
         "routers), also set VLLM_FLOAT32_MATMUL_PRECISION=high to let "
         "Triton autotune pick tensor-core kernels.",
