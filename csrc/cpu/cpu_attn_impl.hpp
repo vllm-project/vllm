@@ -21,7 +21,8 @@ enum class Fp8KVCacheDataType {
   kFp8E5M2 = 1,
 };
 
-template <ISA isa, typename scalar_t, int64_t head_dim>
+template <ISA isa, typename scalar_t, int64_t head_dim,
+          typename kv_cache_t = scalar_t>
 class AttentionImpl {};
 
 struct AttentionWorkItemGroup {
@@ -784,11 +785,9 @@ struct AttentionInput {
   int32_t sliding_window_left;
   int32_t sliding_window_right;
   float softcap;
-  // FP8 KV cache scales (used by AttentionImplFP8VEC and AttentionImplFP8AMX)
+  // FP8 KV cache scales (used by FP8 attention implementations)
   float k_scale_fp8 = 1.0f;
   float v_scale_fp8 = 1.0f;
-  // FP8 format: E4M3 (default) or E5M2
-  Fp8KVCacheDataType fp8_kv_dtype = Fp8KVCacheDataType::kFp8E4M3;
 };
 
 #define DEFINE_CPU_ATTENTION_PARAMS                                         \
@@ -858,7 +857,7 @@ void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
 }
 
 // SFINAE helper: calls impl.init_from_input(input) if the method exists,
-// otherwise does nothing.  This lets AttentionImplFP8VEC (and future impls)
+// otherwise does nothing.  This lets FP8 AttentionImpl specializations
 // read per-run parameters from AttentionInput without modifying every ISA
 // specialisation.
 template <typename T>

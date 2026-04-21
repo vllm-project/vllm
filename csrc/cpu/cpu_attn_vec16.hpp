@@ -117,8 +117,8 @@ class TileGemm161 {
 
 // This is a general but naive implementation based on vector instructions
 template <typename scalar_t, int64_t head_dim>
-class AttentionImpl<ISA::VEC16, scalar_t, head_dim>
-    : public AttentionImpl<ISA::VEC, scalar_t, head_dim> {
+class AttentionImpl<ISA::VEC16, scalar_t, head_dim, scalar_t>
+    : public AttentionImpl<ISA::VEC, scalar_t, head_dim, scalar_t> {
  public:
   using query_t = scalar_t;
   using q_buffer_t = float;

@@ -654,10 +654,6 @@ def test_varlen_with_paged_kv_sink(
 # FP8 KV cache tests (Phase 1)
 # ---------------------------------------------------------------------------
 
-from vllm._custom_ops import (  # noqa: E402
-    cpu_attention_with_kv_cache_fp8,
-    cpu_attn_reshape_and_cache_fp8,
-)
 
 # Tolerances for FP8 vs float attention output comparisons.
 # E5M2 (2 mantissa bits) introduces slightly more noise than E4M3 (3 bits).
@@ -714,14 +710,16 @@ def test_fp8_round_trip(dtype: torch.dtype):
     value_cache = torch.zeros_like(key_cache)
     slot_mapping = torch.arange(token_num, dtype=torch.int64)
 
-    cpu_attn_reshape_and_cache_fp8(
+    cpu_attn_reshape_and_cache(
         key,
         value,
         key_cache,
         value_cache,
         slot_mapping,
+        "vec",
         k_scale=scale,
         v_scale=scale,
+        kv_cache_dtype="fp8_e4m3",
     )
 
     # Dequantize value cache (row-major layout) and check round-trip error.
@@ -745,11 +743,11 @@ def test_fp8_round_trip(dtype: torch.dtype):
 def test_fp8_reshape_and_cache_round_trip(
     dtype: torch.dtype, k_scale: float, v_scale: float, kv_cache_dtype: str
 ):
-    """Tests the encode path of cpu_attn_reshape_and_cache_fp8.
+    """Tests the encode path of cpu_attn_reshape_and_cache with FP8 kv_cache_dtype.
 
     Encodes KV to FP8, manually dequantizes in Python, then runs standard float
     attention to verify the encode round-trip is accurate enough.  This test
-    does NOT call cpu_attention_with_kv_cache_fp8; the on-the-fly dequant kernel
+    does NOT use on-the-fly dequant; the on-the-fly dequant kernel
     is tested separately in test_fp8_end_to_end_native.
     """
     set_random_seed(0)
@@ -784,12 +782,13 @@ def test_fp8_reshape_and_cache_round_trip(
         num_blocks, num_kv_heads, block_size, head_size, dtype=torch.uint8
     )
     value_cache_fp8 = torch.zeros_like(key_cache_fp8)
-    cpu_attn_reshape_and_cache_fp8(
+    cpu_attn_reshape_and_cache(
         key_orig.view(-1, num_kv_heads, head_size),
         value_orig.view(-1, num_kv_heads, head_size),
         key_cache_fp8,
         value_cache_fp8,
         slot_mapping,
+        isa,
         k_scale=k_scale,
         v_scale=v_scale,
         kv_cache_dtype=kv_cache_dtype,
@@ -878,7 +877,7 @@ def test_fp8_reshape_and_cache_round_trip(
 
 # ---------------------------------------------------------------------------
 # FP8 KV cache tests (Phase 2) — on-the-fly dequantization via
-# cpu_attention_with_kv_cache_fp8 (no Python-level eager dequant).
+# cpu_attention_with_kv_cache with kv_cache_dtype (no Python-level eager dequant).
 # ---------------------------------------------------------------------------
 
 
@@ -926,15 +925,15 @@ def _fp8_attn_e2e(
         num_blocks, num_kv_heads, block_size, head_size, dtype=torch.uint8
     )
     value_cache_fp8 = torch.zeros_like(key_cache_fp8)
-    cpu_attn_reshape_and_cache_fp8(
+    cpu_attn_reshape_and_cache(
         key_orig.view(-1, num_kv_heads, head_size),
         value_orig.view(-1, num_kv_heads, head_size),
         key_cache_fp8,
         value_cache_fp8,
         slot_mapping,
+        isa,
         k_scale=k_scale,
         v_scale=v_scale,
-        isa=isa,
         kv_cache_dtype=kv_cache_dtype,
     )
 
@@ -974,7 +973,7 @@ def _fp8_attn_e2e(
     )
 
     output_fp8 = torch.zeros(token_num, num_query_heads, head_size, dtype=dtype)
-    cpu_attention_with_kv_cache_fp8(
+    cpu_attention_with_kv_cache(
         query=query,
         key_cache=key_cache_fp8,
         value_cache=value_cache_fp8,
@@ -1039,7 +1038,7 @@ def test_fp8_end_to_end_native(
     dtype: torch.dtype,
     kv_cache_dtype: str,
 ) -> None:
-    """Phase 2: cpu_attention_with_kv_cache_fp8 performs on-the-fly dequant.
+    """Phase 2: cpu_attention_with_kv_cache performs on-the-fly dequant.
 
     The output must match running the same attention over a float KV cache
     built from the same original values (within FP8 quantisation noise).
@@ -1083,7 +1082,7 @@ def test_fp8_amx_end_to_end(
     """FP8 AMX: reshape with AMX layout, run AMX attention, compare to float.
 
     Uses isa='amx' for both reshape and the scheduler metadata so that the
-    full AMX tile path is exercised (TileGemm224/122<uint8_t>).
+    full AMX tile path is exercised (TileGemm224/122<c10::Float8_e4m3fn/e5m2>).
     """
     _fp8_attn_e2e(
         seq_lens, num_heads, head_size, k_scale, v_scale, dtype, kv_cache_dtype, "amx"

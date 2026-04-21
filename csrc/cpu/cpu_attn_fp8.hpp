@@ -4,8 +4,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <cstring>
 #include <limits>
+
+typedef uint32_t __attribute__((__may_alias__)) u32_alias_t;
+typedef uint16_t __attribute__((__may_alias__)) u16_alias_t;
+typedef float __attribute__((__may_alias__)) f32_alias_t;
 
 inline float fp8e4m3_to_float_scalar(uint8_t b, float scale) noexcept {
   // NaN encoding in E4M3
@@ -14,8 +17,7 @@ inline float fp8e4m3_to_float_scalar(uint8_t b, float scale) noexcept {
   uint32_t sign = (b_u32 & 0x80) << 24;
   uint32_t payload = (b_u32 & 0x7F) << 20;
   uint32_t bits = sign | payload;
-  float b_f32_unscaled;
-  std::memcpy(&b_f32_unscaled, &bits, sizeof(float));
+  float b_f32_unscaled = *reinterpret_cast<const f32_alias_t*>(&bits);
   float b_f32_scaled = b_f32_unscaled * scale * 0x1p120f;
   return b_f32_scaled;
 }
@@ -29,8 +31,7 @@ inline uint8_t float_to_fp8e4m3_scalar(float v, float inv_scale) noexcept {
   // Inverse mapping of fp8e4m3_to_float_scalar: shift the effective exponent
   // bias from fp32 (127) back to fp8 e4m3 (7), then pack sign|payload.
   float v_f32_unscaled = v * 0x1p-120f;
-  uint32_t bits;
-  std::memcpy(&bits, &v_f32_unscaled, sizeof(float));
+  uint32_t bits = *reinterpret_cast<const u32_alias_t*>(&v_f32_unscaled);
   uint8_t sign = static_cast<uint8_t>((bits >> 24) & 0x80);
   uint8_t payload = static_cast<uint8_t>((bits >> 20) & 0x7F);
   if (payload == 0) return sign;
@@ -94,8 +95,7 @@ inline void reshape_and_cache_fp8_amx_impl(
           uint8_t fp8_0 = quant_fn(static_cast<float>(ksrc[j * 2]), k_inv);
           uint8_t fp8_1 = quant_fn(static_cast<float>(ksrc[j * 2 + 1]), k_inv);
           uint8_t bytes[2] = {fp8_0, fp8_1};
-          uint16_t hw;
-          std::memcpy(&hw, bytes, 2);
+          uint16_t hw = *reinterpret_cast<const u16_alias_t*>(bytes);
           kdst[j * token_num_per_group] = hw;
         }
       }
@@ -160,8 +160,7 @@ inline float fp8e5m2_to_float_scalar(uint8_t b, float scale) noexcept {
   uint32_t fp32_bits = sign |
                        ((static_cast<uint32_t>(exp_bits) - 15 + 127) << 23) |
                        (static_cast<uint32_t>(mant_bits) << 21);
-  float val;
-  std::memcpy(&val, &fp32_bits, sizeof(float));
+  float val = *reinterpret_cast<const f32_alias_t*>(&fp32_bits);
   return val * scale;
 }
 
@@ -170,8 +169,7 @@ inline uint8_t float_to_fp8e5m2_scalar(float v, float inv_scale) noexcept {
   constexpr float fp8_e5m2_max = 57344.0f;
   v = std::max(-fp8_e5m2_max, std::min(fp8_e5m2_max, v));
   if (v == 0.0f) return 0;
-  uint32_t bits;
-  std::memcpy(&bits, &v, sizeof(float));
+  uint32_t bits = *reinterpret_cast<const u32_alias_t*>(&v);
   const uint8_t sign = static_cast<uint8_t>((bits >> 24) & 0x80);
   const int32_t exp_fp32 = static_cast<int32_t>((bits >> 23) & 0xFF) - 127;
   const uint8_t mant2 = static_cast<uint8_t>((bits >> 21) & 0x03);

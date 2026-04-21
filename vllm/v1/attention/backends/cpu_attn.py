@@ -329,27 +329,17 @@ class CPUAttentionBackendImpl(AttentionImpl):
             and key is not None
             and value is not None
         ):
-            if self.is_fp8_kv_cache:
-                ops.cpu_attn_reshape_and_cache_fp8(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    layer._k_scale_float,
-                    layer._v_scale_float,
-                    attn_metadata.isa,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                )
-            else:
-                ops.cpu_attn_reshape_and_cache(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    attn_metadata.slot_mapping,
-                    attn_metadata.isa,
-                )
+            ops.cpu_attn_reshape_and_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                attn_metadata.slot_mapping,
+                attn_metadata.isa,
+                k_scale=layer._k_scale_float if self.is_fp8_kv_cache else 1.0,
+                v_scale=layer._v_scale_float if self.is_fp8_kv_cache else 1.0,
+                kv_cache_dtype=self.kv_cache_dtype if self.is_fp8_kv_cache else "auto",
+            )
 
         if attn_metadata.use_sdpa_prefill:
             assert self.sinks is None, "Attention sink is unsupported in SDPA prefill"
@@ -365,43 +355,25 @@ class CPUAttentionBackendImpl(AttentionImpl):
             num_actual_tokens = num_decode_tokens
 
         if num_actual_tokens > 0:
-            if self.is_fp8_kv_cache:
-                ops.cpu_attention_with_kv_cache_fp8(
-                    query=query[:num_actual_tokens],
-                    key_cache=key_cache,
-                    value_cache=value_cache,
-                    output=output[:num_actual_tokens],  # type: ignore
-                    query_start_loc=attn_metadata.query_start_loc,
-                    seq_lens=attn_metadata.seq_lens,
-                    scale=self.scale,
-                    causal=attn_metadata.causal,
-                    alibi_slopes=self.alibi_slopes,  # type: ignore
-                    sliding_window=self.sliding_window,
-                    block_table=attn_metadata.block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=attn_metadata.scheduler_metadata,
-                    s_aux=self.sinks,
-                    k_scale=layer._k_scale_float,
-                    v_scale=layer._v_scale_float,
-                    kv_cache_dtype=self.kv_cache_dtype,
-                )
-            else:
-                ops.cpu_attention_with_kv_cache(
-                    query=query[:num_actual_tokens],
-                    key_cache=key_cache,
-                    value_cache=value_cache,
-                    output=output[:num_actual_tokens],  # type: ignore
-                    query_start_loc=attn_metadata.query_start_loc,
-                    seq_lens=attn_metadata.seq_lens,
-                    scale=self.scale,
-                    causal=attn_metadata.causal,
-                    alibi_slopes=self.alibi_slopes,  # type: ignore
-                    sliding_window=self.sliding_window,
-                    block_table=attn_metadata.block_table,
-                    softcap=self.logits_soft_cap,
-                    scheduler_metadata=attn_metadata.scheduler_metadata,
-                    s_aux=self.sinks,
-                )
+            ops.cpu_attention_with_kv_cache(
+                query=query[:num_actual_tokens],
+                key_cache=key_cache,
+                value_cache=value_cache,
+                output=output[:num_actual_tokens],  # type: ignore
+                query_start_loc=attn_metadata.query_start_loc,
+                seq_lens=attn_metadata.seq_lens,
+                scale=self.scale,
+                causal=attn_metadata.causal,
+                alibi_slopes=self.alibi_slopes,  # type: ignore
+                sliding_window=self.sliding_window,
+                block_table=attn_metadata.block_table,
+                softcap=self.logits_soft_cap,
+                scheduler_metadata=attn_metadata.scheduler_metadata,
+                s_aux=self.sinks,
+                k_scale=layer._k_scale_float if self.is_fp8_kv_cache else 1.0,
+                v_scale=layer._v_scale_float if self.is_fp8_kv_cache else 1.0,
+                kv_cache_dtype=self.kv_cache_dtype if self.is_fp8_kv_cache else "auto",
+            )
 
         return output
 

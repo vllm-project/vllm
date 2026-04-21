@@ -3227,6 +3227,9 @@ def cpu_attn_reshape_and_cache(
     value_cache: torch.Tensor,
     slot_mapping: torch.Tensor,
     isa: str,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attn_reshape_and_cache(
         key,
@@ -3235,29 +3238,8 @@ def cpu_attn_reshape_and_cache(
         value_cache,
         slot_mapping,
         isa,
-    )
-
-
-def cpu_attn_reshape_and_cache_fp8(
-    key: torch.Tensor,
-    value: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor,
-    k_scale: float,
-    v_scale: float,
-    isa: str = "vec",
-    kv_cache_dtype: str = "fp8_e4m3",
-) -> None:
-    torch.ops._C.cpu_attn_reshape_and_cache_fp8(
-        key,
-        value,
-        key_cache,
-        value_cache,
-        slot_mapping,
         k_scale,
         v_scale,
-        isa,
         kv_cache_dtype,
     )
 
@@ -3277,46 +3259,11 @@ def cpu_attention_with_kv_cache(
     softcap: float,
     scheduler_metadata: torch.Tensor,
     s_aux: torch.Tensor | None,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+    kv_cache_dtype: str = "auto",
 ) -> None:
     torch.ops._C.cpu_attention_with_kv_cache(
-        query,
-        key_cache,
-        value_cache,
-        output,
-        query_start_loc,
-        seq_lens,
-        scale,
-        causal,
-        alibi_slopes,
-        sliding_window[0],
-        sliding_window[1],
-        block_table,
-        softcap,
-        scheduler_metadata,
-        s_aux,
-    )
-
-
-def cpu_attention_with_kv_cache_fp8(
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    output: torch.Tensor,
-    query_start_loc: torch.Tensor,
-    seq_lens: torch.Tensor,
-    scale: float,
-    causal: bool,
-    alibi_slopes: torch.Tensor | None,
-    sliding_window: tuple[int, int],
-    block_table: torch.Tensor,
-    softcap: float,
-    scheduler_metadata: torch.Tensor,
-    s_aux: torch.Tensor | None,
-    k_scale: float,
-    v_scale: float,
-    kv_cache_dtype: str = "fp8_e4m3",
-) -> None:
-    torch.ops._C.cpu_attention_with_kv_cache_fp8(
         query,
         key_cache,
         value_cache,

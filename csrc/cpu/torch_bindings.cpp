@@ -98,26 +98,11 @@ void cpu_attn_reshape_and_cache(const torch::Tensor& key,
                                 torch::Tensor& key_cache,
                                 torch::Tensor& value_cache,
                                 const torch::Tensor& slot_mapping,
-                                const std::string& isa);
-
-void cpu_attn_reshape_and_cache_fp8(
-    const torch::Tensor& key, const torch::Tensor& value,
-    torch::Tensor& key_cache, torch::Tensor& value_cache,
-    const torch::Tensor& slot_mapping, double k_scale, double v_scale,
-    const std::string& isa, const std::string& kv_cache_dtype);
+                                const std::string& isa, const double k_scale,
+                                const double v_scale,
+                                const std::string& kv_cache_dtype);
 
 void cpu_attention_with_kv_cache(
-    const torch::Tensor& query, const torch::Tensor& key_cache,
-    const torch::Tensor& value_cache, torch::Tensor& output,
-    const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
-    const double scale, const bool causal,
-    const std::optional<torch::Tensor>& alibi_slopes,
-    const int64_t sliding_window_left, const int64_t sliding_window_right,
-    const torch::Tensor& block_table, const double softcap,
-    const torch::Tensor& scheduler_metadata,
-    const std::optional<torch::Tensor>& s_aux);
-
-void cpu_attention_with_kv_cache_fp8(
     const torch::Tensor& query, const torch::Tensor& key_cache,
     const torch::Tensor& value_cache, torch::Tensor& output,
     const torch::Tensor& query_start_loc, const torch::Tensor& seq_lens,
@@ -332,31 +317,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       &get_scheduler_metadata);
   ops.def(
       "cpu_attn_reshape_and_cache(Tensor key, Tensor value, Tensor(a2!) "
-      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str "
-      "isa) -> ()",
+      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, str isa, "
+      "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
+      "()",
       &cpu_attn_reshape_and_cache);
-  ops.def(
-      "cpu_attn_reshape_and_cache_fp8(Tensor key, Tensor value, Tensor(a2!) "
-      "key_cache, Tensor(a3!) value_cache, Tensor slot_mapping, "
-      "float k_scale, float v_scale, str isa=\"vec\", "
-      "str kv_cache_dtype=\"fp8_e4m3\") -> ()",
-      &cpu_attn_reshape_and_cache_fp8);
   ops.def(
       "cpu_attention_with_kv_cache(Tensor query, Tensor key_cache, Tensor "
       "value_cache, Tensor(a3!) output, Tensor query_start_loc, Tensor "
       "seq_lens, float scale, bool causal, Tensor? alibi_slopes, SymInt "
       "sliding_window_left, SymInt sliding_window_right, Tensor block_table, "
-      "float softcap, Tensor scheduler_metadata, Tensor? s_aux) -> ()",
+      "float softcap, Tensor scheduler_metadata, Tensor? s_aux, "
+      "float k_scale=1.0, float v_scale=1.0, str kv_cache_dtype=\"auto\") -> "
+      "()",
       &cpu_attention_with_kv_cache);
-  ops.def(
-      "cpu_attention_with_kv_cache_fp8(Tensor query, Tensor key_cache, "
-      "Tensor value_cache, Tensor(a3!) output, Tensor query_start_loc, "
-      "Tensor seq_lens, float scale, bool causal, Tensor? alibi_slopes, "
-      "SymInt sliding_window_left, SymInt sliding_window_right, "
-      "Tensor block_table, float softcap, Tensor scheduler_metadata, "
-      "Tensor? s_aux, float k_scale, float v_scale, "
-      "str kv_cache_dtype=\"fp8_e4m3\") -> ()",
-      &cpu_attention_with_kv_cache_fp8);
 
   // placeholders
   ops.def("static_scaled_fp8_quant() -> ()", placeholder_op);
