@@ -723,8 +723,9 @@ def test_eagle_correctness_heavy(
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
         (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
+        (("mtp", "Qwen/Qwen3.5-0.8B", 1), False, 0.0),  # hybrid + MTP
     ],
-    ids=["mimo", "deepseek"],
+    ids=["mimo", "deepseek", "qwen3_5-hybrid"],
 )
 @single_gpu_only
 @large_gpu_mark(min_gb=20)

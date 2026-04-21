@@ -82,6 +82,13 @@ SPEC_DECODE_CONFIGS = [
         2,
         id="eagle-mla-deepseek",
     ),
+    pytest.param(
+        "Qwen/Qwen3.5-0.8B",
+        "Qwen/Qwen3.5-0.8B",
+        "mtp",
+        1,
+        id="mtp-qwen3_5-hybrid",
+    ),
 ]
 
 
