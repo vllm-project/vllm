@@ -65,7 +65,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.7"
+      "default": "0.6.8.post1"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"

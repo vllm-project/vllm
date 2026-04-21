@@ -37,6 +37,10 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.online.mxfp8 import (
+    Mxfp8OnlineLinearMethod,
+    Mxfp8OnlineMoEMethod,
+)
 
 logger = init_logger(__name__)
 
@@ -110,6 +114,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             elif linear_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
                 return Fp8PerBlockOnlineLinearMethod()
+            elif linear_scheme == OnlineQuantScheme.MXFP8:
+                return Mxfp8OnlineLinearMethod()
             else:
                 return Fp8PerTensorOnlineLinearMethod()
         elif isinstance(layer, FusedMoE):
@@ -125,6 +131,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 return Int8OnlineMoEMethod(layer=layer)
             elif moe_scheme == OnlineQuantScheme.FP8_PER_BLOCK:
                 return Fp8PerBlockOnlineMoEMethod(layer=layer)
+            elif moe_scheme == OnlineQuantScheme.MXFP8:
+                return Mxfp8OnlineMoEMethod(layer=layer)
             else:
                 return Fp8PerTensorOnlineMoEMethod(layer=layer)
         return None

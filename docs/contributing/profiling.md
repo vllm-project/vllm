@@ -206,8 +206,8 @@ Both the `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_cont
 used to profile a section of code.
 
 !!! note
-    The legacy import paths `vllm.utils.cprofile` and `vllm.utils.cprofile_context` are deprecated.
-    Please use `vllm.utils.profiling.cprofile` and `vllm.utils.profiling.cprofile_context` instead.
+    The `vllm.utils.profiling` helpers are deprecated and will be removed in
+    `v0.21`. Please use Python's `cProfile` module directly instead.
 
 ### Example usage - decorator
 
