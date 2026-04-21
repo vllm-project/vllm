@@ -369,6 +369,22 @@ def test_compressed_tensors_kv_cache_fp8_per_attn_head(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+def test_compressed_tensors_kv_cache_fp8_per_attn_head_rejects_flashinfer(
+    vllm_runner,
+):
+    model_path = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-attn_head"
+
+    with pytest.raises(
+        ValueError,
+        match="Per-attention-head KV-cache quantization.*FLASH_ATTN.*FLASHINFER",
+    ):
+        with vllm_runner(model_path, attention_config={"backend": "FLASHINFER"}):
+            pass
+
+
 @pytest.mark.parametrize(
     "args",
     [

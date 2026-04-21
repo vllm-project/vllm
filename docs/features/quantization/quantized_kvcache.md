@@ -95,7 +95,7 @@ print(out)
 
 ### 3. **[Recommended] Calibration Using a Dataset (with `llm-compressor`)**
 
-For the highest-quality quantization, we recommend calibrating against a dataset using `llm-compressor`. This enables advanced strategies such as per-attention-head quantization.
+For the highest-quality quantization, we recommend calibrating against a dataset using `llm-compressor`. This enables advanced strategies such as per-attention-head quantization. Per-attention-head KV-cache quantization is currently supported only with the `FLASH_ATTN` backend.
 
 #### Install the required package
 

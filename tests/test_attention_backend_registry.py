@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import pytest
+import torch
+
+from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -167,3 +172,41 @@ def test_register_custom_mamba_backend_with_class_path():
     backend_cls = MambaAttentionBackendEnum.CUSTOM.get_class()
     assert backend_cls.get_name() == "CUSTOM_MAMBA"
     assert backend_cls.get_impl_cls() == CustomMambaAttentionImpl
+
+
+@pytest.mark.parametrize(
+    ("backend_cls", "expected_match"),
+    [
+        (
+            AttentionBackendEnum.FLASHINFER.get_class(),
+            "Per-attention-head KV-cache quantization is currently supported only with FLASH_ATTN, not FLASHINFER",
+        ),
+        (
+            CustomAttentionBackend,
+            "per-head quant scales not supported",
+        ),
+    ],
+)
+def test_validate_configuration_reports_per_head_quant_scale_support(
+    backend_cls: type[AttentionBackend],
+    expected_match: str,
+):
+    invalid_reasons = backend_cls.validate_configuration(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="fp8",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=False,
+        use_per_head_quant_scales=True,
+        device_capability=DeviceCapability(9, 0),
+        attn_type="decoder",
+    )
+
+    assert any(expected_match in reason for reason in invalid_reasons)
+
+    if backend_cls is CustomAttentionBackend:
+        assert all("FLASH_ATTN" not in reason for reason in invalid_reasons)
+        assert all("FLASHINFER" not in reason for reason in invalid_reasons)
