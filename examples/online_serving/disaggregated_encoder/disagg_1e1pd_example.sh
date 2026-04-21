@@ -30,8 +30,7 @@ fi
 
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-12000}"   # wait_for_server timeout
-
-NUM_PROMPTS="${NUM_PROMPTS:-100}"    # number of prompts to send in benchmark
+NUM_PROMPTS="${NUM_PROMPTS:-100}"             # number of prompts to send in benchmark
 
 # Serve args
 GPU_MEMORY_UTILIZATION_E="${GPU_MEMORY_UTILIZATION_E:-0.01}"
@@ -107,6 +106,7 @@ env "$DEVICE_AFFINITY_ENV=$GPU_E" vllm serve "$MODEL" \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION_E" \
     --port "$ENCODE_PORT" \
     --enforce-eager \
+    --mm-encoder-only \
     --enable-request-id-headers \
     --no-enable-prefix-caching \
     --max-num-batched-tokens 114688 \
@@ -169,15 +169,22 @@ echo "All services are up!"
 # Benchmark
 ###############################################################################
 echo "Running benchmark (stream)..."
+
 vllm bench serve \
-  --model               "$MODEL" \
-  --backend             openai-chat \
-  --endpoint            /v1/chat/completions \
-  --dataset-name        hf \
-  --dataset-path        lmarena-ai/VisionArena-Chat \
-  --seed                0 \
-  --num-prompts         "$NUM_PROMPTS" \
-  --port                "$PROXY_PORT"
+    --model $MODEL \
+    --dataset-name random-mm \
+    --num-prompts $NUM_PROMPTS \
+    --random-input-len 400 \
+    --random-output-len 100 \
+    --random-range-ratio 0.0 \
+    --random-mm-base-items-per-request 3 \
+    --random-mm-num-mm-items-range-ratio 0 \
+    --random-mm-limit-mm-per-prompt '{"image":3,"video":0}' \
+    --random-mm-bucket-config '{(560, 560, 1): 1.0}' \
+    --ignore-eos \
+    --backend openai-chat \
+    --endpoint /v1/chat/completions \
+    --port $PROXY_PORT
 
 PIDS+=($!)
 
@@ -197,7 +204,6 @@ curl http://127.0.0.1:"${PROXY_PORT}"/v1/chat/completions \
     ]}
     ]
     }'
-
 
 # cleanup
 echo "cleanup..."

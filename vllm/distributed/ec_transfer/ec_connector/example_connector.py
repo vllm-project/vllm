@@ -55,7 +55,6 @@ class ECExampleConnector(ECConnectorBase):
             self._storage_path = transfer_config.get_from_extra_config(
                 "shared_storage_path", "/tmp"
             )
-            logger.debug(transfer_config)
             logger.debug("Shared storage path is %s", self._storage_path)
         else:
             raise ValueError("ec_transfer_config must be set for ECConnectorBase")
@@ -89,11 +88,20 @@ class ECExampleConnector(ECConnectorBase):
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
+            logger.debug(
+                "start_load_caches for %s, filename: %s",
+                mm_data.mm_hash,
+                filename,
+            )
+
             ec_cache = safetensors.torch.load_file(
                 filename, device=current_platform.device_type
             )["ec_cache"]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
+
+    def wait_for_load(self) -> set[str]:
+        return set()
 
     def save_caches(self, encoder_cache, mm_hash, **kwargs) -> None:
         """
@@ -120,6 +128,7 @@ class ECExampleConnector(ECConnectorBase):
     def has_cache_item(
         self,
         identifier: str,
+        request: "Request | None" = None,
     ) -> bool:
         """
         Check if cache exist externally for the media
@@ -147,23 +156,104 @@ class ECExampleConnector(ECConnectorBase):
         num_encoder_token = request.get_num_encoder_embeds(index)
         self._mm_datas_need_loads[mm_hash] = num_encoder_token
 
+    def maybe_update_remote_cache_state(self, encoder_cache, **kwargs) -> None:
+        metadata: ECConnectorMetadata = self._get_connector_metadata()
+        assert isinstance(metadata, ECExampleConnectorMetadata)
+
+        for mm_data in metadata.mm_datas:
+            # make sure is producer, and mm_hash exists in local
+            # EncodeCacheManager encoder cache
+            if (not self.is_producer) or (mm_data.mm_hash not in encoder_cache):
+                continue
+
+            # Check if external storage doesn't have it but EncodeCacheManager
+            # does
+            if not self.has_cache_item(mm_data.mm_hash):
+                logger.debug(
+                    "update_remote_cache_state for hash %s",
+                    mm_data.mm_hash,
+                )
+                self.save_caches(
+                    encoder_cache=encoder_cache,
+                    mm_hash=mm_data.mm_hash,
+                )
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
+        encoder_cache_manager=None,
     ) -> ECConnectorMetadata:
         """Build the connector metadata for this step.
 
         This function should NOT modify any fields in the scheduler_output.
         Also, calling this function will reset the state of the connector.
-        This only build for load mm_data only
+
+        This builds metadata for both loading and saving:
+        1. Items in _mm_datas_need_loads are marked for loading
+        2. For producer role: checks all scheduled encoder inputs and marks
+           for saving if EncodeCacheManager has cache but external storage doesn't
+
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+            encoder_cache_manager (EncoderCacheManager, optional): the encoder
+                cache manager to check EncoderCacheManager cache status.
         """
         meta = ECExampleConnectorMetadata()
+
+        # 1. Add items that need to be loaded from external storage
         for mm_hash, num_encoder_token in self._mm_datas_need_loads.items():
             meta.add_mm_data(MMMeta.make_meta(mm_hash, num_encoder_token))
         self._mm_datas_need_loads.clear()
+
+        # 2. Check if any EncoderCacheManager-cached items need to be saved to
+        # external storage. Only producer needs to save.
+        if self.is_producer and encoder_cache_manager is not None:
+            scheduled_mm_hashes = self._collect_scheduled_mm_hashes(scheduler_output)
+
+            for mm_hash, num_token in scheduled_mm_hashes.items():
+                # Skip if already in metadata (from loading)
+                if any(m.mm_hash == mm_hash for m in meta.mm_datas):
+                    continue
+
+                # Check if external storage doesn't have it but
+                # EncoderCacheManager does
+                if not self.has_cache_item(mm_hash) and encoder_cache_manager.has_cache(
+                    mm_hash
+                ):
+                    # EncodeCacheManager has but external doesn't - mark for
+                    # saving
+                    meta.add_mm_data(MMMeta.make_meta(mm_hash, num_token))
+                    logger.debug(
+                        "Marking mm_hash %s for saving: EncodeCacheManager "
+                        "has cache but external storage doesn't",
+                        mm_hash,
+                    )
+
         return meta
+
+    def _collect_scheduled_mm_hashes(
+        self, scheduler_output: SchedulerOutput
+    ) -> dict[str, int]:
+        """
+        Collect all mm_hashes from scheduled requests.
+
+        Args:
+            scheduler_output: The scheduler output containing scheduled requests
+
+        Returns:
+            dict: mm_hash -> num_encoder_tokens mapping
+        """
+        mm_hashes = {}
+
+        # Collect from scheduled_new_reqs
+        for req in scheduler_output.scheduled_new_reqs:
+            if hasattr(req, "mm_features") and req.mm_features:
+                for feature in req.mm_features:
+                    mm_hash = feature.identifier
+                    num_tokens = feature.mm_position.get_num_embeds
+                    mm_hashes[mm_hash] = num_tokens
+
+        return mm_hashes
 
     # ==============================
     # Helper functions

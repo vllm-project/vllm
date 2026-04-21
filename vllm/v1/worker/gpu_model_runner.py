@@ -2912,6 +2912,11 @@ class GPUModelRunner(
         should_sync_mrope_positions = False
         should_sync_xdrope_positions = False
 
+        ec_failed_mm_hashes = self.maybe_wait_for_ec_load()
+        assert not ec_failed_mm_hashes, (
+            f"EC cache load failed for {ec_failed_mm_hashes}."
+        )
+
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
 

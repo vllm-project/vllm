@@ -185,6 +185,7 @@ if TYPE_CHECKING:
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
+    VLLM_EC_MOONCAKE_BOOTSTRAP_PORT: int = 9098
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_MQ_MAX_CHUNK_BYTES_MB: int = 16
@@ -1334,6 +1335,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
+    ),
+    # Port used for Mooncake handshake between remote (E-PD) agents.
+    "VLLM_EC_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
+        os.getenv("VLLM_EC_MOONCAKE_BOOTSTRAP_PORT", "9098")
     ),
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
