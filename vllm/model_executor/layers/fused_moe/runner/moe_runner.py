@@ -216,10 +216,6 @@ class MoERunner(MoERunnerInterface):
         self.gate = gate
         self.quant_method = quant_method
         self.enable_dbo = enable_dbo
-        self._fused_output_is_reduced = (
-            self.quant_method.moe_kernel is not None
-            and self.quant_method.moe_kernel.output_is_reduced()
-        )
 
         self._shared_experts: SharedExperts | None = None
         if shared_experts is not None:
@@ -319,11 +315,18 @@ class MoERunner(MoERunnerInterface):
         (the decoder layer compensates with matching divisions).
         """
         if self.routed_scaling_factor != 1.0:
-            if fused_output.dtype != torch.float16:
+            if fused_output.dtype != torch.float16 or shared_output is None:
                 fused_output *= self.routed_scaling_factor
             elif shared_output is not None:
                 shared_output *= 1.0 / self.routed_scaling_factor
         return shared_output, fused_output
+
+    @property
+    def _fused_output_is_reduced(self) -> bool:
+        return (
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
+        )
 
     def _maybe_reduce_shared_expert_output(
         self,
@@ -336,8 +339,7 @@ class MoERunner(MoERunnerInterface):
         already-reduced fused output, shared output must be reduced separately
         to match.
         """
-        if self._fused_output_is_reduced:
-            assert shared_output is not None
+        if shared_output is not None and self._fused_output_is_reduced:
             shared_output = tensor_model_parallel_all_reduce(shared_output)
         return shared_output
 
