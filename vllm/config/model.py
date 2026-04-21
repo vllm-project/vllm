@@ -1206,6 +1206,7 @@ class ModelConfig:
         MM_PREFIX_LM_MODELS = (
             "bagel",
             "gemma3",
+            "gemma4",
             "molmo2",
             "paligemma",
             "umm",
