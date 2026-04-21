@@ -161,6 +161,7 @@ def rocm_unquantized_gemm_impl(
     )
     if envs.VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM:
         from aiter.tuned_gemm import tgemm
+
         return tgemm.mm(x, weight, bias)
 
     if use_skinny_reduce_counting:

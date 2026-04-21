@@ -1049,7 +1049,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Use aiter tuned gemms for unquantized gemms
     "VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM", "False").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM", "False").lower()
+        in ("true", "1")
     ),
     # Pad the fp8 weights to 256 bytes for ROCm
     "VLLM_ROCM_FP8_PADDING": lambda: bool(int(os.getenv("VLLM_ROCM_FP8_PADDING", "1"))),
@@ -1061,7 +1062,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable dynamic MXFP4 quantization for attention linear layers on ROCm
     "VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT": lambda: (
-        os.getenv("VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT", "False").lower() in ("true", "1")
+        os.getenv(
+            "VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT", "False"
+        ).lower()
+        in ("true", "1")
     ),
     # Custom quick allreduce kernel for MI3* cards
     # Choice of quantization level: FP, INT8, INT6, INT4 or NONE
