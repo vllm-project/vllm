@@ -456,7 +456,7 @@ class Worker(WorkerBase):
                 logger.info(
                     "CUDA graph memory profiling is enabled "
                     "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
-                    "This will become the default in v0.19. "
+                    "This will become the default in v0.21. "
                     "The current --gpu-memory-utilization=%.4f is equivalent "
                     "to --gpu-memory-utilization=%.4f without CUDA graph "
                     "memory profiling. To maintain the same effective KV "
@@ -472,7 +472,7 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.info(
-                    "In v0.19, CUDA graph memory profiling will be enabled "
+                    "In v0.21, CUDA graph memory profiling will be enabled "
                     "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
                     "which more accurately accounts for CUDA graph memory "
                     "during KV cache allocation. To try it now, set "
