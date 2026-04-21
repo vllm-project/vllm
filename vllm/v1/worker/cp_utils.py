@@ -33,7 +33,7 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "implementations to return the softmax LSE during decode, "
                     f"but {layer_impl.__class__.__name__} does not. "
                     "Try a different backend by setting "
-                    "VLLM_ATTENTION_BACKEND or disable DCP."
+                    "--attention-backend or disable DCP."
                 )
 
             if pcp_size > 1:
