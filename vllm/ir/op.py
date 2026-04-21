@@ -408,15 +408,26 @@ class IrOp:
             self._symbolic_mode = old
 
     def _make_symbolic(self, args: tuple) -> tuple[Any, ...]:
-        """Replace the first dimension of tensors in args with a SymInt."""
+        """Replace the first dimension of the first tensor with a SymInt.
+
+        Only the first tensor (typically the input) gets its first dimension
+        replaced with a SymInt. Other parameters like weight, bias, epsilon
+        remain unchanged.
+        """
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
         shape_env = ShapeEnv()
         sym_num_tokens = shape_env.create_unbacked_symint()
 
         result: list[Any] = []
+        first_tensor_found = False
         for arg in args:
-            if isinstance(arg, torch.Tensor) and arg.dim() >= 1:
+            if (
+                isinstance(arg, torch.Tensor)
+                and arg.dim() >= 1
+                and not first_tensor_found
+            ):
+                first_tensor_found = True
                 new_shape = (sym_num_tokens,) + arg.shape[1:]
                 result.append(torch.empty(new_shape, device="meta", dtype=arg.dtype))
             else:
