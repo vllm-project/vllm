@@ -89,7 +89,7 @@ class ServingPooling(PoolingServingBase):
                     f"via --pooler-config.task {request.task}."
                 )
 
-        if pooling_task == "plugin" and "plugin" not in self.supported_tasks:
+        if pooling_task == "plugin" and "plugin" not in self.io_processors:
             raise ValueError(
                 "No IOProcessor plugin installed. Please refer "
                 "to the documentation and to the "
