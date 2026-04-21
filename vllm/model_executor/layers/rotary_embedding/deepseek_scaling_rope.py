@@ -155,10 +155,8 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if is_neox_style:
-            # NOTE(woosuk): Here we assume that the positions tensor has the
-            # shape [batch_size, seq_len].
-            cos = cos.repeat(1, 1, 2).unsqueeze(-2)
-            sin = sin.repeat(1, 1, 2).unsqueeze(-2)
+            cos = cos.repeat(1, 2).unsqueeze(-2)
+            sin = sin.repeat(1, 2).unsqueeze(-2)
         else:
             cos = cos.repeat_interleave(2, dim=-1).unsqueeze(-2)
             sin = sin.repeat_interleave(2, dim=-1).unsqueeze(-2)
