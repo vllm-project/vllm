@@ -317,6 +317,13 @@ class ModelBlockTransferPolicy(ABC):
         region_ids = np.arange(num_regions)[:, None]
         return (region_ids * stride + block_ids_arr[None, :]).flatten()
 
+    # NOTE (ZhanqiuHu): The helpers below (_should_skip_fa, _fa_head_slot,
+    # _fa_rank_offset) handle FA replication, where num_kv_heads < tp_size
+    # and multiple ranks share the same physical KV head data.  As of now
+    # they are only used for Mamba hybrid models because pure FA models
+    # typically have enough KV heads to avoid replication.  We may modify
+    # and reuse these for Gemma4 hybrid cases.
+
     @staticmethod
     def _should_skip_fa(info: EngineTransferInfo, remote_rank: int) -> bool:
         """Whether to skip FA groups for this remote rank.
@@ -840,6 +847,8 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         )
         return result
 
+    # NOTE (ZhanqiuHu): See ABC comment on _should_skip_fa for context.
+    # This method also handles FA replication (see ABC helpers above).
     def _build_fa_remote_descs(
         self,
         nixl_agent_meta,
