@@ -371,7 +371,7 @@ def _test_backend_correctness(
     )
     device = torch.device(f"{DEVICE_TYPE}:0")
 
-    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
 
     # 1. Setup
     batch_size = batch_spec.batch_size
@@ -787,14 +787,9 @@ def test_non_causal_backend_correctness(
         else []
     )
 
-    if current_platform.is_rocm():
-        SMALL_BLOCK_BACKENDS = [
-            x for x in NON_CAUSAL_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
-        ]
-    else:
-        SMALL_BLOCK_BACKENDS = [
-            x for x in NON_CAUSAL_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
-        ]
+    SMALL_BLOCK_BACKENDS = [
+        x for x in NON_CAUSAL_BACKENDS_TO_TEST if x not in LARGE_BLOCK_BACKENDS
+    ]
 
     _test_backend_correctness(
         batch_spec,
