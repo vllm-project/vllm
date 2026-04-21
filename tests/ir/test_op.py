@@ -495,3 +495,68 @@ def test_uuid_and_oot(tmp_path: Path):
     assert uuid2 == uuid
     assert uuid2 != uuid1
     del _custom_mm.impls["impl_mm_oot"]
+
+
+def _test_native(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return x + y
+
+
+def _make_op_with_generator(name: str = "_ig_test"):
+    op = IrOp(name, _test_native)
+
+    @op.register_input_generator
+    def _gen(n: int = 4):
+        x = torch.randn(n, 3)
+        y = torch.randn(n, 3)
+        return x, y
+
+    return op
+
+
+def _test_native_single(x: torch.Tensor) -> torch.Tensor:
+    return x
+
+
+class TestInputGenerator:
+    def test_no_input_generator_by_default(self):
+        op = IrOp("_ig_test_no_gen", _test_native_single)
+        assert not op.has_input_generator
+
+    def test_register_input_generator(self):
+        op = _make_op_with_generator("_ig_test_reg")
+        assert op.has_input_generator
+
+    def test_generate_inputs_returns_tuple(self):
+        op = _make_op_with_generator("_ig_test_tuple")
+        result = op.generate_inputs(n=2)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert result[0].shape == (2, 3)
+        assert result[1].shape == (2, 3)
+
+    def test_generate_inputs_default_kwargs(self):
+        op = _make_op_with_generator("_ig_test_default")
+        result = op.generate_inputs()
+        assert result[0].shape == (4, 3)
+
+    def test_generate_inputs_without_registration_raises(self):
+        op = IrOp("_ig_test_no_gen_raises", _test_native_single)
+        with pytest.raises(RuntimeError, match="No input generator"):
+            op.generate_inputs()
+
+
+class TestTolerance:
+    def test_override_and_get_tolerance(self):
+        op = IrOp("_tol_test", _test_native)
+
+        tol = op.get_tolerance(torch.float32)
+        assert tol == {"atol": 1e-5, "rtol": 1.3e-6}
+
+        op.override_tolerance(torch.float32, atol=0.1, rtol=0.2)
+        assert op.get_tolerance(torch.float32) == {"atol": 0.1, "rtol": 0.2}
+        assert op.get_tolerance(torch.float16) == {"atol": 1e-3, "rtol": 1e-3}
+
+    def test_get_tolerance_raises_for_unknown_dtype(self):
+        op = IrOp("_tol_test_unknown", _test_native)
+        with pytest.raises(ValueError, match="No tolerance defined"):
+            op.get_tolerance(torch.complex64)
