@@ -112,8 +112,8 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        """Supports SiLU, RELU^2 non-gated, and GELU activation."""
+        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL, MoEActivation.GELU]
 
     @staticmethod
     def _supports_shape(hidden_dim: int) -> bool:
@@ -188,7 +188,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL, MoEActivation.GELU]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
@@ -306,7 +306,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL, MoEActivation.GELU]
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
