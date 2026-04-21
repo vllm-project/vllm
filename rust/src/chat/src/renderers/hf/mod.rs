@@ -143,20 +143,14 @@ impl HfChatRenderer {
             "applying chat template"
         );
 
-        let merged_template_kwargs = {
-            let mut kwargs = self.default_template_kwargs.clone();
-            kwargs.extend(request.chat_options.template_kwargs.clone());
-            kwargs.insert(
-                "continue_final_message".to_string(),
-                Value::Bool(request.chat_options.continue_final_message),
-            );
-            kwargs
-        };
+        let mut merged_template_kwargs = self.default_template_kwargs.clone();
+        merged_template_kwargs.extend(request.chat_options.template_kwargs.clone());
 
         let prompt = effective_template
             .apply(TemplateContext {
                 messages: &messages,
-                add_generation_prompt: request.chat_options.add_generation_prompt,
+                add_generation_prompt: request.chat_options.add_generation_prompt(),
+                continue_final_message: request.chat_options.continue_final_message(),
                 tools: tools.as_deref(),
                 documents: request.documents.as_deref(),
                 template_kwargs: Some(&merged_template_kwargs),
@@ -354,6 +348,7 @@ mod tests {
     use super::{ChatTemplateContentFormatOption, HfChatRenderer};
     use crate::request::{
         ChatContentPart, ChatMessage, ChatRequest, ChatRole, ChatTool, ChatToolChoice,
+        GenerationPromptMode,
     };
     use crate::{AssistantContentBlock, ChatRenderer, Error, Result};
 
@@ -410,8 +405,7 @@ mod tests {
             "new"
         );
 
-        request.chat_options.continue_final_message = true;
-        request.chat_options.add_generation_prompt = false;
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
 
         assert_eq!(
             render(
@@ -679,7 +673,7 @@ mod tests {
                 },
             ]),
         ]);
-        request.chat_options.add_generation_prompt = false;
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
 
         let rendered = render(Some(QWEN3_0_6B_TEMPLATE), &request).unwrap();
 
@@ -788,8 +782,7 @@ mod tests {
     #[test]
     fn qwen35_template_omits_assistant_reasoning_prefill_without_generation_prompt() {
         let mut request = sample_request(vec![ChatMessage::text(ChatRole::User, "hello")]);
-        request.chat_options.add_generation_prompt = false;
-        request.chat_options.continue_final_message = true;
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
         request
             .chat_options
             .template_kwargs

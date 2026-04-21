@@ -171,9 +171,11 @@ pub struct ChatCompletionRequest {
     #[serde(default)]
     pub echo: bool,
 
-    /// Whether to add the generation prompt to the chat template
-    #[serde(default = "default_true")]
-    pub add_generation_prompt: bool,
+    /// Whether to add the generation prompt to the chat template.
+    ///
+    /// When omitted, the request follows the API default behavior, which is equivalent to `true`
+    /// unless `continue_final_message=true` selects final assistant continuation instead.
+    pub add_generation_prompt: Option<bool>,
 
     /// Continue generating from final assistant message
     #[serde(default)]
@@ -270,7 +272,7 @@ impl Default for ChatCompletionRequest {
             allowed_token_ids: None,
             bad_words: None,
             echo: false,
-            add_generation_prompt: true,
+            add_generation_prompt: None,
             continue_final_message: false,
             add_special_tokens: false,
             documents: None,

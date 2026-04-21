@@ -42,6 +42,7 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
 pub(super) struct TemplateContext<'a> {
     pub(super) messages: &'a [TemplateMessage],
     pub(super) add_generation_prompt: bool,
+    pub(super) continue_final_message: bool,
     pub(super) tools: Option<&'a [TemplateTool]>,
     pub(super) documents: Option<&'a [serde_json::Value]>,
     #[serde(flatten)]

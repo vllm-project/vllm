@@ -465,7 +465,7 @@ impl ChatRenderer for FakeChatBackend {
             prompt.push_str(&message.text_content()?);
             prompt.push('\n');
         }
-        if request.chat_options.add_generation_prompt {
+        if request.chat_options.add_generation_prompt() {
             prompt.push_str("assistant:");
         }
         Ok(vllm_chat::RenderedPrompt { prompt })

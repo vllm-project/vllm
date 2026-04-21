@@ -219,17 +219,34 @@ impl From<AssistantMessage> for ChatMessage {
     }
 }
 
+/// Controls how prompt rendering should end after the existing chat history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationPromptMode {
+    /// Append a generation prompt for a new assistant turn.
+    ///
+    /// Equivalent to `add_generation_prompt = true` and `continue_final_message = false`.
+    #[default]
+    StartNewAssistant,
+    /// Leave the final assistant message open so generation continues it.
+    ///
+    /// Equivalent to `add_generation_prompt = false` and `continue_final_message = true`.
+    ContinueFinalAssistant,
+    /// Render the existing chat history without adding any trailing generation prompt.
+    ///
+    /// Equivalent to `add_generation_prompt = false` and `continue_final_message = false`.
+    NoGenerationPrompt,
+}
+
 /// Chat-template-related request options.
 ///
 /// These are the small subset of chat controls that currently affect prompt rendering in
 /// `vllm-chat`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChatOptions {
-    /// If true, ask the chat template to append a generation prompt for the assistant.
-    pub add_generation_prompt: bool,
-    /// If true, expose `continue_final_message` to the chat template so the final assistant
-    /// message can be left open-ended for continuation instead of starting a new assistant turn.
-    pub continue_final_message: bool,
+    /// Controls whether rendering starts a new assistant turn, continues the final assistant
+    /// message, or emits no trailing generation prompt at all.
+    pub generation_prompt_mode: GenerationPromptMode,
 
     /// Per-request Jinja chat template override. When set, this template is used instead of the
     /// model's default chat template.
@@ -242,11 +259,28 @@ pub struct ChatOptions {
 impl Default for ChatOptions {
     fn default() -> Self {
         Self {
-            add_generation_prompt: true,
-            continue_final_message: false,
+            generation_prompt_mode: GenerationPromptMode::StartNewAssistant,
             chat_template: None,
             template_kwargs: HashMap::new(),
         }
+    }
+}
+
+impl ChatOptions {
+    /// Whether to add a generation prompt for a new assistant turn after the existing chat history.
+    pub fn add_generation_prompt(&self) -> bool {
+        matches!(
+            self.generation_prompt_mode,
+            GenerationPromptMode::StartNewAssistant
+        )
+    }
+
+    /// Whether to leave the final assistant message open so generation continues it.
+    pub fn continue_final_message(&self) -> bool {
+        matches!(
+            self.generation_prompt_mode,
+            GenerationPromptMode::ContinueFinalAssistant
+        )
     }
 }
 
@@ -343,8 +377,16 @@ impl ChatRequest {
         if self.messages.is_empty() {
             return Err(Error::EmptyMessages);
         }
-        if self.chat_options.add_generation_prompt && self.chat_options.continue_final_message {
-            return Err(Error::ConflictingGenerationPromptMode);
+        match (
+            self.chat_options.generation_prompt_mode,
+            self.messages.last().map(ChatMessage::role),
+        ) {
+            (GenerationPromptMode::ContinueFinalAssistant, Some(ChatRole::Assistant)) => {}
+            (GenerationPromptMode::ContinueFinalAssistant, _) => {
+                return Err(Error::ContinueFinalAssistantWithoutFinalAssistant);
+            }
+            (GenerationPromptMode::NoGenerationPrompt, _)
+            | (GenerationPromptMode::StartNewAssistant, _) => {}
         }
         Ok(())
     }

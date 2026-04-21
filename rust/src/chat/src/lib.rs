@@ -27,7 +27,7 @@ pub use renderers::{
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
-    ChatToolChoice, SamplingParams,
+    ChatToolChoice, GenerationPromptMode, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
 pub use tool::{ToolParser, ToolParserError, ToolParserFactory};

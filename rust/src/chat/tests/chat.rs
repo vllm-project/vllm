@@ -8,7 +8,8 @@ use tokio::time::timeout;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessageExt as _, ChatBackend, ChatEvent,
     ChatLlm, ChatMessage, ChatRenderer, ChatRequest, ChatRole, ChatTextBackend, ChatTool,
-    ChatToolChoice, DynChatRenderer, FinishReason, ParserSelection, RenderedPrompt, SamplingParams,
+    ChatToolChoice, DynChatRenderer, FinishReason, GenerationPromptMode, ParserSelection,
+    RenderedPrompt, SamplingParams,
 };
 use vllm_engine_core_client::protocol::{
     EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, Logprobs,
@@ -252,7 +253,7 @@ impl ChatRenderer for FakeChatBackend {
             prompt.push_str(&message.text_content()?);
             prompt.push('\n');
         }
-        if request.chat_options.add_generation_prompt {
+        if request.chat_options.add_generation_prompt() {
             prompt.push_str("assistant:");
         }
 
@@ -667,13 +668,22 @@ async fn chat_stream_flushes_held_text_on_finish() {
 #[test]
 fn chat_request_rejects_conflicting_generation_modes() {
     let mut request = sample_request("chat-2");
-    request.chat_options.continue_final_message = true;
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
     let error = request.validate().unwrap_err();
 
     assert!(matches!(
         error,
-        vllm_chat::Error::ConflictingGenerationPromptMode
+        vllm_chat::Error::ContinueFinalAssistantWithoutFinalAssistant
     ));
+}
+
+#[test]
+fn chat_request_accepts_continue_final_assistant_mode_with_final_assistant() {
+    let mut request = sample_request("chat-2b");
+    request.messages = vec![ChatMessage::assistant_text("hello")];
+    request.chat_options.generation_prompt_mode = GenerationPromptMode::ContinueFinalAssistant;
+
+    request.validate().unwrap();
 }
 
 #[test]

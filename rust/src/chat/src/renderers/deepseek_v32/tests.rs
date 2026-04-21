@@ -9,7 +9,7 @@ use thiserror_ext::AsReport;
 use super::DeepSeekV32ChatRenderer;
 use crate::error::Error;
 use crate::event::{AssistantContentBlock, AssistantToolCall};
-use crate::request::{ChatMessage, ChatRequest, ChatTool, ChatToolChoice};
+use crate::request::{ChatMessage, ChatRequest, ChatTool, ChatToolChoice, GenerationPromptMode};
 use crate::{ChatRenderer, ChatRole};
 
 #[derive(Debug, Deserialize)]
@@ -94,6 +94,12 @@ fn thinking_request(messages: Vec<ChatMessage>) -> ChatRequest {
         messages,
         ..ChatRequest::for_test()
     };
+    if matches!(
+        request.messages.last().map(ChatMessage::role),
+        Some(ChatRole::Assistant)
+    ) {
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    }
     request
         .chat_options
         .template_kwargs
@@ -161,6 +167,12 @@ fn fixture_request(input_name: &str) -> ChatRequest {
         },
         ..ChatRequest::for_test()
     };
+    if matches!(
+        request.messages.last().map(ChatMessage::role),
+        Some(ChatRole::Assistant)
+    ) {
+        request.chat_options.generation_prompt_mode = GenerationPromptMode::NoGenerationPrompt;
+    }
     request
         .chat_options
         .template_kwargs
