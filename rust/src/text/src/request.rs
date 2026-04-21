@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::StructuredOutputsParams;
@@ -11,7 +12,7 @@ use crate::output::TextDecodeOptions;
 ///
 /// This supports either ordinary text that still needs tokenization or already-tokenized prompt
 /// IDs that should bypass tokenizer work entirely.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, EnumAsInner)]
 #[serde(untagged)]
 pub enum Prompt {
     /// Untokenized prompt text that still needs tokenizer work before generation.

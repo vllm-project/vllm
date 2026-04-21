@@ -7,6 +7,7 @@ edition.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 easy-ext.workspace = true
+enum-as-inner.workspace = true
 fastokens.workspace = true
 futures.workspace = true
 futures-async-stream.workspace = true

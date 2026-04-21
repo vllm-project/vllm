@@ -1,4 +1,4 @@
-use vllm_text::{Prompt, SamplingParams, TextDecodeOptions, TextRequest};
+use vllm_text::{SamplingParams, TextDecodeOptions, TextRequest};
 
 use super::types::CompletionRequest;
 use crate::error::ApiError;
@@ -54,10 +54,10 @@ pub(crate) fn prepare_completion_request(
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
-    let echo = request.echo.then(|| match &request.prompt {
-        Prompt::Text(text) => text.clone(),
-        Prompt::TokenIds(_) => unreachable!("validated above"),
-    });
+    let echo = request
+        .echo
+        .then(|| request.prompt.as_text().cloned())
+        .flatten();
 
     let structured_outputs =
         convert_from_response_format_value(&request.response_format, &request.structured_outputs)?;

@@ -21,7 +21,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 use vllm_text::{
-    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
+    DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob, Prompt,
     TextBackend,
 };
 use zeromq::prelude::{SocketRecv, SocketSend};
@@ -272,7 +272,9 @@ impl ChatRenderer for FakeChatBackend {
             prompt.push_str("assistant:");
         }
 
-        Ok(RenderedPrompt { prompt })
+        Ok(RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+        })
     }
 }
 

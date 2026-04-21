@@ -5,6 +5,7 @@ use serde::Serialize;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{info, trace, warn};
+use vllm_text::Prompt;
 use vllm_text::backend::hf::{
     HfSpecialTokens, HfTokenizerConfig, ResolvedModelFiles, load_tokenizer_config,
 };
@@ -163,7 +164,9 @@ impl HfChatRenderer {
             prompt, "rendered chat template prompt"
         );
 
-        Ok(RenderedPrompt { prompt })
+        Ok(RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+        })
     }
 }
 
@@ -343,6 +346,7 @@ mod tests {
 
     use expect_test::expect;
     use serde_json::Value;
+    use vllm_text::Prompt;
     use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
 
     use super::{ChatTemplateContentFormatOption, HfChatRenderer};
@@ -364,14 +368,16 @@ mod tests {
     }
 
     fn render(template: Option<&str>, request: &ChatRequest) -> Result<String> {
-        Ok(HfChatRenderer::new(
+        HfChatRenderer::new(
             template.map(str::to_owned),
             HashMap::new(),
             ChatTemplateContentFormatOption::Auto,
             None,
         )?
         .render(request)?
-        .prompt)
+        .prompt
+        .into_text()
+        .map_err(|_| unreachable!("HF renderer should return text prompt"))
     }
 
     #[test]
@@ -537,7 +543,7 @@ mod tests {
         .apply_chat_template(&request)
         .unwrap();
 
-        assert_eq!(rendered.prompt, "<bos>|true");
+        assert_eq!(rendered.prompt, Prompt::Text("<bos>|true".to_string()));
     }
 
     #[test]
@@ -580,7 +586,7 @@ mod tests {
         .unwrap()
         .prompt;
 
-        assert_eq!(rendered, "hello world");
+        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
     }
 
     #[test]
@@ -601,7 +607,7 @@ mod tests {
         .unwrap()
         .prompt;
 
-        assert_eq!(rendered, "hello world");
+        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
     }
 
     #[test]
@@ -625,7 +631,7 @@ mod tests {
 
         let rendered = renderer.render(&request).unwrap().prompt;
 
-        assert_eq!(rendered, "true|x");
+        assert_eq!(rendered, Prompt::Text("true|x".to_string()));
     }
 
     #[test]

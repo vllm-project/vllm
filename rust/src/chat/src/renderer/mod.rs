@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use vllm_text::Prompt;
+
 use crate::error::Result;
 use crate::request::ChatRequest;
 
@@ -13,7 +15,7 @@ pub use selection::RendererSelection;
 /// Rendered chat prompt submitted to the text backend.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedPrompt {
-    pub prompt: String,
+    pub prompt: Prompt,
 }
 
 /// Minimal chat-prompt renderer used by `vllm-chat`.

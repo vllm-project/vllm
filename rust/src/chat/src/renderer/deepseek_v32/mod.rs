@@ -1,5 +1,7 @@
 mod encoding;
 
+use vllm_text::Prompt;
+
 use super::{ChatRenderer, RenderedPrompt};
 use crate::Result;
 use crate::request::ChatRequest;
@@ -20,7 +22,7 @@ impl ChatRenderer for DeepSeekV32ChatRenderer {
         request.validate()?;
 
         Ok(RenderedPrompt {
-            prompt: encoding::render_request(request)?,
+            prompt: Prompt::Text(encoding::render_request(request)?),
         })
     }
 }

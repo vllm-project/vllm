@@ -174,6 +174,8 @@ mod tests {
             .render(&request_with_user_text("hello"))
             .unwrap()
             .prompt
+            .into_text()
+            .expect("renderer should return text prompt")
     }
 
     #[test]

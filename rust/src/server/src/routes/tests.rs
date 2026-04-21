@@ -34,8 +34,8 @@ use vllm_engine_core_client::{
 };
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
-use vllm_text::TextBackend;
 use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
+use vllm_text::{Prompt, TextBackend};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
@@ -483,7 +483,9 @@ impl ChatRenderer for FakeChatBackend {
         if request.chat_options.add_generation_prompt() {
             prompt.push_str("assistant:");
         }
-        Ok(vllm_chat::RenderedPrompt { prompt })
+        Ok(vllm_chat::RenderedPrompt {
+            prompt: Prompt::Text(prompt),
+        })
     }
 }
 

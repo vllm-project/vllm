@@ -48,7 +48,7 @@ mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_llm::Llm;
-use vllm_text::{Prompt, TextLlm, TextRequest};
+use vllm_text::{TextLlm, TextRequest};
 
 /// Validate explicit parser override names without starting request processing.
 pub fn validate_parser_overrides(
@@ -154,7 +154,7 @@ impl ChatLlm {
 
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
-            prompt: Prompt::Text(rendered.prompt),
+            prompt: rendered.prompt,
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,
             intermediate: request.intermediate,

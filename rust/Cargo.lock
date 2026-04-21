@@ -4777,6 +4777,7 @@ dependencies = [
  "base64 0.22.1",
  "criterion",
  "easy-ext",
+ "enum-as-inner",
  "expect-test",
  "fastokens",
  "futures",
