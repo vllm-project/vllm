@@ -116,6 +116,12 @@ def _cached_get_attn_backend(
 ) -> type[AttentionBackend]:
     from vllm.platforms import current_platform
 
+    if attn_selector_config.use_batch_invariant and attn_selector_config.use_mla:
+        logger.warning_once(
+            "MLA uses different backends for prefill and decode, so batch "
+            "invariance will not hold across prefill and decode.",
+        )
+
     attention_cls = current_platform.get_attn_backend_cls(
         backend,
         attn_selector_config=attn_selector_config,
