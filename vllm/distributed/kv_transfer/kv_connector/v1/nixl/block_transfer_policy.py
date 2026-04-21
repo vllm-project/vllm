@@ -238,7 +238,6 @@ class ModelBlockTransferPolicy(ABC):
         self,
         src_blocks_data: list[tuple[int, int, int]],
         num_descs: int,
-        abs_tp: int,
         transfer_config: Any | None = None,
         tp_size: int = 1,
         is_mla: bool = False,
@@ -521,13 +520,15 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         self,
         src_blocks_data,
         num_descs,
-        abs_tp,
         transfer_config=None,
         tp_size: int = 1,
         is_mla: bool = False,
         total_num_kv_heads: int = 1,
     ):
-        _ = (num_descs, transfer_config, tp_size, is_mla, total_num_kv_heads)
+        _ = (num_descs, is_mla, total_num_kv_heads)
+        assert isinstance(transfer_config, EngineTransferInfo)
+        assert transfer_config.remote_tp_size > tp_size
+        abs_tp = transfer_config.remote_tp_size // tp_size
         result: list[list[tuple[int, int, int]]] = []
         for i in range(abs_tp):
             blocks_data: list[tuple[int, int, int]] = []
@@ -963,7 +964,6 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         self,
         src_blocks_data,
         num_descs,
-        abs_tp,
         transfer_config=None,
         tp_size: int = 1,
         is_mla: bool = False,
@@ -971,6 +971,8 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
     ):
         assert isinstance(transfer_config, MambaEngineTransferInfo)
         info = transfer_config
+        assert info.remote_tp_size > tp_size
+        abs_tp = info.remote_tp_size // tp_size
         if self.needs_split_handles(
             info,
             tp_size=tp_size,
