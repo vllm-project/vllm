@@ -275,6 +275,7 @@ class TieringOffloadingManager(OffloadingManager):
             job_id=job_id,
             keys=primary_store_result.keys_to_store,
             spec=primary_store_result.store_spec,
+            req_context=req_context,
         )
         self._load_jobs[job_id] = job_metadata
 

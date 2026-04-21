@@ -28,7 +28,7 @@ The class provides the following primitives:
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NewType
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -99,6 +99,7 @@ class JobMetadata:
     job_id: JobId
     keys: list[OffloadKey]
     spec: LoadStoreSpec
+    req_context: ReqContext = field(default_factory=ReqContext)
 
 
 @dataclass
