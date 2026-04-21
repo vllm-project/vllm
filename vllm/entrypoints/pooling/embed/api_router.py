@@ -7,12 +7,10 @@ from fastapi import APIRouter, Depends, Request
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.utils import validate_json_request
-from vllm.entrypoints.pooling.embed.protocol import (
-    CohereEmbedRequest,
-    EmbeddingRequest,
-)
-from vllm.entrypoints.pooling.embed.serving import ServingEmbedding
 from vllm.entrypoints.utils import load_aware_call, with_cancellation
+
+from .protocol import CohereEmbedRequest, EmbeddingRequest
+from .serving import ServingEmbedding
 
 router = APIRouter()
 
