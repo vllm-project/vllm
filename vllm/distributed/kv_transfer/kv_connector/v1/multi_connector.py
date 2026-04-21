@@ -169,6 +169,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
             self._ktc_kv_transfer_config.append(temp_config.kv_transfer_config)
 
         self._all_support_hma = all(supports_hma(c) for c in self._connectors)
+        assert (
+            vllm_config.scheduler_config.disable_hybrid_kv_cache_manager
+            or self._all_support_hma
+        ), "HMA should not be enabled unless all sub-connectors support it"
 
         # A mapping from request id to the index of the connector chosen to
         # load the request from (if any).
