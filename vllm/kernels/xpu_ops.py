@@ -67,6 +67,7 @@ def dynamic_group_quant_fp8(
 
     assert x.is_contiguous()
     assert x.shape[-1] % group_size == 0
+    assert scale_alignment == 1
 
     x_q = torch.empty(x.shape, device=x.device, dtype=fp8_dtype)
     x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)

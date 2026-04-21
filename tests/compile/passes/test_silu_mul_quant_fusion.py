@@ -205,8 +205,6 @@ class TestSiluMulBlockQuantModel(torch.nn.Module):
         ops = []
         if self.enable_silu_mul_custom_op:
             ops.append(SILU_MUL_OP)
-        # When silu custom op is disabled, aten.mul.Tensor also appears
-        # in dequant code, so we skip checking it to avoid false positives.
         ops.append(torch.ops.vllm_ir.dynamic_group_quant_fp8)
         return ops
 

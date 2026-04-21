@@ -118,7 +118,9 @@ def dynamic_quant_fp8(
 
 _vllm_c_group_quant_args = (
     lambda x, group_shape, column_major, use_ue8m0, fp8_dtype, scale_alignment=1: (
-        x.is_contiguous() and x.shape[-1] % group_shape[-1] == 0
+        x.is_contiguous()
+        and x.shape[-1] % group_shape[-1] == 0
+        and scale_alignment in (1, 4)
     )
 )
 """vllm_c dynamic_group_quant_fp8 requires a contiguous input tensor with
@@ -140,7 +142,7 @@ def dynamic_group_quant_fp8(
 
     assert x.is_contiguous()
     assert x.shape[-1] % group_size == 0
-
+    assert scale_alignment in (1, 4)
     x_q = torch.empty(x.shape, device=x.device, dtype=fp8_dtype)
     x_s = make_group_quant_scales(x, group_size, column_major, scale_alignment)
     torch.ops._C.per_token_group_fp8_quant(
