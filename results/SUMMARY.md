@@ -6,10 +6,33 @@
 
 ### /models_Qwen3_Qwen3-30B-A3B-Instruct-2507
 
-| Threshold | gsm8k | mmlu_pro |
+| Threshold | GSM8K | MMLU Pro | LongBench-E (mean) |
+|---|---|---|---|
+| None (baseline) | 88.00% ± 0.0206 | 73.86% ± 0.0072 | 41.75% ± 0.0068 |
+| pf10000/dc500 | 48.00% ± 0.0317 | 53.49% ± 0.0081 | 34.66% ± 0.0066 |
+
+## LongBench-E Per-Subtask Breakdown
+
+Each cell is the subtask's `score,none` from lm_eval (F1 / ROUGE / code-sim / classification / count / retrieval depending on the subtask). The `mean` row matches the LongBench-E column in the main accuracy table above.
+
+### /models_Qwen3_Qwen3-30B-A3B-Instruct-2507
+
+| Subtask (metric) | None (baseline) | pf10000/dc500 |
 |---|---|---|
-| None (baseline) | 88.00% ± 0.0206 | 73.86% ± 0.0072 |
-| pf10000/dc500 | 48.00% ± 0.0317 | 53.49% ± 0.0081 |
+| `2wikimqa` (qa_f1_score) | 17.05% ± 0.0130 | 11.76% ± 0.0133 |
+| `gov_report` (rouge_score) | 30.98% ± 0.0056 | 30.73% ± 0.0050 |
+| `hotpotqa` (qa_f1_score) | 18.24% ± 0.0181 | 13.07% ± 0.0111 |
+| `lcc` (code_sim_score) | 47.45% ± 0.0363 | 28.73% ± 0.0299 |
+| `multi_news` (rouge_score) | 23.17% ± 0.0045 | 22.49% ± 0.0053 |
+| `multifieldqa_en` (qa_f1_score) | 29.33% ± 0.0239 | 23.17% ± 0.0159 |
+| `passage_count` (count_score) | 13.58% ± 0.0242 | 8.84% ± 0.0162 |
+| `passage_retrieval_en` (retrieval_score) | 85.50% ± 0.0223 | 84.90% ± 0.0257 |
+| `qasper` (qa_f1_score) | 24.26% ± 0.0289 | 16.22% ± 0.0181 |
+| `repobench-p` (code_sim_score) | 46.53% ± 0.0298 | 28.75% ± 0.0293 |
+| `samsum` (rouge_score) | 39.04% ± 0.0153 | 32.90% ± 0.0158 |
+| `trec` (classification_score) | 78.00% ± 0.0416 | 70.00% ± 0.0461 |
+| `triviaqa` (qa_f1_score) | 89.63% ± 0.0258 | 78.99% ± 0.0372 |
+| **mean** | **41.75%** ± 0.0068 | **34.66%** ± 0.0066 |
 
 ## Performance Results
 

@@ -1,0 +1,1073 @@
+{
+  "results": {
+    "longbench_2wikimqa_e": {
+      "alias": "longbench_2wikimqa_e",
+      "score,none": 0.17054603745840116,
+      "score_stderr,none": 0.012978117219090979,
+      "qa_f1_score,none": 0.17054603745840116,
+      "qa_f1_score_stderr,none": 0.012978117219090979
+    },
+    "longbench_gov_report_e": {
+      "alias": "longbench_gov_report_e",
+      "score,none": 0.30976027347592416,
+      "score_stderr,none": 0.0055570238229242595,
+      "rouge_score,none": 0.30976027347592416,
+      "rouge_score_stderr,none": 0.0055570238229242595
+    },
+    "longbench_hotpotqa_e": {
+      "alias": "longbench_hotpotqa_e",
+      "score,none": 0.1823835395912324,
+      "score_stderr,none": 0.018061475590906456,
+      "qa_f1_score,none": 0.1823835395912324,
+      "qa_f1_score_stderr,none": 0.018061475590906456
+    },
+    "longbench_lcc_e": {
+      "alias": "longbench_lcc_e",
+      "score,none": 0.47450000000000003,
+      "score_stderr,none": 0.0362542578481647,
+      "code_sim_score,none": 0.47450000000000003,
+      "code_sim_score_stderr,none": 0.0362542578481647
+    },
+    "longbench_multi_news_e": {
+      "alias": "longbench_multi_news_e",
+      "score,none": 0.23171370365087307,
+      "score_stderr,none": 0.004524494050258392,
+      "rouge_score,none": 0.23171370365087307,
+      "rouge_score_stderr,none": 0.004524494050258392
+    },
+    "longbench_multifieldqa_en_e": {
+      "alias": "longbench_multifieldqa_en_e",
+      "score,none": 0.29333476233576516,
+      "score_stderr,none": 0.02386410701756554,
+      "qa_f1_score,none": 0.29333476233576516,
+      "qa_f1_score_stderr,none": 0.02386410701756554
+    },
+    "longbench_passage_count_e": {
+      "alias": "longbench_passage_count_e",
+      "score,none": 0.13582539682539682,
+      "score_stderr,none": 0.024158109148156394,
+      "count_score,none": 0.13582539682539682,
+      "count_score_stderr,none": 0.024158109148156394
+    },
+    "longbench_passage_retrieval_en_e": {
+      "alias": "longbench_passage_retrieval_en_e",
+      "score,none": 0.855,
+      "score_stderr,none": 0.02230477092095185,
+      "retrieval_score,none": 0.855,
+      "retrieval_score_stderr,none": 0.02230477092095185
+    },
+    "longbench_qasper_e": {
+      "alias": "longbench_qasper_e",
+      "score,none": 0.24264481735373153,
+      "score_stderr,none": 0.028930029871682566,
+      "qa_f1_score,none": 0.24264481735373153,
+      "qa_f1_score_stderr,none": 0.028930029871682566
+    },
+    "longbench_repobench-p_e": {
+      "alias": "longbench_repobench-p_e",
+      "score,none": 0.4653,
+      "score_stderr,none": 0.029770657033428405,
+      "code_sim_score,none": 0.4653,
+      "code_sim_score_stderr,none": 0.029770657033428405
+    },
+    "longbench_samsum_e": {
+      "alias": "longbench_samsum_e",
+      "score,none": 0.3903714146126053,
+      "score_stderr,none": 0.015329599712537953,
+      "rouge_score,none": 0.3903714146126053,
+      "rouge_score_stderr,none": 0.015329599712537953
+    },
+    "longbench_trec_e": {
+      "alias": "longbench_trec_e",
+      "score,none": 0.78,
+      "score_stderr,none": 0.041633319989322654,
+      "classification_score,none": 0.78,
+      "classification_score_stderr,none": 0.041633319989322654
+    },
+    "longbench_triviaqa_e": {
+      "alias": "longbench_triviaqa_e",
+      "score,none": 0.8963333333333334,
+      "score_stderr,none": 0.025828124814344627,
+      "qa_f1_score,none": 0.8963333333333334,
+      "qa_f1_score_stderr,none": 0.025828124814344627
+    }
+  },
+  "group_subtasks": {
+    "longbench_triviaqa_e": [],
+    "longbench_trec_e": [],
+    "longbench_samsum_e": [],
+    "longbench_repobench-p_e": [],
+    "longbench_qasper_e": [],
+    "longbench_passage_retrieval_en_e": [],
+    "longbench_passage_count_e": [],
+    "longbench_multifieldqa_en_e": [],
+    "longbench_multi_news_e": [],
+    "longbench_lcc_e": [],
+    "longbench_hotpotqa_e": [],
+    "longbench_gov_report_e": [],
+    "longbench_2wikimqa_e": []
+  },
+  "configs": {
+    "longbench_2wikimqa_e": {
+      "task": "longbench_2wikimqa_e",
+      "tag": [
+        "longbench_multi_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "2wikimqa_e",
+      "test_split": "test",
+      "doc_to_text": "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{{context}}\n\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {{question}}\nAnswer:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_qa_f1_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_qa_f1_score(doc, results, **kwargs)\n    qa_f1 = result[\"qa_f1_score\"]\n    return {\"score\": qa_f1, \"qa_f1_score\": qa_f1}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{{context}}\n\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {{question}}\nAnswer:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "qa_f1_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 32,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_gov_report_e": {
+      "task": "longbench_gov_report_e",
+      "tag": [
+        "longbench_summarization_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "gov_report_e",
+      "test_split": "test",
+      "doc_to_text": "You are given a report by a government agency. Write a one-page summary of the report.\n\nReport:\n{{context}}\n\nNow, write a one-page summary of the report.\n\nSummary:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_rouge_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_rouge_score(doc, results, **kwargs)\n    rouge = result[\"rouge_score\"]\n    return {\"score\": rouge, \"rouge_score\": rouge}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "You are given a report by a government agency. Write a one-page summary of the report.\n\nReport:\n{{context}}\n\nNow, write a one-page summary of the report.\n\nSummary:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "rouge_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 512,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_hotpotqa_e": {
+      "task": "longbench_hotpotqa_e",
+      "tag": [
+        "longbench_multi_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "hotpotqa_e",
+      "test_split": "test",
+      "doc_to_text": "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{{context}}\n\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {{question}}\nAnswer:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_qa_f1_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_qa_f1_score(doc, results, **kwargs)\n    qa_f1 = result[\"qa_f1_score\"]\n    return {\"score\": qa_f1, \"qa_f1_score\": qa_f1}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Answer the question based on the given passages. Only give me the answer and do not output any other words.\n\nThe following are given passages.\n{{context}}\n\nAnswer the question based on the given passages. Only give me the answer and do not output any other words.\n\nQuestion: {{question}}\nAnswer:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "qa_f1_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 32,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_lcc_e": {
+      "task": "longbench_lcc_e",
+      "tag": [
+        "longbench_code_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "lcc_e",
+      "test_split": "test",
+      "doc_to_text": "Please complete the code given below. \n{{context}}Next line of code:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_code_sim_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_code_sim_score(doc, results, **kwargs)\n    code_sim = result[\"code_sim_score\"]\n    return {\"score\": code_sim, \"code_sim_score\": code_sim}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Please complete the code given below. \n{{context}}Next line of code:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "code_sim_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 64,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_multi_news_e": {
+      "task": "longbench_multi_news_e",
+      "tag": [
+        "longbench_summarization_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "multi_news_e",
+      "test_split": "test",
+      "doc_to_text": "You are given several news passages. Write a one-page summary of all news. \n\nNews:\n{{context}}\n\nNow, write a one-page summary of all the news.\n\nSummary:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_rouge_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_rouge_score(doc, results, **kwargs)\n    rouge = result[\"rouge_score\"]\n    return {\"score\": rouge, \"rouge_score\": rouge}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "You are given several news passages. Write a one-page summary of all news. \n\nNews:\n{{context}}\n\nNow, write a one-page summary of all the news.\n\nSummary:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "rouge_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 512,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_multifieldqa_en_e": {
+      "task": "longbench_multifieldqa_en_e",
+      "tag": [
+        "longbench_single_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "multifieldqa_en_e",
+      "test_split": "test",
+      "doc_to_text": "Read the following text and answer briefly.\n\n{{context}}\n\nNow, answer the following question based on the above text, only give me the answer and do not output any other words.\n\nQuestion: {{question}}\nAnswer:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_qa_f1_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_qa_f1_score(doc, results, **kwargs)\n    qa_f1 = result[\"qa_f1_score\"]\n    return {\"score\": qa_f1, \"qa_f1_score\": qa_f1}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Read the following text and answer briefly.\n\n{{context}}\n\nNow, answer the following question based on the above text, only give me the answer and do not output any other words.\n\nQuestion: {{question}}\nAnswer:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "qa_f1_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 64,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_passage_count_e": {
+      "task": "longbench_passage_count_e",
+      "tag": [
+        "longbench_synthetic_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "passage_count_e",
+      "test_split": "test",
+      "doc_to_text": "There are some paragraphs below sourced from Wikipedia. Some of them may be duplicates. Please carefully read these paragraphs and determine how many unique paragraphs there are after removing duplicates. In other words, how many non-repeating paragraphs are there in total?\n\n{{context}}\n\nPlease enter the final count of unique paragraphs after removing duplicates. The output format should only contain the number, such as 1, 2, 3, and so on.\n\nThe final answer is:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_count_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_count_score(doc, results, **kwargs)\n    count = result[\"count_score\"]\n    return {\"score\": count, \"count_score\": count}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "There are some paragraphs below sourced from Wikipedia. Some of them may be duplicates. Please carefully read these paragraphs and determine how many unique paragraphs there are after removing duplicates. In other words, how many non-repeating paragraphs are there in total?\n\n{{context}}\n\nPlease enter the final count of unique paragraphs after removing duplicates. The output format should only contain the number, such as 1, 2, 3, and so on.\n\nThe final answer is:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "count_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 32,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_passage_retrieval_en_e": {
+      "task": "longbench_passage_retrieval_en_e",
+      "tag": [
+        "longbench_synthetic_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "passage_retrieval_en_e",
+      "test_split": "test",
+      "doc_to_text": "Here are 30 paragraphs from Wikipedia, along with an abstract. Please determine which paragraph the abstract is from.\n\n{{context}}\n\nThe following is an abstract.\n\n{{question}}\n\nPlease enter the number of the paragraph that the abstract is from. The answer format must be like \"Paragraph 1\", \"Paragraph 2\", etc.\n\nThe answer is:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_retrieval_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_retrieval_score(doc, results, **kwargs)\n    retrieval = result[\"retrieval_score\"]\n    return {\"score\": retrieval, \"retrieval_score\": retrieval}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Here are 30 paragraphs from Wikipedia, along with an abstract. Please determine which paragraph the abstract is from.\n\n{{context}}\n\nThe following is an abstract.\n\n{{question}}\n\nPlease enter the number of the paragraph that the abstract is from. The answer format must be like \"Paragraph 1\", \"Paragraph 2\", etc.\n\nThe answer is:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "retrieval_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 32,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_qasper_e": {
+      "task": "longbench_qasper_e",
+      "tag": [
+        "longbench_single_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "qasper_e",
+      "test_split": "test",
+      "doc_to_text": "You are given a scientific article and a question. Answer the question as concisely as you can, using a single phrase or sentence if possible. If the question cannot be answered based on the information in the article, write \"unanswerable\". If the question is a yes/no question, answer \"yes\", \"no\", or \"unanswerable\". Do not provide any explanation.\n\nArticle: {{context}}\n\n Answer the question based on the above article as concisely as you can, using a single phrase or sentence if possible. If the question cannot be answered based on the information in the article, write \"unanswerable\". If the question is a yes/no question, answer \"yes\", \"no\", or \"unanswerable\". Do not provide any explanation.\n\nQuestion: {{question}}\n\nAnswer:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_qa_f1_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_qa_f1_score(doc, results, **kwargs)\n    qa_f1 = result[\"qa_f1_score\"]\n    return {\"score\": qa_f1, \"qa_f1_score\": qa_f1}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "You are given a scientific article and a question. Answer the question as concisely as you can, using a single phrase or sentence if possible. If the question cannot be answered based on the information in the article, write \"unanswerable\". If the question is a yes/no question, answer \"yes\", \"no\", or \"unanswerable\". Do not provide any explanation.\n\nArticle: {{context}}\n\n Answer the question based on the above article as concisely as you can, using a single phrase or sentence if possible. If the question cannot be answered based on the information in the article, write \"unanswerable\". If the question is a yes/no question, answer \"yes\", \"no\", or \"unanswerable\". Do not provide any explanation.\n\nQuestion: {{question}}\n\nAnswer:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "qa_f1_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 128,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_repobench-p_e": {
+      "task": "longbench_repobench-p_e",
+      "tag": [
+        "longbench_code_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "repobench-p_e",
+      "test_split": "test",
+      "doc_to_text": "Please complete the code given below. \n{{context}}{{question}}Next line of code:",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_code_sim_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_code_sim_score(doc, results, **kwargs)\n    code_sim = result[\"code_sim_score\"]\n    return {\"score\": code_sim, \"code_sim_score\": code_sim}\n",
+      "description": "",
+      "target_delimiter": " ",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Please complete the code given below. \n{{context}}{{question}}Next line of code:",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": " "
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "code_sim_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 64,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": []
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_samsum_e": {
+      "task": "longbench_samsum_e",
+      "tag": [
+        "longbench_fewshot_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "samsum_e",
+      "test_split": "test",
+      "doc_to_text": "Summarize the dialogue into a few short sentences. The following are some examples.\n\n{{context}}\n{{question}}",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_rouge_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_rouge_score(doc, results, **kwargs)\n    rouge = result[\"rouge_score\"]\n    return {\"score\": rouge, \"rouge_score\": rouge}\n",
+      "description": "",
+      "target_delimiter": "",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Summarize the dialogue into a few short sentences. The following are some examples.\n\n{{context}}\n{{question}}",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": ""
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "rouge_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 128,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": [
+          "\n"
+        ]
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_trec_e": {
+      "task": "longbench_trec_e",
+      "tag": [
+        "longbench_fewshot_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "trec_e",
+      "test_split": "test",
+      "doc_to_text": "Please determine the type of the question below. Here are some examples of questions.\n\n{{context}}\n{{question}}",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_classification_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_classification_score(doc, results, **kwargs)\n    classification = result[\"classification_score\"]\n    return {\"score\": classification, \"classification_score\": classification}\n",
+      "description": "",
+      "target_delimiter": "",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Please determine the type of the question below. Here are some examples of questions.\n\n{{context}}\n{{question}}",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": ""
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "classification_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 64,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": [
+          "\n"
+        ]
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    },
+    "longbench_triviaqa_e": {
+      "task": "longbench_triviaqa_e",
+      "tag": [
+        "longbench_fewshot_tasks_e",
+        "longbench_tasks_e"
+      ],
+      "dataset_path": "Xnhyacinth/LongBench",
+      "dataset_name": "triviaqa_e",
+      "test_split": "test",
+      "doc_to_text": "Answer the question based on the given passage. Only give me the answer and do not output any other words. The following are some examples.\n\n{{context}}\n{{question}}",
+      "doc_to_target": "{{answers}}",
+      "unsafe_code": false,
+      "process_results": "def get_qa_f1_with_score(doc: dict, results: list[str], **kwargs):\n    result = get_qa_f1_score(doc, results, **kwargs)\n    qa_f1 = result[\"qa_f1_score\"]\n    return {\"score\": qa_f1, \"qa_f1_score\": qa_f1}\n",
+      "description": "",
+      "target_delimiter": "",
+      "fewshot_delimiter": "\n\n",
+      "fewshot_config": {
+        "sampler": "default",
+        "split": null,
+        "process_docs": null,
+        "fewshot_indices": null,
+        "samples": null,
+        "doc_to_text": "Answer the question based on the given passage. Only give me the answer and do not output any other words. The following are some examples.\n\n{{context}}\n{{question}}",
+        "doc_to_choice": null,
+        "doc_to_target": "{{answers}}",
+        "gen_prefix": null,
+        "fewshot_delimiter": "\n\n",
+        "target_delimiter": ""
+      },
+      "num_fewshot": 0,
+      "metric_list": [
+        {
+          "metric": "score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        },
+        {
+          "metric": "qa_f1_score",
+          "aggregation": "mean",
+          "higher_is_better": true
+        }
+      ],
+      "output_type": "generate_until",
+      "generation_kwargs": {
+        "max_gen_toks": 32,
+        "temperature": 1.0,
+        "do_sample": false,
+        "until": [
+          "\n"
+        ]
+      },
+      "repeats": 1,
+      "should_decontaminate": false,
+      "metadata": {
+        "version": 5.0,
+        "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+        "base_url": "http://127.0.0.1:8000/v1/completions",
+        "num_concurrent": 16,
+        "tokenized_requests": false
+      }
+    }
+  },
+  "versions": {
+    "longbench_2wikimqa_e": 5.0,
+    "longbench_gov_report_e": 5.0,
+    "longbench_hotpotqa_e": 5.0,
+    "longbench_lcc_e": 5.0,
+    "longbench_multi_news_e": 5.0,
+    "longbench_multifieldqa_en_e": 5.0,
+    "longbench_passage_count_e": 5.0,
+    "longbench_passage_retrieval_en_e": 5.0,
+    "longbench_qasper_e": 5.0,
+    "longbench_repobench-p_e": 5.0,
+    "longbench_samsum_e": 5.0,
+    "longbench_trec_e": 5.0,
+    "longbench_triviaqa_e": 5.0
+  },
+  "n-shot": {
+    "longbench_2wikimqa_e": 0,
+    "longbench_gov_report_e": 0,
+    "longbench_hotpotqa_e": 0,
+    "longbench_lcc_e": 0,
+    "longbench_multi_news_e": 0,
+    "longbench_multifieldqa_en_e": 0,
+    "longbench_passage_count_e": 0,
+    "longbench_passage_retrieval_en_e": 0,
+    "longbench_qasper_e": 0,
+    "longbench_repobench-p_e": 0,
+    "longbench_samsum_e": 0,
+    "longbench_trec_e": 0,
+    "longbench_triviaqa_e": 0
+  },
+  "higher_is_better": {
+    "longbench_2wikimqa_e": {
+      "score": true,
+      "qa_f1_score": true
+    },
+    "longbench_gov_report_e": {
+      "score": true,
+      "rouge_score": true
+    },
+    "longbench_hotpotqa_e": {
+      "score": true,
+      "qa_f1_score": true
+    },
+    "longbench_lcc_e": {
+      "score": true,
+      "code_sim_score": true
+    },
+    "longbench_multi_news_e": {
+      "score": true,
+      "rouge_score": true
+    },
+    "longbench_multifieldqa_en_e": {
+      "score": true,
+      "qa_f1_score": true
+    },
+    "longbench_passage_count_e": {
+      "score": true,
+      "count_score": true
+    },
+    "longbench_passage_retrieval_en_e": {
+      "score": true,
+      "retrieval_score": true
+    },
+    "longbench_qasper_e": {
+      "score": true,
+      "qa_f1_score": true
+    },
+    "longbench_repobench-p_e": {
+      "score": true,
+      "code_sim_score": true
+    },
+    "longbench_samsum_e": {
+      "score": true,
+      "rouge_score": true
+    },
+    "longbench_trec_e": {
+      "score": true,
+      "classification_score": true
+    },
+    "longbench_triviaqa_e": {
+      "score": true,
+      "qa_f1_score": true
+    }
+  },
+  "n-samples": {
+    "longbench_2wikimqa_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_gov_report_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_hotpotqa_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_lcc_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_multi_news_e": {
+      "original": 294,
+      "effective": 100
+    },
+    "longbench_multifieldqa_en_e": {
+      "original": 150,
+      "effective": 100
+    },
+    "longbench_passage_count_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_passage_retrieval_en_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_qasper_e": {
+      "original": 224,
+      "effective": 100
+    },
+    "longbench_repobench-p_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_samsum_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_trec_e": {
+      "original": 300,
+      "effective": 100
+    },
+    "longbench_triviaqa_e": {
+      "original": 300,
+      "effective": 100
+    }
+  },
+  "config": {
+    "model": "local-completions",
+    "model_args": {
+      "model": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+      "base_url": "http://127.0.0.1:8000/v1/completions",
+      "num_concurrent": 16,
+      "tokenized_requests": false
+    },
+    "batch_size": "auto",
+    "batch_sizes": [],
+    "device": "cuda:0",
+    "use_cache": null,
+    "limit": 100.0,
+    "bootstrap_iters": 100000,
+    "gen_kwargs": {},
+    "random_seed": 0,
+    "numpy_seed": 1234,
+    "torch_seed": 1234,
+    "fewshot_seed": 1234
+  },
+  "git_hash": "v0.13.0rc1-3849-g26b7f2021",
+  "date": 1776780003.1193502,
+  "pretty_env_info": "PyTorch version: 2.11.0+cu130\nIs debug build: False\nCUDA used to build PyTorch: 13.0\nROCM used to build PyTorch: N/A\n\nOS: Ubuntu 24.04.4 LTS (aarch64)\nGCC version: (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0\nClang version: 21.1.8 (https://github.com/llvm/llvm-project 2078da43e25a4623cab2d0d60decddf709aaea28)\nCMake version: version 4.3.1\nLibc version: glibc-2.39\n\nPython version: 3.12.3 (main, Mar  3 2026, 12:15:18) [GCC 13.3.0] (64-bit runtime)\nPython platform: Linux-6.14.0-1013-nvidia-64k-aarch64-with-glibc2.39\nIs CUDA available: True\nCUDA runtime version: 13.0.88\nCUDA_MODULE_LOADING set to: \nGPU models and configuration: \nGPU 0: NVIDIA GB200\nGPU 1: NVIDIA GB200\nGPU 2: NVIDIA GB200\nGPU 3: NVIDIA GB200\n\nNvidia driver version: 580.126.20\ncuDNN version: Probably one of the following:\n/usr/lib/aarch64-linux-gnu/libcudnn.so.9.12.0\n/usr/lib/aarch64-linux-gnu/libcudnn_adv.so.9.12.0\n/usr/lib/aarch64-linux-gnu/libcudnn_cnn.so.9.12.0\n/usr/lib/aarch64-linux-gnu/libcudnn_engines_precompiled.so.9.12.0\n/usr/lib/aarch64-linux-gnu/libcudnn_engines_runtime_compiled.so.9.12.0\n/usr/lib/aarch64-linux-gnu/libcudnn_graph.so.9.12.0\n/usr/lib/aarch64-linux-gnu/libcudnn_heuristic.so.9.12.0\n/usr/lib/aarch64-linux-gnu/libcudnn_ops.so.9.12.0\nIs XPU available: False\nHIP runtime version: N/A\nMIOpen runtime version: N/A\nIs XNNPACK available: True\nCaching allocator config: N/A\n\nCPU:\nArchitecture:                            aarch64\nCPU op-mode(s):                          64-bit\nByte Order:                              Little Endian\nCPU(s):                                  144\nOn-line CPU(s) list:                     0-143\nVendor ID:                               ARM\nModel name:                              Neoverse-V2\nModel:                                   0\nThread(s) per core:                      1\nCore(s) per cluster:                     72\nSocket(s):                               -\nCluster(s):                              2\nStepping:                                r0p0\nFrequency boost:                         disabled\nCPU(s) scaling MHz:                      100%\nCPU max MHz:                             3411.0000\nCPU min MHz:                             81.0000\nBogoMIPS:                                2000.00\nFlags:                                   fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp cpuid asimdrdm jscvt fcma lrcpc dcpop sha3 sm3 sm4 asimddp sha512 sve asimdfhm dit uscat ilrcpc flagm sb paca pacg dcpodp sve2 sveaes svepmull svebitperm svesha3 svesm4 flagm2 frint svei8mm svebf16 i8mm bf16 dgh bti\nL1d cache:                               9 MiB (144 instances)\nL1i cache:                               9 MiB (144 instances)\nL2 cache:                                144 MiB (144 instances)\nL3 cache:                                228 MiB (2 instances)\nNUMA node(s):                            34\nNUMA node0 CPU(s):                       0-71\nNUMA node1 CPU(s):                       72-143\nNUMA node2 CPU(s):                       \nNUMA node3 CPU(s):                       \nNUMA node4 CPU(s):                       \nNUMA node5 CPU(s):                       \nNUMA node6 CPU(s):                       \nNUMA node7 CPU(s):                       \nNUMA node8 CPU(s):                       \nNUMA node9 CPU(s):                       \nNUMA node10 CPU(s):                      \nNUMA node11 CPU(s):                      \nNUMA node12 CPU(s):                      \nNUMA node13 CPU(s):                      \nNUMA node14 CPU(s):                      \nNUMA node15 CPU(s):                      \nNUMA node16 CPU(s):                      \nNUMA node17 CPU(s):                      \nNUMA node18 CPU(s):                      \nNUMA node19 CPU(s):                      \nNUMA node20 CPU(s):                      \nNUMA node21 CPU(s):                      \nNUMA node22 CPU(s):                      \nNUMA node23 CPU(s):                      \nNUMA node24 CPU(s):                      \nNUMA node25 CPU(s):                      \nNUMA node26 CPU(s):                      \nNUMA node27 CPU(s):                      \nNUMA node28 CPU(s):                      \nNUMA node29 CPU(s):                      \nNUMA node30 CPU(s):                      \nNUMA node31 CPU(s):                      \nNUMA node32 CPU(s):                      \nNUMA node33 CPU(s):                      \nVulnerability Gather data sampling:      Not affected\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Not affected\nVulnerability Itlb multihit:             Not affected\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Not affected\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Not affected\nVulnerability Spectre v1:                Mitigation; __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; CSV2, but not BHB\nVulnerability Srbds:                     Not affected\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Not affected\nVulnerability Vmscape:                   Not affected\n\nVersions of relevant libraries:\n[pip3] numpy==2.2.0\n[pip3] nvidia-cublas==13.0.2.14\n[pip3] nvidia-cuda-cupti==13.0.85\n[pip3] nvidia-cuda-nvrtc==13.0.88\n[pip3] nvidia-cuda-runtime==13.0.96\n[pip3] nvidia-cudnn-cu13==9.21.0.82\n[pip3] nvidia-cudnn-frontend==1.18.0\n[pip3] nvidia-cufft==12.0.0.61\n[pip3] nvidia-curand==10.4.0.35\n[pip3] nvidia-cusolver==12.0.4.66\n[pip3] nvidia-cusparse==12.6.3.3\n[pip3] nvidia-cusparselt-cu13==0.8.0\n[pip3] nvidia-nccl-cu13==2.28.9\n[pip3] nvidia-nvjitlink==13.0.88\n[pip3] nvidia-nvtx==13.0.85\n[pip3] nvtx==0.2.15\n[pip3] torch==2.11.0\n[pip3] torch_c_dlpack_ext==0.1.5\n[pip3] torchaudio==2.11.0+cu130\n[pip3] torchvision==0.26.0+cu130\n[pip3] triton==3.6.0\n[conda] Could not collect",
+  "transformers_version": "5.5.4",
+  "lm_eval_version": "0.4.11",
+  "upper_git_hash": null,
+  "tokenizer_pad_token": [
+    "<|endoftext|>",
+    "151643"
+  ],
+  "tokenizer_eos_token": [
+    "<|im_end|>",
+    "151645"
+  ],
+  "tokenizer_bos_token": [
+    null,
+    "None"
+  ],
+  "eot_token_id": 151645,
+  "max_length": 2047,
+  "task_hashes": {},
+  "model_source": "local-completions",
+  "model_name": "/models/Qwen3/Qwen3-30B-A3B-Instruct-2507",
+  "model_name_sanitized": "__models__Qwen3__Qwen3-30B-A3B-Instruct-2507",
+  "system_instruction": null,
+  "system_instruction_sha": null,
+  "fewshot_as_multiturn": null,
+  "chat_template": null,
+  "chat_template_sha": null,
+  "total_evaluation_time_seconds": "164.5886112760054"
+}
