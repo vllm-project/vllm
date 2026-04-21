@@ -185,6 +185,7 @@ if flashinfer_comm is not None:
             workspace=workspace,
             pattern=pattern_code,
             launch_with_pdl=launch_with_pdl,
+            trigger_completion_at_end=not launch_with_pdl,
             output=None,
             residual_out=residual_out,
             norm_out=norm_out,
