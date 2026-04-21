@@ -111,6 +111,7 @@ _TEXT_GENERATION_MODELS = {
     "Gemma2ForCausalLM": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3ForCausalLM": ("gemma3", "Gemma3ForCausalLM"),
     "Gemma3nForCausalLM": ("gemma3n", "Gemma3nForCausalLM"),
+    "Gemma4ForCausalLM": ("gemma4", "Gemma4ForCausalLM"),
     "Qwen3NextForCausalLM": ("qwen3_next", "Qwen3NextForCausalLM"),
     "GlmForCausalLM": ("glm", "GlmForCausalLM"),
     "Glm4ForCausalLM": ("glm4", "Glm4ForCausalLM"),
@@ -159,6 +160,7 @@ _TEXT_GENERATION_MODELS = {
     "MiniMaxText01ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM1ForCausalLM": ("minimax_text_01", "MiniMaxText01ForCausalLM"),
     "MiniMaxM2ForCausalLM": ("minimax_m2", "MiniMaxM2ForCausalLM"),
+    "Ministral3ForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralForCausalLM": ("mistral", "MistralForCausalLM"),
     "MistralLarge3ForCausalLM": ("mistral_large_3", "MistralLarge3ForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
@@ -181,6 +183,7 @@ _TEXT_GENERATION_MODELS = {
     "PanguEmbeddedForCausalLM": ("openpangu", "PanguEmbeddedForCausalLM"),
     "PanguProMoEV2ForCausalLM": ("openpangu", "PanguProMoEV2ForCausalLM"),
     "PanguUltraMoEForCausalLM": ("openpangu", "PanguUltraMoEForCausalLM"),
+    "Param2MoEForCausalLM": ("param2moe", "Param2MoEForCausalLM"),
     "PersimmonForCausalLM": ("persimmon", "PersimmonForCausalLM"),
     "PhiForCausalLM": ("phi", "PhiForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
@@ -205,6 +208,7 @@ _TEXT_GENERATION_MODELS = {
     "SolarForCausalLM": ("solar", "SolarForCausalLM"),
     "TeleChatForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
     "TeleChat2ForCausalLM": ("telechat2", "TeleChat2ForCausalLM"),
+    "TeleChat3ForCausalLM": ("llama", "LlamaForCausalLM"),
     "TeleFLMForCausalLM": ("teleflm", "TeleFLMForCausalLM"),
     "XverseForCausalLM": ("llama", "LlamaForCausalLM"),
     "Zamba2ForCausalLM": ("zamba2", "Zamba2ForCausalLM"),
@@ -223,6 +227,7 @@ _EMBEDDING_MODELS = {
     "GritLM": ("gritlm", "GritLM"),
     "GteModel": ("bert_with_rope", "SnowflakeGteNewModel"),
     "GteNewModel": ("bert_with_rope", "GteNewModel"),
+    "JinaEmbeddingsV5Model": ("jina", "JinaEmbeddingsV5Model"),
     "LlamaBidirectionalModel": ("llama", "LlamaBidirectionalModel"),
     "LlamaModel": ("llama", "LlamaForCausalLM"),
     **{
@@ -270,6 +275,7 @@ _LATE_INTERACTION_MODELS = {
     "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
     "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
     "ColBERTLfm2Model": ("colbert", "ColBERTLfm2Model"),
+    "JinaForRanking": ("jina", "JinaForRanking"),
     # [Multimodal]
     "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "ColPaliForRetrieval": ("colpali", "ColPaliModel"),
@@ -291,6 +297,10 @@ _TOKEN_CLASSIFICATION_MODELS = {
     "ModernBertForTokenClassification": (
         "modernbert",
         "ModernBertForTokenClassification",
+    ),
+    "Qwen3ASRForcedAlignerForTokenClassification": (
+        "qwen3_asr_forced_aligner",
+        "Qwen3ASRForcedAlignerForTokenClassification",
     ),
 }
 
@@ -346,6 +356,8 @@ _MULTIMODAL_MODELS = {
         "chameleon",
         "ChameleonForConditionalGeneration",
     ),
+    "Cheers": ("cheers", "CheersForConditionalGeneration"),
+    "CheersForConditionalGeneration": ("cheers", "CheersForConditionalGeneration"),
     "Cohere2VisionForConditionalGeneration": (
         "cohere2_vision",
         "Cohere2VisionForConditionalGeneration",
@@ -362,11 +374,19 @@ _MULTIMODAL_MODELS = {
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
     ),
+    "Exaone4_5_ForConditionalGeneration": (
+        "exaone4_5",
+        "Exaone4_5_ForConditionalGeneration",
+    ),  # noqa: E501
     "FireRedASR2ForConditionalGeneration": (
         "fireredasr2",
         "FireRedASR2ForConditionalGeneration",
     ),
     "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),
+    "FireRedLIDForConditionalGeneration": (
+        "fireredlid",
+        "FireRedLIDForConditionalGeneration",
+    ),
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
@@ -377,6 +397,7 @@ _MULTIMODAL_MODELS = {
         "gemma3n_mm",
         "Gemma3nForConditionalGeneration",
     ),
+    "Gemma4ForConditionalGeneration": ("gemma4_mm", "Gemma4ForConditionalGeneration"),
     "GlmAsrForConditionalGeneration": ("glmasr", "GlmAsrForConditionalGeneration"),
     "GLM4VForCausalLM": ("glm4v", "GLM4VForCausalLM"),
     "Glm4vForConditionalGeneration": ("glm4_1v", "Glm4vForConditionalGeneration"),
@@ -453,6 +474,8 @@ _MULTIMODAL_MODELS = {
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "Molmo2ForConditionalGeneration": ("molmo2", "Molmo2ForConditionalGeneration"),
     "NemotronH_Nano_VL_V2": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Nano_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
+    "NemotronH_Super_Omni_Reasoning_V3": ("nano_nemotron_vl", "NemotronH_Nano_VL_V2"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),
     "OpenCUAForConditionalGeneration": ("opencua", "OpenCUAForConditionalGeneration"),
     "OpenPanguVLForConditionalGeneration": (
@@ -472,6 +495,7 @@ _MULTIMODAL_MODELS = {
         "PaliGemmaForConditionalGeneration",
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
+    "Phi4ForCausalLMV": ("phi4siglip", "Phi4ForCausalLMV"),
     "Phi4MMForCausalLM": ("phi4mm", "Phi4MMForCausalLM"),
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),
     "QwenVLForConditionalGeneration": ("qwen_vl", "QwenVLForConditionalGeneration"),
@@ -525,9 +549,9 @@ _MULTIMODAL_MODELS = {
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),
     # [Encoder-decoder]
-    "CohereASRForConditionalGeneration": (
+    "CohereAsrForConditionalGeneration": (
         "cohere_asr",
-        "CohereASRForConditionalGeneration",
+        "CohereAsrForConditionalGeneration",
     ),
     "NemotronParseForConditionalGeneration": (
         "nemotron_parse",
@@ -542,7 +566,9 @@ _SPECULATIVE_DECODING_MODELS = {
     "EagleLlamaForCausalLM": ("llama_eagle", "EagleLlamaForCausalLM"),
     "EagleLlama4ForCausalLM": ("llama4_eagle", "EagleLlama4ForCausalLM"),
     "EagleMiniCPMForCausalLM": ("minicpm_eagle", "EagleMiniCPMForCausalLM"),
+    "DFlashDraftModel": ("qwen3_dflash", "DFlashQwen3ForCausalLM"),
     "Eagle3LlamaForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
+    "Eagle3MiniMaxM2ForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "LlamaForCausalLMEagle3": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen2_5vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
     "Eagle3Qwen3vlForCausalLM": ("llama_eagle3", "Eagle3LlamaForCausalLM"),
@@ -556,6 +582,7 @@ _SPECULATIVE_DECODING_MODELS = {
     "DeepSeekMTPModel": ("deepseek_mtp", "DeepSeekMTP"),
     "ErnieMTPModel": ("ernie_mtp", "ErnieMTP"),
     "ExaoneMoeMTP": ("exaone_moe_mtp", "ExaoneMoeMTP"),
+    "Exaone4_5_MTP": ("exaone4_5_mtp", "Exaone4_5_MTP"),
     "NemotronHMTPModel": ("nemotron_h_mtp", "NemotronHMTP"),
     "LongCatFlashMTPModel": ("longcat_flash_mtp", "LongCatFlashMTP"),
     "Glm4MoeMTPModel": ("glm4_moe_mtp", "Glm4MoeMTP"),

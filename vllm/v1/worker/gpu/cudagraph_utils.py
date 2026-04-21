@@ -94,13 +94,8 @@ class CudaGraphManager:
         self.decode_query_len = decode_query_len
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
-        self.pp_size = vllm_config.parallel_config.pipeline_parallel_size
-        if self.pp_size > 1:
-            self.is_first_pp_rank = get_pp_group().is_first_rank
-            self.is_last_pp_rank = get_pp_group().is_last_rank
-        else:
-            self.is_first_pp_rank = True
-            self.is_last_pp_rank = True
+        self.is_first_pp_rank = get_pp_group().is_first_rank
+        self.is_last_pp_rank = get_pp_group().is_last_rank
 
         self.graphs: dict[BatchExecutionDescriptor, torch.cuda.CUDAGraph] = {}
         self.pool = current_platform.get_global_graph_pool() if cudagraph_mode else None
@@ -371,14 +366,11 @@ class ModelCudaGraphManager(CudaGraphManager):
                         self.aux_hidden_states[i][:num_tokens] = aux
                 else:
                     # Non-last PP rank.
+                    assert isinstance(model_output, IntermediateTensors)
                     intermediate_tensors = model_output
-                    assert isinstance(intermediate_tensors, IntermediateTensors)
                     if self.intermediate_tensors is None:
-                        self.intermediate_tensors = IntermediateTensors(
-                            {
-                                k: torch.empty_like(v)
-                                for k, v in intermediate_tensors.tensors.items()
-                            }
+                        self.intermediate_tensors = IntermediateTensors.empty_like(
+                            intermediate_tensors
                         )
                     for k, v in intermediate_tensors.tensors.items():
                         self.intermediate_tensors[k][:num_tokens] = v

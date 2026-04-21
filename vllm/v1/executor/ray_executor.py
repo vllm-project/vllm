@@ -23,8 +23,10 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.executor.ray_utils import (
+    WORKER_SPECIFIC_ENV_VARS,
     FutureWrapper,
     RayWorkerWrapper,
+    detach_zero_copy_from_model_runner_output,
     initialize_ray_cluster,
     ray,
 )
@@ -61,17 +63,6 @@ class RayWorkerMetaData:
 
 class RayDistributedExecutor(Executor):
     """Ray-based distributed executor"""
-
-    # These env vars are worker-specific, therefore are NOT copied
-    # from the driver to the workers
-    WORKER_SPECIFIC_ENV_VARS = {
-        "VLLM_HOST_IP",
-        "VLLM_HOST_PORT",
-        "LOCAL_RANK",
-        "CUDA_VISIBLE_DEVICES",
-        "HIP_VISIBLE_DEVICES",
-        "ROCR_VISIBLE_DEVICES",
-    }
 
     uses_ray: bool = True
     supports_pp: bool = True
@@ -335,7 +326,7 @@ class RayDistributedExecutor(Executor):
 
         # Environment variables to copy from driver to workers
         env_vars_to_copy = get_env_vars_to_copy(
-            exclude_vars=self.WORKER_SPECIFIC_ENV_VARS,
+            exclude_vars=WORKER_SPECIFIC_ENV_VARS,
             additional_vars=set(current_platform.additional_env_vars),
             destination="workers",
         )
@@ -473,7 +464,9 @@ class RayDistributedExecutor(Executor):
             # Get output only from a single worker (output_rank)
             # When PP is not used, we block here until the result is available.
             if not non_block:
-                return refs[0].get()
+                output = refs[0].get()
+                detach_zero_copy_from_model_runner_output(output)
+                return output
 
             # When PP is used, we return a FutureWrapper immediately so that
             # the scheduler can yield to the next batch.
@@ -483,7 +476,10 @@ class RayDistributedExecutor(Executor):
         assert self.kv_output_aggregator is not None
         if not non_block:
             # Block and get results from all workers
-            return self.kv_output_aggregator.aggregate(ray.get(refs))
+            outputs = ray.get(refs)
+            for output in outputs:
+                detach_zero_copy_from_model_runner_output(output)
+            return self.kv_output_aggregator.aggregate(outputs)
 
         # Return a future that will aggregate outputs from all workers
         return FutureWrapper(refs, self.kv_output_aggregator)

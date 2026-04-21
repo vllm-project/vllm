@@ -8,7 +8,7 @@ import functools
 import json
 import sys
 from collections.abc import Callable
-from dataclasses import MISSING, dataclass, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, fields, is_dataclass
 from itertools import permutations
 from types import UnionType
 from typing import (
@@ -45,6 +45,7 @@ from vllm.config import (
     KVTransferConfig,
     LoadConfig,
     LoRAConfig,
+    MambaConfig,
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
@@ -53,6 +54,7 @@ from vllm.config import (
     PoolerConfig,
     PrefetchOffloadConfig,
     ProfilerConfig,
+    ReasoningConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
@@ -69,8 +71,9 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
-from vllm.config.kernel import MoEBackend
+from vllm.config.kernel import IrOpPriorityConfig, MoEBackend
 from vllm.config.lora import MaxLoRARanks
+from vllm.config.mamba import MambaBackendEnum
 from vllm.config.model import (
     ConvertOption,
     HfOverrides,
@@ -111,6 +114,7 @@ from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
 if TYPE_CHECKING:
+    from vllm.config.quantization import OnlineQuantizationConfigArgs
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.model_loader import LoadFormats
     from vllm.usage.usage_lib import UsageContext
@@ -387,7 +391,7 @@ class EngineArgs:
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
     download_dir: str | None = LoadConfig.download_dir
-    safetensors_load_strategy: str = LoadConfig.safetensors_load_strategy
+    safetensors_load_strategy: str | None = LoadConfig.safetensors_load_strategy
     load_format: str | LoadFormats = LoadConfig.load_format
     config_format: str = ModelConfig.config_format
     dtype: ModelDType = ModelConfig.dtype
@@ -400,6 +404,7 @@ class EngineArgs:
     max_cudagraph_capture_size: int | None = get_field(
         CompilationConfig, "max_cudagraph_capture_size"
     )
+    ir_op_priority: IrOpPriorityConfig = get_field(KernelConfig, "ir_op_priority")
     # Note: Specifying a custom executor backend by passing a class
     # is intended for expert use only. The API may change without
     # notice.
@@ -413,6 +418,9 @@ class EngineArgs:
     nnodes: int = ParallelConfig.nnodes
     node_rank: int = ParallelConfig.node_rank
     distributed_timeout_seconds: int | None = ParallelConfig.distributed_timeout_seconds
+    numa_bind: bool = ParallelConfig.numa_bind
+    numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
+    numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -481,6 +489,7 @@ class EngineArgs:
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | str | None = ModelConfig.quantization
+    quantization_config: "dict[str, Any] | OnlineQuantizationConfigArgs | None" = None
     allow_deprecated_quantization: bool = ModelConfig.allow_deprecated_quantization
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
@@ -507,6 +516,7 @@ class EngineArgs:
         MultiModalConfig.mm_encoder_attn_backend
     )
     io_processor_plugin: str | None = None
+    renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
@@ -529,6 +539,8 @@ class EngineArgs:
 
     enable_chunked_prefill: bool | None = None
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
+
+    scheduler_reserve_full_isl: bool = SchedulerConfig.scheduler_reserve_full_isl
 
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
@@ -568,6 +580,7 @@ class EngineArgs:
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
     attention_config: AttentionConfig = get_field(VllmConfig, "attention_config")
+    mamba_config: MambaConfig = get_field(VllmConfig, "mamba_config")
     kernel_config: KernelConfig = get_field(VllmConfig, "kernel_config")
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
@@ -581,6 +594,7 @@ class EngineArgs:
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
+    reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -592,10 +606,19 @@ class EngineArgs:
     attention_backend: AttentionBackendEnum | None = AttentionConfig.backend
 
     calculate_kv_scales: bool = CacheConfig.calculate_kv_scales
+    kv_cache_dtype_skip_layers: list[str] = get_field(
+        CacheConfig, "kv_cache_dtype_skip_layers"
+    )
     mamba_cache_dtype: MambaDType = CacheConfig.mamba_cache_dtype
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+
+    mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
+    enable_mamba_cache_stochastic_rounding: bool = (
+        MambaConfig.enable_stochastic_rounding
+    )
+    mamba_cache_philox_rounds: int = MambaConfig.stochastic_rounding_philox_rounds
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
@@ -637,6 +660,8 @@ class EngineArgs:
             self.compilation_config = CompilationConfig(**self.compilation_config)
         if isinstance(self.attention_config, dict):
             self.attention_config = AttentionConfig(**self.attention_config)
+        if isinstance(self.mamba_config, dict):
+            self.mamba_config = MambaConfig(**self.mamba_config)
         if isinstance(self.kernel_config, dict):
             self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
@@ -645,6 +670,15 @@ class EngineArgs:
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
             )
+        if isinstance(self.ir_op_priority, dict):
+            self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
+
+        from vllm.config.quantization import resolve_online_quant_config
+
+        self.quantization_config = resolve_online_quant_config(
+            self.quantization, self.quantization_config
+        )
+
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -763,6 +797,10 @@ class EngineArgs:
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
         )
+        model_group.add_argument(
+            "--renderer-num-workers",
+            **model_kwargs["renderer_num_workers"],
+        )
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -792,6 +830,22 @@ class EngineArgs:
         )
         attention_group.add_argument(
             "--attention-backend", **attention_kwargs["backend"]
+        )
+
+        # Mamba arguments
+        mamba_kwargs = get_kwargs(MambaConfig)
+        mamba_group = parser.add_argument_group(
+            title="MambaConfig",
+            description=MambaConfig.__doc__,
+        )
+        mamba_group.add_argument("--mamba-backend", **mamba_kwargs["backend"])
+        mamba_group.add_argument(
+            "--enable-mamba-cache-stochastic-rounding",
+            **mamba_kwargs["enable_stochastic_rounding"],
+        )
+        mamba_group.add_argument(
+            "--mamba-cache-philox-rounds",
+            **mamba_kwargs["stochastic_rounding_philox_rounds"],
         )
 
         # Structured outputs arguments
@@ -832,6 +886,13 @@ class EngineArgs:
         parallel_group.add_argument(
             "--distributed-timeout-seconds",
             **parallel_kwargs["distributed_timeout_seconds"],
+        )
+        parallel_group.add_argument("--numa-bind", **parallel_kwargs["numa_bind"])
+        parallel_group.add_argument(
+            "--numa-bind-nodes", **parallel_kwargs["numa_bind_nodes"]
+        )
+        parallel_group.add_argument(
+            "--numa-bind-cpus", **parallel_kwargs["numa_bind_cpus"]
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -993,6 +1054,9 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
+        )
+        cache_group.add_argument(
+            "--kv-cache-dtype-skip-layers", **cache_kwargs["kv_cache_dtype_skip_layers"]
         )
         cache_group.add_argument(
             "--kv-sharing-fast-prefill", **cache_kwargs["kv_sharing_fast_prefill"]
@@ -1233,6 +1297,10 @@ class EngineArgs:
             "--scheduler-cls", **scheduler_kwargs["scheduler_cls"]
         )
         scheduler_group.add_argument(
+            "--scheduler-reserve-full-isl",
+            **scheduler_kwargs["scheduler_reserve_full_isl"],
+        )
+        scheduler_group.add_argument(
             "--disable-hybrid-kv-cache-manager",
             **scheduler_kwargs["disable_hybrid_kv_cache_manager"],
         )
@@ -1263,6 +1331,7 @@ class EngineArgs:
             title="KernelConfig",
             description=KernelConfig.__doc__,
         )
+        kernel_group.add_argument("--ir-op-priority", **kernel_kwargs["ir_op_priority"])
         kernel_group.add_argument(
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
@@ -1282,7 +1351,7 @@ class EngineArgs:
         # delay the Pydantic validation that comes with SpeculativeConfig.
         vllm_kwargs["speculative_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
-            "--speculative-config", **vllm_kwargs["speculative_config"]
+            "--speculative-config", "-sc", **vllm_kwargs["speculative_config"]
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
@@ -1297,6 +1366,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--reasoning-config", **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
@@ -1395,6 +1465,7 @@ class EngineArgs:
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
+            quantization_config=self.quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
@@ -1429,6 +1500,7 @@ class EngineArgs:
             video_pruning_rate=self.video_pruning_rate,
             mm_tensor_ipc=self.mm_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
+            renderer_num_workers=self.renderer_num_workers,
         )
 
     def validate_tensorizer_args(self):
@@ -1521,6 +1593,7 @@ class EngineArgs:
                     revision=self.revision,
                     trust_remote_code=self.trust_remote_code,
                     vllm_speculative_config=self.speculative_config,
+                    hf_token=self.hf_token,
                 )
             )
 
@@ -1531,10 +1604,7 @@ class EngineArgs:
 
         self._check_feature_supported()
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
-        self._set_default_max_num_seqs_and_batched_tokens_args(
-            usage_context, model_config
-        )
-
+        self._set_default_reasoning_config_args()
         sliding_window: int | None = None
         if not is_interleaved(model_config.hf_text_config):
             # Only set CacheConfig.sliding_window if the model is all sliding
@@ -1562,6 +1632,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             calculate_kv_scales=self.calculate_kv_scales,
+            kv_cache_dtype_skip_layers=self.kv_cache_dtype_skip_layers,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
@@ -1570,6 +1641,31 @@ class EngineArgs:
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
+
+        # TurboQuant: auto-skip first/last 2 layers (boundary protection).
+        # These layers are most sensitive to quantization error.
+        # Users can add extra layers via --kv-cache-dtype-skip-layers.
+        if resolved_cache_dtype.startswith("turboquant_"):
+            if model_config.is_hybrid:
+                raise NotImplementedError(
+                    "TurboQuant KV cache is not supported for hybrid "
+                    "(attention + Mamba) models. Boundary layer protection "
+                    "requires uniform attention layers."
+                )
+            from vllm.model_executor.layers.quantization.turboquant.config import (
+                TurboQuantConfig,
+            )
+
+            num_layers = model_config.hf_text_config.num_hidden_layers
+            boundary = TurboQuantConfig.get_boundary_skip_layers(num_layers)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            merged = sorted(existing | set(boundary), key=lambda x: int(x))
+            cache_config.kv_cache_dtype_skip_layers = merged
+            logger.info(
+                "TQ: skipping layers %s for boundary protection (num_layers=%d)",
+                merged,
+                num_layers,
+            )
 
         ray_runtime_env = None
         if is_ray_initialized():
@@ -1776,11 +1872,20 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
+            numa_bind=self.numa_bind,
+            numa_bind_nodes=self.numa_bind_nodes,
+            numa_bind_cpus=self.numa_bind_cpus,
         )
 
         speculative_config = self.create_speculative_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
+        )
+
+        self._set_default_max_num_seqs_and_batched_tokens_args(
+            usage_context,
+            model_config,
+            parallel_config,
         )
 
         assert self.max_num_batched_tokens is not None, (
@@ -1807,6 +1912,7 @@ class EngineArgs:
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
             long_prefill_token_threshold=self.long_prefill_token_threshold,
+            scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
@@ -1867,6 +1973,35 @@ class EngineArgs:
                 self.attention_backend
             )
 
+        # TurboQuant requires FlashAttention 2 — FA3 boundary layers assert
+        # FlashAttentionImpl which fails with TurboQuantAttentionImpl.
+        if resolved_cache_dtype.startswith("turboquant_") and (
+            attention_config.flash_attn_version is None
+            or attention_config.flash_attn_version >= 3
+        ):
+            logger.warning(
+                "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "Overriding flash_attn_version to 2. To silence this "
+                "warning, pass --attention-config.flash_attn_version=2"
+            )
+            attention_config.flash_attn_version = 2
+
+        # Mamba config overrides
+        mamba_config = copy.deepcopy(self.mamba_config)
+        # Convert string to enum if needed (CLI parsing returns a string)
+        if isinstance(self.mamba_backend, str):
+            mamba_config.backend = MambaBackendEnum[self.mamba_backend.upper()]
+        else:
+            mamba_config.backend = self.mamba_backend
+        if self.enable_mamba_cache_stochastic_rounding:
+            mamba_config.enable_stochastic_rounding = (
+                self.enable_mamba_cache_stochastic_rounding
+            )
+        if self.mamba_cache_philox_rounds:
+            mamba_config.stochastic_rounding_philox_rounds = (
+                self.mamba_cache_philox_rounds
+            )
+
         # Kernel config overrides
         kernel_config = copy.deepcopy(self.kernel_config)
         if self.enable_flashinfer_autotune is not None:
@@ -1879,6 +2014,22 @@ class EngineArgs:
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
         if self.moe_backend != "auto":
             kernel_config.moe_backend = self.moe_backend
+
+        # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
+        for op_name, op_priority in asdict(self.ir_op_priority).items():
+            # Empty means unset
+            if not op_priority:
+                continue
+
+            # Priority cannot be set 2x for the same op
+            if getattr(kernel_config.ir_op_priority, op_name):
+                raise ValueError(
+                    f"Op priority for {op_name} specified via both ir_op_priority "
+                    f"and KernelConfig.ir_op_priority, only one allowed at a time."
+                )
+
+            # Set the attribute
+            setattr(kernel_config.ir_op_priority, op_name, op_priority)
 
         load_config = self.create_load_config()
 
@@ -1924,7 +2075,7 @@ class EngineArgs:
             )
 
         offload_config = OffloadConfig(
-            offload_backend=self.offload_backend,  # type: ignore[arg-type]
+            offload_backend=self.offload_backend,
             uva=UVAOffloadConfig(
                 cpu_offload_gb=self.cpu_offload_gb,
                 cpu_offload_params=self.cpu_offload_params,
@@ -1949,6 +2100,7 @@ class EngineArgs:
             load_config=load_config,
             offload_config=offload_config,
             attention_config=attention_config,
+            mamba_config=mamba_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
             speculative_config=speculative_config,
@@ -1958,6 +2110,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
@@ -2152,10 +2305,18 @@ class EngineArgs:
             )
             self.enable_prefix_caching = False
 
+    def _set_default_reasoning_config_args(self):
+        if not self.reasoning_parser:
+            return
+        if self.reasoning_config is None:
+            self.reasoning_config = ReasoningConfig()
+        self.reasoning_config.reasoning_parser = self.reasoning_parser
+
     def _set_default_max_num_seqs_and_batched_tokens_args(
         self,
         usage_context: UsageContext | None,
         model_config: ModelConfig,
+        parallel_config: ParallelConfig,
     ):
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (
@@ -2167,10 +2328,15 @@ class EngineArgs:
         orig_max_num_seqs = self.max_num_seqs
 
         if self.max_num_batched_tokens is None:
-            self.max_num_batched_tokens = default_max_num_batched_tokens.get(
-                usage_context,
-                SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
-            )
+            if parallel_config.use_batched_dp_moe:
+                self.max_num_batched_tokens = (
+                    SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
+                )
+            else:
+                self.max_num_batched_tokens = default_max_num_batched_tokens.get(
+                    usage_context,
+                    SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS,
+                )
 
         if self.max_num_seqs is None:
             self.max_num_seqs = default_max_num_seqs.get(
