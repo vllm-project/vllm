@@ -441,6 +441,52 @@ def process_video(video: Any) -> Mapping[str, Any]:
     )
 
 
+def process_audio(audio: Any) -> Mapping[str, Any]:
+    """
+    Process a single audio input and return a multimedia content dictionary
+    using the OpenAI ``input_audio`` format.
+
+    Supports the following input types:
+
+    1. Dictionary with raw audio bytes: - Expects a dict with a ``bytes`` key
+       containing raw audio data and an optional ``format`` key (default
+       ``"wav"``).
+
+    2. String input: - Treats the string as a local file path.  - Reads the
+       file, base64-encodes the content, and infers the format from the file
+       extension.
+
+    Returns a dict of the form::
+
+        {"type": "input_audio", "input_audio": {"data": "<base64>", "format": "wav"}}
+
+    Raises:
+        ValueError: If the input is not a supported type.
+    """
+    if isinstance(audio, dict) and "bytes" in audio:
+        audio_bytes = audio["bytes"]
+        audio_base64 = base64.b64encode(audio_bytes).decode("utf-8")
+        fmt = audio.get("format", "wav")
+        return {
+            "type": "input_audio",
+            "input_audio": {"data": audio_base64, "format": fmt},
+        }
+
+    if isinstance(audio, str):
+        path = Path(audio)
+        audio_base64 = base64.b64encode(path.read_bytes()).decode("utf-8")
+        fmt = path.suffix.lstrip(".") or "wav"
+        return {
+            "type": "input_audio",
+            "input_audio": {"data": audio_base64, "format": fmt},
+        }
+
+    raise ValueError(
+        f"Invalid audio input {audio}. Must be a string file path "
+        "or a dictionary with raw audio bytes."
+    )
+
+
 def gen_prompt_decode_to_target_len(
     tokenizer: TokenizerLike,
     token_sequence: list[int],
@@ -2267,20 +2313,21 @@ class CustomDataset(BenchmarkDataset):
 
 class CustomMMDataset(CustomDataset):
     """
-    Implements the Custom MultiModal dataset. Loads data from a JSONL file and generates
-    sample requests based on conversation turns. E.g.,
-    ```
-    {
-        "prompt": "How many red blocks in the given images?",
-        "image_files": ["path/to/image1.png", "path/to/image2.png"],
-    }
-    {
-        "prompt": "Which country has the most pokemons based on the given graphs?",
-        "image_files": ["path/to/image.png"],
-    }
-    ```
+    Implements the Custom MultiModal dataset. Loads data from a JSONL file and
+    generates sample requests based on conversation turns.
 
-    NOTE: Only the first image file in "image_files" is used for each sample request.
+    Each JSONL row must contain a ``"prompt"`` field and at least one of
+    ``"image_files"`` or ``"audio_files"``::
+
+        {"prompt": "Describe this image", "image_files": ["path/to/img.png"]}
+        {"prompt": "Transcribe the audio", "audio_files": ["path/to/clip.wav"]}
+        {
+            "prompt": "What do you see and hear?",
+            "image_files": ["img.png"],
+            "audio_files": ["clip.wav"],
+        }
+
+    NOTE: Only the first image file in ``"image_files"`` is used per sample.
 
     This is used to benchmark multimodal LLMs on arbitrary datasets.
     """
@@ -2314,14 +2361,34 @@ class CustomMMDataset(CustomDataset):
             prompt = item["prompt"]
 
             prompt_len = len(tokenizer(prompt).input_ids)
-            images = item["image_files"]
-            if len(images) > 1:
-                logger.warning(
-                    "Multiple image files found for sample %d. "
-                    "Only the first image will be used.",
-                    i,
+
+            mm_content_list: list[Mapping[str, Any]] = []
+
+            if "image_files" in item:
+                images = item["image_files"]
+                if len(images) > 1:
+                    logger.warning(
+                        "Multiple image files found for sample %d. "
+                        "Only the first image will be used.",
+                        i,
+                    )
+                mm_content_list.append(process_image(images[0]))
+
+            if "audio_files" in item:
+                for audio_path in item["audio_files"]:
+                    mm_content_list.append(process_audio(audio_path))
+
+            if not mm_content_list:
+                raise ValueError(
+                    f"Sample {i} has neither 'image_files' nor 'audio_files'."
                 )
-            mm_content = process_image(images[0])
+
+            mm_content: Mapping[str, Any] | list[Mapping[str, Any]]
+            if len(mm_content_list) == 1:
+                mm_content = mm_content_list[0]
+            else:
+                mm_content = mm_content_list
+
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
