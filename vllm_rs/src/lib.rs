@@ -15,6 +15,7 @@ use pyo3::prelude::*;
 mod block;
 mod hash_map;
 mod pool;
+mod scheduler_loop;
 
 #[pymodule]
 fn vllm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -22,5 +23,6 @@ fn vllm_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<block::FreeKVCacheBlockQueue>()?;
     m.add_class::<hash_map::BlockHashToBlockMap>()?;
     m.add_class::<pool::BlockPool>()?;
+    m.add_function(wrap_pyfunction!(scheduler_loop::scheduler_update_preamble, m)?)?;
     Ok(())
 }
