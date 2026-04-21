@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.sampling_params import _SAMPLING_EPS
 from vllm.triton_utils import tl, triton
 
 
@@ -17,7 +18,7 @@ def _min_p_kernel(
     token_idx = tl.program_id(0)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     min_p = tl.load(min_p_ptr + req_state_idx).to(tl.float32)
-    if min_p == 0.0:
+    if tl.abs(min_p) < _SAMPLING_EPS:
         return
 
     max_val = float("-inf")
