@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 from collections import defaultdict
 from collections.abc import Iterable
+from pathlib import Path
 
 from torch import fx
 from torch._inductor.pattern_matcher import (
@@ -53,6 +55,14 @@ def get_ir_op(node: fx.Node) -> IrOp | None:
     return ir_op
 
 
+def _source_fn_stack_name(ir_op: IrOp, provider: str) -> str:
+    return f"vllm_ir_{ir_op.name}_{provider}"
+
+
+def _profiler_annotation_name(ir_op: IrOp, provider: str) -> str:
+    return f"vllm_ir::{ir_op.name}[{provider}]"
+
+
 class VllmIRLoweringPass(VllmInductorPass):
     """
     This pass lowers vLLM IR ops to their implementations the priority list.
@@ -61,7 +71,11 @@ class VllmIRLoweringPass(VllmInductorPass):
     def __init__(self, vllm_config: VllmConfig) -> None:
         super().__init__(vllm_config)
         self.patterns = PatternMatcherPass(self.pass_name)
-        self.selected_impls: dict[str, dict[str, str]] = defaultdict(lambda: {})
+        self.selected_impls: dict[str, dict[str, str]] = defaultdict(dict)
+        self.selected_annotations: dict[str, dict[str, dict[str, str]]] = defaultdict(
+            dict
+        )
+        self.debug_dump_path: Path | None = vllm_config.compile_debug_dump_path()
         self.ops = [ir_op.torch_op for ir_op in IrOp.registry.values()]
 
         # Look for any call_function node where the target is a vLLM IR op.
@@ -83,7 +97,27 @@ class VllmIRLoweringPass(VllmInductorPass):
         # Select and record the implementation, using fake args
         fake_args = fx.map_arg(node.args, lambda arg: arg.meta["val"])
         ir_op_impl = ir_op.dispatch(*fake_args)
-        self.selected_impls[ir_op.name][node.name] = ir_op_impl.provider
+        provider = ir_op_impl.provider
+
+        self.selected_impls[ir_op.name][node.name] = provider
+
+        source_fn_name = _source_fn_stack_name(ir_op, provider)
+        annotation = _profiler_annotation_name(ir_op, provider)
+
+        node.meta["source_fn_stack"] = node.meta.get("source_fn_stack", []) + [
+            (node.name, source_fn_name)
+        ]
+
+        node.meta["vllm_ir_annotation"] = {
+            "op": ir_op.name,
+            "provider": provider,
+            "annotation": annotation,
+            "source_fn_stack": source_fn_name,
+        }
+
+        self.selected_annotations[ir_op.name][node.name] = node.meta[
+            "vllm_ir_annotation"
+        ]
 
         # replace_by_example wants node args, not the fake tensors
         # TODO(luka): Use aot_export_module to get functionalized graph
@@ -94,10 +128,33 @@ class VllmIRLoweringPass(VllmInductorPass):
         bound_args.apply_defaults()
         match.replace_by_example(ir_op_impl.impl_fn, bound_args.args)
 
+    def _dump_selected_annotations(self) -> None:
+        if self.debug_dump_path is None:
+            return
+
+        self.debug_dump_path.mkdir(parents=True, exist_ok=True)
+
+        from vllm.utils.system_utils import unique_filepath
+
+        file_path = unique_filepath(
+            lambda i: (
+                self.debug_dump_path
+                / f"ir_lowering_annotations.{self.pass_name}.{i}.json"
+            )
+        )
+
+        payload = {
+            op_name: dict(nodes) for op_name, nodes in self.selected_annotations.items()
+        }
+
+        with file_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
         # clear at the beginning instead of end, so that tests can inspect
         self.selected_impls.clear()
+        self.selected_annotations.clear()
 
         count = self.patterns.apply(graph)
         logger.debug("VllmIRLoweringPass lowered %d vLLM IR nodes", count)
@@ -123,6 +180,7 @@ class VllmIRLoweringPass(VllmInductorPass):
                 )
             ),
         )
+        self._dump_selected_annotations()
 
         failed_nodes: list[fx.Node] = []
         failed_ops: set[str] = set()
