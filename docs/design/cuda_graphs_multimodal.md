@@ -52,14 +52,14 @@ For each graph replay:
 
 When `mm_encoder_tp_mode="data"`, the manager distributes images across TP ranks using load-balanced assignment via `get_load_balance_assignment`, executes locally on each rank, then gathers results back in the original order via `tensor_model_parallel_all_gather`.
 
-### Video inference support (experimental)
+### Video inference support
 
 Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph support for image inference), <https://github.com/vllm-project/vllm/pull/38061> extends the encoder CUDA graph framework to support video inference for Qwen3-VL. Previously, the CUDA graph capture/replay path only handled image inputs (`pixel_values` + `image_grid_thw`). Video inputs use different keys (`pixel_values_videos` + `video_grid_thw`) and require larger `cu_seqlens` buffers because each video item contributes multiple frames (`T` attention sequences). This PR generalizes the protocol and manager to handle both modalities through a single shared graph manager.
 
 !!! note
     Video CUDA graphs are automatically disabled when EVS (Efficient Video Sampling) pruning is enabled, since EVS makes the token count data-dependent and incompatible with CUDA graph capture.
 
-    Currently, we only support image-only or video-only inputs when enabling CUDA graph, mixed inputs (image + video) are not supported yet (we will work on it in the near future). Thus, it's recommended to turn off the image modality by `--limit-mm-per-prompt '{"image": 0}'` for video-only inputs.
+    Mixed inputs (image+video) per prompt are also supported now.
 
 ## Model integration via `SupportsEncoderCudaGraph`
 
@@ -142,7 +142,6 @@ Enable encoder CUDA Graphs via `compilation_config`:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
-  --limit-mm-per-prompt '{"image": 0}' \
   --compilation-config '{"cudagraph_mm_encoder": true}'
 ```
 
@@ -150,7 +149,6 @@ With explicit budgets:
 
 ```bash
 vllm serve Qwen/Qwen3-VL-32B \
-  --limit-mm-per-prompt '{"image": 0}' \
   --compilation-config '{"cudagraph_mm_encoder": true, "encoder_cudagraph_token_budgets": [2048, 4096, 8192, 13824], "encoder_cudagraph_max_vision_items_per_batch": 8, "encoder_cudagraph_max_frames_per_batch": 64}'
 ```
 
@@ -169,7 +167,6 @@ compilation_config = {
 
 model = vllm.LLM(
     model="Qwen/Qwen3-VL-32B",
-    limit_mm_per_prompt='{"image": 0}',
     compilation_config=compilation_config,
 )
 ```
