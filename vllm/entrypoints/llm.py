@@ -79,7 +79,7 @@ from vllm.renderers.inputs.preprocess import (
     prompt_to_seq,
 )
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
-from vllm.tasks import PoolingTask
+from vllm.tasks import SCORE_TYPE_MAP, PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
@@ -1182,7 +1182,7 @@ class LLM:
             else:
                 raise ValueError(
                     f"Try switching the model's pooling_task "
-                    f'via `PoolerConfig(task="{pooling_task}"`)'
+                    f'via `PoolerConfig(task="{pooling_task}")`'
                 )
 
         if pooling_task == "plugin" and "plugin" not in self.pooling_io_processors:
@@ -1380,7 +1380,7 @@ class LLM:
                 "pooling model."
             )
 
-        score_type = self.model_config.score_type
+        score_type: str | None = SCORE_TYPE_MAP.get(self.pooling_task, None)  # type: ignore[arg-type]
         if (
             score_type == "cross-encoder"
             and getattr(self.model_config.hf_config, "num_labels", 0) != 1

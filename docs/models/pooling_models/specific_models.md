@@ -202,19 +202,19 @@ ColQwen3.5 is based on [ColPali](https://arxiv.org/abs/2407.01449), extending Co
 
 | Architecture | Backbone | Example HF Models |
 | - | - | - |
-| `ColQwen3_5` | Qwen3.5 | `athrael-soju/colqwen3.5-4.5B` |
+| `ColQwen3_5` | Qwen3.5 | `athrael-soju/colqwen3.5-4.5B-v3` |
 
 Start the server:
 
 ```shell
-vllm serve athrael-soju/colqwen3.5-4.5B --max-model-len 4096
+vllm serve athrael-soju/colqwen3.5-4.5B-v3 --max-model-len 4096
 ```
 
 Then you can use the rerank endpoint:
 
 ```shell
 curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
-    "model": "athrael-soju/colqwen3.5-4.5B",
+    "model": "athrael-soju/colqwen3.5-4.5B-v3",
     "query": "What is machine learning?",
     "documents": [
         "Machine learning is a subset of artificial intelligence.",
@@ -228,7 +228,7 @@ Or the score endpoint:
 
 ```shell
 curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
-    "model": "athrael-soju/colqwen3.5-4.5B",
+    "model": "athrael-soju/colqwen3.5-4.5B-v3",
     "text_1": "What is the capital of France?",
     "text_2": ["The capital of France is Paris.", "Python is a programming language."]
 }'

@@ -8,7 +8,7 @@ It produces per-token embeddings and uses MaxSim scoring for retrieval
 and reranking. Supports both text and image inputs.
 
 Start the server with:
-    vllm serve athrael-soju/colqwen3.5-4.5B --max-model-len 4096
+    vllm serve athrael-soju/colqwen3.5-4.5B-v3 --max-model-len 4096
 
 Then run this script:
     python colqwen3_5_rerank_online.py
@@ -16,7 +16,7 @@ Then run this script:
 
 import requests
 
-MODEL = "athrael-soju/colqwen3.5-4.5B"
+MODEL = "athrael-soju/colqwen3.5-4.5B-v3"
 BASE_URL = "http://127.0.0.1:8000"
 
 headers = {"accept": "application/json", "Content-Type": "application/json"}

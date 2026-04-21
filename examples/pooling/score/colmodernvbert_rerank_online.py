@@ -9,7 +9,7 @@ embeddings and uses MaxSim scoring for retrieval and reranking.
 Supports both text and image inputs.
 
 Start the server with:
-    vllm serve ModernVBERT/colmodernvbert-merged --max-model-len 8192
+    vllm serve ModernVBERT/colmodernvbert-merged --max-model-len 4096
 
 Then run this script:
     python colmodernvbert_rerank_online.py
