@@ -16,7 +16,7 @@ Then run this script:
 
 import requests
 
-MODEL = "athrael-soju/colqwen3.5-4.5B-v3"
+MODEL = "athrael-soju/colqwen3.5-4.5B"
 BASE_URL = "http://127.0.0.1:8000"
 
 headers = {"accept": "application/json", "Content-Type": "application/json"}
