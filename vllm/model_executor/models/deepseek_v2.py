@@ -356,7 +356,12 @@ class DeepseekV2MoE(nn.Module):
         # downstream references (FusedMoE, router) share the same
         # nn.Parameter object, so mutating .data propagates everywhere.
         # Weight loading uses copy_(), which handles the dtype conversion.
-        if self.gate.e_score_correction_bias is not None:
+        # Only needed on ROCm where the aiter biased_grouped_topk kernel
+        # requires the bias dtype to match the gating output dtype.
+        if (
+            self.is_rocm_aiter_moe_enabled
+            and self.gate.e_score_correction_bias is not None
+        ):
             self.gate.e_score_correction_bias.data = (
                 self.gate.e_score_correction_bias.data.to(self.gate.out_dtype)
             )
