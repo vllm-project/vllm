@@ -7,11 +7,11 @@ import numpy as np
 from fastapi.responses import JSONResponse
 
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.base.serving import PoolingServing
-from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.logger import init_logger
 from vllm.outputs import ClassificationOutput
 
+from ..base.serving import PoolingServing
+from ..typing import PoolingServeContext
 from .io_processor import ClassifyIOProcessor
 from .protocol import (
     ClassificationData,
@@ -31,7 +31,7 @@ class ServingClassification(PoolingServing):
     def init_io_processor(self, *args, **kwargs) -> ClassifyIOProcessor:
         return ClassifyIOProcessor(*args, **kwargs)
 
-    async def _build_response(
+    def _build_response(
         self,
         ctx: ClassificationServeContext,
     ) -> JSONResponse:
