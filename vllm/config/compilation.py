@@ -121,38 +121,36 @@ class PassConfig(DeferredFieldsMixin):
 
     # Fields initialized during VllmConfig.__post_init__.
     #
-    # Deferred(False) is a last-resort fallback that fires only when neither
-    # the user nor the optimization-level table (OPTIMIZATION_LEVEL_TO_CONFIG
-    # in vllm.py) has supplied a value.  Most fields are covered by the table;
-    # the exceptions are fuse_attn_quant (absent from levels 0 and 1) and
-    # fuse_minimax_qk_norm (absent from all levels), where Deferred(False) is
-    # the sole default.
+    # Deferred() fields have no fallback: they must be set by the user or by
+    # the optimization-level table (OPTIMIZATION_LEVEL_TO_CONFIG in vllm.py).
+    # Deferred(False) is reserved for fields absent from the optimization-level
+    # tables; currently only fuse_minimax_qk_norm falls into that category.
 
-    fuse_norm_quant: bool = Deferred(False)
+    fuse_norm_quant: bool = Deferred()
     """Fuse the custom RMSNorm + quant ops."""
-    fuse_act_quant: bool = Deferred(False)
+    fuse_act_quant: bool = Deferred()
     """Fuse the custom SiluMul + quant ops."""
-    fuse_attn_quant: bool = Deferred(False)
+    fuse_attn_quant: bool = Deferred()
     """Fuse the custom Attention and MLAAttention + quant ops."""
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
-    enable_sp: bool = Deferred(False)
+    enable_sp: bool = Deferred()
     """Enable sequence parallelism. Requires TP>1. Automatically disabled
     if the model's hidden_size is too small for SP to be beneficial
     (threshold is device-capability dependent)."""
-    fuse_gemm_comms: bool = Deferred(False)
+    fuse_gemm_comms: bool = Deferred()
     """Enable async TP."""
-    fuse_allreduce_rms: bool = Deferred(False)
+    fuse_allreduce_rms: bool = Deferred()
     """Enable flashinfer allreduce fusion."""
     fuse_minimax_qk_norm: bool = Deferred(False)
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
 
     # ROCm/AITER specific fusions
-    fuse_act_padding: bool = Deferred(False)
+    fuse_act_padding: bool = Deferred()
     """Fuse the custom RMSNorm + padding ops."""
-    fuse_mla_dual_rms_norm: bool = Deferred(False)
+    fuse_mla_dual_rms_norm: bool = Deferred()
     """Fuse paired q/kv RMS norms in MLA attention."""
-    fuse_rope_kvcache: bool = Deferred(False)
+    fuse_rope_kvcache: bool = Deferred()
     """Fuse the QK rope + KV cache ops."""
 
     enable_qk_norm_rope_fusion: bool = False

@@ -504,9 +504,9 @@ def set_from_deprecated_env_if_set(
 
 
 class _DeferredValue:
-    """Per-field sentinel that doubles as a factory carrier.
+    """Per-field sentinel that doubles as an optional factory carrier.
 
-    Each ``Deferred(factory)`` call produces one ``_DeferredValue`` instance
+    Each ``Deferred(...)`` call produces one ``_DeferredValue`` instance
     that becomes the pydantic default for that field.  Embedding the factory
     in the default value means:
 
@@ -516,36 +516,58 @@ class _DeferredValue:
     * ``__bool__`` returns ``False`` so guards in ``__post_init__`` that read
       deferred fields before initialization treat them as falsy, matching the
       behaviour of the old ``None`` sentinel.
+    * When no factory is provided (``MISSING``), the field has no fallback and
+      must be set by the user or the optimization-level table; validation will
+      fail if it remains unset.
     """
 
-    def __init__(self, factory: "Callable[[Any], Any] | Any") -> None:
+    def __init__(self, factory: "Callable[[Any], Any] | Any" = MISSING) -> None:
         self.factory = factory
 
     def __bool__(self) -> bool:
         return False
 
+    def __copy__(self) -> "_DeferredValue":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "_DeferredValue":
+        # _DeferredValue is a sentinel whose identity matters.  Pydantic
+        # deepcopies mutable defaults when creating each model instance;
+        # returning self preserves factory identity so that ``is MISSING``
+        # checks and __repr__ work correctly on every instance.
+        return self
+
     def __repr__(self) -> str:
+        if self.factory is MISSING:
+            return "<Deferred()>"
         factory_name = getattr(self.factory, "__name__", repr(self.factory))
         return f"<Deferred({factory_name})>"
 
 
-def Deferred(factory: "Callable[[Any], Any] | Any") -> Any:
+def Deferred(factory: "Callable[[Any], Any] | Any" = MISSING) -> Any:
     """Declare a config field whose value is resolved in VllmConfig.__post_init__.
 
-    Returns a pydantic Field whose default is a ``_DeferredValue`` instance
-    carrying the factory.  The declared annotation is the true runtime type —
-    no ``| None`` needed.  ``validate_default=False`` tells pydantic to skip
-    coercion of the sentinel through the field's type validator.
+    Returns a pydantic Field whose default is a ``_DeferredValue`` instance.
+    The declared annotation is the true runtime type — no ``| None`` needed.
+    ``validate_default=False`` tells pydantic to skip coercion of the sentinel
+    through the field's type validator.
+
+    When called with no argument, the field has no fallback: it must be set by
+    the user or the optimization-level table, or validation will raise.  Pass a
+    factory only when a last-resort fallback is genuinely needed (e.g. for
+    fields absent from the optimization-level tables).
 
     Args:
-        factory: Either a static fallback value (e.g. False) or a callable
+        factory: Optional static fallback value (e.g. ``False``) or a callable
                  that accepts a VllmConfig instance and returns the value.
+                 Omit to require the field to be set externally.
 
     Example::
 
         @config
         class MyConfig(DeferredFieldsMixin):
-            simple_flag: bool = Deferred(False)
+            required_flag: bool = Deferred()  # must be set by table/user
+            fallback_flag: bool = Deferred(False)  # falls back to False
             tp_flag: bool = Deferred(lambda cfg: cfg.parallel_config.tp > 1)
     """
     return PydanticField(  # type: ignore[call-overload]
@@ -583,7 +605,7 @@ class DeferredFieldsMixin:
         """
         for dc_field in fields(self):  # type: ignore[arg-type]
             current = getattr(self, dc_field.name)
-            if isinstance(current, _DeferredValue):
+            if isinstance(current, _DeferredValue) and current.factory is not MISSING:
                 factory = current.factory
                 value = factory(vllm_config) if callable(factory) else factory
                 setattr(self, dc_field.name, value)
