@@ -418,9 +418,7 @@ class IrOp:
         for arg in args:
             if isinstance(arg, torch.Tensor) and arg.dim() >= 1:
                 new_shape = (sym_num_tokens,) + arg.shape[1:]
-                result.append(
-                    torch.empty(new_shape, device="meta", dtype=arg.dtype)
-                )
+                result.append(torch.empty(new_shape, device="meta", dtype=arg.dtype))
             else:
                 result.append(arg)
         return tuple(result)
