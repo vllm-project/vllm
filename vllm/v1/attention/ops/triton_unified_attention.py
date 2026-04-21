@@ -18,6 +18,7 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
+    cast_kv_tile,
     cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
@@ -33,29 +34,6 @@ from vllm.v1.kv_cache_interface import KVQuantMode
 logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
-
-
-@triton.jit
-def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
-    """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
-
-    Modes handled inside the core kernel:
-
-    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
-      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
-      their scales separately on S/P inside the loop.
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
-      tensor-wide scale.
-
-    Sub-byte packed modes (INT4 / INT2) are dispatched to their own
-    backends in :mod:`vllm.v1.attention.ops.triton_quant_kv` and never
-    reach this kernel.
-    """
-    if KV_QUANT_MODE == 1:
-        if Q.dtype.is_fp8():
-            return data.to(Q.dtype)
-        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
-    return data.to(Q.dtype)
 
 
 @triton.jit
@@ -251,13 +229,13 @@ def kernel_unified_attention(
             mask=dim_mask[:, None] & tile_mask[None, :],
             other=0.0,
         )
-        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
+        K = cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
         V_load = tl.load(
             value_cache_ptr + v_offset,
             mask=dim_mask[None, :] & tile_mask[:, None],
             other=0.0,
         )
-        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+        V = cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:
@@ -527,7 +505,7 @@ def unified_attention(
 
     # Sub-byte packed modes (INT4 / INT2) need bespoke kernels — they
     # split the dot, look up centroids / dequantize from packed bytes,
-    # and live in their own backend modules under
+    # and live in their own factory modules under
     # ``vllm.v1.attention.ops.triton_quant_kv``.  Everything else
     # (NONE, FP8 per-tensor, INT8 / FP8 per-token-head) goes through the
     # core kernel below via constexpr branches.
@@ -535,12 +513,12 @@ def unified_attention(
         KVQuantMode.INT4_PER_TOKEN_HEAD,
         KVQuantMode.INT2_PER_TOKEN_HEAD,
     ):
-        from vllm.v1.attention.ops.triton_quant_kv import get_backend
+        from vllm.v1.attention.ops.triton_quant_kv import get_quant_kv_factory
 
-        backend = get_backend(kv_quant_mode)
+        factory = get_quant_kv_factory(kv_quant_mode)
         if sinks is not None:
             assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"
-        backend.unified_attention(
+        factory.unified_attention(
             q=q,
             k_cache=k,
             v_cache=v,

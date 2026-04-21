@@ -473,10 +473,10 @@ def triton_reshape_and_cache_flash_per_token_head_quant(
         else:
             kv_quant_mode = KVQuantMode.INT8_PER_TOKEN_HEAD
 
-    from vllm.v1.attention.ops.triton_quant_kv import get_backend
+    from vllm.v1.attention.ops.triton_quant_kv import get_quant_kv_factory
 
-    backend = get_backend(kv_quant_mode)
-    backend.reshape_and_cache(
+    factory = get_quant_kv_factory(kv_quant_mode)
+    factory.reshape_and_cache(
         key=key,
         value=value,
         key_cache=key_cache,

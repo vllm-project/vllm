@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Backend protocol for KV cache quantization modes.
+"""Factory protocol for KV cache quantization modes.
 
-A ``QuantKVBackend`` owns the cache write path (``reshape_and_cache``) and
-the attention read path (``unified_attention``) for one ``KVQuantMode``.
-The core attention/reshape kernels stay quantization-agnostic; each mode
-that wants its own data layout, packing, or pre-rotation lives in a
-self-contained module under ``quant_kv/`` and registers an instance of
-this class on import.
+A ``QuantKVFactory`` owns the cache write path (``reshape_and_cache``)
+and the attention read path (``unified_attention``) for one
+``KVQuantMode``.  The core attention/reshape kernels stay
+quantization-agnostic; each mode that wants its own data layout,
+packing, or pre-rotation lives in a self-contained module under
+``quant_kv/`` and registers an instance of this class on import.  This
+is an exceptional code path — standard modes go through the core
+kernel's constexpr branches directly.
 """
 
 from __future__ import annotations
@@ -23,14 +25,14 @@ if TYPE_CHECKING:
     pass
 
 
-class QuantKVBackend(ABC):
+class QuantKVFactory(ABC):
     """Cache write + attention read for one KV quantization mode.
 
     Subclasses implement ``reshape_and_cache`` and ``unified_attention``
     for a single :class:`KVQuantMode`, and call
     :func:`vllm.v1.attention.ops.triton_quant_kv.register` at module import.
     The dispatcher in :mod:`triton_unified_attention` and
-    :mod:`triton_reshape_and_cache_flash` looks up the backend lazily on
+    :mod:`triton_reshape_and_cache_flash` looks up the factory lazily on
     first use, so unused modes pay zero import or compile cost.
     """
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Sub-byte per-token-head KV cache quantization backends (INT4 + INT2).
+"""Sub-byte per-token-head KV cache quantization factories (INT4 + INT2).
 
 Both modes share the same skeleton — per-(token, head) dynamic scale +
 Hadamard pre-rotation on the inputs and inverse Hadamard on the output
@@ -27,7 +27,7 @@ gated by constexpr ``if`` on ``PACKING_FACTOR``.  Everything else
 (prologue, masking, online softmax, tile loop, 2D/3D epilogue) is
 shared.
 
-Both backends register on module import; the attention and reshape
+Both factories register on module import; the attention and reshape
 kernels are Triton-compiled lazily with the ``PACKING_FACTOR`` /
 quant-specific constexprs of each mode.
 """
@@ -63,7 +63,7 @@ from vllm.v1.attention.ops.triton_quant_kv._pack_unpack import (
     unpack_int2_quartet,
     unpack_int4_nibbles,
 )
-from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVBackend
+from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVFactory
 from vllm.v1.attention.ops.triton_unified_attention import reduce_segments
 from vllm.v1.kv_cache_interface import KVQuantMode
 
@@ -891,7 +891,7 @@ def _attn_packed(
 
 
 # ===========================================================================
-# Python launchers + Backend classes.
+# Python launchers + Factory classes.
 # ===========================================================================
 
 
@@ -1133,8 +1133,8 @@ def _run_reshape_kernel(
     )
 
 
-class _PackedBackend(QuantKVBackend):
-    """Shared Backend for sub-byte packed per-token-head modes.
+class _PackedFactory(QuantKVFactory):
+    """Shared factory for sub-byte packed per-token-head modes.
 
     Subclasses declare the mode-specific pieces as class attributes /
     classmethods; the ``reshape_and_cache`` / ``unified_attention``
@@ -1275,8 +1275,8 @@ class _PackedBackend(QuantKVBackend):
         out.copy_(out_f.to(q_orig_dtype))
 
 
-class Int4PerTokenHeadBackend(_PackedBackend):
-    """KV cache backend for ``KVQuantMode.INT4_PER_TOKEN_HEAD``."""
+class Int4PerTokenHeadFactory(_PackedFactory):
+    """KV cache factory for ``KVQuantMode.INT4_PER_TOKEN_HEAD``."""
 
     mode = KVQuantMode.INT4_PER_TOKEN_HEAD
     packing_factor = 2  # 2 × int4 per byte
@@ -1303,8 +1303,8 @@ class Int4PerTokenHeadBackend(_PackedBackend):
         return scale / head_size
 
 
-class Int2PerTokenHeadBackend(_PackedBackend):
-    """KV cache backend for ``KVQuantMode.INT2_PER_TOKEN_HEAD``."""
+class Int2PerTokenHeadFactory(_PackedFactory):
+    """KV cache factory for ``KVQuantMode.INT2_PER_TOKEN_HEAD``."""
 
     mode = KVQuantMode.INT2_PER_TOKEN_HEAD
     packing_factor = 4  # 4 × int2 per byte
@@ -1326,5 +1326,5 @@ class Int2PerTokenHeadBackend(_PackedBackend):
         return fast_hadamard_transform(out.float())
 
 
-register(Int4PerTokenHeadBackend())
-register(Int2PerTokenHeadBackend())
+register(Int4PerTokenHeadFactory())
+register(Int2PerTokenHeadFactory())

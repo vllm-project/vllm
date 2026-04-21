@@ -37,6 +37,29 @@ def apply_softcap(S, x):
     return x * (p1 - p2) / (p1 + p2)
 
 
+@triton.jit
+def cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
+    """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
+
+    Modes handled inside the core kernel:
+
+    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
+      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
+      their scales separately on S/P inside the loop.
+    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
+      tensor-wide scale.
+
+    Sub-byte packed modes (INT4 / INT2) are dispatched to their own
+    specializations in :mod:`vllm.v1.attention.ops.triton_quant_kv` and
+    never reach the common kernel that uses this helper.
+    """
+    if KV_QUANT_MODE == 1:
+        if Q.dtype.is_fp8():
+            return data.to(Q.dtype)
+        return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
+    return data.to(Q.dtype)
+
+
 # ===========================================================================
 # Attention loop
 # ===========================================================================

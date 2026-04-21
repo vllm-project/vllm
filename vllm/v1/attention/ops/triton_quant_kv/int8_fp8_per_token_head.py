@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""INT8 and FP8 per-token-head KV cache quantization backends.
+"""INT8 and FP8 per-token-head KV cache quantization factories.
 
 The attention read path for these modes lives in the core kernel
 (:mod:`vllm.v1.attention.ops.triton_unified_attention`) — the only thing
@@ -30,7 +30,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.ops.triton_quant_kv import register
-from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVBackend
+from vllm.v1.attention.ops.triton_quant_kv.base import QuantKVFactory
 from vllm.v1.kv_cache_interface import KVQuantMode
 
 # ---------------------------------------------------------------------------
@@ -207,11 +207,11 @@ def _run_reshape_and_cache(
     )
 
 
-class _PerTokenHeadBackend(QuantKVBackend):
+class _PerTokenHeadFactory(QuantKVFactory):
     """Common implementation for INT8 / FP8 per-token-head modes.
 
     Subclasses set ``mode``, ``_quant_max`` and ``_quant_min``.  The
-    attention read path lives in the core kernel; this backend only
+    attention read path lives in the core kernel; this factory only
     owns the write path and the scale-cache allocation.
     """
 
@@ -248,21 +248,21 @@ class _PerTokenHeadBackend(QuantKVBackend):
         )
 
 
-class Int8PerTokenHeadBackend(_PerTokenHeadBackend):
-    """KV cache backend for ``KVQuantMode.INT8_PER_TOKEN_HEAD``."""
+class Int8PerTokenHeadFactory(_PerTokenHeadFactory):
+    """KV cache factory for ``KVQuantMode.INT8_PER_TOKEN_HEAD``."""
 
     mode = KVQuantMode.INT8_PER_TOKEN_HEAD
     _quant_max = _INT8_QUANT_MAX
     _quant_min = _INT8_QUANT_MIN
 
 
-class Fp8PerTokenHeadBackend(_PerTokenHeadBackend):
-    """KV cache backend for ``KVQuantMode.FP8_PER_TOKEN_HEAD``."""
+class Fp8PerTokenHeadFactory(_PerTokenHeadFactory):
+    """KV cache factory for ``KVQuantMode.FP8_PER_TOKEN_HEAD``."""
 
     mode = KVQuantMode.FP8_PER_TOKEN_HEAD
     _quant_max = _FP8_QUANT_MAX
     _quant_min = _FP8_QUANT_MIN
 
 
-register(Int8PerTokenHeadBackend())
-register(Fp8PerTokenHeadBackend())
+register(Int8PerTokenHeadFactory())
+register(Fp8PerTokenHeadFactory())
