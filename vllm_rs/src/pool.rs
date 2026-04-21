@@ -269,4 +269,63 @@ impl BlockPool {
         }
         Some(self.get_block_at(py, block_id))
     }
+
+    /// Fast-path cache-full-blocks: stamp each non-null block's hash and
+    /// register it in `cached_block_hash_to_block`. Skips events (caller
+    /// keeps event emission in Python) and the block_size != hash_block_size
+    /// branch. Python wrapper falls back to its own implementation for those.
+    ///
+    /// Arguments:
+    ///   blocks: list[KVCacheBlock] of length >= num_full
+    ///   block_hashes: list[bytes] of length >= (num_full - num_cached)
+    ///     — pre-sliced to start at num_cached to match vLLM's layout
+    ///   num_cached: number of already-cached blocks
+    ///   num_full: total number of full blocks to cover
+    ///   kv_cache_group_id: u32 group id
+    pub fn cache_full_blocks_fast(
+        &mut self,
+        py: Python<'_>,
+        blocks: Bound<'_, PyList>,
+        block_hashes: Bound<'_, PyList>,
+        num_cached: usize,
+        num_full: usize,
+        kv_cache_group_id: u32,
+    ) -> PyResult<()> {
+        use pyo3::types::PyBytes;
+        if num_cached >= num_full {
+            return Ok(());
+        }
+        let count = num_full - num_cached;
+        if block_hashes.len() < count {
+            return Err(PyAssertionError::new_err(
+                "block_hashes slice is shorter than num_full - num_cached",
+            ));
+        }
+        let group_bytes = kv_cache_group_id.to_be_bytes();
+        for i in 0..count {
+            let blk_obj = blocks.get_item(num_cached + i)?;
+            let blk: Bound<'_, KVCacheBlock> = blk_obj.downcast_into::<KVCacheBlock>()?;
+            let (is_null, has_hash) = {
+                let b = blk.borrow();
+                (b.is_null, b.block_hash_ref().is_some())
+            };
+            if is_null {
+                continue;
+            }
+            if has_hash {
+                return Err(PyAssertionError::new_err(
+                    "cache_full_blocks: block already has a hash",
+                ));
+            }
+            let raw_hash_obj = block_hashes.get_item(i)?;
+            let raw_bytes: &[u8] = raw_hash_obj.downcast::<PyBytes>()?.as_bytes();
+            let mut combined = Vec::with_capacity(raw_bytes.len() + 4);
+            combined.extend_from_slice(raw_bytes);
+            combined.extend_from_slice(&group_bytes);
+            blk.borrow_mut().set_hash_internal(combined.clone());
+            let mut map = self.cached_block_hash_to_block.borrow_mut(py);
+            map.insert(py, combined, blk.as_unbound().clone_ref(py))?;
+        }
+        Ok(())
+    }
 }

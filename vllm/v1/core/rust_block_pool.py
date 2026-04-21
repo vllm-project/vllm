@@ -164,18 +164,27 @@ class RustBlockPool:
             [] if self.enable_kv_cache_events else None
         )
         cache_map = self._rs.cached_block_hash_to_block
-        for i, blk in enumerate(new_full_blocks):
-            if blk.is_null:
-                continue
-            assert blk.block_hash is None
-            block_hash = new_block_hashes[i]
-            block_hash_with_group_id = make_block_hash_with_group_id(
-                block_hash, kv_cache_group_id
+
+        # Fast path: when events are off we don't need the side-output
+        # `new_hashes` list and can delegate the whole loop to Rust.
+        if new_hashes is None and isinstance(new_block_hashes, list):
+            self._rs.cache_full_blocks_fast(
+                blocks, new_block_hashes, num_cached_blocks,
+                num_full_blocks, kv_cache_group_id,
             )
-            blk.block_hash = block_hash_with_group_id
-            cache_map.insert(block_hash_with_group_id, blk)
-            if new_hashes is not None:
-                new_hashes.append(maybe_convert_block_hash(block_hash))
+        else:
+            for i, blk in enumerate(new_full_blocks):
+                if blk.is_null:
+                    continue
+                assert blk.block_hash is None
+                block_hash = new_block_hashes[i]
+                block_hash_with_group_id = make_block_hash_with_group_id(
+                    block_hash, kv_cache_group_id
+                )
+                blk.block_hash = block_hash_with_group_id
+                cache_map.insert(block_hash_with_group_id, blk)
+                if new_hashes is not None:
+                    new_hashes.append(maybe_convert_block_hash(block_hash))
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:

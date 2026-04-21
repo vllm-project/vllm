@@ -214,6 +214,47 @@ def test_block_pool_randomized_trace():
     )
 
 
+def test_cache_full_blocks_fast_parity():
+    """Rust cache_full_blocks_fast should produce identical post-state to the
+    Python BlockPool.cache_full_blocks fast path (block_size==hash_block_size,
+    events off).
+    """
+    import types
+
+    py, r = _make_pair(num=32, caching=True)
+    py_bs = py.get_new_blocks(8)
+    rs_bs = r.get_new_blocks(8)
+    # Fake block hashes: 32 bytes each. Must be distinct per block.
+    block_hashes = [bytes([i]) * 32 for i in range(8)]
+
+    # Fake Request with just .block_hashes — cache_full_blocks reads that attr.
+    req = types.SimpleNamespace(block_hashes=block_hashes)
+
+    py.cache_full_blocks(
+        request=req,
+        blocks=py_bs,
+        num_cached_blocks=0,
+        num_full_blocks=5,
+        block_size=16,
+        kv_cache_group_id=0,
+    )
+    # Rust RustBlockPool wrapper also takes the same args.
+    # But here we're using the raw `rs.BlockPool` (not the wrapper),
+    # so call the Rust fast method directly.
+    r.cache_full_blocks_fast(rs_bs, block_hashes[:5], 0, 5, 0)
+
+    # Parity: the hash-to-block map contents should match.
+    for i in range(5):
+        key = block_hashes[i] + (0).to_bytes(4, "big", signed=False)
+        py_b = py.cached_block_hash_to_block.get_one_block(key)
+        rs_b = r.cached_block_hash_to_block.get_one_block(key)
+        assert py_b is not None
+        assert rs_b is not None
+        assert py_b.block_id == rs_b.block_id
+        # Block hash is stamped on the block
+        assert py_bs[i].block_hash == rs_bs[i].block_hash
+
+
 if __name__ == "__main__":
     import sys
     pytest.main([__file__, "-v"] + sys.argv[1:])
