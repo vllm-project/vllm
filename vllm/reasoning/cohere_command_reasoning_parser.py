@@ -43,7 +43,7 @@ class CohereTagStyle(NamedTuple):
     tools: CohereTagRegistry
 
 
-class NormalizedTool(TypedDict):
+class CohereNormalizedTool(TypedDict):
     """A tool definition normalized to the shape ``collect_tool_schema`` expects.
 
     ``parameters`` is a JSON Schema object (possibly empty) describing the tool's
@@ -71,7 +71,7 @@ MODEL_TO_TAG_STYLE: dict[str, CohereTagStyle] = {
 }
 
 
-def collect_tool_schema(tool_schema: list[NormalizedTool]) -> str:
+def collect_tool_schema(tool_schema: list[CohereNormalizedTool]) -> str:
     """Build an xgrammar EBNF grammar that matches a JSON array of tool calls.
 
     The grammar shape is architecture-independent; callers are responsible for
@@ -97,7 +97,9 @@ def collect_tool_schema(tool_schema: list[NormalizedTool]) -> str:
                             }}"""
         tool_grammar = str(xgr.Grammar.from_json_schema(json_schema))
         for match in re.findall(r"\b(\w+)\s*::=", tool_grammar):
-            tool_grammar = tool_grammar.replace(match, tool_name + match)
+            tool_grammar = re.sub(
+                rf"\b{re.escape(match)}\b", tool_name + match, tool_grammar
+            )
         tool_dictionary[tool_name] = f"{tool_name} ::= {tool_name}root\n{tool_grammar}"
     # Emitted grammar shape:
     #   root  ::= tools
@@ -119,9 +121,10 @@ def collect_tool_schema(tool_schema: list[NormalizedTool]) -> str:
 
 def _tool_definitions_to_schema_list(
     tools: str | list[Any],
-) -> list[NormalizedTool]:
+) -> list[CohereNormalizedTool]:
     """
-    Build the list of ``NormalizedTool`` dicts expected by ``collect_tool_schema``.
+    Build the list of ``CohereNormalizedTool`` dicts expected by
+    ``collect_tool_schema``.
 
     Accepts:
     - JSON string
@@ -139,7 +142,7 @@ def _tool_definitions_to_schema_list(
     else:
         parsed = list(tools)
 
-    out: list[NormalizedTool] = []
+    out: list[CohereNormalizedTool] = []
     for raw in parsed:
         t = raw.model_dump() if hasattr(raw, "model_dump") else raw
         if not isinstance(t, dict):
@@ -153,7 +156,7 @@ def _tool_definitions_to_schema_list(
             continue
         params = t.get("parameters")
         out.append(
-            NormalizedTool(
+            CohereNormalizedTool(
                 name=name,
                 parameters=params if isinstance(params, dict) else {},
             )
