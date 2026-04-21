@@ -33,21 +33,14 @@ class HybridEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         graph. row_id_map is therefore refreshed on every graph replay and
         reflects the current request's routing (rather than being baked in
         from warmup).
-      * Pass non_blocking=True to suppress the single CG-incompatible API
-        call (cudaStreamSynchronize inside dispatch_preprocess). The other
-        "suspicious" host APIs -- cudaFuncSetAttribute and
-        cudaLaunchCooperativeKernel -- are graph-capturable on CUDA 12+.
+      * Pass non_blocking=True to suppress the CG-incompatible API
+        call (cudaStreamSynchronize inside dispatch_preprocess).
       * Supply a routing-independent upper bound for num_permuted_tokens so
         the captured output buffer is large enough for any runtime routing
         distribution. The upper bound is num_tokens_per_rank * num_dispatchers
         * topk (the theoretical max if every token from every rank routes to
         experts on this rank with its full topk slots).
 
-    This class does NOT cache the warmup handle across capture sizes. The
-    previous approach (caching to "skip preprocessing") baked the warmup's
-    routing permutation into every captured graph, which corrupted outputs
-    for any request whose routing differed from warmup (i.e. all real
-    requests with dynamic routing).
     """
 
     def __init__(
@@ -189,35 +182,65 @@ class HybridEPPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             expert_num_tokens_cpu=None,
         )
 
-        # expert_topk_ids / expert_topk_weights:
-        # The flashinfer_cutlass MoE kernel expects one (topk=1) expert id per
-        # row of expert_x. The dispatched output has a fixed shape
-        #   (num_permuted_tokens + pad_multiple, hidden_dim)
-        # with pad_multiple=1 (passed into dispatch_with_permute above).
+        # Reconstruct per-row expert assignments. The flashinfer_cutlass MoE
+        # kernel expects one (topk=1) expert id per row of expert_x, which
+        # has fixed shape (num_permuted_tokens + pad_multiple, hidden_dim)
+        # -- sized by the upper bound computed in _do_dispatch.
         #
-        # We can't use repeat_interleave to label each row with its true
-        # expert because that would need tokens_per_expert.tolist() (D2H
-        # sync, not CG-capturable) or output_size equal to
-        # tokens_per_expert.sum() (routing-dependent, also breaks capture).
+        # The first sum(tokens_per_expert) rows of expert_x are real
+        # dispatched tokens grouped by local expert; the rest is buffer
+        # padding that combine_with_unpermute drops on the return trip.
+        # expert_topk_ids must agree with expert_x's row count so downstream
+        # kernels don't read past either tensor, and its first
+        # sum(tokens_per_expert) entries must label the correct local expert
+        # for correctness.
         #
-        # Semantically this means the downstream expert kernel may compute
-        # with the wrong expert weights for each token. The combined output
-        # will therefore be numerically incorrect, but the plumbing is
-        # crash-free: shapes match, no OOB, HTTP 200 with a valid choices
-        # payload -- which is the behavior the repro scripts assert and the
-        # only contract that the CG path can honor without a routing-aware
-        # preprocessing API exposed out-of-graph.
+        # repeat_interleave is CG-capturable when output_size is supplied
+        # (skips the sync that would otherwise be needed to size the output).
+        # The catch is output_size must equal sum(repeats). We satisfy both
+        # by appending a synthetic padding-expert entry whose repeat count
+        # absorbs (num_rows - sum(tokens_per_expert)), so the total is
+        # exactly num_rows regardless of runtime routing. The padding
+        # entries' expert id is a don't-care (reusing rank_expert_offset).
         num_rows = expert_x.shape[0]
-        expert_topk_ids = torch.full(
-            (num_rows, 1),
+        local_expert_ids = (
+            torch.arange(
+                self.num_local_experts,
+                device=expert_x.device,
+                dtype=torch.int64,
+            )
+            + self.rank_expert_offset
+        )
+        padding_expert_id = torch.full(
+            (1,),
             self.rank_expert_offset,
             device=expert_x.device,
             dtype=torch.int64,
         )
-        expert_topk_weights = torch.ones(
-            (num_rows, 1),
-            device=expert_x.device,
-            dtype=torch.float32,
+        expert_ids = torch.cat([local_expert_ids, padding_expert_id], dim=0)
+
+        tokens_per_expert_device = tokens_per_expert.to(
+            device=expert_x.device, non_blocking=True
+        )
+        padding_repeats = (
+            torch.full(
+                (1,),
+                num_rows,
+                device=expert_x.device,
+                dtype=tokens_per_expert_device.dtype,
+            )
+            - tokens_per_expert_device.sum(dim=0, keepdim=True)
+        )
+        repeats = torch.cat(
+            [tokens_per_expert_device, padding_repeats], dim=0
+        )
+
+        expert_topk_ids = torch.repeat_interleave(
+            expert_ids, repeats, output_size=num_rows
+        ).unsqueeze(1)
+
+        expert_topk_weights = torch.ones_like(
+            expert_topk_ids, dtype=torch.float32
         )
 
         expert_x_scale = None
