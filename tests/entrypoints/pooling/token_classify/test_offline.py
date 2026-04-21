@@ -59,7 +59,7 @@ def test_token_ids_prompts(llm: LLM):
 
 @pytest.mark.skip_global_cleanup
 def test_score_api(llm: LLM):
-    err_msg = "Scoring API is only enabled for num_labels == 1."
+    err_msg = "This model does not support the Scoring API."
     with pytest.raises(ValueError, match=err_msg):
         llm.score("ping", "pong", use_tqdm=False)
 
