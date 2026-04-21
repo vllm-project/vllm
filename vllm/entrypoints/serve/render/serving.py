@@ -55,6 +55,9 @@ from vllm.tool_parsers import ToolParser
 from vllm.utils import random_uuid
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.mistral import mt as _mt
+from vllm.v1.utils import record_function_or_nullcontext  # noqa: F401  (kept for other call sites)
+
+import time as _time
 
 logger = init_logger(__name__)
 
@@ -500,6 +503,13 @@ class OpenAIServingRender:
         tool_parser: type[ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         """Copied from OpenAIServing._preprocess_chat."""
+        # NVTX range removed: this whole body is async and spans `await`,
+        # so PushPop ranges nest across concurrent coroutines on the same
+        # event-loop thread. Use the [preproc] log line below for per-request
+        # wall-clock attribution instead.
+        _preproc_t0 = _time.perf_counter()
+        _req_id = getattr(request, "request_id", None) or "?"
+
         renderer = self.renderer
         mm_config = self.model_config.multimodal_config
 
@@ -516,10 +526,15 @@ class OpenAIServingRender:
             default_template, default_template_content_format
         ).with_defaults(
             default_template_kwargs,
-            default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
-            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            default_media_io_kwargs=(
+                mm_config.media_io_kwargs if mm_config else None
+            ),
+            default_mm_processor_kwargs=getattr(
+                request, "mm_processor_kwargs", None
+            ),
         )
 
+        _render_t0 = _time.perf_counter()
         (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],
             chat_params,
@@ -530,6 +545,7 @@ class OpenAIServingRender:
                 if (v := getattr(request, k, None)) is not None
             },
         )
+        _render_ms = (_time.perf_counter() - _render_t0) * 1000.0
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -537,7 +553,9 @@ class OpenAIServingRender:
         if tool_parser is not None:
             tool_choice = getattr(request, "tool_choice", "none")
             if tool_choice != "none":
-                if not isinstance(request, ChatCompletionRequest | ResponsesRequest):
+                if not isinstance(
+                    request, ChatCompletionRequest | ResponsesRequest
+                ):
                     msg = (
                         "Tool usage is only supported "
                         "for Chat Completions API or Responses API requests, "
@@ -549,4 +567,9 @@ class OpenAIServingRender:
                     request=request  # type: ignore[arg-type]
                 )
 
+        _wall_ms = (_time.perf_counter() - _preproc_t0) * 1000.0
+        logger.info(
+            "[preproc] req=%s wall_ms=%.1f render_ms=%.1f",
+            _req_id, _wall_ms, _render_ms,
+        )
         return conversation, [engine_input]

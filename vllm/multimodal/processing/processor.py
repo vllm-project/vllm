@@ -29,6 +29,7 @@ from vllm.inputs import (
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import call_hf_processor_mm_only
+from vllm.v1.utils import record_function_or_nullcontext
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
@@ -1453,20 +1454,27 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         if cache is None or passthrough_data:
             return self._apply_hf_processor(inputs, timing_ctx)
 
-        with timing_ctx.record("get_mm_hashes"):
+        with record_function_or_nullcontext("mm:hash"), timing_ctx.record(
+            "get_mm_hashes"
+        ):
             mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        with timing_ctx.record("get_cache_missing_items"):
+        with record_function_or_nullcontext(
+            "mm:cache_lookup"
+        ), timing_ctx.record("get_cache_missing_items"):
             mm_is_cached, mm_missing_data_items = self._get_cache_missing_items(
                 cache=cache,
                 mm_data_items=inputs.mm_data_items,
                 mm_hashes=mm_hashes,
             )
+        timing_ctx.mm_is_cached = mm_is_cached
 
         # NOTE: `prompt` does not correspond to `mm_missing_data_items`,
         # so we can't apply prompt updates until the new multimodal
         # items are combined with the cached multimodal items
-        with timing_ctx.record("apply_hf_processor"):
+        with record_function_or_nullcontext(
+            "mm:hf_call"
+        ), timing_ctx.record("apply_hf_processor"):
             (
                 prompt_ids,
                 mm_missing_processed_data,
@@ -1492,7 +1500,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             mm_missing_kwargs,
         )
 
-        with timing_ctx.record("merge_mm_kwargs"):
+        with record_function_or_nullcontext(
+            "mm:merge"
+        ), timing_ctx.record("merge_mm_kwargs"):
             mm_kwargs, mm_prompt_updates = self._merge_mm_kwargs(
                 cache,
                 mm_hashes=mm_hashes,
@@ -1685,7 +1695,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         ) = self._cached_apply_hf_processor(inputs, timing_ctx)
 
         # NOTE: tokenization_kwargs are not required to init processor
-        with timing_ctx.record("apply_prompt_updates"):
+        with record_function_or_nullcontext(
+            "mm:prompt_updates"
+        ), timing_ctx.record("apply_prompt_updates"):
             prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
                 mm_items=inputs.mm_data_items,
                 prompt_ids=prompt_ids,

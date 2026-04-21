@@ -98,6 +98,38 @@ from vllm.tokenizers.protocol import TokenizerLike
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
+from vllm.v1.utils import record_function_or_nullcontext as _nvtx_ctx
+
+
+def _install_smart_resize_nvtx() -> None:
+    """Wrap transformers.smart_resize with `mm:qwen:smart_resize` NVTX.
+
+    Patches at module load so every call site (image + video) gets the range,
+    regardless of whether it went through our renamed imports above or imported
+    smart_resize fresh from transformers elsewhere.
+    """
+    import transformers.models.qwen2_vl.image_processing_qwen2_vl as _img_mod
+    import transformers.models.qwen3_vl.video_processing_qwen3_vl as _vid_mod
+
+    for _mod, _label in (
+        (_img_mod, "mm:qwen:smart_resize"),
+        (_vid_mod, "mm:qwen:smart_resize_video"),
+    ):
+        _orig = getattr(_mod, "smart_resize", None)
+        if _orig is None or getattr(_orig, "_vllm_nvtx_patched", False):
+            continue
+
+        def _make(fn, label):
+            def _wrapped(*a, **kw):
+                with _nvtx_ctx(label):
+                    return fn(*a, **kw)
+            _wrapped._vllm_nvtx_patched = True  # type: ignore[attr-defined]
+            return _wrapped
+
+        _mod.smart_resize = _make(_orig, _label)
+
+
+_install_smart_resize_nvtx()
 
 from .interfaces import (
     MultiModalEmbeddings,

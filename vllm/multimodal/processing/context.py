@@ -53,6 +53,13 @@ class TimingContext:
     stage_secs: dict[str, float] = field(default_factory=dict)
     """The execution time (in seconds) for each processing stage."""
 
+    mm_is_cached: dict[str, list[bool]] | None = None
+    """Pre-apply per-item cache hit/miss vector, keyed by modality. Populated
+    by `_cached_apply_hf_processor` from the result of `_get_cache_missing_items`,
+    before any cache insertion — so it reflects the real request-time state.
+    Remains None when the processor has no cache or the call took the
+    passthrough short-circuit."""
+
     @property
     def total_secs(self) -> float:
         return sum(self.stage_secs.values())

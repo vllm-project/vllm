@@ -37,6 +37,8 @@ from vllm.multimodal.parse import (
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
+from vllm.multimodal.processing import TimingContext as _TimingContext
+import vllm.envs as envs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import (
@@ -46,6 +48,7 @@ from vllm.utils.async_utils import (
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
+from vllm.v1.utils import record_function_or_nullcontext
 
 from .embed_utils import safe_load_prompt_embeds
 from .inputs import (
@@ -626,32 +629,75 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
     ) -> "MultiModalInput":
-        mm_req_id = f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+        with record_function_or_nullcontext("hf_processor"):
+            # NVTX hf_processor is safe (runs on the MM executor thread, not the
+            # event loop) — non-overlapping per worker thread. The [mmproc] log
+            # below gives the same numbers as a per-request scalar.
+            _probe = envs.VLLM_MM_CACHE_PROBE
+            _mm_t0 = time.perf_counter()
+            _mm_cpu_t0 = time.thread_time_ns()
 
-        mm_processor = self.get_mm_processor()
+            mm_req_id = (
+                f"renderer{self.api_process_rank}-mm-{self._mm_req_counter.inc(1)}"
+            )
 
-        mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-        mm_uuid_items = parse_mm_uuids(mm_uuids)
+            mm_processor = self.get_mm_processor()
 
-        mm_uuid_items = self._process_mm_uuids(
-            mm_data, mm_data_items, mm_uuid_items, mm_req_id
-        )
+            mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+            mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-        mm_processor_inputs = MMProcessorInputs(
-            prompt,
-            mm_data_items,
-            mm_uuid_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs or {},
-            tokenization_kwargs=tokenization_kwargs or {},
-        )
-        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+            mm_uuid_items = self._process_mm_uuids(
+                mm_data, mm_data_items, mm_uuid_items, mm_req_id
+            )
 
-        with set_default_torch_num_threads():
-            mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+            mm_processor_inputs = MMProcessorInputs(
+                prompt,
+                mm_data_items,
+                mm_uuid_items,
+                hf_processor_mm_kwargs=mm_processor_kwargs or {},
+                tokenization_kwargs=tokenization_kwargs or {},
+            )
+            if _probe:
+                mm_timing_ctx = _TimingContext(enabled=True)
+            else:
+                mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
-        self.update_mm_cache_stats()
+            _apply_t0 = time.perf_counter()
+            with set_default_torch_num_threads():
+                mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+            _apply_ms = (time.perf_counter() - _apply_t0) * 1000.0
 
-        return mm_inputs
+            self.update_mm_cache_stats()
+
+            _total_ms = (time.perf_counter() - _mm_t0) * 1000.0
+            _cpu_ms = (time.thread_time_ns() - _mm_cpu_t0) / 1e6
+            logger.info(
+                "[mmproc] req=%s total_ms=%.1f cpu_ms=%.1f apply_ms=%.1f",
+                mm_req_id, _total_ms, _cpu_ms, _apply_ms,
+            )
+
+            if _probe:
+                hit_vec: dict[str, list[str]] = {}
+                if mm_timing_ctx.mm_is_cached is not None:
+                    hit_vec = {
+                        mod: ["H" if c else "M" for c in is_cached]
+                        for mod, is_cached in mm_timing_ctx.mm_is_cached.items()
+                    }
+                stages_ms = {
+                    k: v * 1000.0 for k, v in mm_timing_ctx.stage_secs.items()
+                }
+                logger.info(
+                    "[mmcache] req=%s total=%.1fms hits=%s "
+                    "hash=%.1fms miss_scan=%.1fms hf=%.1fms merge=%.1fms upd=%.1fms",
+                    mm_req_id, _total_ms, hit_vec,
+                    stages_ms.get("get_mm_hashes", 0.0),
+                    stages_ms.get("get_cache_missing_items", 0.0),
+                    stages_ms.get("apply_hf_processor", 0.0),
+                    stages_ms.get("merge_mm_kwargs", 0.0),
+                    stages_ms.get("apply_prompt_updates", 0.0),
+                )
+
+            return mm_inputs
 
     def _process_tokens(
         self,
@@ -717,6 +763,9 @@ class BaseRenderer(ABC, Generic[_T]):
 
         engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
+            # NVTX hf_processor_wait removed: it wraps `await` and PushPop-nests
+            # across concurrent coroutines on the event loop. Use the [mmproc]
+            # log line emitted from _process_multimodal for per-request CPU.
             engine_input = await self._process_multimodal_async(
                 prompt_token_ids,
                 multi_modal_data,

@@ -32,6 +32,7 @@ from vllm.transformers_utils.chat_templates import get_chat_template_fallback_pa
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
+from vllm.v1.utils import record_function_or_nullcontext
 
 from .base import BaseRenderer
 from .inputs import DictPrompt
@@ -683,6 +684,10 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        # NVTX ranges removed (render_messages / parse_chat / chat_template):
+        # all three wrap `await` calls and therefore PushPop-nest with other
+        # concurrent coroutines on the event loop. Use [preproc] / [mmproc]
+        # log lines for per-request attribution.
         model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
