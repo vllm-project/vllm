@@ -36,7 +36,19 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
 
 
-@support_torch_compile()
+# NOTE: `from __future__ import annotations` above turns every forward-method
+# annotation into a *string*, which defeats `@support_torch_compile`'s
+# auto-inference of dynamic dims (it does `v.annotation in [torch.Tensor, ...]`
+# with class objects, not strings). We therefore pass `dynamic_arg_dims`
+# explicitly. All four tensor inputs have the batch size on dim 0.
+@support_torch_compile(
+    dynamic_arg_dims={
+        "token_ids": 0,
+        "seq_lens": 0,
+        "valid_mask": 0,
+        "last_sampled": 0,
+    }
+)
 class _NgramKernel(nn.Module):
     """Pure, stateless n-gram match kernel.
 
@@ -253,7 +265,7 @@ class NgramGPUSpeculator:
         # [num_reqs] int32 — unused by ngram
         num_rejected: torch.Tensor,
         # [max_num_reqs, 1] int64
-        last_sampled_tokens: torch.Tensor,
+        last_sampled: torch.Tensor,
         # [max_num_reqs] int32 — unused
         next_prefill_tokens: torch.Tensor,
         # [max_num_reqs] — unused
@@ -264,7 +276,6 @@ class NgramGPUSpeculator:
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None,
-        is_profile: bool = False,
     ) -> torch.Tensor:
         """Propose up to ``num_speculative_steps`` draft tokens per request.
 
@@ -295,9 +306,7 @@ class NgramGPUSpeculator:
             idx_mapping_long
         ]
         active_seq_lens: torch.Tensor = self.req_states.total_len.gpu[idx_mapping_long]
-        active_last_sampled: torch.Tensor = last_sampled_tokens.view(-1)[
-            idx_mapping_long
-        ]
+        active_last_sampled: torch.Tensor = last_sampled.view(-1)[idx_mapping_long]
 
         # A request can draft iff (a) at least one real token was just
         # sampled for it (otherwise we cannot trust its suffix) AND
