@@ -66,6 +66,10 @@ class FlashInferMLABackend(MLACommonBackend):
         return capability.major == 10
 
     @classmethod
+    def supports_skip_softmax(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_combination(
         cls,
         head_size: int,
@@ -117,6 +121,8 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
+        skip_softmax_threshold_scale_factor_prefill: float | None = None,
+        skip_softmax_threshold_scale_factor_decode: float | None = None,
         **mla_args,
     ) -> None:
         super().__init__(
@@ -151,6 +157,13 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
         self._workspace_buffer = g_fi_workspace
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+
+        # FlashInfer MLA is decode-only; the prefill kwarg is accepted for
+        # API symmetry with non-MLA flashinfer and ignored here.
+        del skip_softmax_threshold_scale_factor_prefill
+        self.skip_softmax_threshold_scale_factor_decode: float | None = (
+            skip_softmax_threshold_scale_factor_decode
+        )
 
     def forward_mqa(
         self,
@@ -199,6 +212,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
             max_seq_len=attn_metadata.max_seq_len,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
+            skip_softmax_threshold_scale_factor=self.skip_softmax_threshold_scale_factor_decode,
         )
 
         # Flatten the output for consistent shape

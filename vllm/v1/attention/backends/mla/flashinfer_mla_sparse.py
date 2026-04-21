@@ -102,6 +102,10 @@ class FlashInferMLASparseBackend(AttentionBackend):
         return capability.major == 10
 
     @classmethod
+    def supports_skip_softmax(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_combination(
         cls,
         head_size: int,
@@ -272,6 +276,8 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         # MLA Specific Arguments
         topk_indice_buffer: torch.Tensor | None = None,
         indexer: "Indexer | None" = None,
+        skip_softmax_threshold_scale_factor_prefill: float | None = None,
+        skip_softmax_threshold_scale_factor_decode: float | None = None,
         **mla_args,
     ) -> None:
         unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
@@ -306,6 +312,12 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         self._workspace_buffer: torch.Tensor | None = None
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
+
+        # FlashInfer sparse MLA is decode-only; the prefill kwarg is accepted
+        # for API symmetry with non-MLA flashinfer and ignored here.
+        self.skip_softmax_threshold_scale_factor_decode: float | None = (
+            skip_softmax_threshold_scale_factor_decode
+        )
 
         # fp8 query quantization is required when using fp8 kv_cache,
         # as the TRTLLM-GEN sparse MLA kernel requires matching dtypes
@@ -361,5 +373,6 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             sparse_mla_top_k=attn_metadata.topk_tokens,
+            skip_softmax_threshold_scale_factor=self.skip_softmax_threshold_scale_factor_decode,
         )
         return o.view(-1, o.shape[-2], o.shape[-1]), None
