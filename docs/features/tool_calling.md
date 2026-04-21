@@ -369,6 +369,14 @@ Flags:
 * For non-reasoning: `--tool-call-parser hunyuan_a13b`
 * For reasoning: `--tool-call-parser hunyuan_a13b --reasoning-parser hunyuan_a13b`
 
+### Cohere Command A Reasoning (`cohere_command3`)
+
+Supported models:
+
+* [`CohereLabs/command-a-reasoning-08-2025`](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025)
+
+Flags: `--tool-call-parser cohere_command3 --reasoning-parser cohere_command3`
+
 ### LongCat-Flash-Chat Models (`longcat`)
 
 Supported models:

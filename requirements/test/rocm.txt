@@ -163,6 +163,10 @@ cligj==0.7.2
     #   rasterio
 cloudpickle==3.1.2
     # via -r requirements/test/../common.txt
+cohere-melody==0.7.0
+    # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
 colorama==0.4.6
     # via
     #   perceptron
