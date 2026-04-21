@@ -220,18 +220,20 @@ class ModelBlockTransferPolicy(ABC):
     @abstractmethod
     def build_remote_descs(
         self,
-        nixl_agent_meta: NixlAgentMetadata,
-        block_size_ratio: int,
-        tp_ratio: int,
+        # TP topology
         tp_rank: int,
-        use_mla: bool,
+        tp_size: int,
+        is_mla: bool,
+        total_num_kv_heads: int,
+        tp_ratio: int,
+        # Remote engine info
+        nixl_agent_meta: NixlAgentMetadata,
+        remote_info: EngineTransferInfo,
+        # Block geometry
+        block_size_ratio: int,
         block_len_per_layer: list[int],
+        # Layout
         is_blocks_first: bool,
-        indexes_into_remote: bool,
-        transfer_config: Any | None = None,
-        physical_blocks_per_logical: int = 1,
-        tp_size: int = 1,
-        total_num_kv_heads: int = 1,
     ) -> list[tuple[int, int, int]]:
         """Build remote (dst) descriptor tuples."""
         ...
@@ -463,25 +465,27 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     def build_remote_descs(
         self,
-        nixl_agent_meta,
-        block_size_ratio,
-        tp_ratio,
         tp_rank,
-        use_mla,
+        tp_size,
+        is_mla,
+        total_num_kv_heads,
+        tp_ratio,
+        nixl_agent_meta,
+        remote_info,
+        block_size_ratio,
         block_len_per_layer,
         is_blocks_first,
-        indexes_into_remote,
-        transfer_config=None,
-        physical_blocks_per_logical=1,
-        tp_size: int = 1,
-        total_num_kv_heads: int = 1,
     ):
         # With homogeneous TP, D pulls the whole kv cache from corresponding
         # rank. With heterogeneous TP, prepare the descriptors by splitting the
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
         # Register all remote blocks, but only the corresponding kv heads.
-        _ = (tp_size, total_num_kv_heads, physical_blocks_per_logical, transfer_config)
+        assert isinstance(remote_info, EngineTransferInfo)
+        indexes_into_remote = (
+            not (is_mla or remote_info.remote_tp_size > total_num_kv_heads)
+            and tp_ratio > 0
+        )
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(
             nixl_agent_meta.kv_caches_base_addr,
@@ -496,7 +500,7 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
                 local_block_len = remote_kv_block_len
-            if tp_ratio < 0 and not use_mla:
+            if tp_ratio < 0 and not is_mla:
                 # Remote tp is bigger: read a chunk of local region from remote
                 local_block_len = local_block_len // (-tp_ratio)
             rank_offset = (
@@ -514,7 +518,7 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
                     block_len_per_layer,
                     is_blocks_first,
                 )
-                if tp_ratio < 0 and not use_mla:
+                if tp_ratio < 0 and not is_mla:
                     second_split = second_split // (-tp_ratio)
                 for blk in range(num_blocks):
                     addr = base_addr + blk * page_size + rank_offset
@@ -786,24 +790,19 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     def build_remote_descs(
         self,
-        nixl_agent_meta,
-        block_size_ratio,
-        tp_ratio,
         tp_rank,
-        use_mla,
+        tp_size,
+        is_mla,
+        total_num_kv_heads,
+        tp_ratio,
+        nixl_agent_meta,
+        remote_info,
+        block_size_ratio,
         block_len_per_layer,
         is_blocks_first,
-        indexes_into_remote,
-        transfer_config=None,
-        physical_blocks_per_logical=1,
-        tp_size: int = 1,
-        total_num_kv_heads: int = 1,
     ):
-        # indexes_into_remote is not used for Mamba: FA offset is computed
-        # via fa_rank_offset which accounts for GQA/HMA head mapping.
-        _ = indexes_into_remote
-        assert isinstance(transfer_config, MambaEngineTransferInfo)
-        info = transfer_config
+        assert isinstance(remote_info, MambaEngineTransferInfo)
+        info = remote_info
         result: list[tuple[int, int, int]] = []
         result.extend(
             self._build_fa_remote_descs(
@@ -815,7 +814,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                 total_num_kv_heads,
                 block_size_ratio,
                 is_blocks_first,
-                use_mla,
+                is_mla,
                 block_len_per_layer,
             )
         )
@@ -824,7 +823,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                 nixl_agent_meta,
                 tp_ratio,
                 tp_rank,
-                physical_blocks_per_logical,
+                info.remote_physical_blocks_per_logical,
             )
         )
         return result
