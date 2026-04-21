@@ -601,9 +601,12 @@ class TestEnableSymbolic:
                 num_tokens=128, hidden_size=64, dtype=torch.float32
             )
             # First dim is SymInt
+            # First dim is SymInt
             assert isinstance(result[0].shape[0], SymInt)
             # Remaining dims preserved
             assert result[0].shape[1:] == (64,)
+            # Weight shape preserved (not symbolic)
+            assert result[1].shape == (64,)
             # Meta device
             assert result[0].device.type == "meta"
             assert result[1].device.type == "meta"
