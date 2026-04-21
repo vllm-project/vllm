@@ -3,56 +3,100 @@ name: Build and Release Marin TPU Wheel
 on:
   push:
     branches: [main]
+  schedule:
+    # Daily nightly build (artifact only, no release)
+    - cron: '13 6 * * *'   # 06:13 UTC daily
+    # Every 3 days, also cut a release (days 1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31)
+    - cron: '13 7 */3 * *' # 07:13 UTC on every-3rd day-of-month
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Also create a GitHub release (not just an artifact)'
+        type: boolean
+        default: false
+
+# Most recent push on a branch wins; in-flight runs are cancelled.
+concurrency:
+  group: marin-release-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-wheel:
+  build:
     name: Build Wheel
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     permissions:
       contents: write
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: "3.12"
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          python-version: "3.12"
 
-    - name: Determine version
-      id: vars
-      run: |
-        SHORT_SHA=$(git rev-parse --short HEAD)
-        DATE=$(date -u +%Y%m%d)
-        VERSION="0.0.0.dev${DATE}+${SHORT_SHA}"
-        echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
-        echo "SHORT_SHA=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
-        echo "Wheel version: ${VERSION}"
+      - name: Determine version
+        id: vars
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y%m%d)
+          VERSION="0.0.0.dev${DATE}+${SHORT_SHA}"
+          {
+            echo "VERSION=${VERSION}"
+            echo "SHORT_SHA=${SHORT_SHA}"
+            echo "DATE=${DATE}"
+          } >> "$GITHUB_OUTPUT"
+          echo "Wheel version: ${VERSION}"
 
-    - name: Install build dependencies
-      run: python3 -m pip install build
+      - name: Build TPU wheel
+        env:
+          VLLM_TARGET_DEVICE: tpu
+          VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
+        run: uv build --wheel
 
-    - name: Build TPU wheel
-      env:
-        VLLM_TARGET_DEVICE: tpu
-        VLLM_VERSION_OVERRIDE: ${{ steps.vars.outputs.VERSION }}
-      run: python3 -m build --wheel
+      - name: Compute wheel filename
+        id: whl
+        run: |
+          FILENAME=$(basename "$(ls dist/*.whl | head -1)")
+          echo "FILENAME=${FILENAME}" >> "$GITHUB_OUTPUT"
+          echo "Built wheel: ${FILENAME}"
 
-    - name: Create GitHub release
-      uses: softprops/action-gh-release@v2
-      with:
-        tag_name: marin-${{ steps.vars.outputs.SHORT_SHA }}
-        name: marin-${{ steps.vars.outputs.SHORT_SHA }}
-        body: |
-          Auto-built TPU wheel from `main` at ${{ github.sha }}.
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: marin-wheel-${{ steps.vars.outputs.SHORT_SHA }}
+          path: dist/*.whl
+          retention-days: 14
 
-          Install with:
-          ```
-          pip install "vllm @ https://github.com/marin-community/vllm/releases/download/marin-${{ steps.vars.outputs.SHORT_SHA }}/<wheel-filename>"
-          ```
-        files: dist/*.whl
-        prerelease: true
+      - name: Decide whether to cut release
+        id: gate
+        run: |
+          RELEASE=false
+          if [[ "${{ github.event.schedule }}" == "13 7 */3 * *" ]]; then
+            RELEASE=true
+          elif [[ "${{ github.event.inputs.create_release }}" == "true" ]]; then
+            RELEASE=true
+          fi
+          echo "RELEASE=${RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "Will create release: ${RELEASE}"
+
+      - name: Create GitHub release
+        if: steps.gate.outputs.RELEASE == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: marin-${{ steps.vars.outputs.DATE }}
+          name: Marin nightly ${{ steps.vars.outputs.DATE }} (${{ steps.vars.outputs.SHORT_SHA }})
+          body: |
+            Auto-built TPU wheel from `main` at ${{ github.sha }}.
+
+            Install with:
+            ```
+            pip install "vllm @ https://github.com/marin-community/vllm/releases/download/marin-${{ steps.vars.outputs.DATE }}/${{ steps.whl.outputs.FILENAME }}"
+            ```
+          files: dist/*.whl
+          prerelease: true
