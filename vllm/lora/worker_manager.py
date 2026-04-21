@@ -17,10 +17,12 @@ from vllm.lora.model_manager import (
 )
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import (
-    get_adapter_absolute_path,
+from vllm.lora.shared import (
     is_in_target_modules,
     is_supported_lora_module,
+)
+from vllm.lora.utils import (
+    get_adapter_absolute_path,
 )
 
 logger = init_logger(__name__)

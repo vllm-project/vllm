@@ -20,7 +20,7 @@ from vllm.lora.layers import (
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import PunicaWrapperBase, get_punica_wrapper
-from vllm.lora.utils import (
+from vllm.lora.shared import (
     from_layer,
     from_layer_logits_processor,
     get_supported_lora_modules,

@@ -12,7 +12,7 @@ from typing import final
 import torch
 
 from vllm.lora.layers import LoRAMapping
-from vllm.lora.utils import get_captured_lora_counts
+from vllm.lora.shared import get_captured_lora_counts
 from vllm.triton_utils import HAS_TRITON, triton
 from vllm.utils.math_utils import round_up
 

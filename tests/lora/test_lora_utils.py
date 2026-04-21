@@ -1,60 +1,64 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from unittest.mock import MagicMock, patch
 
-from vllm.lora.utils import is_in_target_modules, is_supported_lora_module
+from huggingface_hub.utils import HfHubHTTPError
 
-
-class TestIsSupportedLoraModule:
-    """Tests for is_supported_lora_module (model-definition check)."""
-
-    def test_suffix_match(self):
-        assert is_supported_lora_module(
-            "model.layers.0.self_attn.o_proj", ["o_proj", "q_proj"]
-        )
-
-    def test_no_match(self):
-        assert not is_supported_lora_module(
-            "model.layers.0.self_attn.o_proj", ["q_proj", "k_proj"]
-        )
-
-    def test_exact_match(self):
-        assert is_supported_lora_module("o_proj", ["o_proj"])
-
-    def test_regex_suffix_matching(self):
-        """Regex anchors to end — partial suffix should not match."""
-        assert not is_supported_lora_module("model.layers.0.self_attn.o_proj", ["proj"])
-
-    def test_empty_supported_modules(self):
-        assert not is_supported_lora_module("model.layers.0.self_attn.o_proj", [])
-
-    def test_multiple_supported_modules(self):
-        supported = ["q_proj", "k_proj", "v_proj", "o_proj"]
-        assert is_supported_lora_module("model.layers.0.self_attn.v_proj", supported)
-        assert not is_supported_lora_module("model.layers.0.mlp.gate_proj", supported)
+from vllm.lora.utils import (
+    get_adapter_absolute_path,
+)
 
 
-class TestIsInTargetModules:
-    """Tests for is_in_target_modules (deployment-time filter)."""
+# Unit tests for get_adapter_absolute_path
+@patch("os.path.isabs")
+def test_get_adapter_absolute_path_absolute(mock_isabs):
+    path = "/absolute/path/to/lora"
+    mock_isabs.return_value = True
+    assert get_adapter_absolute_path(path) == path
 
-    def test_none_allows_all(self):
-        assert is_in_target_modules("model.layers.0.self_attn.o_proj", None)
 
-    def test_suffix_in_target(self):
-        assert is_in_target_modules(
-            "model.layers.0.self_attn.o_proj", ["o_proj", "q_proj"]
-        )
+@patch("os.path.expanduser")
+def test_get_adapter_absolute_path_expanduser(mock_expanduser):
+    # Path with ~ that needs to be expanded
+    path = "~/relative/path/to/lora"
+    absolute_path = "/home/user/relative/path/to/lora"
+    mock_expanduser.return_value = absolute_path
+    assert get_adapter_absolute_path(path) == absolute_path
 
-    def test_suffix_not_in_target(self):
-        assert not is_in_target_modules(
-            "model.layers.0.self_attn.o_proj", ["q_proj", "k_proj"]
-        )
 
-    def test_empty_target_modules(self):
-        assert not is_in_target_modules("model.layers.0.self_attn.o_proj", [])
+@patch("os.path.exists")
+@patch("os.path.abspath")
+def test_get_adapter_absolute_path_local_existing(mock_abspath, mock_exist):
+    # Relative path that exists locally
+    path = "relative/path/to/lora"
+    absolute_path = "/absolute/path/to/lora"
+    mock_exist.return_value = True
+    mock_abspath.return_value = absolute_path
+    assert get_adapter_absolute_path(path) == absolute_path
 
-    def test_exact_name_match(self):
-        assert is_in_target_modules("dense1", ["dense1", "dense2"])
 
-    def test_exact_name_no_match(self):
-        assert not is_in_target_modules("dense3", ["dense1", "dense2"])
+@patch("huggingface_hub.snapshot_download")
+@patch("os.path.exists")
+def test_get_adapter_absolute_path_huggingface(mock_exist, mock_snapshot_download):
+    # Hugging Face model identifier
+    path = "org/repo"
+    absolute_path = "/mock/snapshot/path"
+    mock_exist.return_value = False
+    mock_snapshot_download.return_value = absolute_path
+    assert get_adapter_absolute_path(path) == absolute_path
+
+
+@patch("huggingface_hub.snapshot_download")
+@patch("os.path.exists")
+def test_get_adapter_absolute_path_huggingface_error(
+    mock_exist, mock_snapshot_download
+):
+    # Hugging Face model identifier with download error
+    path = "org/repo"
+    mock_exist.return_value = False
+    mock_snapshot_download.side_effect = HfHubHTTPError(
+        "failed to query model info",
+        response=MagicMock(),
+    )
+    assert get_adapter_absolute_path(path) == path

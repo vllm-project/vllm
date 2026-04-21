@@ -1299,7 +1299,7 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
     before ColumnParallelLinearWithLoRA for layers with 3+ output sizes, since
     ColumnParallelLinearWithLoRA's slice_lora_b assumes exactly 2 slices.
     """
-    from vllm.lora.utils import from_layer
+    from vllm.lora.shared import from_layer
 
     lora_config = LoRAConfig(max_loras=8, max_lora_rank=8, lora_dtype=torch.float16)
 
