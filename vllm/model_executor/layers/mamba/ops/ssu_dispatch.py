@@ -15,6 +15,7 @@ import torch
 from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
+from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 
 logger = init_logger(__name__)
 
@@ -188,12 +189,22 @@ _BACKEND_REGISTRY: dict[MambaBackendEnum, type[MambaSSUBackend]] = {
 _mamba_ssu_backend: MambaSSUBackend | None = None
 
 
-def initialize_mamba_ssu_backend(mamba_config: MambaConfig) -> None:
+def initialize_mamba_ssu_backend(
+    mamba_config: MambaConfig,
+    kv_cache_config: KVCacheConfig,
+) -> None:
     """Initialize the global Mamba SSU backend.
 
-    Args:
-        mamba_config: Mamba configuration.
+    No-op if `kv_cache_config` contains no specs that call
+    selective_state_update.
     """
+    if not any(
+        isinstance(g.kv_cache_spec, MambaSpec)
+        and g.kv_cache_spec.mamba_type in ("mamba1", "mamba2")
+        for g in kv_cache_config.kv_cache_groups
+    ):
+        return
+
     global _mamba_ssu_backend
 
     backend = mamba_config.backend
@@ -203,7 +214,11 @@ def initialize_mamba_ssu_backend(mamba_config: MambaConfig) -> None:
             f"Valid options: {list(_BACKEND_REGISTRY.keys())}"
         )
 
-    _mamba_ssu_backend = _BACKEND_REGISTRY[backend](mamba_config)
+    backend_cls = _BACKEND_REGISTRY[backend]
+    if isinstance(_mamba_ssu_backend, backend_cls):
+        return
+
+    _mamba_ssu_backend = backend_cls(mamba_config)
     logger.info("Using %s Mamba SSU backend.", _mamba_ssu_backend.name)
 
 
