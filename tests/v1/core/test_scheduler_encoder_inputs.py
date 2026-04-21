@@ -13,7 +13,8 @@ import pytest
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
-from vllm.v1.request import Request
+from vllm.v1.core.sched.request_queue import SchedulingPolicy, create_request_queue
+from vllm.v1.request import Request, RequestStatus
 
 pytestmark = pytest.mark.cpu_test
 
@@ -54,6 +55,28 @@ def create_mock_request_with_mm(
     # Mock get_num_encoder_embeds
     request.get_num_encoder_embeds = Mock(return_value=num_encoder_tokens)
 
+    return request
+
+
+def create_running_request_with_remote_ec(
+    request_id: str,
+    mm_hash: str,
+    num_encoder_tokens: int = 100,
+) -> Request:
+    request = create_mock_request_with_mm(
+        request_id, mm_hash, num_encoder_tokens=num_encoder_tokens
+    )
+    request.status = RequestStatus.RUNNING
+    request.ec_transfer_params = {
+        mm_hash: {
+            "do_remote_encode": True,
+            "remote_host": "127.0.0.1",
+            "remote_port": 5600,
+        }
+    }
+    request.spec_token_ids = []
+    request.num_preemptions = 0
+    request.record_event = Mock()
     return request
 
 
@@ -256,6 +279,40 @@ class TestSchedulerEncoderInputLogic:
 
         # Verify it's NOT in load list
         assert len(external_load_encoder_input) == 0
+
+    def test_failed_ec_load_reschedules_for_local_compute(self):
+        """Failed remote EC loads disable remote encode and preempt request."""
+        from vllm.v1.core.sched.scheduler import Scheduler
+
+        scheduler = Mock(spec=Scheduler)
+        scheduler.log_stats = False
+        scheduler.running = []
+        scheduler.waiting = create_request_queue(SchedulingPolicy.FCFS)
+        scheduler.kv_cache_manager = Mock()
+        scheduler.encoder_cache_manager = Mock(spec=EncoderCacheManager)
+        scheduler._disable_remote_ec_for_failed_hashes = (
+            Scheduler._disable_remote_ec_for_failed_hashes
+        )
+        scheduler._preempt_request = Scheduler._preempt_request.__get__(
+            scheduler, Scheduler
+        )
+
+        mm_hash = "failed_remote_hash"
+        request = create_running_request_with_remote_ec("req_failed_ec", mm_hash)
+        scheduler.running.append(request)
+
+        failed_req_ids = Scheduler._handle_failed_ec_loads(
+            scheduler, {mm_hash}, {request.request_id}
+        )
+
+        assert failed_req_ids == {request.request_id}
+        assert request not in scheduler.running
+        assert scheduler.waiting.peek_request() is request
+        assert request.status == RequestStatus.PREEMPTED
+        assert request.num_computed_tokens == 0
+        assert request.ec_transfer_params[mm_hash]["do_remote_encode"] is False
+        scheduler.kv_cache_manager.free.assert_called_once_with(request)
+        scheduler.encoder_cache_manager.free.assert_called_once_with(request)
 
 
 class TestEncoderCacheManagerHasCache:

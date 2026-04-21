@@ -218,6 +218,16 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+class ECLoadFailure(RuntimeError):
+    """Raised when remote EC load misses should be rescheduled locally."""
+
+    def __init__(self, failed_mm_hashes: set[str]):
+        super().__init__(f"EC cache load failed for {failed_mm_hashes}.")
+        self.failed_mm_hashes = failed_mm_hashes
+        self.ec_connector_output: ECConnectorOutput | None = None
+
+
 AttnMetadataDict: TypeAlias = dict[str, AttentionMetadata]
 # list when ubatching is enabled
 PerLayerAttnMetadata: TypeAlias = list[AttnMetadataDict] | AttnMetadataDict
@@ -2913,9 +2923,8 @@ class GPUModelRunner(
         should_sync_xdrope_positions = False
 
         ec_failed_mm_hashes = self.maybe_wait_for_ec_load()
-        assert not ec_failed_mm_hashes, (
-            f"EC cache load failed for {ec_failed_mm_hashes}."
-        )
+        if ec_failed_mm_hashes:
+            raise ECLoadFailure(ec_failed_mm_hashes)
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
@@ -3218,12 +3227,18 @@ class GPUModelRunner(
 
         if self.supports_mm_inputs and is_first_rank and not is_encoder_decoder:
             # Run the multimodal encoder if any.
-            with self.maybe_get_ec_connector_output(
-                scheduler_output,
-                encoder_cache=self.encoder_cache,
-            ) as ec_connector_output:
-                self._execute_mm_encoder(scheduler_output)
-                mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+            try:
+                with self.maybe_get_ec_connector_output(
+                    scheduler_output,
+                    encoder_cache=self.encoder_cache,
+                ) as ec_connector_output:
+                    self._execute_mm_encoder(scheduler_output)
+                    mm_embeds, is_mm_embed = self._gather_mm_embeddings(
+                        scheduler_output
+                    )
+            except ECLoadFailure as e:
+                e.ec_connector_output = ec_connector_output
+                raise
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -3988,16 +4003,31 @@ class GPUModelRunner(
                 )
             )
 
-            (
-                input_ids,
-                inputs_embeds,
-                positions,
-                intermediate_tensors,
-                model_kwargs,
-                ec_connector_output,
-            ) = self._preprocess(
-                scheduler_output, num_tokens_padded, intermediate_tensors
-            )
+            try:
+                (
+                    input_ids,
+                    inputs_embeds,
+                    positions,
+                    intermediate_tensors,
+                    model_kwargs,
+                    ec_connector_output,
+                ) = self._preprocess(
+                    scheduler_output, num_tokens_padded, intermediate_tensors
+                )
+            except ECLoadFailure as e:
+                if deferred_state_corrections_fn:
+                    deferred_state_corrections_fn()
+                req_ids = list(scheduler_output.num_scheduled_tokens)
+                output = ModelRunnerOutput(
+                    req_ids=req_ids,
+                    req_id_to_index={req_id: idx for idx, req_id in enumerate(req_ids)},
+                    sampled_token_ids=[[] for _ in req_ids],
+                    pooler_output=[None for _ in req_ids],
+                    ec_connector_output=e.ec_connector_output
+                    or ECConnectorOutput(failed_recving=e.failed_mm_hashes),
+                    cudagraph_stats=cudagraph_stats,
+                )
+                return output
 
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible

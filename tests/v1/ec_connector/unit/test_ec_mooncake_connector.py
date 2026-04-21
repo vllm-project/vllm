@@ -4,6 +4,7 @@
 Unit tests for MooncakeECConnector.
 """
 
+import threading
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -16,6 +17,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_connector import (
     MMHashMeta,
     MooncakeECConnector,
     MooncakeECConnectorMetadata,
+    MooncakeECConnectorWorker,
 )
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -685,3 +687,26 @@ class TestEdgeCases:
         # Should not raise
         connector.update_state_after_alloc(request, index=0)
         assert len(connector.connector_scheduler._mm_hashes_need_recv) == 0
+
+    def test_repeated_save_keeps_new_addr_when_old_addr_is_freed(self):
+        """Freeing an old slot must not drop the latest mm_hash mapping."""
+        worker = MooncakeECConnectorWorker.__new__(MooncakeECConnectorWorker)
+        worker.transfer_buffer = Mock()
+        old_addr = 0x1000
+        new_addr = 0x2000
+        worker.transfer_buffer.store_tensor.side_effect = [old_addr, new_addr]
+        worker.local_mm_addrs = {}
+        worker._addr_to_mm_hash = {}
+        worker._mm_lock = threading.Lock()
+
+        mm_hash = "repeat_hash"
+        encoder_cache = {mm_hash: torch.randn(2, 4)}
+
+        worker.save_caches(encoder_cache, mm_hash)
+        worker.save_caches(encoder_cache, mm_hash)
+
+        worker._on_pool_free(old_addr)
+        assert worker.local_mm_addrs[mm_hash] == new_addr
+
+        worker._on_pool_free(new_addr)
+        assert mm_hash not in worker.local_mm_addrs
