@@ -849,22 +849,23 @@ class Gemma4MultimodalEmbedder(nn.Module):
             or multimodal_config.hidden_size
         )
 
+        self.embedding_pre_projection_norm = RMSNorm(
+            embedding_dim,
+            eps=self.eps,
+            has_weight=False,
+        )
+
         self.embedding_projection = ReplicatedLinear(
             embedding_dim,
             self.text_hidden_size,
             bias=False,
         )
 
-        self.embedding_post_projection_norm = RMSNorm(
-            self.text_hidden_size,
-            eps=self.eps,
-            has_weight=False,
-        )
-
     def forward(self, inputs_embeds: torch.Tensor) -> torch.Tensor:
         """Project soft tokens from a multimodal tower into LM space."""
-        embs_proj, _ = self.embedding_projection(inputs_embeds)
-        return self.embedding_post_projection_norm(embs_proj)
+        embs_normed = self.embedding_pre_projection_norm(inputs_embeds)
+        embs_proj, _ = self.embedding_projection(embs_normed)
+        return embs_proj
 
 
 # ---------------------------------------------------------------------------
