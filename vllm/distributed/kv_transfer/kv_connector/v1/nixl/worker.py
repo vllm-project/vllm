@@ -1024,9 +1024,7 @@ class NixlConnectorWorker:
                 self.src_blocks_data,
                 self.num_descs,
                 abs_tp,
-                transfer_config=transfer_topo.get_engine_info(engine_id)
-                if self._has_mamba
-                else None,
+                transfer_config=transfer_topo.get_engine_info(engine_id),
                 tp_size=transfer_topo.tp_size,
                 is_mla=transfer_topo.is_mla,
                 total_num_kv_heads=transfer_topo.total_num_kv_heads,
@@ -1047,9 +1045,7 @@ class NixlConnectorWorker:
             block_len_per_layer=self.block_len_per_layer,
             is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
             indexes_into_remote=indexes_into_remote,
-            transfer_config=transfer_topo.get_engine_info(engine_id)
-            if self._has_mamba
-            else None,
+            transfer_config=transfer_topo.get_engine_info(engine_id),
             physical_blocks_per_logical=transfer_info.remote_physical_blocks_per_logical,
             tp_size=transfer_topo.tp_size,
             total_num_kv_heads=transfer_topo.total_num_kv_heads,
@@ -1604,7 +1600,7 @@ class NixlConnectorWorker:
             local_block_ids=meta.local_physical_block_ids,
             remote_block_ids=expanded_remote,
             remote_ranks=remote_ranks,
-            transfer_config=remote_info if self._has_mamba else None,
+            transfer_config=remote_info,
         )
 
         # D may have to perform multiple reads from different remote ranks.
