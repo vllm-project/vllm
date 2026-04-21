@@ -156,15 +156,18 @@ class BaseFrontendArgs:
     If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
-    fingerprint_mode: Literal["full", "hash"] = "full"
-    """Controls the ``system_fingerprint`` field on non-streaming responses.
+    fingerprint_mode: Literal["full", "hash", "custom", "none"] = "full"
+    """Controls the ``system_fingerprint`` field on responses.
 
-    - ``full`` (default): human-readable, e.g.
-      ``vllm-0.11.0-H100-tp8-bf16-a3b21f94``. Encodes server version, short
-      hardware name, parallelism (tp/pp/dp/ep), dtype, quantization, kv-cache
-      dtype, and an 8-char config hash.
-    - ``hash``: opaque, e.g. ``vllm-a3b21f94``. Hides hardware and version.
+    - ``full`` (default): ``vllm-<version>[-<parallelism>]-<hash8>``. Encodes
+      server version, non-trivial parallelism degrees (tp/pp/dp/ep), and an
+      8-char config hash.
+    - ``hash``: ``vllm-<version>-<hash8>``. Parallelism stripped.
+    - ``custom``: emits the literal string from ``--fingerprint-value``.
+    - ``none``: the field is omitted (serialized as ``null``).
     """
+    fingerprint_value: str | None = None
+    """Literal fingerprint string used when ``--fingerprint-mode=custom``."""
 
     @classmethod
     def _customize_cli_kwargs(

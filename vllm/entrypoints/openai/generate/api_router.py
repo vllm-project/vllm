@@ -67,7 +67,10 @@ async def init_generate_state(
 
     # Applied before any serving class is constructed so that each one picks
     # up the chosen mode on its first cache miss.
-    set_default_fingerprint_mode(getattr(args, "fingerprint_mode", "full"))
+    set_default_fingerprint_mode(
+        getattr(args, "fingerprint_mode", "full"),
+        getattr(args, "fingerprint_value", None),
+    )
 
     if args.tool_server == "demo":
         tool_server: ToolServer | None = DemoToolServer()

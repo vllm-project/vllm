@@ -129,6 +129,9 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[ChatCompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    # Set only on the final chunk of a stream to mirror non-streaming responses
+    # without the per-chunk serialization overhead.
+    system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
 
