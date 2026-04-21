@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors import (
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsMultiModal,
     SupportsPP,
     SupportsQuant,
@@ -282,6 +283,7 @@ class KimiK25ForConditionalGeneration(
     SupportsQuant,
     SupportsEagle,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
 ):
     """Kimi-K2.5 model for conditional generation.
 
@@ -403,6 +405,264 @@ class KimiK25ForConditionalGeneration(
             pixel_values=pixel_values,
             grid_thws=grid_thws,
         )
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+    # The runner batches multimodal items by the string modality returned
+    # from ``group_and_batch_mm_kwargs``.  Kimi-K2.5 uses a single
+    # ``vision_chunk`` modality for both image and video-chunk items (see
+    # ``KimiK25ProcessingInfo.get_supported_mm_limits``), so the config
+    # advertises that one key.  Image vs. video items differ only in
+    # ``grid_thws[:, 0]`` (``t=1`` vs ``t=num_frames_per_chunk``) and
+    # share the same CUDA graph.
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["vision_chunk"],
+            input_key_by_modality={"vision_chunk": "pixel_values"},
+            buffer_keys=[
+                "pos_embeds",
+                "rope_freqs_cis",
+                "cu_seqlens",
+                "max_seqlen",
+                "sequence_lengths",
+                "tpool_temporal_gather_idx",
+                "tpool_temporal_divisor",
+                "tpool_spatial_gather_idx",
+            ],
+            out_hidden_size=self.config.vision_config.mm_hidden_size,
+        )
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        return "vision_chunk"
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        kh, kw = self.vision_tower.merge_kernel_size
+        # Min: one image item with one spatial merge window ->
+        # (h, w) = (kh, kw), so 1 output slot.
+        min_budget = 1
+        # Max: capped by the scheduler's batched-token budget.  The
+        # multimodal prefill path never exceeds this anyway.
+        max_budget = vllm_config.scheduler_config.max_num_batched_tokens
+        return (min_budget, max_budget)
+
+    def _get_grid_thws(self, mm_kwargs: dict[str, Any]) -> list[tuple[int, int, int]]:
+        grid = mm_kwargs["grid_thws"]
+        if isinstance(grid, torch.Tensor):
+            grid_list = grid.reshape(-1, grid.shape[-1]).tolist()
+        else:
+            grid_list = [list(x) for x in grid]
+        return [(int(t), int(h), int(w)) for t, h, w in grid_list]
+
+    def get_encoder_cudagraph_num_items(self, mm_kwargs: dict[str, Any]) -> int:
+        return len(self._get_grid_thws(mm_kwargs))
+
+    def get_encoder_cudagraph_per_item_output_tokens(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        # Kimi temporal-pools across t, so per-item output tokens are
+        # ``(h // kh) * (w // kw)``, independent of ``t``.
+        kh, kw = self.vision_tower.merge_kernel_size
+        return [(h // kh) * (w // kw) for _, h, w in self._get_grid_thws(mm_kwargs)]
+
+    def get_encoder_cudagraph_per_item_input_sizes(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list[int]:
+        return [t * h * w for t, h, w in self._get_grid_thws(mm_kwargs)]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        grid_thws_all = self._get_grid_thws(mm_kwargs)
+        pixel_values: torch.Tensor = mm_kwargs["pixel_values"]
+        grid_raw = mm_kwargs["grid_thws"]
+
+        if len(indices) == 0:
+            empty_grid: torch.Tensor | list[tuple[int, int, int]]
+            if isinstance(grid_raw, torch.Tensor):
+                empty_grid = grid_raw.reshape(-1, grid_raw.shape[-1])[:0]
+            else:
+                empty_grid = []
+            return {
+                "pixel_values": pixel_values[:0],
+                "grid_thws": empty_grid,
+            }
+
+        # pixel_values is laid out as concatenated per-item patches.
+        patches_per_item = [t * h * w for t, h, w in grid_thws_all]
+        cum = [0]
+        for p in patches_per_item:
+            cum.append(cum[-1] + p)
+
+        selected_pv = torch.cat(
+            [pixel_values[cum[i] : cum[i + 1]] for i in indices], dim=0
+        )
+        if isinstance(grid_raw, torch.Tensor):
+            flat = grid_raw.reshape(-1, grid_raw.shape[-1])
+            selected_grid: torch.Tensor | list[tuple[int, int, int]] = flat[indices]
+        else:
+            selected_grid = [grid_thws_all[i] for i in indices]
+
+        return {
+            "pixel_values": selected_pv,
+            "grid_thws": selected_grid,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        kh, kw = self.vision_tower.merge_kernel_size
+        patch_size = self.vision_tower.patch_embed.patch_size
+        p_h, p_w = patch_size
+        per_item_output = max(token_budget // max(max_batch_size, 1), 1)
+
+        frames_per_item = max(max_frames_per_batch // max(max_batch_size, 1), 1)
+
+        # Each output slot corresponds to kh*kw input patches per frame,
+        # so per-item input patches = t * (nh*kh) * (nw*kw) where
+        # nh*nw = per_item_output.  Pick a square-ish layout: use
+        # ``nh = 1`` and ``nw = per_item_output`` for simplicity; the
+        # encoder only cares that h % kh == 0 and w % kw == 0.
+        t_cap = frames_per_item if frames_per_item > 1 else 1
+        h_cap = kh  # 1 output row per item
+        w_cap = per_item_output * kw  # per_item_output output cols per item
+
+        grid_config: list[list[int]] = [
+            [t_cap, h_cap, w_cap] for _ in range(max(max_batch_size, 1))
+        ]
+
+        total_patches = sum(t * h * w for t, h, w in grid_config)
+        total_output_slots = sum((h // kh) * (w // kw) for t, h, w in grid_config)
+
+        dummy_pixel_values = torch.randn(
+            total_patches, 3, p_h, p_w, device=device, dtype=dtype
+        )
+
+        # Worst case max_seqlen for replays: a single frame covering all
+        # patches that fit in the ``token_budget`` output slots.  An
+        # output slot is a ``kh*kw`` window, so a frame with
+        # ``token_budget`` output slots has ``token_budget * kh * kw``
+        # input patches.  Take that as the capture-time upper bound; any
+        # replay fits because total frames are bounded by
+        # ``max_frames_per_batch`` and per-frame length is <= this.
+        max_seqlen_override = max(token_budget * kh * kw, total_patches)
+
+        buffers = self.vision_tower.prepare_encoder_metadata(
+            grid_config,
+            max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
+            max_total_patches=total_patches,
+            max_output_slots=total_output_slots,
+            max_seqlen_override=max_seqlen_override,
+            device=device,
+        )
+
+        mm_kwargs = {
+            "pixel_values": dummy_pixel_values,
+            "grid_thws": grid_config,
+        }
+        return EncoderCudaGraphCaptureInputs(mm_kwargs=mm_kwargs, buffers=buffers)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        grid_thws = self._get_grid_thws(mm_kwargs)
+        # Match the input/output sizing the capture used so scatter copies
+        # into the captured buffers are slice-consistent.
+        kh, kw = self.vision_tower.merge_kernel_size
+        max_total_patches = sum(t * h * w for t, h, w in grid_thws)
+        max_output_slots = sum((h // kh) * (w // kw) for t, h, w in grid_thws)
+        buffers = self.vision_tower.prepare_encoder_metadata(
+            grid_thws,
+            max_batch_size=max_batch_size,
+            max_frames_per_batch=max_frames_per_batch,
+            max_total_patches=max_total_patches,
+            max_output_slots=max_output_slots,
+        )
+        return EncoderCudaGraphReplayBuffers(buffers=buffers)
+
+    def encoder_cudagraph_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        buffers: dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        # ``grid_thws`` is only needed by the eager patch-embed
+        # (for position-embedding interpolation) and the eager
+        # merger; both are bypassed when ``encoder_metadata`` is
+        # provided, so we do not need to materialize a tensor here.
+        # A placeholder of the right type keeps downstream code happy.
+        grid_thws = mm_kwargs["grid_thws"]
+        if isinstance(grid_thws, torch.Tensor):
+            grid_thws_tensor = grid_thws
+        else:
+            # Pure-Python list: not used inside the captured ops, but
+            # the tower signature still accepts it.
+            grid_thws_tensor = grid_thws  # type: ignore[assignment]
+
+        target_dtype = next(self.vision_tower.parameters()).dtype
+        if pixel_values.dtype != target_dtype:
+            pixel_values = pixel_values.to(target_dtype)
+
+        vt_out = self.vision_tower(
+            pixel_values, grid_thws_tensor, encoder_metadata=buffers
+        )  # (max_output_slots, kh*kw, hidden)
+        # Projector expects (N, kh*kw, hidden); the internal
+        # ``view(-1, hidden_size=hidden*kh*kw)`` + two linears then
+        # collapses it to ``(N, mm_hidden)``.
+        proj_out = self.mm_projector(vt_out)
+        return proj_out
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> torch.Tensor:
+        pixel_values = mm_kwargs["pixel_values"]
+        grid_thws = mm_kwargs["grid_thws"]
+        if isinstance(grid_thws, list):
+            grid_thws_tensor = torch.tensor(
+                grid_thws, dtype=torch.int32, device=pixel_values.device
+            )
+        else:
+            grid_thws_tensor = grid_thws
+        target_dtype = next(self.vision_tower.parameters()).dtype
+        if pixel_values.dtype != target_dtype:
+            pixel_values = pixel_values.to(target_dtype)
+        features = vision_tower_forward(
+            self.vision_tower,
+            pixel_values,
+            grid_thws_tensor,
+            mm_projector=self.mm_projector,
+            use_data_parallel=self.use_data_parallel,
+        )
+        # Concatenate per-item outputs into a single packed tensor; the
+        # manager ``_scatter_output_slices`` splits them again using
+        # ``per_item_output_tokens``.
+        return torch.cat(features, dim=0)
 
     def _process_media_input(
         self, media_input: KimiK25MediaPixelInputs
