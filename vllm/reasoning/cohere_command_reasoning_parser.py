@@ -385,8 +385,9 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
     ):
         super().__init__(tokenizer, *args, **kwargs)
         self.end_token_id = tokenizer.convert_tokens_to_ids("<|END_THINKING|>")
-        self.melody_streaming = PyFilter(streaming_opts)
+        self.unary_opts = unary_opts
         self.melody_unary = PyFilter(unary_opts)
+        self.melody_streaming = PyFilter(streaming_opts)
 
     def extract_reasoning_streaming(
         self,
@@ -397,12 +398,10 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
         current_token_ids: Sequence[int],
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
-        print(delta_text)
         r = self.melody_streaming.write_decoded(delta_text)
         if r.content is None and r.reasoning is None and not r.tool_calls:
             return None
         msg = DeltaMessage()
-        print(msg)
         if r.content is not None:
             msg.content = r.content
         if r.reasoning is not None:
@@ -428,12 +427,13 @@ class BaseCohereCommandReasoningParser(ReasoningParser):
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         token_buf: list[int] = []
         content_ids: list[int] = []
+        content_filter = PyFilter(self.unary_opts)
         for t in input_ids:
             token_buf.append(t)
             s = self.model_tokenizer.decode(token_buf, skip_special_tokens=False)
             if s.endswith(REPLACEMENT_CHAR):
                 continue
-            r = self.melody_unary.write_decoded(s)
+            r = content_filter.write_decoded(s)
             if r.content is not None:
                 content_ids.extend(token_buf)
             token_buf = []
