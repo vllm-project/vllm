@@ -577,7 +577,7 @@ class OpenAIServingRender:
         # adjust_request — even for tool_choice="none" — so that the grammar
         # factory can prevent special-token leakage.
         if tool_parser is not None:
-            tool_choice = getattr(request, "tool_choice", "none")
+            tool_choice = getattr(request, "tool_choice", None)
             tools = getattr(request, "tools", None)
             tokenizer = renderer.get_tokenizer()
             is_mistral_grammar_eligible = (
