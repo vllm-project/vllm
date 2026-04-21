@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
-import torch._inductor.pattern_matcher as pm
-from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-from torch._inductor.fx_passes.post_grad import view_to_reshape
-from torch._inductor.pattern_matcher import PatternMatcherPass
 
 import vllm._custom_ops as ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
@@ -21,10 +17,8 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 
-from ..inductor_pass import enable_fake_mode
-from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from ..vllm_inductor_pass import VllmFusionPatternMatcherPass, VllmPatternReplacement
 from .matcher_utils import MatcherDeepseekScalingRotaryEmbedding, MatcherRotaryEmbedding
-from .rms_quant_fusion import empty_bf16, empty_i64
 
 logger = init_logger(__name__)
 
@@ -86,7 +80,7 @@ direct_register_custom_op(
 )
 
 
-class MLARoPEKVCacheCatPattern:
+class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
     FUSED_OP = torch.ops.vllm.fused_concat_and_cache_mla_rope.default
 
     def __init__(
@@ -104,6 +98,7 @@ class MLARoPEKVCacheCatPattern:
         self.qk_rope_head_dim = layer.qk_rope_head_dim
         self.is_neox = is_neox
         self.use_flashinfer = use_flashinfer
+        self._ln = _encode_layer_name(self.layer_name)
 
         if use_deepseek_scaling:
             self.rope_matcher = MatcherDeepseekScalingRotaryEmbedding(
@@ -121,16 +116,15 @@ class MLARoPEKVCacheCatPattern:
                 use_flashinfer=self.use_flashinfer,
             )
 
-    def get_inputs(self) -> list:
-        # Sample inputs to help pattern tracing
+    def get_inputs(self) -> list[torch.Tensor]:
         T = 5
         L = 4096
-        q = empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
-        k_pe = empty_bf16(T, self.qk_rope_head_dim)
-        kv_c_normed = empty_bf16(T, self.kv_lora_rank)
-        cos_sin_cache = empty_bf16(L, self.qk_rope_head_dim)
-        positions = empty_i64(T)
-        k_scale = torch.empty(0, device=k_pe.device, dtype=torch.float32)
+        q = self.empty_bf16(T, self.num_heads, self.qk_rope_head_dim)
+        k_pe = self.empty_bf16(T, self.qk_rope_head_dim)
+        kv_c_normed = self.empty_bf16(T, self.kv_lora_rank)
+        cos_sin_cache = self.empty_bf16(L, self.qk_rope_head_dim)
+        positions = self.empty(T, dtype=torch.int64)
+        k_scale = self.empty(0, dtype=torch.float32)
         inputs = [
             q,
             k_pe,
@@ -140,59 +134,36 @@ class MLARoPEKVCacheCatPattern:
             k_scale,
         ]
         if _USE_LAYERNAME:
-            inputs.append(_encode_layer_name(self.layer_name))
+            inputs.append(self._ln)
         return inputs
 
-    def _mk_pattern_with_layer_name_input(self, _ln):
-        """Pattern/replacement with layer_name as an explicit input."""
+    @property
+    def pattern(self):
+        _ln = self._ln
+        rope_matcher = self.rope_matcher
+        kv_cache_dtype = self.kv_cache_dtype
 
-        def pattern(
-            q: torch.Tensor,
-            k_pe: torch.Tensor,
-            kv_c_normed: torch.Tensor,
-            positions: torch.Tensor,
-            cos_sin_cache: torch.Tensor,
-            k_scale: torch.Tensor,
-            layer_name: LayerNameType,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            k_pe_unsqueezed = k_pe.unsqueeze(1)
-            q_pe, k_pe = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
-            dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed, k_pe, layer_name, self.kv_cache_dtype, k_scale
-            )
-            return dummy, q_pe, k_pe
+        if _USE_LAYERNAME:
 
-        def replacement(
-            q: torch.Tensor,
-            k_pe: torch.Tensor,
-            kv_c_normed: torch.Tensor,
-            positions: torch.Tensor,
-            cos_sin_cache: torch.Tensor,
-            k_scale: torch.Tensor,
-            layer_name: LayerNameType,
-        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            at = auto_functionalized(
-                self.FUSED_OP,
-                positions=positions,
-                q_pe=q,
-                k_pe=k_pe,
-                kv_c=kv_c_normed,
-                cos_sin_cache=cos_sin_cache,
-                is_neox=self.is_neox,
-                kv_cache_dtype=self.kv_cache_dtype,
-                kv_cache_scale=k_scale,
-                layer_name=layer_name,
-            )
-            dummy, q_pe, k_pe_squeezed = at
-            k_pe = k_pe_squeezed.unsqueeze(1)
-            return dummy, q_pe, k_pe
+            def _pattern(
+                q: torch.Tensor,
+                k_pe: torch.Tensor,
+                kv_c_normed: torch.Tensor,
+                positions: torch.Tensor,
+                cos_sin_cache: torch.Tensor,
+                k_scale: torch.Tensor,
+                layer_name: LayerNameType,
+            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                k_pe_unsqueezed = k_pe.unsqueeze(1)
+                q_pe, k_pe = rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
+                dummy = torch.ops.vllm.unified_mla_kv_cache_update(
+                    kv_c_normed, k_pe, layer_name, kv_cache_dtype, k_scale
+                )
+                return dummy, q_pe, k_pe
 
-        return pattern, replacement
+            return _pattern
 
-    def _mk_pattern_with_layer_name_closure(self, _ln):
-        """Pattern/replacement with layer_name as a closure constant."""
-
-        def pattern(
+        def _pattern(
             q: torch.Tensor,
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
@@ -201,13 +172,51 @@ class MLARoPEKVCacheCatPattern:
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            q_pe, k_pe = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
+            q_pe, k_pe = rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed, k_pe, _ln, self.kv_cache_dtype, k_scale
+                kv_c_normed, k_pe, _ln, kv_cache_dtype, k_scale
             )
             return dummy, q_pe, k_pe
 
-        def replacement(
+        return _pattern
+
+    @property
+    def replacement(self):
+        _ln = self._ln
+        is_neox = self.is_neox
+        kv_cache_dtype = self.kv_cache_dtype
+        FUSED_OP = self.FUSED_OP
+
+        if _USE_LAYERNAME:
+
+            def _replacement(
+                q: torch.Tensor,
+                k_pe: torch.Tensor,
+                kv_c_normed: torch.Tensor,
+                positions: torch.Tensor,
+                cos_sin_cache: torch.Tensor,
+                k_scale: torch.Tensor,
+                layer_name: LayerNameType,
+            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+                at = auto_functionalized(
+                    FUSED_OP,
+                    positions=positions,
+                    q_pe=q,
+                    k_pe=k_pe,
+                    kv_c=kv_c_normed,
+                    cos_sin_cache=cos_sin_cache,
+                    is_neox=is_neox,
+                    kv_cache_dtype=kv_cache_dtype,
+                    kv_cache_scale=k_scale,
+                    layer_name=layer_name,
+                )
+                dummy, q_pe, k_pe_squeezed = at
+                k_pe = k_pe_squeezed.unsqueeze(1)
+                return dummy, q_pe, k_pe
+
+            return _replacement
+
+        def _replacement(
             q: torch.Tensor,
             k_pe: torch.Tensor,
             kv_c_normed: torch.Tensor,
@@ -216,14 +225,14 @@ class MLARoPEKVCacheCatPattern:
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             at = auto_functionalized(
-                self.FUSED_OP,
+                FUSED_OP,
                 positions=positions,
                 q_pe=q,
                 k_pe=k_pe,
                 kv_c=kv_c_normed,
                 cos_sin_cache=cos_sin_cache,
-                is_neox=self.is_neox,
-                kv_cache_dtype=self.kv_cache_dtype,
+                is_neox=is_neox,
+                kv_cache_dtype=kv_cache_dtype,
                 kv_cache_scale=k_scale,
                 layer_name=_ln,
             )
@@ -231,36 +240,13 @@ class MLARoPEKVCacheCatPattern:
             k_pe = k_pe_squeezed.unsqueeze(1)
             return dummy, q_pe, k_pe
 
-        return pattern, replacement
-
-    def register(self, pm_pass: PatternMatcherPass) -> None:
-        _ln = _encode_layer_name(self.layer_name)
-
-        if _USE_LAYERNAME:
-            pattern, replacement = self._mk_pattern_with_layer_name_input(_ln)
-        else:
-            pattern, replacement = self._mk_pattern_with_layer_name_closure(_ln)
-
-        # NOTE: use view_to_reshape to unify view/reshape to simplify
-        # pattern and increase matching opportunities
-        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
-            gm = pm.fwd_only(*args, **kwargs)
-            view_to_reshape(gm)
-            return gm
-
-        pm.register_replacement(
-            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
-        )
+        return _replacement
 
 
-class MLARoPEKVCacheCatFusionPass(VllmPatternMatcherPass):
-    @enable_fake_mode
+class MLARoPEKVCacheCatFusionPass(VllmFusionPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
-        super().__init__(config)
+        super().__init__(config, "mla_rope_kv_cache_fusion_pass")
 
-        self.patterns: PatternMatcherPass = PatternMatcherPass(
-            pass_name="mla_rope_kv_cache_fusion_pass"
-        )
         attn_layers = get_layers_from_vllm_config(config, MLAAttention)
 
         for _, layer in attn_layers.items():
@@ -268,31 +254,24 @@ class MLARoPEKVCacheCatFusionPass(VllmPatternMatcherPass):
                 for use_deepseek_scaling in [False, True]:
                     if RotaryEmbedding.enabled():
                         for use_flashinfer in [False, True]:
+                            self.register(
+                                MLARoPEKVCacheCatPattern(
+                                    layer,
+                                    is_neox,
+                                    use_flashinfer,
+                                    use_deepseek_scaling,
+                                )
+                            )
+                    else:
+                        self.register(
                             MLARoPEKVCacheCatPattern(
                                 layer,
                                 is_neox,
-                                use_flashinfer,
-                                use_deepseek_scaling,
-                            ).register(self.patterns)
-                    else:
-                        MLARoPEKVCacheCatPattern(
-                            layer,
-                            is_neox,
-                            use_deepseek_scaling=use_deepseek_scaling,
-                        ).register(self.patterns)
+                                use_deepseek_scaling=use_deepseek_scaling,
+                            )
+                        )
 
             if _USE_LAYERNAME:
                 break
 
-        self.dump_patterns(config, self.patterns)
-
-    @VllmInductorPass.time_and_log
-    def __call__(self, graph: fx.Graph) -> None:
-        self.matched_count = self.patterns.apply(graph)
-        logger.debug("Replaced %s patterns", self.matched_count)
-
-    def uuid(self) -> str:
-        return self.hash_source(
-            self,
-            MLARoPEKVCacheCatPattern,
-        )
+        self.dump_patterns(config, self.pm_pass)
