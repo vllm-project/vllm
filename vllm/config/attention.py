@@ -47,8 +47,8 @@ class AttentionConfig:
     """If set, quantize query for attention in prefill."""
 
     sparse_mla_force_mqa: bool = False
-    """Force sparse MLA to use forward_mqa for all tokens including prefill.
-    When False (default), prefill tokens use forward_mha when implemented.
+    """Force sparse MLA to use forward_mqa for all requests, including prefill.
+    When False (default), pure prefill batches use forward_mha when implemented.
     Set to True to always use the MQA path."""
 
     def compute_hash(self) -> str:
