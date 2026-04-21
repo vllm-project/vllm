@@ -18,7 +18,7 @@ use vllm_engine_core_client::protocol::{
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
-use vllm_text::tokenizers::{DynTokenizer, Tokenizer};
+use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 use vllm_text::{
     DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTokenLogprob,
     TextBackend,

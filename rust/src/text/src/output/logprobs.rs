@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use vllm_llm::{Logprobs, PositionLogprobs};
 
 use crate::error::Error;
-use crate::tokenizers::Tokenizer;
+use crate::tokenizer::Tokenizer;
 
 /// One decoded token candidate and its logprob metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,7 +129,7 @@ mod tests {
     #[derive(Debug)]
     struct ByteTokenizer;
 
-    impl crate::tokenizers::Tokenizer for ByteTokenizer {
+    impl crate::tokenizer::Tokenizer for ByteTokenizer {
         fn encode(&self, _text: &str, _add_special_tokens: bool) -> crate::Result<Vec<u32>> {
             unreachable!()
         }

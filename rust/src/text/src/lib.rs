@@ -25,16 +25,15 @@ use vllm_engine_core_client::EngineCoreClient;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
 
-use crate::tokenizers::DynTokenizer;
+use crate::tokenizer::DynTokenizer;
 
-mod backend;
-pub mod backends;
+pub mod backend;
 mod error;
 mod incremental;
 mod lower;
 pub mod output;
 mod request;
-pub mod tokenizers;
+pub mod tokenizer;
 
 /// Shared streamed text output type used by raw completions and other text-only northbound paths.
 pub trait TextOutputStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;

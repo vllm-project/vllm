@@ -1,7 +1,7 @@
 use std::mem::take;
 
 use crate::error::Result;
-use crate::tokenizers::Tokenizer;
+use crate::tokenizer::Tokenizer;
 
 /// Stateful incremental decoder that emits text chunks one token at a time.
 pub trait IncrementalDecoder: Send {

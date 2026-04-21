@@ -1,8 +1,4 @@
-//! Output processing pipeline.
-
-mod reasoning;
-mod structured;
-mod tool;
+mod default;
 
 use std::sync::Arc;
 
@@ -10,14 +6,9 @@ use futures::Stream;
 use subenum::subenum;
 use vllm_text::output::{DecodedLogprobs, DecodedPromptLogprobs, DecodedTextEvent};
 
-use self::reasoning::reasoning_event_stream;
-use self::tool::tool_event_stream;
 use crate::FinishReason;
 use crate::error::Result;
 use crate::event::{AssistantBlockKind, AssistantToolCall, ChatEvent};
-use crate::output::structured::structured_chat_event_stream;
-use crate::reasoning::ReasoningParser;
-use crate::tool::ToolParser;
 
 /// Internal assistant event before final assembly.
 ///
@@ -108,33 +99,7 @@ impl ContentEvent {
     }
 }
 
-trait ContentEventStream = Stream<Item = Result<ContentEvent>> + Send + 'static;
-trait AssistantEventStream = Stream<Item = Result<AssistantEvent>> + Send + 'static;
 pub(crate) trait DecodedTextEventStream = Stream<Item = Result<DecodedTextEvent>> + Send + 'static;
 pub(crate) trait ChatEventStream = Stream<Item = Result<ChatEvent>> + Send + 'static;
 
-/// Request-scoped processors that adapt decoded text into structured chat events.
-pub(crate) struct OutputProcessors {
-    pub(crate) reasoning_parser: Option<Box<dyn ReasoningParser>>,
-    pub(crate) tool_parser: Option<Box<dyn ToolParser>>,
-}
-
-/// Transforms a raw generate-output token stream into structured chat events
-/// through three sequential stages once text decoding has already happened:
-///
-/// 1. [`reasoning_event_stream`] — reasoning/content separation
-/// 2. [`tool_event_stream`] — tool-call parsing
-/// 3. [`structured_chat_event_stream`] — final block assembly
-pub(crate) fn output_stream(
-    intermediate: bool,
-    decoded: impl DecodedTextEventStream,
-    OutputProcessors {
-        reasoning_parser,
-        tool_parser,
-    }: OutputProcessors,
-) -> Result<impl ChatEventStream> {
-    let reasoning = reasoning_event_stream(decoded, reasoning_parser);
-    let tool = tool_event_stream(reasoning, intermediate, tool_parser);
-    let structured = structured_chat_event_stream(tool);
-    Ok(structured)
-}
+pub(crate) use default::{OutputProcessors, output_stream};

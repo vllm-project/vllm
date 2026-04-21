@@ -6,7 +6,7 @@ use vllm_llm::GenerateRequest;
 use crate::backend::SamplingHints;
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
-use crate::tokenizers::Tokenizer;
+use crate::tokenizer::Tokenizer;
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -226,8 +226,8 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::backends::hf::HfTextBackend;
     use crate::request::{Prompt, TextRequest};
 
     /// Stub tokenizer that returns empty token IDs — sufficient for tests that don't exercise

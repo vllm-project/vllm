@@ -13,7 +13,7 @@ use super::logprobs::{
 };
 use crate::error::Error;
 use crate::incremental::IncrementalDecoder;
-use crate::tokenizers::DynTokenizer;
+use crate::tokenizer::DynTokenizer;
 
 /// Request-neutral options for incremental text decoding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,7 +315,7 @@ mod tests {
 
     use super::*;
     use crate::output::TextOutputStreamExt as _;
-    use crate::tokenizers::Tokenizer;
+    use crate::tokenizer::Tokenizer;
 
     /// Backend that treats each token ID as a raw byte, producing lossy UTF-8.
     struct ByteTokenizer;

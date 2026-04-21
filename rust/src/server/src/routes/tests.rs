@@ -34,7 +34,7 @@ use vllm_engine_core_client::{
 use vllm_llm::Llm;
 use vllm_metrics::METRICS;
 use vllm_text::TextBackend;
-use vllm_text::tokenizers::{DynTokenizer, Tokenizer};
+use vllm_text::tokenizer::{DynTokenizer, Tokenizer};
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
