@@ -83,6 +83,7 @@ def select_3d_config(
     max_seqlen_k,
     num_2d_prgms,
     element_size,
+    num_kv_heads,
     num_segments_override=None,
 ):
     if current_platform.is_rocm():
@@ -90,11 +91,18 @@ def select_3d_config(
         if head_size < 128 or element_size == 1:
             cu_mult = 4
             MIN_SEGMENTS = 8
-            attn_warps = 2
         else:
             cu_mult = 2
             MIN_SEGMENTS = 4
-            attn_warps = 2
+
+        # Strix Halo overrides based on kernel benchmarking
+        # head_size >= 224 tested for performance benefits
+        # Lower thresholds might benefit, but this is unverified
+        attn_warps = (
+            4
+            if current_platform.is_gfx1151() and (num_kv_heads == 1 or head_size >= 224)
+            else 2
+        )
 
         target_num_prgms = cu_count * cu_mult
         if current_platform.is_navi():
@@ -1368,6 +1376,7 @@ def unified_attention(
         max_seqlen_k,
         num_2d_prgms,
         kv_element_size,
+        num_kv_heads,
         num_segments_override=num_par_softmax_segments,
     )
 

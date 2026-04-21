@@ -191,6 +191,7 @@ _ON_GFX11 = "gfx11" in _GCN_ARCH
 _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
 _ON_GFX950 = "gfx950" in _GCN_ARCH
+_ON_GFX1151 = "gfx1151" in _GCN_ARCH
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -856,6 +857,10 @@ class RocmPlatform(Platform):
     @classmethod
     def opaque_attention_op(cls) -> bool:
         return True
+
+    @classmethod
+    def is_gfx1151(cls) -> bool:
+        return _ON_GFX1151
 
     @classmethod
     def is_navi(cls) -> bool:
