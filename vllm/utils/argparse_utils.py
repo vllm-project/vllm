@@ -338,7 +338,13 @@ class FlexibleArgumentParser(ArgumentParser):
                 try:
                     value = json.loads(value_str)
                 except json.decoder.JSONDecodeError:
-                    value = value_str
+                    # Attempt human-readable suffixes (e.g. 1k, 80g) conversion
+                    try:
+                        from vllm.engine.arg_utils import human_readable_int
+
+                        value = human_readable_int(value_str)
+                    except (ValueError, ArgumentTypeError):
+                        value = value_str
 
                 # Merge all values with the same key into a single dict
                 arg_dict = create_nested_dict(keys, value)
