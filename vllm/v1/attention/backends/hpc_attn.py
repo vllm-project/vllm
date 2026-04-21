@@ -97,44 +97,16 @@ class HpcAttentionMetadata(AttentionMetadata):
     """Per-batch metadata for the HPC attention backend."""
 
     num_actual_tokens: int
-    """Number of tokens in the batch, excluding padding."""
-
     max_query_len: int
-    """Maximum query length across all requests in the batch."""
-
     query_start_loc: torch.Tensor
-    """Cumulative sum of query lengths. Shape: [num_reqs + 1], dtype int32."""
-
     max_seq_len: int
-    """Maximum total context length (query + KV cache) across all requests."""
-
     seq_lens: torch.Tensor
-    """Total context length for each request. Shape: [num_reqs], dtype int32."""
-
     block_table: torch.Tensor
-    """Physical block IDs. Shape: [num_reqs, max_blocks], dtype int32."""
-
     slot_mapping: torch.Tensor
-    """Flat slot indices for KV cache write. Shape: [num_actual_tokens], dtype int64."""
-
     num_decodes: int = 0
-    """Number of decode requests (query_len == 1) in this batch.
-    Decode requests are always placed at the front of the batch by the
-    framework's reorder_batch_to_split_decodes_and_prefills mechanism."""
-
     num_decode_tokens: int = 0
-    """Number of tokens belonging to decode requests.
-    Equal to num_decodes for standard decode (query_len==1 each)."""
-
     max_decode_seq_len: int = 0
-    """Max ``seq_lens`` among decode requests (front ``num_decodes`` rows).
-    Used to tune decode kernel parameters (e.g. split-K)."""
-
     cu_seqlens_q_prefill: torch.Tensor | None = None
-    """Cumulative query lengths for the prefill segment, relative to the
-    start of that segment (i.e. query_start_loc[num_decodes:] minus
-    num_decode_tokens).  None when there are no prefill requests.
-    Pre-computed in build() on CPU to avoid a GPU kernel launch in forward()."""
 
 
 class HpcAttentionBackend(AttentionBackend):
@@ -178,11 +150,6 @@ class HpcAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        if block_size not in (32, 64):
-            raise ValueError(
-                f"HPC attention backend requires block_size = 32 or 64, "
-                f"got {block_size}. Use --block-size 32 or --block-size 64."
-            )
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @classmethod
@@ -191,7 +158,6 @@ class HpcAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        # HPC kernels require Ampere (sm80) or newer
         return capability >= DeviceCapability(8, 0)
 
 
@@ -208,34 +174,18 @@ class HpcAttentionMetadataBuilder(AttentionMetadataBuilder):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        # Activate framework batch reordering: requests with query_len <= 1
-        # (decode) will be moved to the front of the batch before build() is
-        # called, mirroring the FlashInfer backend pattern.
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
 
     def build_for_cudagraph_capture(
         self,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> "HpcAttentionMetadata":
-        """Build attention metadata for CUDA graph capture.
-
-        During capture we fill seq_lens with 1 (instead of the real
-        sequence lengths) to prevent the HPC decode kernel from iterating
-        over thousands of KV-cache pages, which would make graph capture
-        extremely slow. block_table is zeroed for the same reason.
-
-        This mirrors the pattern used by TritonAttentionMetadataBuilder.
-        """
         attn_metadata = self.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
-        # Overwrite seq_lens and block_table with safe dummy values.
-        # seq_lens=1: valid for the kernel (>0), avoids iterating long KV lists.
-        # block_table=0: index 0 is always a valid allocated block.
         attn_metadata.seq_lens.fill_(1)
         attn_metadata.block_table.fill_(0)
-        # Dummy seq_lens are 1; keep max decode len consistent for kernel flags.
         attn_metadata.max_decode_seq_len = (
             1 if attn_metadata.num_decodes > 0 else 0
         )
@@ -253,30 +203,23 @@ class HpcAttentionMetadataBuilder(AttentionMetadataBuilder):
                 "(common_prefix_len > 0)."
             )
 
-        # HPC kernels require int32 for seq_lens and block_table.
-        # Use non_blocking=True so the cast is enqueued asynchronously.
         seq_lens = common_attn_metadata.seq_lens.to(torch.int32, non_blocking=True)
         block_table = common_attn_metadata.block_table_tensor.to(
             torch.int32, non_blocking=True
         )
 
-        # Determine the decode/prefill boundary.
-        # The framework guarantees that decode requests (query_len <= threshold)
-        # are placed at the front of the batch via reorder_batch_threshold.
         num_decodes, num_prefills, num_decode_tokens, _num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,  # == 1
+                decode_threshold=self.reorder_batch_threshold,
             )
         )
 
         if num_prefills > 0:
-            # query_start_loc_cpu is already on CPU; slice and subtract.
             cu_seqlens_q_prefill_cpu = (
                 common_attn_metadata.query_start_loc_cpu[num_decodes:]
                 - num_decode_tokens
             ).to(torch.int32)
-            # Upload once; forward() reuses this GPU tensor across all layers.
             cu_seqlens_q_prefill = cu_seqlens_q_prefill_cpu.to(
                 common_attn_metadata.query_start_loc.device,
                 non_blocking=True,
@@ -285,11 +228,9 @@ class HpcAttentionMetadataBuilder(AttentionMetadataBuilder):
             cu_seqlens_q_prefill = None
 
         if num_decodes > 0:
-            sl_cpu = common_attn_metadata._seq_lens_cpu
-            if sl_cpu is not None:
-                max_decode_seq_len = int(sl_cpu[:num_decodes].max().item())
-            else:
-                max_decode_seq_len = int(seq_lens[:num_decodes].max().item())
+            max_decode_seq_len = int(
+                common_attn_metadata.seq_lens_cpu[:num_decodes].max().item()
+            )
         else:
             max_decode_seq_len = 0
 
@@ -359,11 +300,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttentionMetadata]):
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.kv_cache_dtype = kv_cache_dtype
-        self.block_size = block_size  # == page_size for HPC kernels
-
-        # Pre-computed view shape for KV cache reshape in forward().
-        # kv_cache layout: [2, num_blocks, block_size, num_kv_heads, head_size]
-        # HPC kernels expect: [num_pages, page_size, num_kv_heads, head_size]
+        self.block_size = block_size
         self._kv_cache_view_shape = (-1, block_size, self.num_kv_heads, head_size)
 
     def do_kv_cache_update(
@@ -430,7 +367,6 @@ class HpcAttentionImpl(AttentionImpl[HpcAttentionMetadata]):
         assert output is not None, "HPC backend requires output tensor."
 
         if attn_metadata is None:
-            # Profiling run — return zero output
             return output.fill_(0)
 
         if output_scale is not None or output_block_scale is not None:
@@ -442,12 +378,9 @@ class HpcAttentionImpl(AttentionImpl[HpcAttentionMetadata]):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_decodes = attn_metadata.num_decodes
 
-        # Reshape from vLLM layout: [num_blocks, block_size, num_kv_heads, head_size]
-        # to HPC layout:            [num_pages,  page_size,  num_kv_heads, head_size]
         key_cache = kv_cache[0].view(self._kv_cache_view_shape)
         value_cache = kv_cache[1].view(self._kv_cache_view_shape)
 
-        # --- Decode segment (front of batch, query_len == 1 each) ---
         if num_decode_tokens > 0:
             splitk = _hpc_decode_use_splitk(
                 attn_metadata.max_decode_seq_len,
@@ -466,7 +399,6 @@ class HpcAttentionImpl(AttentionImpl[HpcAttentionMetadata]):
                 output=output[:num_decode_tokens],
             )
 
-        # --- Prefill segment (back of batch, query_len > 1) ---
         if n > num_decode_tokens:
             hpc.attention_with_kvcache_prefill_bf16(
                 q=query[num_decode_tokens:n],
