@@ -100,6 +100,9 @@ class MultiModalRegistry:
     A registry that dispatches data processing according to the model.
     """
 
+    def __init__(self):
+        self.info = None
+
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
         Checks if the model supports multimodal inputs.
@@ -111,7 +114,7 @@ class MultiModalRegistry:
             return False
 
         mm_config = model_config.get_multimodal_config()
-        info = self._create_processing_info(model_config, tokenizer=None)
+        info = self.get_processing_info(model_config)
 
         # Check if all supported modalities have limit == 0
         if all(
@@ -192,6 +195,11 @@ class MultiModalRegistry:
         factories = model_cls._processor_factory
         ctx = self._create_processing_ctx(model_config, tokenizer)
         return factories.info(ctx)
+
+    def get_processing_info(self, model_config: "ModelConfig") -> BaseProcessingInfo:
+        if self.info is None:
+            self.info = self._create_processing_info(model_config, tokenizer=None)
+        return self.info
 
     def create_processor(
         self,
