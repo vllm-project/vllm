@@ -749,6 +749,33 @@ class OpenAIServingResponses(OpenAIServing):
             self.tool_server, exit_stack, request.request_id, mcp_tools
         )
 
+    def _get_response_debug_fields(
+        self,
+        request: ResponsesRequest,
+        context: ConversationContext,
+    ) -> tuple[
+        ResponseInputOutputMessage | None,
+        ResponseInputOutputMessage | None,
+        dict[str, Any] | None,
+    ]:
+        input_messages: ResponseInputOutputMessage | None = None
+        output_messages: ResponseInputOutputMessage | None = None
+
+        if request.enable_response_messages:
+            if isinstance(context, HarmonyContext):
+                input_messages = context.messages[: context.num_init_messages]
+                output_messages = context.messages[context.num_init_messages :]
+            elif isinstance(context, (ParsableContext, SimpleContext)):
+                input_messages = context.input_messages
+                output_messages = context.output_messages
+            else:
+                raise TypeError(f"Unsupported response context: {type(context)!r}")
+
+        if not isinstance(context, (SimpleContext, HarmonyContext, ParsableContext)):
+            raise TypeError(f"Unsupported response context: {type(context)!r}")
+
+        return input_messages, output_messages, context.kv_transfer_params
+
     async def responses_full_generator(
         self,
         request: ResponsesRequest,
@@ -776,14 +803,9 @@ class OpenAIServingResponses(OpenAIServing):
         # "completed" is implemented as the "catch-all" for now.
         status: ResponseStatus = "completed"
 
-        input_messages: ResponseInputOutputMessage | None = None
-        output_messages: ResponseInputOutputMessage | None = None
         if self.use_harmony:
             assert isinstance(context, HarmonyContext)
             output = self._make_response_output_items_with_harmony(context)
-            if request.enable_response_messages:
-                input_messages = context.messages[: context.num_init_messages]
-                output_messages = context.messages[context.num_init_messages :]
             num_tool_output_tokens = context.num_tool_output_tokens
             if len(output) > 0:
                 if context.finish_reason == "length":
@@ -796,10 +818,6 @@ class OpenAIServingResponses(OpenAIServing):
                 status = "incomplete"
         elif isinstance(context, ParsableContext):
             output = context.parser.make_response_output_items_from_parsable_context()
-
-            if request.enable_response_messages:
-                input_messages = context.input_messages
-                output_messages = context.output_messages
 
             # TODO: Calculate usage.
             # assert final_res.prompt_token_ids is not None
@@ -825,13 +843,13 @@ class OpenAIServingResponses(OpenAIServing):
 
             output = self._make_response_output_items(request, final_output, tokenizer)
 
-            if request.enable_response_messages:
-                input_messages = context.input_messages
-                output_messages = context.output_messages
-
             # Calculate usage.
             assert final_res.prompt_token_ids is not None
             num_tool_output_tokens = 0
+
+        input_messages, output_messages, kv_transfer_params = (
+            self._get_response_debug_fields(request, context)
+        )
 
         assert isinstance(context, (SimpleContext, HarmonyContext, ParsableContext))
         num_prompt_tokens = context.num_prompt_tokens
@@ -889,7 +907,7 @@ class OpenAIServingResponses(OpenAIServing):
             output=output,
             status=status,
             usage=usage,
-            kv_transfer_params=context.kv_transfer_params,
+            kv_transfer_params=kv_transfer_params,
         )
 
         if request.store:
@@ -2033,6 +2051,9 @@ class OpenAIServingResponses(OpenAIServing):
                 ):
                     yield event_data
             except GenerationError as e:
+                input_messages, output_messages, kv_transfer_params = (
+                    self._get_response_debug_fields(request, context)
+                )
                 failed_response = ResponsesResponse.from_request(
                     request,
                     sampling_params,
@@ -2045,6 +2066,9 @@ class OpenAIServingResponses(OpenAIServing):
                         code="server_error",
                         message=str(e),
                     ),
+                    input_messages=input_messages,
+                    output_messages=output_messages,
+                    kv_transfer_params=kv_transfer_params,
                 )
                 yield _increment_sequence_number_and_return(
                     ResponseFailedEvent(

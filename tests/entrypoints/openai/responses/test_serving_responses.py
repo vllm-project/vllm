@@ -638,7 +638,12 @@ class TestHarmonyPreambleStreaming:
         assert "response.output_text.done" not in type_names
 
 
-def _make_simple_context_with_output(text, token_ids):
+def _make_simple_context_with_output(
+    text,
+    token_ids,
+    *,
+    kv_transfer_params=None,
+):
     """Create a SimpleContext with a RequestOutput containing the given text."""
     ctx = SimpleContext()
     completion = CompletionOutput(
@@ -658,6 +663,7 @@ def _make_simple_context_with_output(text, token_ids):
         outputs=[completion],
         finished=False,
         num_cached_tokens=0,
+        kv_transfer_params=kv_transfer_params,
     )
     ctx.append_output(req_output)
     return ctx
@@ -743,6 +749,7 @@ async def test_generation_error_emits_response_failed_event():
         tools=[],
         stream=True,
         service_tier="default",
+        enable_response_messages=True,
     )
     sampling_params = SamplingParams(
         max_tokens=128,
@@ -750,13 +757,18 @@ async def test_generation_error_emits_response_failed_event():
         top_p=0.7,
     )
     metadata = RequestResponseMetadata(request_id=request.request_id)
+    context = _make_simple_context_with_output(
+        "partial answer",
+        [10, 11],
+        kv_transfer_params={"remote_engine_id": "kv-node-1"},
+    )
 
     events = []
     async for event in serving.responses_stream_generator(
         request=request,
         sampling_params=sampling_params,
         result_generator=unused_generator(),
-        context=SimpleContext(),
+        context=context,
         model_name="test-model",
         tokenizer=MagicMock(),
         request_metadata=metadata,
@@ -776,6 +788,19 @@ async def test_generation_error_emits_response_failed_event():
     assert failed_event.response.error is not None
     assert failed_event.response.error.message == "kv load failed"
     assert failed_event.response.error.code == "server_error"
+    assert failed_event.response.kv_transfer_params == {"remote_engine_id": "kv-node-1"}
+    assert failed_event.response.input_messages is not None
+    assert failed_event.response.output_messages is not None
+    assert serialize_message(failed_event.response.input_messages[0]) == {
+        "message": "hi",
+        "tokens": [7, 8],
+        "type": "raw_message_tokens",
+    }
+    assert serialize_message(failed_event.response.output_messages[0]) == {
+        "message": "partial answer",
+        "tokens": [10, 11],
+        "type": "raw_message_tokens",
+    }
 
 
 class TestStreamingReasoningToContentTransition:
