@@ -286,7 +286,7 @@ Pooling models now support token-wise task.
 
 ### Score task
 
-`score` task have already removed and use `classify` instead, only when a classification model outputs num_labels 
+`score` task have already removed and use `classify` instead, only when a classification model outputs num_labels
 equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling multitask support

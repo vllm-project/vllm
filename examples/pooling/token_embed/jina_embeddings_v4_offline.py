@@ -8,6 +8,7 @@ from vllm.config import PoolerConfig
 from vllm.inputs import TextPrompt
 from vllm.multimodal.utils import fetch_image
 
+
 def main():
     # Initialize model
     model = LLM(
@@ -38,7 +39,6 @@ def main():
     prompts = [text1_prompt, text2_prompt, image_prompt]
     outputs = model.encode(prompts, pooling_task="token_embed")
 
-
     def get_embeddings(outputs):
         VISION_START_TOKEN_ID, VISION_END_TOKEN_ID = 151652, 151653
 
@@ -66,7 +66,6 @@ def main():
             )
             embeddings.append(torch.nn.functional.normalize(pooled_output, dim=-1))
         return embeddings
-
 
     embeddings = get_embeddings(outputs)
 
