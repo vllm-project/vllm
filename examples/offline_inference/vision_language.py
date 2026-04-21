@@ -403,15 +403,15 @@ def run_ernie45_vl(questions: list[str], modality: str) -> ModelRequestData:
         trust_remote_code=True,
     )
 
+    image_placeholder = "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
+    video_placeholder = "Video 1:<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
+
     if modality == "image":
-        placeholder = "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "Video 1:<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "Picture 1:<|IMAGE_START|><|image@placeholder|><|IMAGE_END|>"
-            "Video 1:<|VIDEO_START|><|video@placeholder|><|VIDEO_END|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -444,12 +444,15 @@ def run_exaone4_5(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<vision><|image_pad|></vision>"
+    video_placeholder = "<vision><|video_pad|></vision>"
+
     if modality == "image":
-        placeholder = "<vision><|image_pad|></vision>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<vision><|video_pad|></vision>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = "<vision><|image_pad|></vision><vision><|video_pad|></vision>"
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -588,15 +591,15 @@ def run_glm4_1v(questions: list[str], modality: str) -> ModelRequestData:
         enforce_eager=True,
     )
 
+    image_placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    video_placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
     if modality == "image":
-        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|begin_of_image|><|image|><|end_of_image|>"
-            "<|begin_of_video|><|video|><|end_of_video|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -631,15 +634,15 @@ def run_glm4_5v(questions: list[str], modality: str) -> ModelRequestData:
         tensor_parallel_size=4,
     )
 
+    image_placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    video_placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
     if modality == "image":
-        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|begin_of_image|><|image|><|end_of_image|>"
-            "<|begin_of_video|><|video|><|end_of_video|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -674,15 +677,15 @@ def run_glm4_5v_fp8(questions: list[str], modality: str) -> ModelRequestData:
         tensor_parallel_size=4,
     )
 
+    image_placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    video_placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
     if modality == "image":
-        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|begin_of_image|><|image|><|end_of_image|>"
-            "<|begin_of_video|><|video|><|end_of_video|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -716,15 +719,15 @@ def run_glm_ocr(questions: list[str], modality: str) -> ModelRequestData:
         enforce_eager=True,
     )
 
+    image_placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+    video_placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+
     if modality == "image":
-        placeholder = "<|begin_of_image|><|image|><|end_of_image|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|begin_of_video|><|video|><|end_of_video|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|begin_of_image|><|image|><|end_of_image|>"
-            "<|begin_of_video|><|video|><|end_of_video|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -943,12 +946,15 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
         enforce_eager=True,
     )
 
+    image_placeholder = "<IMG_CONTEXT>"
+    video_placeholder = "<video>"
+
     if modality == "image":
-        placeholder = "<IMG_CONTEXT>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<video>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = "<IMG_CONTEXT>\n<video>"
+        placeholder = image_placeholder + "\n" + video_placeholder
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
@@ -980,15 +986,15 @@ def run_interns1_pro(questions: list[str], modality: str) -> ModelRequestData:
         tensor_parallel_size=4,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
@@ -1017,12 +1023,15 @@ def run_internvl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<image>"
+    video_placeholder = "<video>"
+
     if modality == "image":
-        placeholder = "<image>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<video>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = "<image>\n<video>"
+        placeholder = image_placeholder + "\n" + video_placeholder
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     messages = [
@@ -1087,15 +1096,15 @@ def run_keye_vl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -1124,15 +1133,15 @@ def run_keye_vl1_5(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -1340,24 +1349,20 @@ def run_llava_next_video(questions: list[str], modality: str) -> ModelRequestDat
 
 # LLaVA-OneVision
 def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData:
-    if modality == "video":
-        prompts = [
-            f"<|im_start|>user <video>\n{question}<|im_end|><|im_start|>assistant\n"
-            for question in questions
-        ]
-    elif modality == "image":
-        prompts = [
-            f"<|im_start|>user <image>\n{question}<|im_end|><|im_start|>assistant\n"
-            for question in questions
-        ]
+    image_placeholder = "<image>"
+    video_placeholder = "<video>"
+
+    if modality == "image":
+        placeholder = image_placeholder
+    elif modality == "video":
+        placeholder = video_placeholder
     elif modality == "image+video":
-        prompts = [
-            (
-                f"<|im_start|>user <image>\n<video>\n{question}<|im_end|>"
-                f"<|im_start|>assistant\n"
-            )
-            for question in questions
-        ]
+        placeholder = image_placeholder + "\n" + video_placeholder
+
+    prompts = [
+        (f"<|im_start|>user {placeholder}\n{question}<|im_end|><|im_start|>assistant\n")
+        for question in questions
+    ]
 
     mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
     engine_args = EngineArgs(
@@ -1437,21 +1442,22 @@ def run_minicpmv_base(questions: list[str], modality: str, model_name):
     stop_tokens = ["<|im_end|>", "<|endoftext|>"]
     stop_token_ids = [tokenizer.convert_tokens_to_ids(i) for i in stop_tokens]
 
-    if modality == "image+video":
-        content_prefix = "(<image>./</image>)\n(<video>./</video>)"
-    else:
-        modality_placeholder = {
-            "image": "(<image>./</image>)",
-            "video": "(<video>./</video>)",
-        }
-        content_prefix = modality_placeholder[modality]
+    image_placeholder = "(<image>./</image>)"
+    video_placeholder = "(<video>./</video>)"
+
+    if modality == "image":
+        placeholder = image_placeholder
+    elif modality == "video":
+        placeholder = video_placeholder
+    elif modality == "image+video":
+        placeholder = image_placeholder + "\n" + video_placeholder
 
     prompts = [
         tokenizer.apply_chat_template(
             [
                 {
                     "role": "user",
-                    "content": f"{content_prefix}\n{question}",
+                    "content": f"{placeholder}\n{question}",
                 }
             ],
             tokenize=False,
@@ -1569,14 +1575,15 @@ def run_molmo2(questions: list[str], modality: str) -> ModelRequestData:
         max_num_batched_tokens=36864,
     )
 
+    image_placeholder = "<|image|>"
+    video_placeholder = "<|video|>"
+
     if modality == "image":
-        placeholder = "<|image|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|video|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = "<|image|><|video|>"
-    else:
-        raise ValueError(f"Unsupported modality for molmo2: {modality}")
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         f"{placeholder}<|im_start|>user\n{question}<|im_end|>\n<|im_start|>assistant\n"
@@ -1670,12 +1677,15 @@ def run_openpangu_vl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "[unused19]"
+    video_placeholder = "[unused32]"
+
     if modality == "image":
-        placeholder = "[unused19]"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "[unused32]"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = "[unused19][unused32]"
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -1732,12 +1742,16 @@ def run_ovis2_5(questions: list[str], modality: str) -> ModelRequestData:
         dtype="half",
         limit_mm_per_prompt=mm_limit,
     )
+
+    image_placeholder = "<image>"
+    video_placeholder = "<video>"
+
     if modality == "image":
-        placeholder = "<image>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<video>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = "<image>\n<video>"
+        placeholder = image_placeholder + "\n" + video_placeholder
 
     prompts = [
         f"<|im_start|>user\n\n{placeholder}\n{question}<|im_end|>\n<|im_start|>assistant\n"
@@ -1962,15 +1976,15 @@ def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -2005,15 +2019,15 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -2048,14 +2062,15 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_bos|><|IMAGE|><|vision_eos|>"
+    video_placeholder = "<|vision_bos|><|VIDEO|><|vision_eos|>"
+
     if modality == "image":
-        placeholder = "<|vision_bos|><|IMAGE|><|vision_eos|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_bos|><|VIDEO|><|vision_eos|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_bos|><|IMAGE|><|vision_eos|><|vision_bos|><|VIDEO|><|vision_eos|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     default_system = (
         "You are Qwen, a virtual human developed by the Qwen Team, Alibaba "
@@ -2138,15 +2153,15 @@ def run_qwen3_vl_moe(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
@@ -2333,15 +2348,15 @@ def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
         limit_mm_per_prompt=mm_limit,
     )
 
+    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+
     if modality == "image":
-        placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
+        placeholder = image_placeholder
     elif modality == "video":
-        placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
+        placeholder = video_placeholder
     elif modality == "image+video":
-        placeholder = (
-            "<|vision_start|><|image_pad|><|vision_end|>"
-            "<|vision_start|><|video_pad|><|vision_end|>"
-        )
+        placeholder = image_placeholder + video_placeholder
 
     prompts = [
         (
