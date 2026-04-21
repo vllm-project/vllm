@@ -156,11 +156,11 @@ class MLARoPEKVCacheCatPattern:
             layer_name: LayerNameType,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            query, key = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
+            q_pe, k_pe = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed, key, layer_name, self.kv_cache_dtype, k_scale
+                kv_c_normed, k_pe, layer_name, self.kv_cache_dtype, k_scale
             )
-            return dummy, query, key
+            return dummy, q_pe, k_pe
 
         def replacement(
             q: torch.Tensor,
@@ -183,9 +183,9 @@ class MLARoPEKVCacheCatPattern:
                 kv_cache_scale=k_scale,
                 layer_name=layer_name,
             )
-            dummy, q, k_pe_squeezed = at
-            k_pe_unsqueezed_2 = k_pe_squeezed.unsqueeze(1)
-            return dummy, q, k_pe_unsqueezed_2
+            dummy, q_pe, k_pe_squeezed = at
+            k_pe = k_pe_squeezed.unsqueeze(1)
+            return dummy, q_pe, k_pe
 
         return pattern, replacement
 
@@ -201,11 +201,11 @@ class MLARoPEKVCacheCatPattern:
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            query, key = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
+            q_pe, k_pe = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed, key, _ln, self.kv_cache_dtype, k_scale
+                kv_c_normed, k_pe, _ln, self.kv_cache_dtype, k_scale
             )
-            return dummy, query, key
+            return dummy, q_pe, k_pe
 
         def replacement(
             q: torch.Tensor,
@@ -227,9 +227,9 @@ class MLARoPEKVCacheCatPattern:
                 kv_cache_scale=k_scale,
                 layer_name=_ln,
             )
-            dummy, q, k_pe_squeezed = at
-            k_pe_unsqueezed_2 = k_pe_squeezed.unsqueeze(1)
-            return dummy, q, k_pe_unsqueezed_2
+            dummy, q_pe, k_pe_squeezed = at
+            k_pe = k_pe_squeezed.unsqueeze(1)
+            return dummy, q_pe, k_pe
 
         return pattern, replacement
 

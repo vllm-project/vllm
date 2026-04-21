@@ -186,7 +186,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
 
     def forward(
         self, qkv_lora: torch.Tensor, positions: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qkv_lora = qkv_lora.clone()
         q_c, kv_lora = qkv_lora.split(
             [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -209,7 +209,7 @@ class MLARoPEKVCacheCatTestModel(torch.nn.Module):
             self.kv_cache_dtype_str,
             self.mla_attn._k_scale,
         )
-        return q, kv_c, dummy
+        return q, kv_c, k_pe, dummy
 
     def ops_in_model_before(self) -> list[torch._ops.OpOverload]:
         ops = [
@@ -353,7 +353,7 @@ def test_mla_rope_kvcache_cat_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_unfused, kv_c_unfused, dummy = model(qkv_unfused, pos_unfused)
+            q_unfused, kv_c_unfused, k_pe_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache.clone()
         del dummy
@@ -368,13 +368,13 @@ def test_mla_rope_kvcache_cat_fusion(
             forward_context.slot_mapping = {
                 model.layer_name: attn_metadata.slot_mapping
             }
-            q_fused, kv_c_fused, dummy = model_fused(qkv_lora, pos)
+            q_fused, kv_c_fused, k_pe_fused, dummy = model_fused(qkv_lora, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_fused = attn_layer.kv_cache
         del dummy
 
-        if fusion_pass.matched_count < 1:
-            backend.print_graphs()
+        # TODO: Remove before merge
+        backend.print_graphs()
 
         assert fusion_pass.matched_count == 1
 
@@ -388,6 +388,7 @@ def test_mla_rope_kvcache_cat_fusion(
 
         torch.testing.assert_close(q_unfused, q_fused, atol=ATOL, rtol=RTOL)
         torch.testing.assert_close(kv_c_unfused, kv_c_fused, atol=ATOL, rtol=RTOL)
+        torch.testing.assert_close(k_pe_unfused, k_pe_fused, atol=ATOL, rtol=RTOL)
         # Cannot compare fp8_* directly here, cast to model dtype instead
         torch.testing.assert_close(
             kv_cache_unfused.view(dtype),
