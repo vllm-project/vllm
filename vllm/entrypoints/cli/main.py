@@ -12,31 +12,6 @@ import sys
 import threading as _threading
 
 
-# [startup] Kick off torch + transformers .so/module loading in a background
-# thread before we touch vllm.logger (which pulls vllm/__init__.py ->
-# vllm.env_override -> `import torch` on the main thread). Python import
-# lock serializes the same-module import across threads, but the .so dlopen
-# inside torch's init releases the GIL during file I/O. Main thread's
-# non-torch imports (vllm.envs submodules, stdlib, fastapi, etc.) can make
-# progress on the CPU while the background thread pays the ~2 s of cuda
-# .so loading. `import transformers` is also ~2 s of cold-disk work and
-# depends on torch; chain it after torch in the same thread so subsequent
-# `from transformers import ...` lines on the main thread hit a warm
-# module cache.
-def _bg_preload_torch() -> None:
-    try:
-        import torch  # noqa: F401
-    except Exception:
-        return
-    with contextlib.suppress(Exception):
-        import transformers  # noqa: F401
-
-
-_threading.Thread(
-    target=_bg_preload_torch, daemon=True, name="vllm-torch-preload"
-).start()
-
-
 # [startup] Pre-spawn EngineCore via forkserver preload, in a background
 # thread. Only fires for `vllm serve` (the only subcommand that spawns a
 # long-running EngineCore). The forkserver process is forked once and
