@@ -259,10 +259,10 @@ def _maybe_add_docs_url(cls: Any) -> str:
 def _expand_json_human_readable_numbers(val: str) -> str:
     """Expand human-readable number suffixes in a JSON string.
 
-    Reuses :func:`human_readable_int` so that the ``k/m/g/t`` (decimal) and
-    ``K/M/G/T`` (binary) conventions already supported by scalar CLI args
-    like ``--max-model-len 1m`` also work inside JSON config arguments such
-    as ``--kv-transfer-config '{"cpu_bytes_to_use": 80g}'``.
+    Based on :func:`human_readable_int` so that the ``k/m/g/t`` (decimal) and
+    ``K/M/G/T`` (binary) conventions work out the box.
+    Also works inside JSON config arguments such
+    as ``--kv-transfer-config '{"cpu_bytes_to_use": 80m}'``.
 
     Only bare (unquoted) tokens are replaced so that JSON string values
     like ``"model_name"`` are never modified.
