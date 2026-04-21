@@ -177,16 +177,12 @@ class QkNormRopeKvCachePattern:
             k_normed = self.rmsnorm_matcher(k_by_head, k_weight)
             k_flat = k_normed.view(-1, self.k_size)
 
-            q_rope, k_rope = self.rope_matcher(
-                positions, q_flat, k_flat, cos_sin_cache
-            )
+            q_rope, k_rope = self.rope_matcher(positions, q_flat, k_flat, cos_sin_cache)
 
             q_rope = q_rope.view(-1, self.num_heads, self.head_size)
             k_rope = k_rope.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
-            dummy = torch.ops.vllm.unified_kv_cache_update(
-                k_rope, v, self.layer_name
-            )
+            dummy = torch.ops.vllm.unified_kv_cache_update(k_rope, v, self.layer_name)
             return dummy, q_rope, k_rope, v
 
         def replacement(

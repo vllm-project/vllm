@@ -228,6 +228,8 @@ def enable_qk_norm_rope(cfg: "VllmConfig") -> bool:
     # Qwen3/Qwen3-MoE hardcode QK-norm — no config.json field exists
     model_type = getattr(hf_config, "model_type", "")
     return model_type in _QK_NORM_MODEL_TYPES
+
+
 def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
     """Enable MLA dual RMS norm fusion when AITer has fused_qk_rmsnorm."""
     from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops

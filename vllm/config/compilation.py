@@ -309,7 +309,7 @@ class PassConfig:
         """
         fusion_prefixes = ("fuse_", "enable_")
         enabled_fusions = [
-            f.name[len(prefix):]
+            f.name[len(prefix) :]
             for f in fields(self)
             if getattr(self, f.name)
             for prefix in fusion_prefixes
