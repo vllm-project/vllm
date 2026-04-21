@@ -225,6 +225,15 @@ class HFConfigParser(ConfigParserBase):
                 # calls to `from_pretrained`
                 config_class = _CONFIG_REGISTRY[model_type]
                 _register_config_class(model_type, config_class)
+                # If the on-disk model_type differs from the overridden
+                # one, register under both so AutoConfig.from_pretrained
+                # returns the correct class regardless of what the
+                # checkpoint says
+                if (
+                    config_model_type := config_dict.get("model_type")
+                ) and config_model_type != model_type:
+                    _register_config_class(config_model_type, config_class)
+                    config_class.model_type = model_type
                 # Now that it is registered, it is not considered remote code anymore
                 trust_remote_code = False
             try:
