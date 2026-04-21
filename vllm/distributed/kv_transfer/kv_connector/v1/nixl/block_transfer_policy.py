@@ -239,12 +239,15 @@ class ModelBlockTransferPolicy(ABC):
     @abstractmethod
     def build_src_split_handles(
         self,
+        # Local src data
         src_blocks_data: list[tuple[int, int, int]],
         num_descs: int,
-        transfer_config: Any | None = None,
-        tp_size: int = 1,
-        is_mla: bool = False,
-        total_num_kv_heads: int = 1,
+        # TP topology
+        tp_size: int,
+        is_mla: bool,
+        total_num_kv_heads: int,
+        # Remote engine info
+        remote_info: EngineTransferInfo,
     ) -> list[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP scenario."""
         ...
@@ -523,15 +526,15 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         self,
         src_blocks_data,
         num_descs,
-        transfer_config=None,
-        tp_size: int = 1,
-        is_mla: bool = False,
-        total_num_kv_heads: int = 1,
+        tp_size,
+        is_mla,
+        total_num_kv_heads,
+        remote_info,
     ):
         _ = (num_descs, is_mla, total_num_kv_heads)
-        assert isinstance(transfer_config, EngineTransferInfo)
-        assert transfer_config.remote_tp_size > tp_size
-        abs_tp = transfer_config.remote_tp_size // tp_size
+        assert isinstance(remote_info, EngineTransferInfo)
+        assert remote_info.remote_tp_size > tp_size
+        abs_tp = remote_info.remote_tp_size // tp_size
         result: list[list[tuple[int, int, int]]] = []
         for i in range(abs_tp):
             blocks_data: list[tuple[int, int, int]] = []
@@ -967,13 +970,13 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         self,
         src_blocks_data,
         num_descs,
-        transfer_config=None,
-        tp_size: int = 1,
-        is_mla: bool = False,
-        total_num_kv_heads: int = 1,
+        tp_size,
+        is_mla,
+        total_num_kv_heads,
+        remote_info,
     ):
-        assert isinstance(transfer_config, MambaEngineTransferInfo)
-        info = transfer_config
+        assert isinstance(remote_info, MambaEngineTransferInfo)
+        info = remote_info
         assert info.remote_tp_size > tp_size
         abs_tp = info.remote_tp_size // tp_size
         if self.needs_split_handles(

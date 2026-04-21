@@ -1023,12 +1023,15 @@ class NixlConnectorWorker:
             self.src_xfer_handles_by_tp_ratio[tp_ratio] = []
 
             for handle_data in self.transfer_policy.build_src_split_handles(
+                # Local src data
                 self.src_blocks_data,
                 self.num_descs,
-                transfer_config=transfer_topo.get_engine_info(engine_id),
+                # TP topology
                 tp_size=transfer_topo.tp_size,
                 is_mla=transfer_topo.is_mla,
                 total_num_kv_heads=transfer_topo.total_num_kv_heads,
+                # Remote engine info
+                remote_info=transfer_topo.get_engine_info(engine_id),
             ):
                 descs = self.nixl_wrapper.get_xfer_descs(
                     handle_data, self.nixl_memory_type
