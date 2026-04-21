@@ -12,6 +12,17 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
 
+- label: Spec Decode Eagle Nightly B200
+  timeout_in_minutes: 30
+  device: b200
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "eagle_correctness"
+
 - label: Spec Decode Speculators + MTP
   timeout_in_minutes: 30
   device: h200_18gb
@@ -23,6 +34,18 @@ steps:
   commands:
     - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
 
+- label: Spec Decode Speculators + MTP Nightly B200
+  timeout_in_minutes: 30
+  device: b200
+  optional: true
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - vllm/transformers_utils/configs/speculators/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "speculators or mtp_correctness"
+  
 - label: Spec Decode Ngram + Suffix
   timeout_in_minutes: 30
   device: h200_18gb
@@ -36,6 +59,17 @@ steps:
 - label: Spec Decode Draft Model
   timeout_in_minutes: 30
   device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/
+    - vllm/v1/worker/gpu/spec_decode/
+    - tests/v1/e2e/spec_decode/
+  commands:
+    - pytest -v -s v1/e2e/spec_decode -k "draft_model or no_sync or batch_inference"
+
+- label: Spec Decode Draft Model Nightly B200
+  timeout_in_minutes: 30
+  device: b200
+  optional: true
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
