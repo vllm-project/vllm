@@ -602,7 +602,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             max_seq_len = attn_metadata.max_seq_len  # type: ignore[union-attr]
             topk = self.impl.topk_indices_buffer.shape[1]  # type: ignore[union-attr]
             use_mha = (
-                not attn_metadata.has_context  # type: ignore[union-attr]
+                self.impl._fa4_available  # type: ignore[union-attr]
+                and not attn_metadata.has_context  # type: ignore[union-attr]
                 and (max_seq_len <= topk or 128 <= max_seq_len <= 8192)
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
             )
