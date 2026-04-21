@@ -788,6 +788,11 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
     if not trtllm_compute_cap:
         return {}
 
+    # KV cache dtypes that only work with a dedicated kernel (e.g. nvfp4
+    # requires the SM100 NVFP4 MHA kernel) and should not appear in the
+    # generic attention-backend feature matrix.
+    kernel_only_kv_dtypes = ["nvfp4"]
+
     return {
         "native": {
             # Native FlashInfer: everything except SM100
@@ -798,6 +803,7 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
             "compute_capability": trtllm_compute_cap,
             "supports_sink": True,
         },
+        "exclude_kv_dtypes": kernel_only_kv_dtypes,
     }
 
 
@@ -954,6 +960,15 @@ def _expand_flashinfer_variants(
         parts = orig_cap.replace(".x", "").split("-")
         min_cc = parts[0] if parts else "7"
         trtllm_cc = fi_features["trtllm"]["compute_capability"]
+
+        # Remove KV dtypes handled by dedicated kernels (e.g. nvfp4)
+        exclude = fi_features.get("exclude_kv_dtypes", [])
+        if exclude:
+            backend["kv_cache_dtypes"] = ", ".join(
+                d
+                for d in (d.strip() for d in backend["kv_cache_dtypes"].split(","))
+                if d not in exclude
+            )
 
         # Create native entry (pre-Blackwell GPUs)
         native = backend.copy()

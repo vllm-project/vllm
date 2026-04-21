@@ -626,7 +626,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 # which is passed to FlashInferImpl
                 self.kv_cache_dtype = self.cache_dtype
             else:
-                self.kv_cache_dtype = FlashInferBackend.get_fp8_dtype_for_flashinfer(
+                self.kv_cache_dtype = FlashInferBackend.get_dtype_for_flashinfer(
                     self.cache_dtype
                 )
         else:
@@ -1323,10 +1323,16 @@ class FlashInferImpl(AttentionImpl):
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
 
-        # Pre-allocated FP8 output buffer for NVFP4 without fused output
-        # quant.  Allocated lazily (before CUDA graph capture) to avoid
-        # allocations inside the captured region.
-        self._nvfp4_fp8_out: torch.Tensor | None = None
+        # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
+        if self.is_kvcache_nvfp4 and vllm_config is not None:
+            max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+            self._nvfp4_fp8_out = torch.empty(
+                (max_num_tokens, num_heads, head_size),
+                dtype=FP8_DTYPE,
+                device="cuda",
+            )
+        else:
+            self._nvfp4_fp8_out = None
 
         dcp_a2a = (
             vllm_config is not None
@@ -1542,18 +1548,7 @@ class FlashInferImpl(AttentionImpl):
                         self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
                     )
                     if needs_fp8_out_prefill:
-                        n = num_prefill_tokens
-                        if (
-                            self._nvfp4_fp8_out is None
-                            or self._nvfp4_fp8_out.numel()
-                            < n * output.shape[1] * output.shape[2]
-                        ):
-                            self._nvfp4_fp8_out = torch.empty(
-                                (n, output.shape[1], output.shape[2]),
-                                dtype=FP8_DTYPE,
-                                device=output.device,
-                            )
-                        out_prefill = self._nvfp4_fp8_out[:n]
+                        out_prefill = self._nvfp4_fp8_out[:num_prefill_tokens]
                     else:
                         out_prefill = output[num_decode_tokens:]
 
@@ -1604,16 +1599,7 @@ class FlashInferImpl(AttentionImpl):
                 # Use a pre-allocated FP8 buffer and dequantize afterwards.
                 needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
                 if needs_fp8_out:
-                    n = num_prefill_tokens
-                    if (
-                        self._nvfp4_fp8_out is None
-                        or self._nvfp4_fp8_out.numel()
-                        < n * output.shape[1] * output.shape[2]
-                    ):
-                        self._nvfp4_fp8_out = torch.empty(
-                            output.shape, dtype=FP8_DTYPE, device=output.device
-                        )
-                    out = self._nvfp4_fp8_out[:n]
+                    out = self._nvfp4_fp8_out[:num_prefill_tokens]
 
                 prefill_kv_block_scales = None
                 if self.is_kvcache_nvfp4:
@@ -1704,18 +1690,7 @@ class FlashInferImpl(AttentionImpl):
                 # Use a pre-allocated FP8 buffer and dequantize afterwards.
                 needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
                 if needs_fp8_out:
-                    n = num_decode_tokens
-                    if (
-                        self._nvfp4_fp8_out is None
-                        or self._nvfp4_fp8_out.numel()
-                        < n * output.shape[1] * output.shape[2]
-                    ):
-                        self._nvfp4_fp8_out = torch.empty(
-                            (n, output.shape[1], output.shape[2]),
-                            dtype=FP8_DTYPE,
-                            device=output.device,
-                        )
-                    out_decode = self._nvfp4_fp8_out[:n]
+                    out_decode = self._nvfp4_fp8_out[:num_decode_tokens]
                 else:
                     out_decode = output[:num_decode_tokens]
 
@@ -1802,18 +1777,7 @@ class FlashInferImpl(AttentionImpl):
                 # Use a pre-allocated FP8 buffer and dequantize afterwards.
                 needs_fp8_out = self.is_kvcache_nvfp4 and output.dtype != FP8_DTYPE
                 if needs_fp8_out:
-                    n = num_decode_tokens
-                    if (
-                        self._nvfp4_fp8_out is None
-                        or self._nvfp4_fp8_out.numel()
-                        < n * output.shape[1] * output.shape[2]
-                    ):
-                        self._nvfp4_fp8_out = torch.empty(
-                            (n, output.shape[1], output.shape[2]),
-                            dtype=FP8_DTYPE,
-                            device=output.device,
-                        )
-                    out = self._nvfp4_fp8_out[:n]
+                    out = self._nvfp4_fp8_out[:num_decode_tokens]
 
                 if num_decode_tokens % attn_metadata.num_decodes != 0:
                     # This gets triggered when the dummy_run forces
