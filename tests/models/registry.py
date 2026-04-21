@@ -901,6 +901,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "Granite4VisionForConditionalGeneration": _HfExamplesInfo(
         "ibm-granite/granite-vision-4.1-4b",
+        is_available_online=False,
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
     "GraniteSpeechForConditionalGeneration": _HfExamplesInfo(
