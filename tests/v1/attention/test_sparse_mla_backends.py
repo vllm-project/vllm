@@ -718,7 +718,8 @@ def test_split_prefill_chunks(seq_lens, max_buf, expected):
 
 
 PREFILL_BATCH_SPECS = {
-    "pure_prefill": BatchSpec(seq_lens=[64, 128], query_lens=[64, 128]),
+    "short_dense_mha": BatchSpec(seq_lens=[64, 128], query_lens=[64, 128]),
+    "short_sparse_mha": BatchSpec(seq_lens=[256], query_lens=[256]),
 }
 
 
@@ -753,7 +754,7 @@ def test_sparse_backend_prefill_correctness(
     qk_rope_head_dim = 64
     v_head_dim = 128
     head_size = kv_lora_rank + qk_rope_head_dim
-    topk_tokens = 32
+    topk_tokens = 200
 
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
@@ -969,7 +970,7 @@ def test_sparse_backend_prefill_correctness(
 
     assert out_buffer.shape == ref_output.shape
     assert torch.isfinite(out_buffer).all(), "Non-finite values in output"
-    torch.testing.assert_close(out_buffer, ref_output, rtol=0.05, atol=0.05)
+    torch.testing.assert_close(out_buffer, ref_output, rtol=0.01, atol=0.01)
 
 
 @pytest.mark.parametrize(
