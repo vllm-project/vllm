@@ -166,10 +166,8 @@ class TestTieringOffloadingManager:
         # Create primary tier (CPU-based)
         self.primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
 
-        # Mock get_primary_kv_tensor to return test tensor
-        # Create mock CPU tensor (5 blocks, 16 bytes per block)
-        mock_cpu_tensor = torch.zeros((5, 16), dtype=torch.float32)
-        self.primary_tier.get_primary_kv_tensor = lambda: mock_cpu_tensor
+        mock_arr = torch.zeros((5, 16), dtype=torch.int8).numpy()
+        self.primary_tier.create_kv_memoryview = lambda: memoryview(mock_arr)
 
         # Create secondary tiers
         self.secondary_tier1 = DummySecondaryTier(tier_name="Storage", max_blocks=10)
@@ -363,9 +361,8 @@ class TestTieringOffloadingManager:
         # Create a fresh primary tier for this test
         primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=10)
 
-        # Mock get_primary_kv_tensor to return test tensor
-        mock_cpu_tensor = torch.zeros((10, 16), dtype=torch.float32)
-        primary_tier.get_primary_kv_tensor = lambda: mock_cpu_tensor
+        mock_arr = torch.zeros((10, 16), dtype=torch.int8).numpy()
+        primary_tier.create_kv_memoryview = lambda: memoryview(mock_arr)
 
         manager = TieringOffloadingManager(
             primary_tier=primary_tier,
@@ -441,9 +438,8 @@ class TestTieringOffloadingWithoutSecondaryTiers:
         """Test that manager works with empty secondary_tiers list."""
         primary_tier = CPUPrimaryTierOffloadingManager(num_blocks=5)
 
-        # Mock get_primary_kv_tensor to return test tensor
-        mock_cpu_tensor = torch.zeros((5, 16), dtype=torch.float32)
-        primary_tier.get_primary_kv_tensor = lambda: mock_cpu_tensor
+        mock_arr = torch.zeros((5, 16), dtype=torch.int8).numpy()
+        primary_tier.create_kv_memoryview = lambda: memoryview(mock_arr)
 
         # Create manager with no secondary tiers
         manager = TieringOffloadingManager(

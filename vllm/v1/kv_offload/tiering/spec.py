@@ -140,9 +140,9 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             )
 
             # Create scheduler-side SharedOffloadRegion (rank=None) first so
-            # CPUPrimaryTierOffloadingManager can return _base from
-            # get_primary_kv_tensor(), which TieringOffloadingManager.__init__
-            # calls immediately to wire secondary tier memoryviews.
+            # CPUPrimaryTierOffloadingManager.create_kv_memoryview() has _base
+            # available when TieringOffloadingManager.__init__ wires secondary
+            # tier memoryviews.
             world_size = self.vllm_config.parallel_config.world_size
             scheduler_mmap = SharedOffloadRegion(
                 instance_id=self.vllm_config.instance_id,

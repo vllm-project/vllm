@@ -22,8 +22,6 @@ Key Design Principles:
 
 from collections.abc import Iterable
 
-import torch
-
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.abstract import (
     JobId,
@@ -84,24 +82,20 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         decrementing ref_cnt."""
         self.complete_load(keys)
 
-    def get_primary_kv_tensor(self) -> torch.Tensor:
-        """
-        Get the primary tier's KV cache tensor.
+    def create_kv_memoryview(self) -> memoryview:
+        """Create a memoryview over the primary tier's KV cache buffer.
 
-        Returns a 2-D int8 tensor of shape (num_blocks, row_stride_bytes)
-        backed by the SharedOffloadRegion mmap, where row_stride_bytes =
-        cpu_page_size * world_size.  Secondary tiers address block b as
-        view[b], and view.strides[0] gives the per-block byte stride.
-
-        Returns:
-            2-D int8 CPU tensor of shape (num_blocks, row_stride_bytes).
+        Returns a 2-D memoryview of shape (num_blocks, row_stride_bytes)
+        backed by the SharedOffloadRegion mmap. Secondary tiers address
+        block b as view[b]. Caller must call release() when done.
         """
         assert self._mmap_region is not None, (
             "mmap_region must be provided to CPUPrimaryTierOffloadingManager"
         )
-        return self._mmap_region._base.view(
+        kv_tensor = self._mmap_region._base.view(
             self._mmap_region.num_blocks, self._mmap_region._row_stride
         )
+        return memoryview(kv_tensor.numpy())
 
 
 class TieringOffloadingManager(OffloadingManager):
@@ -148,14 +142,10 @@ class TieringOffloadingManager(OffloadingManager):
         self._load_jobs: dict[JobId, JobMetadata] = {}
 
         # Wire each secondary tier with a long-lived memoryview of the primary
-        # CPU tensor (one independent view per tier). Views are stored so they
-        # can be released on shutdown().
-        self._secondary_views: list[memoryview] = []
-        cpu_tensor = primary_tier.get_primary_kv_tensor()
+        # CPU buffer. One view is shared across all tiers; released in shutdown().
+        self._primary_kv_view = primary_tier.create_kv_memoryview()
         for tier in self.secondary_tiers:
-            view = memoryview(cpu_tensor.numpy())
-            self._secondary_views.append(view)
-            tier.set_primary_view(view)
+            tier.set_primary_view(self._primary_kv_view)
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -442,8 +432,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def shutdown(self) -> None:
         """Release memoryviews and scheduler-side mmap."""
-        for view in self._secondary_views:
-            view.release()
+        self._primary_kv_view.release()
         if self.primary_tier._mmap_region is not None:
             self.primary_tier._mmap_region.cleanup()
             self.primary_tier._mmap_region = None
