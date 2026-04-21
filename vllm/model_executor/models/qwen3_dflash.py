@@ -131,7 +131,7 @@ class DFlashQwen3Attention(nn.Module):
         with the context K/V from the target model's hidden states. This forward op
         computes attention for the query tokens only.
         See also: precompute_and_store_context_kv"""
-        qkv = F.linear(hidden_states, self.qkv_proj.weight, self.qkv_proj.bias)
+        qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
         # Per-head RMSNorm
@@ -249,6 +249,7 @@ class DFlashQwen3Model(nn.Module):
                     current_vllm_config,
                     prefix=maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}"),
                     config=self.config,
+                    quant_config=self.quant_config,
                 )
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
@@ -294,21 +295,23 @@ class DFlashQwen3Model(nn.Module):
         """
         layers_attn = [layer.self_attn for layer in self.layers]
         attn0 = layers_attn[0]
-        has_bias = attn0.qkv_proj.bias is not None
-
         self._hidden_norm_weight = self.hidden_norm.weight.data
-
-        # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
-        kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
-        self._fused_kv_weight = torch.cat(kv_weights, dim=0)
-        if has_bias:
-            kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
-            self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
-        else:
-            self._fused_kv_bias = None
+        self._use_quantized_kv_fallback = self.quant_config is not None
 
         # K-norm weights: list of [head_dim] tensors, one per layer.
         self._k_norm_weights = [a.k_norm.weight.data for a in layers_attn]
+
+        if not self._use_quantized_kv_fallback:
+            has_bias = attn0.qkv_proj.bias is not None
+
+            # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
+            kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+            self._fused_kv_weight = torch.cat(kv_weights, dim=0)
+            if has_bias:
+                kv_biases = [a.qkv_proj.bias[a.q_size :] for a in layers_attn]
+                self._fused_kv_bias: torch.Tensor | None = torch.cat(kv_biases, dim=0)
+            else:
+                self._fused_kv_bias = None
 
         # RoPE parameters
         self._rope_head_size = attn0.rotary_emb.head_size
@@ -378,6 +381,48 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
+        if self._use_quantized_kv_fallback:
+            for layer in self.layers:
+                attn_layer = layer.self_attn
+                qkv, _ = attn_layer.qkv_proj(normed_context_states)
+                _, k, v = qkv.split(
+                    [attn_layer.q_size, attn_layer.kv_size, attn_layer.kv_size], dim=-1
+                )
+
+                k = attn_layer.k_norm(
+                    k.view(num_ctx, attn_layer.num_kv_heads, attn_layer.head_dim)
+                )
+                v = v.view(num_ctx, attn_layer.num_kv_heads, attn_layer.head_dim)
+                k_flat = k.contiguous().view(num_ctx, attn_layer.kv_size)
+
+                cos_sin_cache = attn_layer.rotary_emb.cos_sin_cache
+                if cos_sin_cache.dtype != k_flat.dtype:
+                    cos_sin_cache = cos_sin_cache.to(dtype=k_flat.dtype)
+                ops.rotary_embedding(
+                    context_positions,
+                    k_flat,
+                    None,
+                    attn_layer.rotary_emb.head_size,
+                    cos_sin_cache,
+                    attn_layer.rotary_emb.is_neox_style,
+                )
+
+                if context_slot_mapping is None:
+                    continue
+
+                attn = attn_layer.attn
+                kv_cache = attn.kv_cache
+                attn.impl.do_kv_cache_update(
+                    attn,
+                    k_flat.view(
+                        num_ctx, attn_layer.num_kv_heads, attn_layer.head_dim
+                    ),
+                    v,
+                    kv_cache,
+                    context_slot_mapping,
+                )
+            return
+
         all_kv_flat = F.linear(
             normed_context_states, self._fused_kv_weight, self._fused_kv_bias
         )

@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
+from transformers import Qwen3Config
 
-from vllm.config import LoadConfig, ModelConfig, SpeculativeConfig, VllmConfig
+from vllm.config import (
+    LoadConfig,
+    ModelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.model_executor.models.utils import get_draft_quant_config
 from vllm.platforms import current_platform
 
@@ -213,3 +221,188 @@ def test_load_weights_kv_scale_handling():
 
             assert scale_name == "layers.0.self_attn.kv_scale"
             assert weight_to_load == loaded_weight_tensor[0]
+
+
+def test_dflash_qwen3_layers_receive_quant_config(default_vllm_config):
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+
+    mock_quant_config = Mock()
+    hf_config = Qwen3Config(
+        vocab_size=1000,
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=4,
+    )
+    hf_config.dflash_config = {"use_aux_hidden_state": False}
+
+    default_vllm_config.speculative_config = Mock()
+    default_vllm_config.speculative_config.draft_model_config = Mock()
+    default_vllm_config.speculative_config.draft_model_config.hf_config = hf_config
+
+    decoder_layer_ctor = Mock(side_effect=lambda *args, **kwargs: torch.nn.Identity())
+
+    with (
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.VocabParallelEmbedding",
+            return_value=torch.nn.Identity(),
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.DFlashQwen3DecoderLayer",
+            decoder_layer_ctor,
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.RMSNorm",
+            return_value=torch.nn.Identity(),
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.get_draft_quant_config",
+            return_value=mock_quant_config,
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.get_current_vllm_config",
+            return_value=default_vllm_config,
+        ),
+        set_current_vllm_config(default_vllm_config),
+    ):
+        DFlashQwen3Model(vllm_config=default_vllm_config)
+
+    assert decoder_layer_ctor.call_count == hf_config.num_hidden_layers
+    for call in decoder_layer_ctor.call_args_list:
+        assert call.kwargs["quant_config"] is mock_quant_config
+
+
+def test_dflash_qwen3_attention_uses_qkv_proj_module():
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Attention
+
+    class DummyQKVProj:
+        def __init__(self, qkv_output: torch.Tensor):
+            self.bias = None
+            self.qkv_output = qkv_output
+            self.calls: list[torch.Tensor] = []
+
+        @property
+        def weight(self) -> torch.Tensor:
+            raise AssertionError("raw qkv weight access should be avoided")
+
+        def __call__(self, hidden_states: torch.Tensor):
+            self.calls.append(hidden_states)
+            return self.qkv_output, None
+
+    attention = object.__new__(DFlashQwen3Attention)
+    torch.nn.Module.__init__(attention)
+    attention.q_size = 4
+    attention.kv_size = 2
+    attention.head_dim = 2
+    attention.qkv_proj = DummyQKVProj(torch.arange(8, dtype=torch.float32).view(1, 8))
+    attention.q_norm = Mock(side_effect=lambda x: x)
+    attention.k_norm = Mock(side_effect=lambda x: x)
+    attention.rotary_emb = Mock(side_effect=lambda positions, q, k: (q, k))
+    attention.attn = Mock(side_effect=lambda q, k, v: q)
+    attention.o_proj = Mock(side_effect=lambda output: (output, None))
+
+    hidden_states = torch.randn(1, 6)
+    output = attention.forward(torch.tensor([0]), hidden_states)
+
+    assert len(attention.qkv_proj.calls) == 1
+    assert attention.qkv_proj.calls[0] is hidden_states
+    assert output.shape == (1, 4)
+
+
+def test_dflash_qwen3_precompute_uses_quantized_kv_fallback():
+    from vllm.model_executor.models.qwen3_dflash import DFlashQwen3Model
+
+    class DummyQKVProj:
+        def __init__(self, qkv_output: torch.Tensor):
+            self.bias = None
+            self.qkv_output = qkv_output
+            self.calls = 0
+
+        @property
+        def weight(self) -> torch.Tensor:
+            raise AssertionError("quantized fallback should not build fused weights")
+
+        def __call__(self, hidden_states: torch.Tensor):
+            self.calls += 1
+            return self.qkv_output, None
+
+    num_ctx = 3
+    hidden_size = 4
+    q_size = 4
+    kv_size = 2
+    head_dim = 2
+    num_kv_heads = 1
+    context_states = torch.randn(num_ctx, hidden_size)
+    context_positions = torch.arange(num_ctx)
+    context_slot_mapping = torch.arange(num_ctx, dtype=torch.int64)
+
+    model = object.__new__(DFlashQwen3Model)
+    torch.nn.Module.__init__(model)
+    model.quant_config = Mock()
+    model.hidden_norm = SimpleNamespace(
+        weight=torch.nn.Parameter(torch.ones(hidden_size))
+    )
+    model.layers = []
+
+    qkv_outputs = [
+        torch.arange(num_ctx * (q_size + 2 * kv_size), dtype=torch.float32).view(
+            num_ctx, q_size + 2 * kv_size
+        ),
+        torch.arange(
+            num_ctx * (q_size + 2 * kv_size), 2 * num_ctx * (q_size + 2 * kv_size),
+            dtype=torch.float32
+        ).view(num_ctx, q_size + 2 * kv_size),
+    ]
+
+    attn_layers = []
+    for qkv_output in qkv_outputs:
+        qkv_proj = DummyQKVProj(qkv_output)
+        k_norm = Mock(side_effect=lambda x: x)
+        k_norm.weight = torch.nn.Parameter(torch.ones(head_dim))
+        q_norm = SimpleNamespace(variance_epsilon=1e-6)
+        rotary_emb = SimpleNamespace(
+            head_size=head_dim,
+            cos_sin_cache=torch.zeros(16, dtype=torch.float32),
+            is_neox_style=False,
+        )
+        attn_impl = SimpleNamespace(do_kv_cache_update=Mock())
+        attn = SimpleNamespace(impl=attn_impl, kv_cache=object())
+        attn_layer = SimpleNamespace(
+            qkv_proj=qkv_proj,
+            q_size=q_size,
+            kv_size=kv_size,
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            k_norm=k_norm,
+            q_norm=q_norm,
+            rotary_emb=rotary_emb,
+            attn=attn,
+        )
+        attn_layers.append(attn_layer)
+        model.layers.append(SimpleNamespace(self_attn=attn_layer))
+
+    with (
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.ops.rms_norm",
+            side_effect=lambda out, x, weight, eps: out.copy_(x),
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.ops.rotary_embedding",
+            side_effect=lambda *args, **kwargs: None,
+        ),
+        patch(
+            "vllm.model_executor.models.qwen3_dflash.F.linear",
+            side_effect=AssertionError("fused dense linear should not run"),
+        ),
+    ):
+        model.precompute_and_store_context_kv(
+            context_states,
+            context_positions,
+            context_slot_mapping,
+        )
+
+    assert model._use_quantized_kv_fallback is True
+    for attn_layer in attn_layers:
+        assert attn_layer.qkv_proj.calls == 1
+        attn_layer.attn.impl.do_kv_cache_update.assert_called_once()
