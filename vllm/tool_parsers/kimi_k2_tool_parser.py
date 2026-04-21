@@ -62,6 +62,10 @@ class KimiK2ToolParser(ToolParser):
                 "constructor during construction."
             )
 
+    def reset_streaming_state(self) -> None:
+        super().reset_streaming_state()
+        self._sent_content_idx = 0
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:

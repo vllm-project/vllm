@@ -597,6 +597,64 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def validate_interleaved_thinking(cls, data):
+        """When the last message is role=tool, the preceding assistant
+        message must include reasoning content for interleaved thinking.
+
+        Only enforced when ``chat_template_kwargs.thinking`` is True.
+        """
+        chat_template_kwargs = data.get("chat_template_kwargs") or {}
+        if not chat_template_kwargs.get("thinking"):
+            return data
+
+        messages = data.get("messages")
+        if not messages:
+            return data
+
+        last = messages[-1]
+        last_role = (
+            last.get("role")
+            if isinstance(last, dict)
+            else getattr(last, "role", None)
+        )
+        if last_role != "tool":
+            return data
+
+        # Walk backwards past consecutive tool messages to find the
+        # preceding assistant message.
+        for msg in reversed(messages[:-1]):
+            role = (
+                msg.get("role")
+                if isinstance(msg, dict)
+                else getattr(msg, "role", None)
+            )
+            if role == "tool":
+                continue
+            if role == "assistant":
+                if isinstance(msg, dict):
+                    tool_calls = msg.get("tool_calls")
+                    reasoning = msg.get("reasoning") or msg.get(
+                        "reasoning_content"
+                    )
+                else:
+                    tool_calls = getattr(msg, "tool_calls", None)
+                    reasoning = getattr(
+                        msg, "reasoning", None
+                    ) or getattr(msg, "reasoning_content", None)
+                if tool_calls and not reasoning:
+                    raise VLLMValidationError(
+                        "Interleaved thinking required: the assistant "
+                        "message preceding tool results must include "
+                        "`reasoning` or `reasoning_content` when "
+                        "tool_calls are present.",
+                        parameter="messages",
+                    )
+            break
+
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_stream_options(cls, data):
         if data.get("stream_options") and not data.get("stream"):
             raise VLLMValidationError(

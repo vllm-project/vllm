@@ -18,6 +18,7 @@ from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
+    ReasoningLogitsProcessor,
     ThinkingTokenBudgetLogitsProcessor,
     process_dict_updates,
 )
@@ -51,6 +52,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    ReasoningLogitsProcessor,
     ThinkingTokenBudgetLogitsProcessor,
 ]
 
@@ -357,4 +359,5 @@ __all__ = [
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
     "ThinkingTokenBudgetLogitsProcessor",
+    "ReasoningLogitsProcessor",
 ]

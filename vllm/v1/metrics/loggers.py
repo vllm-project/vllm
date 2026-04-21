@@ -1170,7 +1170,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             )
         for n_param in iteration_stats.n_params_iter:
             self.histogram_n_request[engine_idx].observe(n_param)
-        for ttft in iteration_stats.time_to_first_tokens_iter:
+        for ttft, _input_len in iteration_stats.time_to_first_tokens_iter:
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)

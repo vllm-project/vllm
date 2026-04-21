@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import logging
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -15,6 +16,8 @@ from vllm.v1.sample.logits_processor.interface import (
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
@@ -591,3 +594,218 @@ def process_dict_updates(
                     req_entries[a_index] = b_entry
 
     return updated
+
+
+class ReasoningLogitsProcessor(LogitsProcessor):
+    """Bans special tokens during reasoning (thinking) mode.
+
+    When a request is inside a <think>...</think> block the model must not
+    emit EOS / BOS or other special tokens that would prematurely end
+    generation.  This processor tracks whether each request is currently
+    reasoning and, if so, sets the logits for all banned special tokens
+    to -inf before sampling.
+    """
+
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        device: torch.device,
+        is_pin_memory: bool,
+    ):
+        self.device = device
+        self.pin_memory = is_pin_memory
+
+        self.think_start_token_id: int | None = None
+        self.think_end_token_id: int | None = None
+        self.banned_special_token_ids: list[int] = []
+        # Pre-computed device tensor of banned token ids (set in _init_token_ids)
+        self.banned_token_ids_tensor = torch.tensor(
+            [], device=self.device, dtype=torch.int64
+        )
+        self._init_token_ids(vllm_config)
+
+        # index -> (output_tok_ids, is_reasoning, last_checked_pos)
+        self.req_states: dict[int, tuple[Sequence[int], bool, int]] = {}
+        self.has_reasoning: bool = False
+
+        # Reasoning request indices tensor, updated each step
+        self.reasoning_indices_tensor = torch.tensor(
+            [], device=self.device, dtype=torch.int64
+        )
+        self.neg_inf_tensor = torch.tensor(
+            -float("inf"), dtype=torch.float32, device=self.device
+        )
+
+    def _init_token_ids(self, vllm_config: "VllmConfig") -> None:
+        reasoning_parser_name = (
+            vllm_config.structured_outputs_config.reasoning_parser
+        )
+        if not reasoning_parser_name:
+            return
+        if vllm_config.model_config.skip_tokenizer_init:
+            return
+
+        try:
+            from vllm.reasoning import ReasoningParserManager
+            from vllm.tokenizers import cached_tokenizer_from_config
+
+            tokenizer = cached_tokenizer_from_config(
+                model_config=vllm_config.model_config
+            )
+            reasoner_cls = ReasoningParserManager.get_reasoning_parser(
+                reasoning_parser_name
+            )
+            reasoner = reasoner_cls(tokenizer=tokenizer)
+
+            if hasattr(reasoner, "start_token_id"):
+                self.think_start_token_id = reasoner.start_token_id
+            elif hasattr(reasoner, "_start_token_id"):
+                self.think_start_token_id = reasoner._start_token_id
+
+            if hasattr(reasoner, "end_token_id"):
+                self.think_end_token_id = reasoner.end_token_id
+            elif hasattr(reasoner, "_end_token_id"):
+                self.think_end_token_id = reasoner._end_token_id
+
+            all_special_ids: set[int] = set()
+            if hasattr(tokenizer, "all_special_ids"):
+                all_special_ids.update(tokenizer.all_special_ids)
+            if hasattr(tokenizer, "added_tokens_encoder"):
+                all_special_ids.update(tokenizer.added_tokens_encoder.values())
+
+            # think_end is allowed during reasoning (it closes the block)
+            if self.think_end_token_id is not None:
+                all_special_ids.discard(self.think_end_token_id)
+
+            self.banned_special_token_ids = list(all_special_ids)
+            self.banned_token_ids_tensor = torch.tensor(
+                self.banned_special_token_ids,
+                device="cpu",
+                dtype=torch.int64,
+                pin_memory=self.pin_memory,
+            ).to(device=self.device, non_blocking=True)
+
+        except Exception as e:
+            logger.warning(
+                "ReasoningLogitsProcessor init token ids failed: %s", e
+            )
+
+    def _device_tensor(
+        self, data: list, dtype: torch.dtype
+    ) -> torch.Tensor:
+        return torch.tensor(
+            data, device="cpu", dtype=dtype, pin_memory=self.pin_memory
+        ).to(device=self.device, non_blocking=True)
+
+    def is_argmax_invariant(self) -> bool:
+        return False
+
+    def _check_prompt_reasoning(
+        self, prompt_tok_ids: Sequence[int] | None
+    ) -> bool:
+        if not prompt_tok_ids:
+            return False
+        is_reasoning = False
+        for tok_id in prompt_tok_ids:
+            if tok_id == self.think_start_token_id:
+                is_reasoning = True
+            elif tok_id == self.think_end_token_id:
+                is_reasoning = False
+        return is_reasoning
+
+    def _check_reasoning_state(
+        self,
+        output_tok_ids: Sequence[int],
+        is_reasoning: bool,
+        last_pos: int,
+    ) -> tuple[bool, int]:
+        current_len = len(output_tok_ids)
+        checked_pos = last_pos
+        for i in range(last_pos, current_len):
+            tok_id = output_tok_ids[i]
+            if tok_id == -1:  # placeholder, not yet sampled
+                break
+            checked_pos = i + 1
+            if tok_id == self.think_start_token_id:
+                is_reasoning = True
+            elif tok_id == self.think_end_token_id:
+                is_reasoning = False
+        return is_reasoning, checked_pos
+
+    def update_state(self, batch_update: BatchUpdate | None) -> None:
+        if (
+            self.think_start_token_id is None
+            or self.think_end_token_id is None
+            or not self.banned_special_token_ids
+        ):
+            return
+
+        if batch_update:
+            for index in batch_update.removed:
+                self.req_states.pop(index, None)
+
+            for index, _, prompt_tok_ids, output_tok_ids in batch_update.added:
+                initial_reasoning = self._check_prompt_reasoning(
+                    prompt_tok_ids
+                )
+                self.req_states[index] = (output_tok_ids, initial_reasoning, 0)
+
+            for a_index, b_index, direct in batch_update.moved:
+                a_state = self.req_states.pop(a_index, None)
+                b_state = self.req_states.pop(b_index, None)
+                if a_state is not None:
+                    self.req_states[b_index] = a_state
+                if b_state is not None and direct == MoveDirectionality.SWAP:
+                    self.req_states[a_index] = b_state
+
+        # Scan delta output tokens for all requests in the batch
+        reasoning_indices: list[int] = []
+        for index, (tok_ids, is_reasoning, last_pos) in self.req_states.items():
+            is_reasoning, last_pos = self._check_reasoning_state(
+                tok_ids, is_reasoning, last_pos
+            )
+            self.req_states[index] = (tok_ids, is_reasoning, last_pos)
+            if is_reasoning:
+                reasoning_indices.append(index)
+
+        self.has_reasoning = bool(reasoning_indices)
+        if self.has_reasoning:
+            self.reasoning_indices_tensor = self._device_tensor(
+                reasoning_indices, torch.int64
+            )
+
+    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+        # logits: [num_requests, vocab_size]
+        if self.has_reasoning:
+            logits[
+                self.reasoning_indices_tensor[:, None],
+                self.banned_token_ids_tensor[None, :],
+            ] = -float("inf")
+        return logits
+
+    def apply_with_spec_decode(
+        self,
+        logits: torch.Tensor,
+        num_draft_tokens: list[int],
+    ) -> torch.Tensor:
+        if not self.has_reasoning:
+            return logits
+
+        num_draft_arr = np.array(num_draft_tokens, dtype=np.int64)
+        cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
+
+        all_rows: list[int] = []
+        for index, (_, is_reasoning, _) in self.req_states.items():
+            if is_reasoning:
+                offset = int(cumsum[index])
+                n_draft = int(num_draft_arr[index])
+                all_rows.extend(range(offset, offset + n_draft))
+
+        if all_rows:
+            row_tensor = self._device_tensor(all_rows, torch.int64)
+            logits[
+                row_tensor[:, None],
+                self.banned_token_ids_tensor[None, :],
+            ] = -float("inf")
+
+        return logits

@@ -167,6 +167,7 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         self.tool_call_id_type = get_tool_call_id_type(self.model_config)
+        self.is_kimi = (self.tool_call_id_type == "kimi_k2")
 
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
         # for some models, currently vLLM doesn't support it. Please use the
@@ -226,6 +227,85 @@ class OpenAIServingChat(OpenAIServing):
 
         return await self.openai_serving_render.render_chat(request)
 
+    def _validate_kimi_params(
+        self,
+        request: ChatCompletionRequest,
+    ) -> ErrorResponse | None:
+        """Validate request parameters for Kimi models.
+
+        Thinking mode is detected from ``chat_template_kwargs``:
+        - ``chat_template_kwargs.thinking``: true / false
+        - ``chat_template_kwargs.enable_thinking``: true / false
+        - Default: think mode enabled
+
+        Think mode:     temperature=1.0, top_p=0.95
+        Non-think mode: temperature=0.6, top_p=0.95
+        Common constraints: presence_penalty=0, frequency_penalty=0, n=1
+        """
+        is_thinking = True
+        if request.chat_template_kwargs:
+            ctk = request.chat_template_kwargs
+            if "thinking" in ctk:
+                is_thinking = bool(ctk["thinking"])
+            elif "enable_thinking" in ctk:
+                is_thinking = bool(ctk["enable_thinking"])
+
+        expected_temperature = 1.0 if is_thinking else 0.6
+        expected_top_p = 0.95
+        expected_presence_penalty = 0.0
+        expected_frequency_penalty = 0.0
+        expected_n = 1
+
+        errors = []
+
+        req_temp = request.temperature
+        if req_temp is not None and req_temp != expected_temperature:
+            mode_label = "think" if is_thinking else "non-think"
+            errors.append(
+                f"temperature must be {expected_temperature} "
+                f"in {mode_label} mode, got {req_temp}"
+            )
+
+        req_top_p = request.top_p
+        if req_top_p is not None and req_top_p != expected_top_p:
+            errors.append(f"top_p must be {expected_top_p}, got {req_top_p}")
+
+        req_pp = request.presence_penalty
+        if req_pp is not None and req_pp != expected_presence_penalty:
+            errors.append(
+                f"presence_penalty must be {expected_presence_penalty},"
+                f" got {req_pp}"
+            )
+
+        req_fp = request.frequency_penalty
+        if req_fp is not None and req_fp != expected_frequency_penalty:
+            errors.append(
+                f"frequency_penalty must be {expected_frequency_penalty},"
+                f" got {req_fp}"
+            )
+
+        req_n = request.n
+        if req_n is not None and req_n != expected_n:
+            errors.append(f"n must be {expected_n}, got {req_n}")
+
+        if errors:
+            return self.create_error_response(
+                f"Invalid parameters for Kimi model: {'; '.join(errors)}"
+            )
+
+        # Apply defaults for unset parameters
+        if request.temperature is None:
+            request.temperature = expected_temperature
+        if request.top_p is None:
+            request.top_p = expected_top_p
+
+        if request.chat_template_kwargs is None:
+            request.chat_template_kwargs = {}
+        request.chat_template_kwargs.setdefault("thinking", is_thinking)
+        request.chat_template_kwargs.setdefault("enable_thinking", is_thinking)
+
+        return None
+
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
@@ -238,6 +318,12 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        # Validate Kimi model parameters before processing
+        if self.is_kimi:
+            kimi_error = self._validate_kimi_params(request)
+            if kimi_error is not None:
+                return kimi_error
+
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -1272,6 +1358,13 @@ class OpenAIServingChat(OpenAIServing):
             logger.exception("Error in chat completion stream generator.")
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
+        finally:
+            # Reset tool parser streaming state so that any section-level
+            # buffers or counters are cleaned up promptly rather than
+            # waiting for garbage collection.
+            for tp in tool_parsers:
+                if tp is not None:
+                    tp.reset_streaming_state()
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
 

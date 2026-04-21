@@ -135,6 +135,17 @@ class ToolParser:
             "AbstractToolParser.extract_tool_calls has not been implemented!"
         )
 
+    def reset_streaming_state(self) -> None:
+        """Reset all streaming state between requests.
+
+        Subclasses that maintain additional state (e.g. section tracking,
+        token buffers) should override this method and call ``super()``.
+        """
+        self.prev_tool_call_arr = []
+        self.current_tool_id = -1
+        self.current_tool_name_sent = False
+        self.streamed_args_for_tool = []
+
     def extract_tool_calls_streaming(
         self,
         previous_text: str,
