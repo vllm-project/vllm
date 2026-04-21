@@ -380,14 +380,14 @@ def init_fp8_linear_kernel(
     possible_kernels = (
         _POSSIBLE_FP8_BLOCK_KERNELS
         if activation_quant_key.scale.group_shape.is_per_group()
-        else _POSSIBLE_FP8_KERNELS,
+        else _POSSIBLE_FP8_KERNELS
     )
 
     kernel_type = cast(
         type[FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel],
         choose_scaled_mm_linear_kernel(
             config=scaled_mm_linear_kernel_config,
-            possible_kernels=possible_kernels,  # type: ignore[arg-type]
+            possible_kernels=possible_kernels,
             force_kernel=force_kernel,
         ),
     )
