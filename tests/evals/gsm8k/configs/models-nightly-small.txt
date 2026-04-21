@@ -5,7 +5,6 @@ GPT-OSS-20B.yaml
 Granite-4.0-H-Small.yaml
 Jamba2-Mini.yaml
 LFM2.5-350M.yaml
-moe-refactor/Llama-4-Scout-BF16-triton.yaml
 MiniMax-M2.7.yaml
 moe-refactor/Mixtral-8x7B-BF16-triton.yaml
 Nemotron-3-Super-120B-A12B-NVFP4.yaml
@@ -13,3 +12,5 @@ OLMoE-1B-7B-0125-Instruct.yaml
 Phi-Tiny-MoE-Instruct.yaml
 Sarvam-30B.yaml
 ERNIE-4.5-VL-28B-A3B-Thinking.yaml
+# This model times out in weight loading.
+#moe-refactor/Llama-4-Scout-BF16-triton.yaml

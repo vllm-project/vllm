@@ -90,6 +90,19 @@ steps:
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
 
+- label: MoE Nightly Integration Test (H100)
+  device: h100
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-nightly-small.txt
+
+- label: MoE Nightly Integration Test (B200)
+  device: b200
+  optional: true
+  num_devices: 2
+  commands:
+    - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/models-nightly-small.txt
 
 - label: LM Eval TurboQuant KV Cache
   timeout_in_minutes: 75
