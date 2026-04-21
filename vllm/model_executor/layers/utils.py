@@ -3,6 +3,7 @@
 """Utility methods for model layers."""
 
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 
@@ -148,7 +149,17 @@ def _init_tinygemm():
 _init_tinygemm()
 
 
-_inductor_big_gpu_override_applied = False
+# Module-level guards for the two idempotent inductor/dynamo knob helpers
+# exposed below. Tests may reset these to re-exercise the helpers.
+_inductor_max_autotune_gemm_forced = False
+_dynamo_compile_caches_forced = False
+
+# Dynamo cache/recompile limits large enough to cover many distinct
+# per-shape compiled graphs without eviction or FailOnRecompileLimitHit.
+# Matches the values SGLang settled on in
+# https://github.com/lukealonso/sglang/commit/e12a24966530f21ce89ce7827356b1ab61e961b1.
+_DYNAMO_CACHE_SIZE_LIMIT = 65536
+_DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT = 1_048_576
 
 
 def _patch_is_big_gpu(inductor_utils) -> bool:
@@ -230,26 +241,115 @@ def _patch_is_datacenter_blackwell_arch() -> bool:
     return True
 
 
-def _apply_inductor_autotune_config() -> None:
-    """Set global inductor config for max-autotune-gemm with ATEN/TRITON/
-    CUTLASS templates and persistent TMA matmul (Blackwell-aware). Also bump
-    dynamo cache limits so many distinct shapes don't evict each other."""
+def force_large_dynamo_compile_caches() -> None:
+    """Raise Dynamo cache/recompile limits so many small compiled graphs
+    (e.g. per-shape compiled GEMMs) don't evict each other or hit
+    ``FailOnRecompileLimitHit``. Idempotent and safe to call repeatedly.
+
+    Mirrors SGLang's ``force_large_dynamo_compile_caches`` from
+    https://github.com/lukealonso/sglang/commit/e12a24966530f21ce89ce7827356b1ab61e961b1.
+    """
+    global _dynamo_compile_caches_forced
+    if _dynamo_compile_caches_forced:
+        return
+
     try:
-        import torch._dynamo.config
-        import torch._inductor.config as inductor_config
+        import torch._dynamo.config as dynamo_config
     except Exception:
         logger.warning(
-            "torch._inductor/_dynamo config modules could not be imported.",
+            "torch._dynamo.config could not be imported; "
+            "leaving Dynamo cache limits untouched.",
             exc_info=True,
         )
         return
+
+    if hasattr(dynamo_config, "recompile_limit"):
+        dynamo_config.recompile_limit = max(
+            dynamo_config.recompile_limit, _DYNAMO_CACHE_SIZE_LIMIT
+        )
+    if hasattr(dynamo_config, "cache_size_limit"):
+        dynamo_config.cache_size_limit = max(
+            dynamo_config.cache_size_limit, _DYNAMO_CACHE_SIZE_LIMIT
+        )
+    if hasattr(dynamo_config, "accumulated_recompile_limit"):
+        dynamo_config.accumulated_recompile_limit = max(
+            dynamo_config.accumulated_recompile_limit,
+            _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
+        )
+    if hasattr(dynamo_config, "accumulated_cache_size_limit"):
+        dynamo_config.accumulated_cache_size_limit = max(
+            dynamo_config.accumulated_cache_size_limit,
+            _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
+        )
+    if hasattr(dynamo_config, "fail_on_recompile_limit_hit"):
+        dynamo_config.fail_on_recompile_limit_hit = False
+    if hasattr(dynamo_config, "fail_on_cache_limit_hit"):
+        dynamo_config.fail_on_cache_limit_hit = False
+
+    _dynamo_compile_caches_forced = True
+
+
+def force_inductor_max_autotune_gemm_on_small_gpus() -> None:
+    """Force inductor's full GEMM autotune template pool regardless of device.
+
+    Inductor hard-codes two gates that exclude sub-data-center / small GPUs
+    from its best GEMM templates:
+
+    1. ``torch._inductor.utils.is_big_gpu`` compares ``multi_processor_count``
+       against 68 (3080 baseline). GB10 / DGX Spark (48 SMs) fails this,
+       dropping Triton templates from the max-autotune-gemm pool.
+    2. ``torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch``
+       whitelists only arch ∈ [100, 110), excluding SM120/121 (consumer /
+       edge Blackwell), which disables Blackwell-specific codegen paths.
+
+    This helper monkey-patches both helpers, flips ``max_autotune`` /
+    ``max_autotune_gemm`` / ``max_autotune_gemm_backends`` to include
+    ATEN+TRITON+CUTLASS, enables persistent TMA matmul, and points to a
+    fallback CUTLASS dir if the configured one is missing. It also calls
+    :func:`force_large_dynamo_compile_caches` so many distinct compiled
+    shapes don't evict each other.
+
+    Unlike SGLang's equivalent, this helper **does not** touch
+    ``torch.set_float32_matmul_precision`` or ``allow_tf32``: vLLM already
+    owns FP32 matmul precision via :envvar:`VLLM_FLOAT32_MATMUL_PRECISION`
+    (applied once in the worker). If that is left at the default
+    ``"highest"``, inductor's Triton autotune will not pick tensor-core
+    kernels for FP32 GEMMs (e.g. Nemotron routers). A warning is emitted
+    in that case; set ``VLLM_FLOAT32_MATMUL_PRECISION=high`` to unlock
+    them without silently changing global precision here.
+
+    Affects every ``torch.compile`` call in the process and is idempotent.
+    Must run before inductor's first autotune, since both helpers are
+    cached. Named after the SGLang equivalent in
+    https://github.com/lukealonso/sglang/commit/e12a24966530f21ce89ce7827356b1ab61e961b1;
+    the name is descriptive (it fires for *any* GPU, not only small ones).
+    """
+    global _inductor_max_autotune_gemm_forced
+    if _inductor_max_autotune_gemm_forced:
+        return
+
+    force_large_dynamo_compile_caches()
+
+    try:
+        import torch._inductor.config as inductor_config
+        import torch._inductor.utils as inductor_utils
+    except Exception:
+        logger.warning(
+            "torch._inductor could not be imported; "
+            "leaving inductor max-autotune-gemm config untouched.",
+            exc_info=True,
+        )
+        return
+
+    big_gpu_ok = _patch_is_big_gpu(inductor_utils)
+    blackwell_ok = _patch_is_datacenter_blackwell_arch()
 
     inductor_config.max_autotune = True
     inductor_config.max_autotune_gemm = True
     existing_backends = getattr(
         inductor_config, "max_autotune_gemm_backends", ""
     )
-    backend_tokens = []
+    backend_tokens: list[str] = []
     if isinstance(existing_backends, str) and existing_backends:
         backend_tokens = [
             token.strip().upper() for token in existing_backends.split(",")
@@ -258,69 +358,58 @@ def _apply_inductor_autotune_config() -> None:
         if backend not in backend_tokens:
             backend_tokens.append(backend)
     inductor_config.max_autotune_gemm_backends = ",".join(backend_tokens)
-    if hasattr(inductor_config, "triton") and hasattr(
-        inductor_config.triton, "enable_persistent_tma_matmul"
-    ):
-        inductor_config.triton.enable_persistent_tma_matmul = True
-
-    torch._dynamo.config.accumulated_cache_size_limit = 1024
-    if hasattr(torch._dynamo.config, "cache_size_limit"):
-        torch._dynamo.config.cache_size_limit = 1024
-
-
-def _maybe_override_inductor_is_big_gpu() -> None:
-    """Force inductor max-autotune-gemm on sub-68-SM / Blackwell-edge devices.
-
-    Inductor has two hard-coded gates that exclude sub-data-center Blackwell
-    hardware from its best GEMM templates:
-
-    1. `torch._inductor.utils.is_big_gpu` compares `multi_processor_count`
-       against 68 (3080 baseline). GB10 / DGX Spark (48 SMs) fails this,
-       dropping Triton templates from the max-autotune-gemm pool.
-    2. `torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch`
-       whitelists only arch ∈ [100, 110), excluding SM120/121 (consumer /
-       edge Blackwell), which disables Blackwell-specific codegen paths.
-
-    When `VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1`, monkey-patch both helpers and
-    set global inductor config to prefer Triton + ATEN + CUTLASS templates with
-    persistent TMA matmul. All patches are global (affect every
-    torch.compile call in the process) and one-shot. Must run before the
-    first inductor autotune call, since both helpers are cached.
-    """
-    global _inductor_big_gpu_override_applied
-    if _inductor_big_gpu_override_applied:
-        return
-    if not envs.VLLM_INDUCTOR_OVERRIDE_BIG_GPU:
-        return
-    _inductor_big_gpu_override_applied = True
+    inductor_config.coordinate_descent_tuning = True
+    inductor_config.fx_graph_cache = True
+    if hasattr(inductor_config, "triton"):
+        if hasattr(inductor_config.triton, "enable_persistent_tma_matmul"):
+            inductor_config.triton.enable_persistent_tma_matmul = True
+        if hasattr(inductor_config.triton, "unique_kernel_names"):
+            inductor_config.triton.unique_kernel_names = True
 
     try:
-        import torch._inductor.utils as inductor_utils
+        configured_cutlass_dir = Path(inductor_config.cuda.cutlass_dir)
     except Exception:
-        logger.warning(
-            "VLLM_INDUCTOR_OVERRIDE_BIG_GPU set but torch._inductor.utils "
-            "could not be imported; leaving inductor config untouched.",
-            exc_info=True,
+        configured_cutlass_dir = None
+    if (
+        configured_cutlass_dir is not None
+        and not configured_cutlass_dir.exists()
+    ):
+        vllm_root = Path(__file__).resolve().parents[4]
+        fallback_cutlass_dir = (
+            vllm_root.parent / "pytorch" / "third_party" / "cutlass"
         )
-        return
+        if fallback_cutlass_dir.exists():
+            inductor_config.cuda.cutlass_dir = str(
+                fallback_cutlass_dir.resolve()
+            )
 
-    big_gpu_ok = _patch_is_big_gpu(inductor_utils)
-    blackwell_ok = _patch_is_datacenter_blackwell_arch()
-    _apply_inductor_autotune_config()
+    _inductor_max_autotune_gemm_forced = True
 
     logger.info(
-        "VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1: is_big_gpu patched=%s, "
-        "is_datacenter_blackwell_arch patched=%s. Inductor config set to "
-        "max_autotune_gemm=True, backends include ATEN/TRITON/CUTLASS, "
-        "persistent TMA matmul=True. For FP32 GEMMs (e.g. Nemotron "
-        "routers), also set VLLM_FLOAT32_MATMUL_PRECISION=high to let "
-        "Triton autotune pick tensor-core kernels.",
+        "Forced inductor max-autotune-gemm: is_big_gpu patched=%s, "
+        "is_datacenter_blackwell_arch patched=%s. Backends include "
+        "ATEN/TRITON/CUTLASS with persistent TMA matmul. Dynamo cache "
+        "limits raised. Affects every torch.compile call in this process.",
         big_gpu_ok,
         blackwell_ok,
     )
 
-
-_maybe_override_inductor_is_big_gpu()
+    # Nudge users about FP32 precision: Triton autotune templates for FP32
+    # GEMMs only beat ATEN when TF32 is allowed, i.e.
+    # VLLM_FLOAT32_MATMUL_PRECISION != "highest". Don't silently change it
+    # here -- defer to the user-facing env applied in the worker.
+    if torch.cuda.is_available():
+        try:
+            current_precision = torch.get_float32_matmul_precision()
+        except Exception:
+            current_precision = None
+        if current_precision == "highest":
+            logger.info(
+                "VLLM_FLOAT32_MATMUL_PRECISION is 'highest' (default); "
+                "inductor Triton autotune will not pick tensor-core kernels "
+                "for FP32 GEMMs. Set VLLM_FLOAT32_MATMUL_PRECISION=high to "
+                "unlock them if numerical tolerance allows."
+            )
 
 
 # State for the torch.compile-wrapped BF16 linear fast path.
@@ -330,27 +419,7 @@ _maybe_override_inductor_is_big_gpu()
 # the whole model.
 _unquant_bf16_linear_cache: dict[tuple, Callable] = {}
 _unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
-_unquant_bf16_linear_torch_compile_configured = False
 _unquant_bf16_linear_torch_compile_disabled = False
-
-
-def _configure_unquant_bf16_linear_torch_compile_once() -> None:
-    global _unquant_bf16_linear_torch_compile_configured
-    if _unquant_bf16_linear_torch_compile_configured:
-        return
-
-    import torch._dynamo.config
-    import torch._inductor.config
-
-    torch._inductor.config.coordinate_descent_tuning = True
-    torch._inductor.config.triton.unique_kernel_names = True
-    torch._inductor.config.fx_graph_cache = True
-
-    torch._dynamo.config.accumulated_cache_size_limit = 1024
-    if hasattr(torch._dynamo.config, "cache_size_limit"):
-        torch._dynamo.config.cache_size_limit = 1024
-
-    _unquant_bf16_linear_torch_compile_configured = True
 
 
 def _unquant_bf16_linear_eager(
@@ -379,7 +448,11 @@ def _get_or_create_unquant_bf16_linear_kernel(
     if not allow_new_compile:
         return None
 
-    _configure_unquant_bf16_linear_torch_compile_once()
+    # Unconditionally expand inductor's GEMM template pool + raise Dynamo
+    # cache limits before we trigger the first per-shape compile. This
+    # collapses what used to be VLLM_INDUCTOR_OVERRIDE_BIG_GPU + a separate
+    # local "configure once" helper into a single public entry point.
+    force_inductor_max_autotune_gemm_on_small_gpus()
     compiled = torch.compile(
         _unquant_bf16_linear_eager,
         backend="inductor",
