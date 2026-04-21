@@ -58,6 +58,8 @@ class FlashAttnMLABackend(MLACommonBackend):
 
     @classmethod
     def supports_batch_invariance(cls) -> bool:
+        # NOTE: In MLA, batch invariance does not hold across prefill and decode because
+        # of the distinct pipelines and backends.
         return True
 
     @staticmethod
