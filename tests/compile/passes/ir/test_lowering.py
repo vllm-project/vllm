@@ -362,8 +362,15 @@ class TestE2ELowering:
             )
             output_no_lowering = compiled_no_lowering(x.clone())
 
-        torch.testing.assert_close(output, output_no_wrap)
-        torch.testing.assert_close(output, output_no_lowering)
+        # Use op-defined tolerances for dtype-aware comparison
+        dtype = output.dtype
+        tolerance = op.get_tolerance(dtype)
+        torch.testing.assert_close(
+            output, output_no_wrap, atol=tolerance["atol"], rtol=tolerance["rtol"]
+        )
+        torch.testing.assert_close(
+            output, output_no_lowering, atol=tolerance["atol"], rtol=tolerance["rtol"]
+        )
 
     @pytest.mark.parametrize("op_name,provider", _get_op_provider_pairs())
     def test_lowering_dispatch_consistency(
