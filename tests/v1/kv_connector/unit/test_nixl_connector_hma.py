@@ -153,14 +153,15 @@ def test_read_blocks_for_req_expands_remote_ids(
     )
 
     remote_engine_id = "remote-engine"
-    if has_mamba:
-        worker._physical_blocks_per_logical = {remote_engine_id: remote_ratio}
 
     # Mock transfer_topo: empty remote ranks skips the transfer machinery
     # entirely, isolating the block-ID expansion logic.
     worker.transfer_topo = MagicMock()
     worker.transfer_topo.target_remote_ranks.return_value = []
-    worker.transfer_topo.get_engine_info.return_value = MagicMock(remote_tp_size=1)
+    worker.transfer_topo.get_engine_info.return_value = MagicMock(
+        remote_tp_size=1,
+        remote_physical_blocks_per_logical=remote_ratio if has_mamba else 1,
+    )
     worker.transfer_topo.tp_ratio.return_value = 1
 
     metadata = NixlConnectorMetadata()
@@ -308,29 +309,28 @@ def test_nixl_metadata_hma_block_ids_structure():
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_hybrid_ssm():
-    """Test _get_block_descs_ids uses per-group strides for hybrid FA+SSM
-    when ratio=1 (no kernel block size mismatch)."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
+    """Test get_block_descs_ids uses per-group strides for hybrid
+    FA+SSM when ratio=1 (no kernel block size mismatch)."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
+        MambaModelBlockTransferPolicy,
     )
 
-    worker = object.__new__(NixlConnectorWorker)
+    policy = object.__new__(MambaModelBlockTransferPolicy)
+    policy._is_mamba_group = [False, True]
 
     num_blocks = 100
-    engine_id = "test-engine"
-    worker.num_regions = 2
-    worker.dst_num_blocks = {engine_id: num_blocks}
-    worker._has_mamba = True
-    worker._is_mamba_group = [False, True]
-    worker._physical_blocks_per_logical_kv_block = 1
-    worker._physical_blocks_per_logical = {engine_id: 1}
-    worker.block_len_per_layer = [100]
-    # num_descs = num_regions * num_blocks (no blocks_first doubling)
-    worker.num_descs = 2 * num_blocks
+    num_regions = 2
+    block_len_per_layer = [100]
 
     fa_blocks = [3, 5]
     ssm_blocks = [1, 2]
-    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+    result = policy.get_block_descs_ids(
+        block_ids=(fa_blocks, ssm_blocks),
+        num_regions=num_regions,
+        dst_num_blocks=num_blocks,
+        block_len_per_layer=block_len_per_layer,
+        physical_blocks_per_logical=1,
+    )
 
     # FA group: stride=num_blocks=100, offset=0
     #   region0: [3, 5],  region1: [103, 105]
@@ -344,30 +344,30 @@ def test_get_block_descs_ids_hybrid_ssm():
 
 @pytest.mark.cpu_test
 def test_get_block_descs_ids_kernel_block_mismatch():
-    """Test _get_block_descs_ids uses different strides for FA (kernel blocks)
-    vs SSM (logical blocks) when ratio > 1."""
-    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
-        NixlConnectorWorker,
+    """Test get_block_descs_ids uses different strides for FA
+    (kernel blocks) vs SSM (logical blocks) when ratio > 1."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.block_transfer_policy import (  # noqa: E501
+        MambaModelBlockTransferPolicy,
     )
 
-    worker = object.__new__(NixlConnectorWorker)
+    policy = object.__new__(MambaModelBlockTransferPolicy)
+    policy._is_mamba_group = [False, True]
 
     ratio = 4
     logical_blocks = 100
     num_blocks = logical_blocks * ratio  # 400 kernel blocks
-    engine_id = "test-engine"
-    worker.num_regions = 2
-    worker.dst_num_blocks = {engine_id: num_blocks}
-    worker._has_mamba = True
-    worker._is_mamba_group = [False, True]
-    worker._physical_blocks_per_logical_kv_block = ratio
-    worker._physical_blocks_per_logical = {engine_id: ratio}
-    worker.block_len_per_layer = [100]
-    worker.num_descs = 2 * num_blocks  # 800
+    num_regions = 2
+    block_len_per_layer = [100]
 
     fa_blocks = [3, 7]  # kernel-level block IDs
     ssm_blocks = [1, 2]  # logical block IDs
-    result = worker._get_block_descs_ids(engine_id, (fa_blocks, ssm_blocks))
+    result = policy.get_block_descs_ids(
+        block_ids=(fa_blocks, ssm_blocks),
+        num_regions=num_regions,
+        dst_num_blocks=num_blocks,
+        block_len_per_layer=block_len_per_layer,
+        physical_blocks_per_logical=ratio,
+    )
 
     # FA group: stride=num_blocks=400, offset=0
     #   region0: [3, 7],  region1: [403, 407]
