@@ -220,11 +220,7 @@ class BaseRenderer(ABC, Generic[_T]):
         except Exception:
             logger.warning("Chat template warmup failed", exc_info=True)
 
-        if (
-            self.mm_processor
-            and not self.model_config.get_multimodal_config().language_model_only
-            and any(v > 0 for v in self.mm_processor.info.allowed_mm_limits.values())
-        ):
+        if self.mm_processor:
             from vllm.multimodal.processing import TimingContext
 
             model_config = self.model_config
@@ -238,7 +234,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
                 processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
                     seq_len=model_config.max_model_len,
-                    mm_counts=dict.fromkeys(mm_limits, 1),
+                    mm_counts={k: 1 for k, v in mm_limits.items() if v > 0},
                     mm_options=mm_config.limit_per_prompt,
                 )
                 _ = processor.apply(
