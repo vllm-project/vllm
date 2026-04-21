@@ -291,7 +291,6 @@ class BailingMoE(nn.Module):
             top_k=self.top_k,
             hidden_size=self.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
             renormalize=self.norm_expert_prob,
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
@@ -301,6 +300,7 @@ class BailingMoE(nn.Module):
             topk_group=self.topk_group,
             use_grouped_topk=self.use_grouped_topk,
             router_logits_dtype=self.router_dtype,
+            routed_scaling_factor=self.routed_scaling_factor,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -314,21 +314,6 @@ class BailingMoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
         )
-
-        if self.shared_experts is not None:
-            shared_output, final_hidden_states = final_hidden_states
-        else:
-            shared_output = None
-
-        final_hidden_states *= self.routed_scaling_factor
-
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
-
-        if self.tp_size > 1:
-            final_hidden_states = self.experts.maybe_all_reduce_tensor_model_parallel(
-                final_hidden_states
-            )
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
