@@ -376,6 +376,22 @@ def _rocm_aiter_fused_topk_fake(
 
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
+_AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
+
+
+def check_aiter_fused_qk_rmsnorm() -> bool:
+    """Check if aiter provides fused_qk_rmsnorm (requires AITer >= PR #2442)."""
+    global _AITER_HAS_FUSED_QK_RMSNORM
+    if _AITER_HAS_FUSED_QK_RMSNORM is None:
+        try:
+            from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
+                fused_qk_rmsnorm,
+            )
+
+            _AITER_HAS_FUSED_QK_RMSNORM = True
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            _AITER_HAS_FUSED_QK_RMSNORM = False
+    return _AITER_HAS_FUSED_QK_RMSNORM
 
 
 def _check_aiter_mla_fp8_support() -> bool:
@@ -970,7 +986,14 @@ def _fused_mla_dual_rms_norm_impl(
     x1_epsilon: float,
     x2_epsilon: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
+    try:
+        from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise ImportError(
+            "fused_qk_rmsnorm requires a newer AITer version "
+            "(>= PR #2442). Please upgrade aiter or disable the "
+            "fuse_mla_dual_rms_norm pass."
+        ) from exc
 
     return fused_qk_rmsnorm(
         q=x1,
