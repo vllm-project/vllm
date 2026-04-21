@@ -163,6 +163,9 @@ def test_read_blocks_for_req_expands_remote_ids(
         remote_physical_blocks_per_logical=remote_ratio if has_mamba else 1,
     )
     worker.transfer_topo.tp_ratio.return_value = 1
+    worker.transfer_policy = MagicMock()
+    worker.transfer_policy.compute_read_specs.return_value = []
+    worker.use_mla = False
 
     metadata = NixlConnectorMetadata()
     metadata.add_new_req_to_recv(
