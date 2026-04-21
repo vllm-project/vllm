@@ -7,8 +7,7 @@ This class runs in the scheduler, tracks which blocks are offloaded
 and their address.
 
 The class provides the following primitives:
-    lookup() - find the length of the maximal series of blocks,
-        starting from the first one, that are all offloaded.
+    lookup() - check whether a single block is offloaded and ready.
     prepare_load() - prepare given blocks to be read.
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
@@ -30,7 +29,7 @@ The class provides the following primitives:
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import NewType
+from typing import Any, NewType
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
 # its KV cache group index, encoded as raw bytes to avoid tuple GC overhead.
@@ -51,6 +50,11 @@ def get_offload_block_hash(key: OffloadKey) -> bytes:
 def get_offload_group_idx(key: OffloadKey) -> int:
     """Extract the group index from an `OffloadKey`."""
     return int.from_bytes(key[-4:], "big", signed=False)
+
+
+@dataclass
+class ReqContext:
+    kv_transfer_params: dict[str, Any] | None = None
 
 
 class LoadStoreSpec(ABC):
@@ -79,7 +83,6 @@ class PrepareStoreOutput:
 @dataclass
 class OffloadingEvent:
     keys: list[OffloadKey]
-    block_size: int
     medium: str
     # True if blocks are removed, False if stored
     removed: bool
@@ -87,24 +90,28 @@ class OffloadingEvent:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, keys: Iterable[OffloadKey]) -> int | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
         """
-        Finds the length of the maximal series of blocks, starting from the
-        first one, that are all offloaded.
+        Checks whether a single block is offloaded and ready to be read.
 
         Args:
-            keys: the keys identifying the blocks to lookup.
+            key: the key identifying the block to lookup.
+            req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
-            An integer representing the maximal number of blocks that
-            are currently offloaded, or None if the lookup should be retried
-            later. Returning None will delay the request handling by the vLLM
+            True if the block is offloaded and ready, False if not,
+            or None if the lookup should be retried later.
+            Returning None will delay the request handling by the vLLM
             scheduler.
         """
         pass
 
     @abstractmethod
-    def prepare_load(self, keys: Iterable[OffloadKey]) -> LoadStoreSpec:
+    def prepare_load(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> LoadStoreSpec:
         """
         Prepare the given blocks to be read.
         The given blocks will be protected from eviction until
@@ -113,6 +120,7 @@ class OffloadingManager(ABC):
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
             A LoadStoreSpec that can be used by a worker to locate and load
@@ -140,7 +148,11 @@ class OffloadingManager(ABC):
         return
 
     @abstractmethod
-    def prepare_store(self, keys: Iterable[OffloadKey]) -> PrepareStoreOutput | None:
+    def prepare_store(
+        self,
+        keys: Iterable[OffloadKey],
+        req_context: ReqContext,
+    ) -> PrepareStoreOutput | None:
         """
         Prepare the given blocks to be offloaded.
         The given blocks will be protected from eviction until
@@ -148,6 +160,7 @@ class OffloadingManager(ABC):
 
         Args:
             keys: the keys identifying the blocks.
+            req_context: per-request context (e.g. kv_transfer_params).
 
         Returns:
             A PrepareStoreOutput indicating which blocks need storing,
