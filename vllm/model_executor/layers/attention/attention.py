@@ -330,7 +330,6 @@ class Attention(nn.Module, AttentionLayerBase):
             logger.warning_once(
                 "Disabling prefix caching for FLASHINFER/TRITON_MLA "
                 "with batch invariance, as it is not yet supported.",
-                scope="local",
             )
             cache_config.enable_prefix_caching = False
 

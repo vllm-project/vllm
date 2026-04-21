@@ -38,7 +38,7 @@ def select_int8_moe_backend(
             f"deployment configuration: {reason}"
         )
 
-    logger.info_once("Using Triton INT8 MoE backend", scope="local")
+    logger.info_once("Using Triton INT8 MoE backend")
     return TritonExperts
 
 
@@ -69,7 +69,7 @@ def make_int8_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
     experts = experts_cls(
         moe_config=moe_config,
