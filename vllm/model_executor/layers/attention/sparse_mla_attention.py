@@ -317,13 +317,12 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 "On SM90, all tokens are routed through forward_mqa."
             )
 
-        device = q.device
-        prefill_qsl = attn_metadata.prefill_query_start_loc
-        assert prefill_qsl is not None, (
-            "Metadata must provide prefill_query_start_loc for forward_mha"
+        assert not attn_metadata.has_context, (
+            "forward_mha currently requires pure prefill (no cached context)"
         )
 
-        prefill_max_ql = attn_metadata.prefill_max_query_len
+        cu_seqlens = attn_metadata.prefill_query_start_loc
+        max_seq_len = attn_metadata.prefill_max_query_len
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
@@ -333,22 +332,20 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1
         )
         k, v = self._concat_k_nope_k_pe(k_nope_new, k_pe), v_new
-        cu_seqlens_k = prefill_qsl
-        max_q_len = prefill_max_ql
-        max_kv_len = prefill_max_ql
 
         assert self.topk_indices_buffer is not None
         topk = self.topk_indices_buffer.shape[1]
 
-        if max_kv_len <= topk:
+        # Pure prefill: cu_seqlens_q == cu_seqlens_k, max_seqlen_q == max_seqlen_k
+        if max_seq_len <= topk:
             attn_out, _ = flash_attn_varlen_func(
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=prefill_qsl,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_q_len,
-                max_seqlen_k=max_kv_len,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seq_len,
+                max_seqlen_k=max_seq_len,
                 softmax_scale=self.scale,
                 causal=True,
                 return_softmax_lse=True,
@@ -365,9 +362,8 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             q_lens = prefill_query_lens_cpu.tolist()
             num_prefills = len(q_lens)
 
-            num_prefill_tokens = q.shape[0]
             topk_all = self.topk_indices_buffer[
-                num_decode_tokens : num_decode_tokens + num_prefill_tokens
+                num_decode_tokens : num_decode_tokens + q.shape[0]
             ]
             topk_per_req: list[torch.Tensor] = []
             ti_offset = 0
@@ -379,15 +375,15 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             dense_mask = _build_topk_mask(
                 topk_per_req,
                 q_lens,
-                max_q_len,
-                max_kv_len,
-                device,
+                max_seq_len,
+                max_seq_len,
+                q.device,
             )
 
             block_sparse_tensors = dense_mask_to_block_sparse(
                 dense_mask,
-                max_q_len,
-                max_kv_len,
+                max_seq_len,
+                max_seq_len,
                 tile_m=256,
                 tile_n=128,
             )
@@ -396,10 +392,10 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
                 q=q,
                 k=k,
                 v=v,
-                cu_seqlens_q=prefill_qsl,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_q_len,
-                max_seqlen_k=max_kv_len,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seq_len,
+                max_seqlen_k=max_seq_len,
                 softmax_scale=self.scale,
                 causal=False,
                 return_softmax_lse=True,
