@@ -267,8 +267,9 @@ class IrOp:
         - op.has_reduction == True: batch_invariant = False
         - op.has_reduction == False: batch_invariant = True
 
-        This is because ops without reductions are always batch-invariant.
-        Ops with reductions have to opt-in, as they are not batch-invariant by default.
+        This is because ops without reductions are always batch-invariant
+        (unless explicitly opting out).
+        Ops with reductions have to opt in, as they are not batch-invariant by default.
 
         """
         assert provider not in RESERVED_PROVIDERS, (
@@ -410,7 +411,7 @@ class IrOp:
                     continue
 
                 if batch_invariant_only and not impl.batch_invariant:
-                    # Skip batch invariant implementations
+                    # Skip non-batch-invariant implementations
                     continue
 
                 filtered_impls.append(maybe_compile(impl))

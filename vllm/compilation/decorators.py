@@ -205,6 +205,8 @@ def support_torch_compile(
                 if v.annotation in [
                     torch.Tensor,
                     torch.Tensor | None,
+                    torch.FloatTensor,
+                    torch.FloatTensor | None,
                     IntermediateTensors,
                     IntermediateTensors | None,
                 ]:
@@ -346,7 +348,7 @@ def _support_torch_compile(
 
     def __init__(
         self: _T,
-        *,
+        *args,
         vllm_config: VllmConfig | None = None,
         prefix: str = "",
         **kwargs: Any,
@@ -357,11 +359,24 @@ def _support_torch_compile(
         # NOTE: to support multimodal models (such as encoder),
         # we may not have vllm_config so we may need to patch it
         sig = inspect.signature(old_init)
+        # Check that any positional arguments match the old_init method signature
+        annotations = [p.annotation for p in sig.parameters.values()]
+        for arg, annotation in zip(args, annotations):
+            if annotation is inspect._empty:
+                continue
+            if not isinstance(arg, annotation):
+                init = f"'{type(self).__name__}.__init__'"
+                arg_type = f"'{type(arg).__name__}'"
+                raise TypeError(
+                    f"{init} received a positional argument of type {arg_type}, "
+                    "but no parameter of that type was found in the method signature. "
+                    f"Please either annotate {init} or pass it as a keyword argument."
+                )
         if "vllm_config" in sig.parameters:
             kwargs["vllm_config"] = vllm_config
         if "prefix" in sig.parameters:
             kwargs["prefix"] = prefix
-        old_init(self, **kwargs)
+        old_init(self, *args, **kwargs)
 
         self.vllm_config = vllm_config
         self.compilation_config = self.vllm_config.compilation_config
@@ -491,6 +506,16 @@ def _support_torch_compile(
                 "torch_aot_compile",
                 hash_key,
             )
+
+            # Hash-level dir; shared across ranks on the same node.
+            self.compilation_config.local_cache_dir = cache_dir
+            inductor_cache = os.path.join(cache_dir, "inductor_cache")
+            os.makedirs(inductor_cache, exist_ok=True)
+            # Process-wide: post-load execution, CUDA-graph capture, and later
+            # autotune/recompile all need to write under {hash}/inductor_cache/.
+            # Unconditional because torch's cache_dir() may have pre-filled the
+            # /tmp default during import, making setdefault a no-op.
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = inductor_cache
 
             rank = self.vllm_config.parallel_config.rank
             dp_rank = self.vllm_config.parallel_config.data_parallel_index
