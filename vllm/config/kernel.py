@@ -29,15 +29,14 @@ class IrOpPriorityConfig:
     See KernelConfig.set_platform_defaults().
     """
 
-    """Priority lists for vllm.ir.ops"""
     rms_norm: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.rms_norm"""
+
+    fused_add_rms_norm: list[str] = Field(default_factory=list)
+    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
+
     silu_and_mul: list[str] = Field(default_factory=list)
-
-    fused_add_rms_norm: list[str] = Field(default_factory=list)
-    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
-
-    fused_add_rms_norm: list[str] = Field(default_factory=list)
-    """Priority list for vllm.ir.ops.fused_add_rms_norm"""
+    """Priority list for vllm.ir.ops.silu_and_mul"""
 
     def compute_hash(self) -> str:
         """
