@@ -35,19 +35,20 @@ def fused_rope_unified_mla_kv_cache_update_impl(
     layer_name: LayerNameType,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
-    _, _, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
-    ops.concat_and_cache_mla_rope_fused(
-        positions,
-        q_pe,
-        k_pe,
-        kv_c,
-        cos_sin_cache,
-        is_neox,
-        layer_slot_mapping,
-        kv_cache,
-        kv_cache_dtype,
-        kv_cache_scale,
-    )
+    attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    if layer_slot_mapping is not None:
+        ops.concat_and_cache_mla_rope_fused(
+            positions,
+            q_pe,
+            k_pe,
+            kv_c,
+            cos_sin_cache,
+            is_neox,
+            layer_slot_mapping,
+            kv_cache,
+            kv_cache_dtype,
+            kv_cache_scale,
+        )
     return torch.empty(0, device=kv_c.device, dtype=kv_c.dtype)
 
 
