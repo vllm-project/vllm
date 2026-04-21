@@ -21,6 +21,8 @@ mod gemma4;
 mod kimi;
 mod qwen3;
 
+use std::sync::LazyLock;
+
 use thiserror::Error;
 use vllm_text::tokenizer::DynTokenizer;
 
@@ -145,6 +147,13 @@ type ReasoningParserCreator = fn(DynTokenizer) -> Result<Box<dyn ReasoningParser
 pub type ReasoningParserFactory = ParserFactory<ReasoningParserCreator>;
 
 impl ReasoningParserFactory {
+    /// Get the global reasoning parser factory with built-in registrations and model mappings.
+    pub fn global() -> &'static Self {
+        static INSTANCE: LazyLock<ReasoningParserFactory> =
+            LazyLock::new(ReasoningParserFactory::new);
+        &INSTANCE
+    }
+
     /// Create the default registry with built-in parser names and model mappings.
     pub fn new() -> Self {
         let mut factory = Self::default();

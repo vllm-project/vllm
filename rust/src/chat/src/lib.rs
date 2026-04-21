@@ -12,7 +12,7 @@
 pub use backend::hf::HfChatBackend;
 pub use backend::{
     ChatBackend, ChatTextBackend, DynChatBackend, DynChatTextBackend, LoadModelBackendsOptions,
-    LoadedModelBackends, load_model_backends,
+    LoadedModelBackends, NewChatOutputProcessorOptions, load_model_backends,
 };
 pub use error::{Error, Result};
 pub use event::{
@@ -20,6 +20,7 @@ pub use event::{
     AssistantToolCall, ChatEvent,
 };
 use futures::{StreamExt, TryStreamExt as _};
+pub use output::{ChatOutputProcessor, DefaultChatOutputProcessor, DynChatOutputProcessor};
 pub use parser::ParserSelection;
 pub use parser::reasoning::{
     ReasoningDelta, ReasoningError, ReasoningParser, ReasoningParserFactory,
@@ -34,7 +35,6 @@ pub use request::{
     ChatToolChoice, GenerationPromptMode, SamplingParams,
 };
 pub use stream::{ChatEventStream, ChatEventStreamTrait, CollectedAssistantMessage};
-use tracing::info;
 pub use vllm_llm::FinishReason;
 
 mod backend;
@@ -55,7 +55,7 @@ pub fn validate_parser_overrides(
     tool_call_parser: &ParserSelection,
     reasoning_parser: &ParserSelection,
 ) -> Result<()> {
-    let tool_parser_factory = ToolParserFactory::new();
+    let tool_parser_factory = ToolParserFactory::global();
     if let ParserSelection::Explicit(name) = tool_call_parser
         && !tool_parser_factory.contains(name)
     {
@@ -66,7 +66,7 @@ pub fn validate_parser_overrides(
         });
     }
 
-    let reasoning_parser_factory = ReasoningParserFactory::new();
+    let reasoning_parser_factory = ReasoningParserFactory::global();
     if let ParserSelection::Explicit(name) = reasoning_parser
         && !reasoning_parser_factory.contains(name)
     {
@@ -87,8 +87,6 @@ pub fn validate_parser_overrides(
 pub struct ChatLlm {
     text: TextLlm,
     backend: DynChatBackend,
-    reasoning_parser_factory: ReasoningParserFactory,
-    tool_parser_factory: ToolParserFactory,
     /// Tool-call parser selection.
     tool_call_parser: ParserSelection,
     /// Reasoning parser selection.
@@ -101,8 +99,6 @@ impl ChatLlm {
         Self {
             text,
             backend,
-            reasoning_parser_factory: ReasoningParserFactory::new(),
-            tool_parser_factory: ToolParserFactory::new(),
             tool_call_parser: ParserSelection::Auto,
             reasoning_parser: ParserSelection::Auto,
         }
@@ -146,7 +142,14 @@ impl ChatLlm {
     pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
 
-        let output_processors = self.prepare_output_processors(&mut request)?;
+        let output_processor = self.backend.new_chat_output_processor(
+            &mut request,
+            NewChatOutputProcessorOptions {
+                tokenizer: self.text.tokenizer(),
+                tool_call_parser: &self.tool_call_parser,
+                reasoning_parser: &self.reasoning_parser,
+            },
+        )?;
         let rendered = self.backend.chat_renderer().render(&request)?;
 
         let text_request = TextRequest {
@@ -160,15 +163,16 @@ impl ChatLlm {
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
         };
-        let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from);
+        let decoded_stream = self
+            .text
+            .generate(text_request)
+            .await?
+            .map_err(Error::from)
+            .boxed();
 
-        let structured_stream =
-            output::output_stream(request.intermediate, decoded_stream, output_processors)?;
+        let structured_stream = output_processor.process(decoded_stream)?;
 
-        Ok(ChatEventStream::new(
-            request.request_id,
-            structured_stream.boxed(),
-        ))
+        Ok(ChatEventStream::new(request.request_id, structured_stream))
     }
 
     /// Shut down the underlying LLM client and its background tasks.
@@ -177,92 +181,6 @@ impl ChatLlm {
         Ok(())
     }
 }
-
-impl ChatLlm {
-    fn prepare_output_processors(
-        &self,
-        request: &mut ChatRequest,
-    ) -> Result<output::OutputProcessors> {
-        let tool_parsing_enabled =
-            matches!(request.tool_choice, ChatToolChoice::Auto) && !request.tools.is_empty();
-        let tool_parser = if tool_parsing_enabled {
-            Some(self.resolve_tool_parser(request)?)
-        } else {
-            None
-        };
-        let reasoning_parser = self.resolve_optional_reasoning_parser(request)?;
-
-        Ok(output::OutputProcessors {
-            reasoning_parser,
-            tool_parser,
-        })
-    }
-
-    fn resolve_tool_parser(&self, request: &mut ChatRequest) -> Result<Box<dyn ToolParser>> {
-        let parser_name = match &self.tool_call_parser {
-            ParserSelection::Auto => self
-                .tool_parser_factory
-                .resolve_name_for_model(self.text.model_id())
-                .ok_or_else(|| Error::ParserUnavailableForModel {
-                    kind: "tool",
-                    model_id: self.text.model_id().to_string(),
-                })?,
-            ParserSelection::None => return Err(Error::ParserDisabled { kind: "tool" }),
-            ParserSelection::Explicit(name) => name.as_str(),
-        };
-
-        let parser = self
-            .tool_parser_factory
-            .create(parser_name, &request.tools)?;
-
-        parser
-            .adjust_request(request)
-            .map_err(|error| Error::ParserInitialization {
-                kind: "tool",
-                name: parser_name.to_string(),
-                error: error.into(),
-            })?;
-
-        TOOL_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using tool parser"));
-        Ok(parser)
-    }
-
-    fn resolve_optional_reasoning_parser(
-        &self,
-        request: &mut ChatRequest,
-    ) -> Result<Option<Box<dyn ReasoningParser>>> {
-        let parser_name = match &self.reasoning_parser {
-            ParserSelection::Auto => self
-                .reasoning_parser_factory
-                .resolve_name_for_model(self.text.model_id()),
-            ParserSelection::None => None,
-            ParserSelection::Explicit(name) => Some(name.as_str()),
-        };
-
-        let Some(parser_name) = parser_name else {
-            REASONING_PARSER_LOG_ONCE.call_once(|| info!("reasoning parsing disabled"));
-            return Ok(None);
-        };
-
-        let parser = self
-            .reasoning_parser_factory
-            .create(parser_name, self.text.tokenizer())?;
-
-        parser
-            .adjust_request(request)
-            .map_err(|error| Error::ParserInitialization {
-                kind: "reasoning",
-                name: parser_name.to_string(),
-                error: error.into(),
-            })?;
-
-        REASONING_PARSER_LOG_ONCE.call_once(|| info!(parser_name, "using reasoning parser"));
-        Ok(Some(parser))
-    }
-}
-
-static TOOL_PARSER_LOG_ONCE: std::sync::Once = std::sync::Once::new();
-static REASONING_PARSER_LOG_ONCE: std::sync::Once = std::sync::Once::new();
 
 #[cfg(test)]
 mod tests {

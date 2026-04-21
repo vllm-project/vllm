@@ -16,8 +16,7 @@ use crate::event::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
 };
 
-/// One currently open assistant text-like block being assembled from streamed
-/// deltas.
+/// One currently open assistant text-like block being assembled from streamed deltas.
 struct OpenTextBlock {
     /// Stable position of this block in the final assistant message.
     index: usize,
@@ -152,8 +151,8 @@ impl StructuredEventState {
         events
     }
 
-    /// Append one semantic text delta to the current block, or open a new block
-    /// when the semantic kind changes.
+    /// Append one semantic text delta to the current block, or open a new block when the semantic
+    /// kind changes.
     fn push_text_delta(
         &mut self,
         kind: AssistantBlockKind,
@@ -229,10 +228,9 @@ impl StructuredEventState {
     }
 }
 
-/// Wrap one parsed assistant stream into the public structured chat event
-/// stream.
+/// Wrap one parsed assistant stream into the public structured chat event stream.
 #[try_stream(ok = ChatEvent, error = Error)]
-pub(super) async fn structured_chat_event_stream(stream: impl AssistantEventStream) {
+pub(crate) async fn structured_chat_event_stream(stream: impl AssistantEventStream) {
     pin_mut!(stream);
 
     let mut state = StructuredEventState::new();

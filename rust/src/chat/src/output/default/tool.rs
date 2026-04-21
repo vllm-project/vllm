@@ -399,10 +399,10 @@ mod tests {
     use vllm_llm::FinishReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
-    use super::super::structured::structured_chat_event_stream;
     use super::super::{AssistantEvent, ContentEvent};
     use super::tool_event_stream;
     use crate::event::{AssistantBlockKind, AssistantMessageExt as _};
+    use crate::output::structured::structured_chat_event_stream;
     use crate::parser::tool::{Result, ToolParseResult, ToolParser};
     use crate::request::ChatTool;
     use crate::stream::ChatEventStream;

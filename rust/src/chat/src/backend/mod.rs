@@ -2,18 +2,35 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::Value;
+use vllm_text::tokenizer::DynTokenizer;
 use vllm_text::{DynTextBackend, TextBackend};
 
 use crate::error::Result;
+use crate::output::DynChatOutputProcessor;
 use crate::renderer::DynChatRenderer;
-use crate::{ChatTemplateContentFormatOption, RendererSelection};
+use crate::request::ChatRequest;
+use crate::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
 
 pub mod hf;
+
+/// Options for creating a new chat output processor.
+pub struct NewChatOutputProcessorOptions<'a> {
+    pub tokenizer: DynTokenizer,
+    pub tool_call_parser: &'a ParserSelection,
+    pub reasoning_parser: &'a ParserSelection,
+}
 
 /// Minimal prompt-processing backend needed by `vllm-chat`.
 pub trait ChatBackend: Send + Sync {
     /// Return the renderer used for chat-prompt construction.
     fn chat_renderer(&self) -> DynChatRenderer;
+
+    /// Create a request-scoped output processor after request-level adjustments are applied.
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> Result<DynChatOutputProcessor>;
 }
 
 /// Shared trait-object form of [`ChatBackend`].

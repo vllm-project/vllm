@@ -4,14 +4,21 @@ use tracing::info;
 use vllm_text::DynTextBackend;
 use vllm_text::backend::hf::{HfTextBackend, ResolvedModelFiles, load_model_config};
 
-use crate::RendererSelection;
-use crate::backend::{ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends};
+use crate::backend::{
+    ChatBackend, DynChatBackend, LoadModelBackendsOptions, LoadedModelBackends,
+    NewChatOutputProcessorOptions,
+};
 use crate::error::Result;
+use crate::output::DefaultChatOutputProcessor;
 use crate::renderer::hf::HfChatRenderer;
 use crate::renderer::{DeepSeekV32ChatRenderer, DynChatRenderer};
+use crate::request::ChatRequest;
+use crate::{DynChatOutputProcessor, RendererSelection};
 
 /// [`ChatBackend`] implementation built on Hugging Face model files.
 pub struct HfChatBackend {
+    model_id: String,
+    model_type: String,
     chat_renderer: DynChatRenderer,
 }
 
@@ -45,13 +52,34 @@ impl HfChatBackend {
             "loaded chat backend with Hugging Face model files"
         );
 
-        Ok(Self { chat_renderer })
+        Ok(Self {
+            model_id,
+            model_type: model_type.to_string(),
+            chat_renderer,
+        })
     }
 }
 
 impl ChatBackend for HfChatBackend {
     fn chat_renderer(&self) -> DynChatRenderer {
         self.chat_renderer.clone()
+    }
+
+    fn new_chat_output_processor(
+        &self,
+        request: &mut ChatRequest,
+        options: NewChatOutputProcessorOptions<'_>,
+    ) -> Result<DynChatOutputProcessor> {
+        // TODO: use model_type to select different output processor implementations if needed
+        let _ = self.model_type;
+
+        Ok(Box::new(DefaultChatOutputProcessor::new(
+            request,
+            &self.model_id,
+            options.tokenizer,
+            options.tool_call_parser,
+            options.reasoning_parser,
+        )?))
     }
 }
 

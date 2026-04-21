@@ -14,6 +14,7 @@ pub(super) mod streaming;
 mod utils;
 
 use std::collections::{BTreeMap, btree_map};
+use std::sync::LazyLock;
 
 use thiserror::Error;
 use thiserror_ext::Macro;
@@ -165,6 +166,12 @@ type ToolParserCreator = fn(&[ChatTool]) -> Result<Box<dyn ToolParser>>;
 pub type ToolParserFactory = ParserFactory<ToolParserCreator>;
 
 impl ToolParserFactory {
+    /// Get the global tool parser factory with built-in registrations and model mappings.
+    pub fn global() -> &'static Self {
+        static INSTANCE: LazyLock<ToolParserFactory> = LazyLock::new(ToolParserFactory::new);
+        &INSTANCE
+    }
+
     /// Create the default registry with built-in parser names and model mappings.
     pub fn new() -> Self {
         let mut factory = Self::default();
