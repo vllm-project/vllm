@@ -62,7 +62,7 @@ if TYPE_CHECKING:
     VLLM_USE_RAY_WRAPPED_PP_COMM: bool = True
     VLLM_USE_RAY_V2_EXECUTOR_BACKEND: bool = False
     VLLM_XLA_USE_SPMD: bool = False
-    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn", "forkserver"] = "fork"
+    VLLM_WORKER_MULTIPROC_METHOD: Literal["fork", "spawn"] = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_ASSETS_CACHE_MODEL_CLEAN: bool = False
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
@@ -765,13 +765,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_RAY_V2_EXECUTOR_BACKEND", "0"))
     ),
     # Use dedicated multiprocess context for workers.
-    # spawn, fork, and forkserver all work. forkserver is opt-in for fast
-    # startup when paired with the CLI's async prewarm (see
-    # vllm/entrypoints/cli/main.py) — the forkserver process is preloaded
-    # with vllm.v1.engine.async_llm and a subsequent EngineCore Process.start()
-    # forks from that warm sibling instead of paying spawn cost.
+    # Both spawn and fork work
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
-        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork", "forkserver"]
+        "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
     ),
     # Path to the cache for storing downloaded assets
     "VLLM_ASSETS_CACHE": lambda: os.path.expanduser(
