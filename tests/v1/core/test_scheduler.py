@@ -26,6 +26,7 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
+from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
@@ -1038,6 +1039,54 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
 
 
+def test_scheduler_stats_waiting_queues():
+    """Test that scheduler stats correctly report waiting and skipped_waiting queues."""
+    # Create scheduler with limited capacity so we can have waiting requests
+    scheduler = create_scheduler(max_num_batched_tokens=100)
+
+    # Create requests: some will be scheduled, some will wait on capacity,
+    # and some will be blocked by constraints
+    all_requests = create_requests(num_requests=5, num_tokens=50)
+
+    # Add 3 requests - only 2 can be scheduled (2 * 50 = 100 tokens)
+    # The 3rd will remain in waiting queue (capacity constraint)
+    for request in all_requests[:3]:
+        scheduler.add_request(request)
+
+    # Manually add 2 more to skipped_waiting to simulate constraint-blocked
+    for request in all_requests[3:]:
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+        scheduler.skipped_waiting.add_request(request)
+
+    # Schedule - this will schedule 2 requests, leaving 1 in waiting
+    output = scheduler.schedule()
+
+    # Verify: 2 scheduled, 1 still waiting on capacity, 2 blocked by constraints
+    assert len(output.scheduled_new_reqs) == 2
+    assert len(scheduler.waiting) == 1
+    assert len(scheduler.skipped_waiting) == 2
+
+    # Call update_from_output() to get frontend-facing stat
+    scheduled_req_ids = list(output.num_scheduled_tokens.keys())
+    model_runner_output = ModelRunnerOutput(
+        req_ids=scheduled_req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(scheduled_req_ids)},
+        sampled_token_ids=[[1]] * len(scheduled_req_ids),
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+    assert engine_core_outputs and len(engine_core_outputs) > 0
+    stats = engine_core_outputs[0].scheduler_stats
+    assert stats is not None
+
+    # Verify stats match queue lengths after scheduling
+    assert stats.num_running_reqs == 2  # 2 were scheduled
+    assert stats.num_waiting_reqs == 1  # 1 waiting on capacity
+    assert stats.num_skipped_waiting_reqs == 2  # 2 blocked by constraints
+
+
 def _assert_right_scheduler_output(
     output: SchedulerOutput,
     num_requests: int,
@@ -2040,91 +2089,103 @@ def test_priority_scheduling_mixed_priority_and_arrival():
     assert scheduled_req_ids == ["3", "2", "1", "0"]
 
 
-# This test had previously been passing due to its use of duplicate
-# request ids which resulted in incorrect behavior.
-# Now that the duplicate req ids had been fixed it fails and
-# investigation is needed into whether the priority scheduling
-# preemption logic is working as designed or not.
-@pytest.mark.skip("needs investigation")
 def test_priority_scheduling_preemption():
-    """Test that priority scheduling preempts
-    lower priority requests when memory is constrained."""
-    # Create scheduler with very limited memory to force preemption
+    """Test that under KV block pressure the scheduler preempts the
+    lowest-priority *running* request, not the highest-priority one.
+
+    A low-priority request starts running first. Then a high-priority
+    request arrives and is admitted to running.  When block pressure
+    builds, the scheduler preempts the low-priority running request
+    while keeping the high-priority one.
+
+    Block math
+    ----------
+    block_size = 16, num_blocks = 6 (1 null → 5 usable).
+
+    Phase 1: lo1 (priority 5, 32 tokens) → 2 blocks.  3 free.
+             Decode → lo1 has 33 tokens (needs 3rd block on next schedule).
+    Phase 2: hi1 (priority 0, 32 tokens) arrives.
+             schedule() allocates lo1's 3rd block (3 used) and admits
+             hi1 (2 blocks) → 5 used, 0 free. Both running.
+             Decode → lo1 34 tokens, hi1 33 tokens.
+    Phase 3: schedule() → hi1 needs 3rd block, 0 free → preemption.
+             lo1 (priority 5) is preempted, hi1 (priority 0) survives.
+    """
+    block_size = 16
+    num_blocks = 6  # 1 null block → 5 usable
+    num_tokens = block_size * 2  # 32 tokens = exactly 2 blocks
+
     scheduler = create_scheduler_with_priority(
-        max_num_seqs=3,  # Allow multiple requests
+        max_num_seqs=3,
         max_num_batched_tokens=200,
-        num_blocks=6,  # Very limited blocks to force memory pressure
-        block_size=16,  # Standard block size
+        num_blocks=num_blocks,
+        block_size=block_size,
     )
 
-    # Create initial low-priority requests that will consume most memory
-    low_priority_requests = create_requests_with_priority(
-        num_requests=2,
-        priorities=[5, 5],  # Low priority
-        arrival_times=[1.0, 2.0],
-        num_tokens=30,  # Large enough to consume significant memory,
-        req_ids=["lo1", "lo2"],
-    )
-
-    # Add and schedule low priority requests
-    for request in low_priority_requests:
-        scheduler.add_request(request)
+    # --- Phase 1: low-priority request starts running ---
+    lo1 = create_requests_with_priority(
+        num_requests=1,
+        priorities=[5],
+        arrival_times=[1.0],
+        num_tokens=num_tokens,
+        req_ids=["lo1"],
+    )[0]
+    scheduler.add_request(lo1)
 
     output = scheduler.schedule()
-    assert len(output.scheduled_new_reqs) == 2
+    assert len(output.scheduled_new_reqs) == 1
 
-    # Simulate model execution to move requests to running state
+    # Decode: lo1 now has 33 tokens (crosses 32-token boundary).
     model_output = ModelRunnerOutput(
-        req_ids=[req.request_id for req in low_priority_requests],
-        req_id_to_index={
-            req.request_id: i for i, req in enumerate(low_priority_requests)
-        },
-        sampled_token_ids=[[100] for _ in low_priority_requests],
+        req_ids=["lo1"],
+        req_id_to_index={"lo1": 0},
+        sampled_token_ids=[[100]],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
     )
     scheduler.update_from_output(output, model_output)
 
-    # Verify both requests are running
-    assert len(scheduler.running) == 2
-
-    # Now add a high-priority request that requires memory allocation
-    # This should trigger preemption due to memory constraints
-    high_priority_request = create_requests_with_priority(
+    # --- Phase 2: high-priority request arrives AFTER lo1 is running ---
+    hi1 = create_requests_with_priority(
         num_requests=1,
-        priorities=[0],  # High priority
-        arrival_times=[3.0],
-        num_tokens=30,  # Large enough to require significant memory
+        priorities=[0],
+        arrival_times=[2.0],
+        num_tokens=num_tokens,
         req_ids=["hi1"],
     )[0]
+    scheduler.add_request(hi1)
 
-    scheduler.add_request(high_priority_request)
+    # schedule(): lo1 gets its 3rd block (3 used), hi1 admitted (5 used,
+    # 0 free).  Both are now running.
+    output = scheduler.schedule()
+    assert any(r.req_id == "hi1" for r in output.scheduled_new_reqs)
+    assert len(scheduler.running) == 2
 
-    # Schedule again - this should trigger
-    # preemption when trying to allocate memory
+    # Decode: lo1 → 34 tokens, hi1 → 33 tokens.
+    model_output = ModelRunnerOutput(
+        req_ids=["lo1", "hi1"],
+        req_id_to_index={"lo1": 0, "hi1": 1},
+        sampled_token_ids=[[101], [100]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    scheduler.update_from_output(output, model_output)
+
+    # --- Phase 3: preemption with mixed-priority running requests ---
+    # hi1 needs a 3rd block but 0 are free.  The scheduler picks the
+    # lowest-priority running request to preempt:
+    #   max(running, key=(priority, arrival_time)) → lo1 (5 > 0).
     output = scheduler.schedule()
 
-    # Due to the scheduler's design, if preemption happens
-    # during running request scheduling,
-    # waiting requests won't be scheduled in the same step
-    # Let's check if preemption occurred by looking at the waiting queue
-
-    # If preemption happened, we should see requests in the
-    # waiting queue
-    if len(scheduler.waiting) > 1:  # high priority + preempted request
-        # Preemption occurred - verify the high priority request
-        # gets scheduled next
-        output2 = scheduler.schedule()
-        assert len(output2.scheduled_new_reqs) == 1
-        # High priority request
-        assert output2.scheduled_new_reqs[0].req_id == "hi1"
-    else:
-        # No preemption needed - all requests fit
-        # This is also valid behavior if memory allows
-        assert len(output.scheduled_new_reqs) == 1
-        # High priority request
-        assert output.scheduled_new_reqs[0].req_id == "hi1"
+    lo1_req = scheduler.requests["lo1"]
+    assert lo1_req.status == RequestStatus.PREEMPTED, (
+        "Expected low-priority 'lo1' to be preempted"
+    )
+    assert any(req.request_id == "hi1" for req in scheduler.running), (
+        "High-priority 'hi1' should still be running"
+    )
 
 
 def test_priority_scheduling_no_preemption_when_space_available():
@@ -2449,6 +2510,86 @@ def test_schedule_skip_tokenizer_init_structured_output_request():
     assert len(scheduler.running) == 0
     assert len(scheduler.waiting) == 0
     assert len(scheduler.skipped_waiting) == 1
+
+
+def test_abort_request_when_structured_output_fsm_cannot_advance():
+    scheduler = object.__new__(Scheduler)
+    sampling_params = SamplingParams(ignore_eos=True, max_tokens=4)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
+    request = Request(
+        request_id="0",
+        prompt_token_ids=[0, 1],
+        mm_features=None,
+        sampling_params=sampling_params,
+        pooling_params=None,
+    )
+    request.structured_output_request = Mock()
+    request.structured_output_request.grammar = Mock()
+    request.structured_output_request.grammar.accept_tokens.return_value = False
+    request.status = RequestStatus.RUNNING
+    request.num_computed_tokens = request.num_tokens
+
+    scheduler.perf_metrics = None
+    scheduler.connector = None
+    scheduler.structured_output_manager = Mock()
+    scheduler.structured_output_manager.should_advance.return_value = True
+    scheduler.requests = {request.request_id: request}
+    scheduler.running = [request]
+    scheduler.waiting = Mock()
+    scheduler.kv_cache_manager = Mock()
+    scheduler.kv_cache_manager.take_events.return_value = None
+    scheduler.kv_event_publisher = Mock()
+    scheduler.finished_req_ids = set()
+    scheduler.finished_req_ids_dict = None
+    scheduler.vllm_config = Mock()
+    scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.recompute_kv_load_failures = False
+    scheduler.make_stats = Mock(return_value=None)
+    scheduler.max_model_len = 128
+
+    def free_request(req: Request, delay_free_blocks: bool = False):
+        scheduler.finished_req_ids.add(req.request_id)
+        scheduler.requests.pop(req.request_id, None)
+        return None
+
+    scheduler._free_request = Mock(side_effect=free_request)
+
+    output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={request.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        sampled_token_ids=[[123]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_core_outputs = scheduler.update_from_output(output, model_runner_output)
+
+    request.structured_output_request.grammar.accept_tokens.assert_called_once_with(
+        request.request_id, [123]
+    )
+    assert request.resumable is False
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.running
+    scheduler._free_request.assert_called_once_with(request)
+    assert len(engine_core_outputs[0].outputs) == 1
+    engine_core_output = engine_core_outputs[0].outputs[0]
+    assert engine_core_output.request_id == request.request_id
+    assert engine_core_output.new_token_ids == [123]
+    assert engine_core_output.finish_reason == FinishReason.ERROR
 
 
 @pytest.mark.parametrize(

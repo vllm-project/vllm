@@ -21,8 +21,9 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     EngineId,
-    TpKVTopology,
+    TransferTopology,
     get_current_attn_backend,
+    get_current_attn_backends,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -41,20 +42,25 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, make_zmq_path, make_zmq_socket
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
+from vllm.v1.worker.utils import select_common_block_size
+
+logger = init_logger(__name__)
 
 try:
     from mooncake.engine import TransferEngine
-except ImportError as e:
-    raise ImportError(
+except ImportError:
+    logger.warning(
         "Please install mooncake by following the instructions at "
         "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
         "to run VLLM with MooncakeTransferEngine."
-    ) from e
+    )
+    TransferEngine = None
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -63,8 +69,6 @@ if TYPE_CHECKING:
 
 ReqId = str  # Internal scheduler request ID
 TransferId = str  # KV transfer coordination ID (shared by P/D)
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -638,9 +642,16 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
+        if TransferEngine is None:
+            logger.error("Mooncake is not available")
+            raise RuntimeError("Mooncake is not available")
         logger.info("Initializing Mooncake Transfer Engine worker %s", engine_id)
 
         self.vllm_config = vllm_config
+        # Capture device BEFORE TransferEngine init — MNNVL's NVLink allocator
+        # may change the current CUDA device during engine.initialize().
+        self.device_id = torch.accelerator.current_device_index()
+        current_platform.set_device(self.device_id)
 
         self.engine = TransferEngine()
         self.hostname = get_ip()
@@ -701,9 +712,12 @@ class MooncakeConnectorWorker:
         # For kv_both, we will act both prefiller and decoder.
         if not self.is_kv_consumer:
             # Background threads for sending kvcaches to D.
+            # Each pool thread must be bound to the correct CUDA device
+            # because CUDA device selection is thread-local.
             self._sender_executor = ThreadPoolExecutor(
                 max_workers=self.num_sender_workers,
                 thread_name_prefix="vllm-mooncake-sender",
+                initializer=self._bind_sender_thread_device,
             )
             logger.debug(
                 "Mooncake Prefiller: use %d workers to send kvcaches",
@@ -721,9 +735,7 @@ class MooncakeConnectorWorker:
             # Start bootstrap server on global rank 0.
             if should_launch_bootstrap_server(vllm_config):
                 _, port = get_mooncake_bootstrap_addr(vllm_config)
-                self.bootstrap_server = MooncakeBootstrapServer(
-                    vllm_config, "0.0.0.0", port
-                )
+                self.bootstrap_server = MooncakeBootstrapServer("0.0.0.0", port)
                 self.bootstrap_server.start()
 
         if not self.is_kv_producer:
@@ -741,6 +753,7 @@ class MooncakeConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.use_mla = self.model_config.use_mla
+        self._sync_block_size_with_kernel()
 
         # Get the attention backend from the first layer
         # NOTE (NickLucche) models with multiple backends are not supported yet
@@ -751,13 +764,13 @@ class MooncakeConnectorWorker:
         logger.debug("Detected kv cache layout %s", self.kv_cache_layout)
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.tp_size}
-        self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
-        self.kv_topo = TpKVTopology(
+        self.transfer_topo = TransferTopology(
             tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            block_size=self.block_size,
             engine_id=self.engine_id,
-            remote_tp_size=self._tp_size,  # shared state
-            remote_block_size=self._block_size,  # shared state
             is_mla=self.use_mla,
+            is_mamba=False,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=[backend],
         )
@@ -766,6 +779,23 @@ class MooncakeConnectorWorker:
         self._encoder = msgspec.msgpack.Encoder()
         self._xfer_meta_decoder = msgspec.msgpack.Decoder(MooncakeXferMetadata)
         self._xfer_resp_decoder = msgspec.msgpack.Decoder(MooncakeXferResponse)
+
+    def _sync_block_size_with_kernel(self) -> None:
+        # When speculative decoding (e.g. Eagle) is enabled, the main model
+        # and draft model may use different attention backends with different
+        # physical block sizes. Pick the common (smallest) block size so that
+        # KV-cache registration and transfer work correctly for both models.
+        backends = get_current_attn_backends(self.vllm_config)
+        kernel_block_size = select_common_block_size(self.block_size, backends)
+        if self.block_size != kernel_block_size:
+            logger.info_once(
+                "User-specified logical block size (%s) does not match"
+                " physical kernel block size (%s). Using the latter.",
+                self.block_size,
+                kernel_block_size,
+            )
+            assert self.block_size > kernel_block_size
+            self.block_size = kernel_block_size
 
     def __del__(self):
         self.shutdown()
@@ -778,7 +808,9 @@ class MooncakeConnectorWorker:
             if self.sender_loop.is_running():
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
                 self._sender_listener_t.join()
-            if should_launch_bootstrap_server(self.vllm_config):
+            if should_launch_bootstrap_server(self.vllm_config) and hasattr(
+                self, "bootstrap_server"
+            ):
                 self.bootstrap_server.shutdown()
         if not self.is_kv_producer and self.receiver_loop.is_running():
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
@@ -879,7 +911,7 @@ class MooncakeConnectorWorker:
         self, identity: bytes, sock: zmq.asyncio.Socket, meta: MooncakeXferMetadata
     ):
         pending_reqs: dict[ReqId, SendBlockMeta] = {}
-        remote_tp_ranks = self.kv_topo.get_target_remote_ranks(meta.remote_tp_size)
+        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(meta.remote_tp_size)
         if meta.remote_tp_rank not in remote_tp_ranks:
             # This D worker does not pair with the P worker.
             msg = (
@@ -1189,6 +1221,12 @@ class MooncakeConnectorWorker:
 
         return src_ptrs, dst_ptrs, lengths, err_reqs, err_msg
 
+    def _bind_sender_thread_device(self) -> None:
+        """ThreadPoolExecutor initializer — binds each pool thread to the
+        correct CUDA device.  CUDA device selection is thread-local, so
+        without this, NVLink transfers fail for TP ranks > 0."""
+        current_platform.set_device(self.device_id)
+
     def _send_blocks(
         self,
         remote_session: str,
@@ -1218,7 +1256,7 @@ class MooncakeConnectorWorker:
         seen_base_addresses = []
         self.block_len_per_layer = []
 
-        split_k_and_v = self.kv_topo.split_k_and_v
+        split_k_and_v = self.transfer_topo.split_k_and_v
         tensor_size_bytes = None
         for layer_name, cache_or_caches in kv_caches.items():
             cache_list = cache_or_caches if split_k_and_v else [cache_or_caches]
@@ -1250,9 +1288,6 @@ class MooncakeConnectorWorker:
                 self.block_len_per_layer.append(
                     curr_tensor_size_bytes // self.num_blocks
                 )
-
-                kernel_block_size = cache.shape[-2 if self.use_mla else -3]
-                assert self.block_size == kernel_block_size
                 kv_data_ptrs.append(base_addr)
                 kv_data_lens.append(curr_tensor_size_bytes)
 
@@ -1460,8 +1495,8 @@ class MooncakeConnectorWorker:
         remote_engine_id: EngineId,
         pull_metas: dict[ReqId, PullReqMeta],
     ):
-        remote_tp_ranks = self.kv_topo.get_target_remote_ranks_from_engine_id(
-            remote_engine_id
+        remote_tp_ranks = self.transfer_topo.handshake_target_ranks(
+            self._tp_size[remote_engine_id]
         )
         count = len(remote_tp_ranks)
         logger.debug(
@@ -1552,7 +1587,7 @@ class MooncakeConnectorWorker:
             )
 
     def _producer_cache_is_replicated(self) -> bool:
-        return self.kv_topo.replicates_kv_cache(self.engine_id)
+        return self.transfer_topo.local_replicates_kv_cache
 
     def _get_transfer_regions(
         self, base_addrs: list[int], block_lens: list[int]
@@ -1560,7 +1595,7 @@ class MooncakeConnectorWorker:
         return _expand_transfer_regions(
             base_addrs=base_addrs,
             block_lens=block_lens,
-            is_kv_layout_blocks_first=self.kv_topo.is_kv_layout_blocks_first,
+            is_kv_layout_blocks_first=self.transfer_topo.is_kv_layout_blocks_first,
         )
 
     def _get_sender_transfer_plan(

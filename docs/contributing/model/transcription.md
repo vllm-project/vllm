@@ -23,7 +23,7 @@ Declare supported languages and capabilities:
     from torch import nn
 
     from vllm.config import ModelConfig, SpeechToTextConfig
-    from vllm.inputs.data import PromptType
+    from vllm.inputs import PromptType
     from vllm.model_executor.models.interfaces import SupportsTranscription
     
     class YourASRModel(nn.Module, SupportsTranscription):
@@ -66,7 +66,7 @@ This is for controlling general behavior of the API when serving your model:
 
 See [Audio preprocessing and chunking](#audio-preprocessing-and-chunking) for what each field controls.
 
-Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.data.PromptType]. There are two common patterns:
+Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.llm.PromptType]. There are two common patterns:
 
 #### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
 
@@ -193,7 +193,7 @@ Provide a fast duration→token estimate to improve streaming usage statistics:
 
 The API server takes care of basic audio I/O and optional chunking before building prompts:
 
-- Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate` using `librosa`.
+- Resampling: Input audio is resampled to `SpeechToTextConfig.sample_rate` using `AudioResampler`.
 - Chunking: If `SpeechToTextConfig.allow_audio_chunking` is True and the duration exceeds `max_audio_clip_s`, the server splits the audio into overlapping chunks and generates a prompt per chunk. Overlap is controlled by `overlap_chunk_second`.
 - Energy-aware splitting: When `min_energy_split_window_size` is set, the server finds low-energy regions to minimize cutting within words.
 
@@ -206,8 +206,8 @@ Relevant server logic:
     async def _preprocess_speech_to_text(...):
         language = self.model_cls.validate_language(request.language)
         ...
-        y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
-        duration = librosa.get_duration(y=y, sr=sr)
+        y, sr = load_audio(bytes_, sr=self.asr_config.sample_rate)
+        duration = get_audio_duration(y=y, sr=sr)
         do_split_audio = (self.asr_config.allow_audio_chunking
                         and duration > self.asr_config.max_audio_clip_s)
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))

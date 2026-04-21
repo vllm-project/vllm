@@ -244,12 +244,12 @@ response = client.chat.completions.create(
 
 Some models, such as [Qwen3](https://qwen.readthedocs.io/en/latest/getting_started/quickstart.html#thinking-budget), [DeepSeek](https://www.alibabacloud.com/help/en/model-studio/deep-thinking), and [Nemotron3](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16), support a thinking budget that limits the maximum number of tokens used for reasoning.
 
-Token counting starts from `think_start_str`. Once the reasoning token count reaches the configured `thinking_token_budget`, vLLM forces the model to produce `think_end_str`, effectively terminating the reasoning block.
+Token counting starts from `reasoning_start_str`. Once the reasoning token count reaches the configured `thinking_token_budget`, vLLM forces the model to produce `reasoning_end_str`, effectively terminating the reasoning block.
 
 To use this feature:
 
 - `--reasoning-parser` enables reasoning extraction.
-- `--reasoning-config` defines the reasoning boundary tokens (e.g., `think_start_str`, `think_end_str`).
+- `--reasoning-config` defines the reasoning boundary tokens (e.g., `reasoning_start_str`, `reasoning_end_str`). If not set, vLLM will attempt to automatically initialize these tokens from the reasoning parser.
 - `thinking_token_budget` (a sampling parameter) sets the per-request reasoning token limit.
 
 If `thinking_token_budget` is not specified, no explicit reasoning limit is applied beyond normal generation constraints such as `max_tokens`.
@@ -257,20 +257,20 @@ If `thinking_token_budget` is not specified, no explicit reasoning limit is appl
 `--reasoning-config` accepts a JSON object corresponding to  
 [ReasoningConfig][vllm.config.ReasoningConfig] with the following fields:
 
-| Field             | Type           | Description                                      |
-|-------------------|----------------|--------------------------------------------------|
-| `think_start_str` | `str \| null`  | String that marks the start of reasoning content |
-| `think_end_str`   | `str \| null`  | String that marks the end of reasoning content   |
+| Field                 | Type           | Description                                      |
+|-----------------------|----------------|--------------------------------------------------|
+| `reasoning_start_str` | `str \| null`  | String that marks the start of reasoning content |
+| `reasoning_end_str`   | `str \| null`  | String that marks the end of reasoning content   |
 
 !!! note
-    `think_end_str` can include a transition phrase before the think end token. For example, setting `think_end_str` to `"I have to give the solution based on the thinking directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
+    `reasoning_end_str` can include a transition phrase before the reasoning end token. For example, setting `reasoning_end_str` to `"I have to give the solution based on the reasoning directly now.</think>"` instructs the model to emit that phrase when the budget is exhausted, making the reasoning termination more natural.
 
 ### Online Serving
 
 ```bash
 vllm serve Qwen/Qwen3-0.6B \
     --reasoning-parser qwen3 \
-    --reasoning-config '{"think_start_str": "<think>", "think_end_str": "I have to give the solution based on the thinking directly now.</think>"}'
+    --reasoning-config '{"reasoning_start_str": "<think>", "reasoning_end_str": "I have to give the solution based on the reasoning directly now.</think>"}'
 ```
 
 Then make a request with `thinking_token_budget` to limit the reasoning tokens:
@@ -283,9 +283,7 @@ curl http://localhost:8000/v1/chat/completions \
     "messages": [
       { "role": "user", "content": "9.11 and 9.8, which is greater?" }
     ],
-    "extra_body": {
-      "thinking_token_budget": 10
-    }
+    "thinking_token_budget": 10
   }'
 ```
 
@@ -298,8 +296,8 @@ from vllm.config import ReasoningConfig
 llm = LLM(
     model="Qwen/Qwen3-0.6B",
     reasoning_config=ReasoningConfig(
-        think_start_str="<think>",
-        think_end_str="I have to give the solution based on the thinking directly now.</think>",
+        reasoning_start_str="<think>",
+        reasoning_end_str="I have to give the solution based on the thinking directly now.</think>",
     ),
 )
 
