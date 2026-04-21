@@ -64,7 +64,7 @@ def get_ip() -> str:
         pass
 
     warnings.warn(
-        "Failed to get the IP address, using 0.0.0.0 by default."
+        "Failed to get the IP address, using 0.0.0.0 by default. "
         "The value can be set by the environment variable"
         " VLLM_HOST_IP or HOST_IP.",
         stacklevel=2,
@@ -247,7 +247,7 @@ def split_zmq_path(path: str) -> tuple[str, str, str]:
 
     scheme = parsed.scheme
     host = parsed.hostname or ""
-    port = str(parsed.port or "")
+    port = "" if parsed.port is None else str(parsed.port)
     if host.startswith("[") and host.endswith("]"):
         host = host[1:-1]  # Remove brackets for IPv6 address
 

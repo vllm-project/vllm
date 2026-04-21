@@ -52,7 +52,7 @@ class Lfm2MLP(nn.Module):
     def __init__(
         self,
         dim: int,
-        ff_dim: int,
+        intermediate_size: int,
         multiple_of: int,
         auto_adjust_ff_dim: bool,
         ffn_dim_multiplier: float | None,
@@ -61,21 +61,23 @@ class Lfm2MLP(nn.Module):
     ):
         super().__init__()
         if auto_adjust_ff_dim:
-            ff_dim = int(2 * ff_dim / 3)
+            intermediate_size = int(2 * intermediate_size / 3)
             # custom dim factor multiplier
             if ffn_dim_multiplier is not None:
-                ff_dim = int(ffn_dim_multiplier * ff_dim)
-            ff_dim = multiple_of * ((ff_dim + multiple_of - 1) // multiple_of)
+                intermediate_size = int(ffn_dim_multiplier * intermediate_size)
+            intermediate_size = multiple_of * (
+                (intermediate_size + multiple_of - 1) // multiple_of
+            )
 
         self.w13 = MergedColumnParallelLinear(
             input_size=dim,
-            output_sizes=[ff_dim] * 2,
+            output_sizes=[intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.w13",
         )
         self.w2 = RowParallelLinear(
-            input_size=ff_dim,
+            input_size=intermediate_size,
             output_size=dim,
             bias=False,
             quant_config=quant_config,
@@ -212,7 +214,7 @@ class Lfm2AttentionDecoderLayer(nn.Module):
 
         self.feed_forward = Lfm2MLP(
             dim=config.block_dim,
-            ff_dim=config.block_ff_dim,
+            intermediate_size=config.intermediate_size,
             multiple_of=config.block_multiple_of,
             auto_adjust_ff_dim=config.block_auto_adjust_ff_dim,
             ffn_dim_multiplier=config.block_ffn_dim_multiplier,
@@ -262,7 +264,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
 
         self.feed_forward = Lfm2MLP(
             dim=config.block_dim,
-            ff_dim=config.block_ff_dim,
+            intermediate_size=config.intermediate_size,
             multiple_of=config.block_multiple_of,
             auto_adjust_ff_dim=config.block_auto_adjust_ff_dim,
             ffn_dim_multiplier=config.block_ffn_dim_multiplier,

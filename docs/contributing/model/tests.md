@@ -37,7 +37,7 @@ For [generative models](../../models/generative_models.md), there are two levels
 
 #### Pooling models
 
-For [pooling models](../../models/pooling_models.md), we simply check the cosine similarity, as defined in [tests/models/utils.py](../../../tests/models/utils.py).
+For [pooling models](../../models/pooling_models/README.md), we simply check the cosine similarity, as defined in [tests/models/utils.py](../../../tests/models/utils.py).
 
 ### Multi-modal processing
 

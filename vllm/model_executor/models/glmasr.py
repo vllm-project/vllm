@@ -14,7 +14,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed.parallel_state import get_tensor_model_parallel_world_size
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TokensPrompt
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
@@ -27,13 +27,11 @@ from vllm.model_executor.layers.rotary_embedding.common import ApplyRotaryEmb
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
-    ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
@@ -68,7 +66,7 @@ from .interfaces import (
     SupportsTranscription,
 )
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
-from .whisper import ISO639_1_SUPPORTED_LANGS
+from .whisper import ISO639_1_SUPPORTED_LANGS, _create_fake_bias_for_k_proj
 
 
 class GlmAsrEncoderRotaryEmbedding(nn.Module):
@@ -500,6 +498,8 @@ class GlmAsrEncoder(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Custom weight loading to handle q_proj/k_proj/v_proj -> qkv_proj mapping."""
         from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+        weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
 
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
