@@ -26,6 +26,8 @@ from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 logger = init_logger(__name__)
 
+SM120_FP8_SINGLE_REQ_MAX_KV_SPLITS = 128
+
 
 class TritonMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
@@ -170,6 +172,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             # hardware dependent
             occupancy_multiplier = 2
             max_splits = self._sm_count * occupancy_multiplier
+            # On SM120 with FP8 KV cache, single-request long-context MLA decode
+            # peaks around 128 splits in local benchmarks. Letting the heuristic
+            # scale all the way to hundreds of splits adds stage1/stage2 merge
+            # overhead without improving occupancy.
+            if (
+                B == 1
+                and current_platform.is_cuda()
+                and current_platform.has_device_capability(120)
+                and is_quantized_kv_cache(self.kv_cache_dtype)
+            ):
+                max_splits = min(max_splits, SM120_FP8_SINGLE_REQ_MAX_KV_SPLITS)
             num_kv_splits = min(ideal_splits, max_splits)
 
         # TODO(lucas) Allocate ahead of time

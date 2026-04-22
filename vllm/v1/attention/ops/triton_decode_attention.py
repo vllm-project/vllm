@@ -482,6 +482,15 @@ def _decode_grouped_att_m_fwd(
     kv_group_num = q.shape[1] // k_buffer.shape[-2]
 
     BLOCK_H = 16
+    # SM120 FP8 MLA with BLOCK_H=16 exceeds the 101376 B shared-memory
+    # limit by a narrow margin. Reduce the head tile to keep num_stages=2.
+    if (
+        is_mla
+        and current_platform.is_cuda()
+        and current_platform.has_device_capability(120)
+        and k_buffer.element_size() == 1
+    ):
+        BLOCK_H = 8
     NUM_KV_SPLITS = num_kv_splits
     grid = (
         batch,
