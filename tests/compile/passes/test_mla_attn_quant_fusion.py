@@ -548,9 +548,7 @@ def test_mla_attention_quant_pattern(
     # Check quantization ops in the graph
     is_per_group = quant_key.scale.group_shape.is_per_group()
 
-    test_backend.check_before_ops(
-        [QUANT_OPS[quant_key]], fully_replaced=is_per_group
-    )
+    test_backend.check_before_ops([QUANT_OPS[quant_key]], fully_replaced=is_per_group)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 

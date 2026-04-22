@@ -21,6 +21,8 @@ _FP8_DTYPE = current_platform.fp8_dtype()
 _FP8_MIN, _FP8_MAX = get_fp8_min_max()
 _FP8_MIN_SCALING_FACTOR = 1.0 / (_FP8_MAX * 512.0)
 
+# TODO: Remove QuantFP8 and directly call ir ops, see #40617 for more details.
+
 
 # --8<-- [start:quant_fp8]
 @CustomOp.register("quant_fp8")

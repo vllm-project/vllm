@@ -91,7 +91,6 @@ def test_dynamic_group_quant_fp8_registration():
     assert actual == expected
 
 
-
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", [1, 8, 12])
 @pytest.mark.parametrize("hidden_size", [128, 256])
@@ -105,7 +104,9 @@ class TestStaticQuantFP8:
     def test_native_semantics(self, dtype, n_tokens, hidden_size, num_token_padding):
         x = torch.randn(n_tokens, hidden_size, dtype=dtype)
         scale = torch.full((1,), 0.5, dtype=torch.float32)
-        expected_tokens = max(num_token_padding, n_tokens) if num_token_padding else n_tokens
+        expected_tokens = (
+            max(num_token_padding, n_tokens) if num_token_padding else n_tokens
+        )
 
         out = static_quant_fp8_native(x, scale, FP8_DTYPE, num_token_padding)
         assert out.shape[0] == expected_tokens
@@ -117,7 +118,10 @@ class TestStaticQuantFP8:
         # Scale invariance: (2x) / (2s) == x / s (valid rows only)
         out2 = static_quant_fp8_native(x * 2, scale * 2, FP8_DTYPE, num_token_padding)
         torch.testing.assert_close(
-            out.to(torch.float32)[:n_tokens], out2.to(torch.float32)[:n_tokens], atol=0.0, rtol=0.0
+            out.to(torch.float32)[:n_tokens],
+            out2.to(torch.float32)[:n_tokens],
+            atol=0.0,
+            rtol=0.0,
         )
 
         # Per-token scale produces correct shape
@@ -139,8 +143,8 @@ class TestStaticQuantFP8:
         args = (x, scale, FP8_DTYPE, num_token_padding)
 
         if provider == AITER and (
-            dtype not in (torch.float16, torch.bfloat16) or
-            num_token_padding is not None
+            dtype not in (torch.float16, torch.bfloat16)
+            or num_token_padding is not None
         ):
             assert not impl.supports_args(*args)
             return
@@ -192,8 +196,6 @@ class TestStaticQuantFP8:
             torch.library.opcheck(torch.ops.vllm_ir.static_quant_fp8, args)
 
 
-
-
 @pytest.mark.parametrize("group_size", [64, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("n_tokens", [1, 8, 12])
@@ -211,9 +213,13 @@ class TestStaticGroupQuantFP8:
         return x, scale
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
-    def test_native_semantics(self, dtype, n_tokens, hidden_size, group_size, num_token_padding):
+    def test_native_semantics(
+        self, dtype, n_tokens, hidden_size, group_size, num_token_padding
+    ):
         x, scale = self._make_inputs(n_tokens, hidden_size, dtype, group_size)
-        expected_tokens = max(num_token_padding, n_tokens) if num_token_padding else n_tokens
+        expected_tokens = (
+            max(num_token_padding, n_tokens) if num_token_padding else n_tokens
+        )
 
         out = static_group_quant_fp8_native(x, scale, FP8_DTYPE, num_token_padding)
         assert out.shape[0] == expected_tokens
@@ -223,14 +229,21 @@ class TestStaticGroupQuantFP8:
         assert out.is_contiguous()
 
         # Scale invariance: (2x) / (2s) == x / s (valid rows only)
-        out2 = static_group_quant_fp8_native(x * 2, scale * 2, FP8_DTYPE, num_token_padding)
+        out2 = static_group_quant_fp8_native(
+            x * 2, scale * 2, FP8_DTYPE, num_token_padding
+        )
         torch.testing.assert_close(
-            out.to(torch.float32)[:n_tokens], out2.to(torch.float32)[:n_tokens], atol=0.0, rtol=0.0
+            out.to(torch.float32)[:n_tokens],
+            out2.to(torch.float32)[:n_tokens],
+            atol=0.0,
+            rtol=0.0,
         )
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
     @pytest.mark.parametrize("provider", [VLLM_C])
-    def test_impls(self, dtype, n_tokens, hidden_size, group_size, num_token_padding, provider):
+    def test_impls(
+        self, dtype, n_tokens, hidden_size, group_size, num_token_padding, provider
+    ):
         impl = ir.ops.static_group_quant_fp8.impls[provider]
         if not impl.supported:
             pytest.skip(f"{provider} impl not supported on this platform")
@@ -292,11 +305,17 @@ class TestDynamicQuantFP8:
         torch.set_default_device(current_platform.device_type)
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
-    def test_native_semantics(self, dtype, n_tokens, hidden_size, per_token, num_token_padding):
+    def test_native_semantics(
+        self, dtype, n_tokens, hidden_size, per_token, num_token_padding
+    ):
         x = torch.randn(n_tokens, hidden_size, dtype=dtype)
-        expected_tokens = max(num_token_padding, n_tokens) if num_token_padding else n_tokens
+        expected_tokens = (
+            max(num_token_padding, n_tokens) if num_token_padding else n_tokens
+        )
 
-        out, scale = dynamic_quant_fp8_native(x, per_token, FP8_DTYPE, num_token_padding=num_token_padding)
+        out, scale = dynamic_quant_fp8_native(
+            x, per_token, FP8_DTYPE, num_token_padding=num_token_padding
+        )
 
         assert out.shape[0] == expected_tokens
         assert out.shape[1:] == x.shape[1:]
@@ -317,7 +336,9 @@ class TestDynamicQuantFP8:
 
     @pytest.mark.parametrize("num_token_padding", [None, 16])
     @pytest.mark.parametrize("provider", [VLLM_C, AITER])
-    def test_impls(self, dtype, n_tokens, hidden_size, per_token, num_token_padding, provider):
+    def test_impls(
+        self, dtype, n_tokens, hidden_size, per_token, num_token_padding, provider
+    ):
         impl = ir.ops.dynamic_quant_fp8.impls[provider]
         if not impl.supported:
             pytest.skip(f"{provider} impl not supported on this platform")
@@ -346,7 +367,9 @@ class TestDynamicQuantFP8:
         # Verify the impl correctly quantizes: dequantized output should approximate
         # the original input regardless of internal precision differences across impls.
         x_deq_impl = out_impl.to(torch.float32)[:n] * scale_impl[:n]
-        torch.testing.assert_close(x_deq_impl, x.to(torch.float32), rtol=0.15, atol=0.01)
+        torch.testing.assert_close(
+            x_deq_impl, x.to(torch.float32), rtol=0.15, atol=0.01
+        )
 
         # Dispatched call must match direct impl exactly (padding rows are
         # uninitialized, so only compare actual token rows)
@@ -358,7 +381,9 @@ class TestDynamicQuantFP8:
             atol=0.0,
             rtol=0.0,
         )
-        torch.testing.assert_close(scale_dispatch[:n], scale_impl[:n], atol=0.0, rtol=0.0)
+        torch.testing.assert_close(
+            scale_dispatch[:n], scale_impl[:n], atol=0.0, rtol=0.0
+        )
 
         # Different inputs must produce different outputs
         args_diff = (x + 1, per_token, FP8_DTYPE, None, num_token_padding)
@@ -394,7 +419,16 @@ class TestDynamicGroupQuantFP8:
     def setup_class(cls, **kwargs):
         torch.set_default_device(current_platform.device_type)
 
-    def test_native_semantics(self, dtype, n_tokens, hidden_size, group_size, column_major, scale_alignment, use_ue8m0):
+    def test_native_semantics(
+        self,
+        dtype,
+        n_tokens,
+        hidden_size,
+        group_size,
+        column_major,
+        scale_alignment,
+        use_ue8m0,
+    ):
         x = torch.randn(n_tokens, hidden_size, dtype=dtype)
         group_shape = [group_size]
         n_groups = hidden_size // group_size
@@ -402,7 +436,6 @@ class TestDynamicGroupQuantFP8:
         x_q, x_s = dynamic_group_quant_fp8_native(
             x, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment
         )
-        
 
         assert x_q.shape == x.shape
         assert x_q.dtype == FP8_DTYPE
@@ -428,7 +461,15 @@ class TestDynamicGroupQuantFP8:
 
     @pytest.mark.parametrize("provider", [VLLM_C, AITER, TRITON, XPU_KERNELS])
     def test_impls(
-        self, dtype, n_tokens, hidden_size, group_size, column_major, scale_alignment, use_ue8m0, provider
+        self,
+        dtype,
+        n_tokens,
+        hidden_size,
+        group_size,
+        column_major,
+        scale_alignment,
+        use_ue8m0,
+        provider,
     ):
         impl = ir.ops.dynamic_group_quant_fp8.impls[provider]
         if not impl.supported:
@@ -459,12 +500,14 @@ class TestDynamicGroupQuantFP8:
             tma_m = get_tma_aligned_size(n_tokens, scale_alignment)
             assert x_s_impl.stride() == (1, tma_m)
 
-        # Dequantized output should approximate the original input 
+        # Dequantized output should approximate the original input
         # regardless of the precision differences across impls.
-        x_deq_impl = x_q_impl.to(torch.float32) * x_s_impl.contiguous().repeat_interleave(
-            group_size, dim=-1
+        x_deq_impl = x_q_impl.to(
+            torch.float32
+        ) * x_s_impl.contiguous().repeat_interleave(group_size, dim=-1)
+        torch.testing.assert_close(
+            x_deq_impl, x.to(torch.float32), rtol=0.15, atol=0.01
         )
-        torch.testing.assert_close(x_deq_impl, x.to(torch.float32), rtol=0.15, atol=0.01)
 
         # Dispatched call must match direct impl exactly
         with ir.ops.dynamic_group_quant_fp8.set_priority([provider, NATIVE]):
@@ -483,7 +526,14 @@ class TestDynamicGroupQuantFP8:
         )
 
         # Different inputs must produce different outputs
-        args_diff = (x + 1, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
+        args_diff = (
+            x + 1,
+            group_shape,
+            column_major,
+            use_ue8m0,
+            FP8_DTYPE,
+            scale_alignment,
+        )
         x_q_impl_diff, _ = impl.impl_fn(*args_diff)
         assert not torch.all(
             x_q_impl.to(torch.float32) == x_q_impl_diff.to(torch.float32)
@@ -492,20 +542,37 @@ class TestDynamicGroupQuantFP8:
         # Verify key supports_args rejections per provider
         if provider == AITER:
             # aiter requires group_size == 128
-            assert not impl.supports_args(x, [64], column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
+            assert not impl.supports_args(
+                x, [64], column_major, use_ue8m0, FP8_DTYPE, scale_alignment
+            )
         if provider == TRITON:
             # triton rejects fnuz dtype
             assert not impl.supports_args(
-                x, group_shape, column_major, use_ue8m0, torch.float8_e4m3fnuz, scale_alignment
+                x,
+                group_shape,
+                column_major,
+                use_ue8m0,
+                torch.float8_e4m3fnuz,
+                scale_alignment,
             )
         if provider == VLLM_C:
             # vllm_c rejects non-contiguous inputs
             x_nc = x.t().contiguous().t()
-            assert not impl.supports_args(x_nc, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment)
+            assert not impl.supports_args(
+                x_nc, group_shape, column_major, use_ue8m0, FP8_DTYPE, scale_alignment
+            )
 
     @pytest.mark.parametrize("provider", [VLLM_C, AITER, TRITON, XPU_KERNELS, NATIVE])
     def test_torch_opcheck(
-        self, dtype, n_tokens, hidden_size, group_size, column_major, scale_alignment, use_ue8m0, provider
+        self,
+        dtype,
+        n_tokens,
+        hidden_size,
+        group_size,
+        column_major,
+        scale_alignment,
+        use_ue8m0,
+        provider,
     ):
         if not ir.ops.dynamic_group_quant_fp8.impls[provider].supported:
             pytest.skip(f"{provider} impl not supported on this platform")
