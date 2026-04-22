@@ -51,6 +51,26 @@ decode_session: aiohttp.ClientSession | None = None
 
 
 MM_TYPES = {"image_url", "audio_url", "input_audio"}
+SAMPLING_PARAM_KEYS = (
+    "temperature",
+    "top_p",
+    "top_k",
+    "min_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "repetition_penalty",
+    "seed",
+    "stop",
+    "stop_token_ids",
+    "ignore_eos",
+    "include_stop_str_in_output",
+)
+
+
+def copy_sampling_params(source: dict, target: dict) -> None:
+    for key in SAMPLING_PARAM_KEYS:
+        if key in source:
+            target[key] = source[key]
 
 
 def extract_mm_items(request_data: dict) -> list[dict]:
@@ -115,6 +135,7 @@ async def fanout_encoder_primer(
             "max_tokens": 1,
             "stream": False,
         }
+        copy_sampling_params(orig_request, encoder_req)
         tasks.append(
             encode_session.post(
                 f"{target_url}/v1/chat/completions",
