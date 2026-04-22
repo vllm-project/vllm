@@ -142,6 +142,33 @@ def bundle_tcmalloc(build_lib: str) -> None:
     logger.info("Bundled tcmalloc into wheel: %s", bundle_path)
 
 
+def compile_render_protos() -> bool:
+    """Compile vLLM render protobuf definitions during build.
+
+    Runs the compile_protos.py helper so editable installs and wheels both
+    ship the generated vllm_render_pb2{.py,_grpc.py,.pyi} files. Failures
+    are logged but non-fatal — the generated files can always be produced
+    later by running the script directly.
+    """
+    try:
+        script = ROOT_DIR / "vllm" / "entrypoints" / "grpc" / "compile_protos.py"
+        proto_file = script.parent / "vllm_render.proto"
+        if not script.exists() or not proto_file.exists():
+            return False
+
+        import runpy
+
+        namespace = runpy.run_path(str(script))
+        rc = namespace["compile_protos"]()
+        if rc != 0:
+            logger.warning("Render proto compilation returned %s", rc)
+            return False
+        return True
+    except Exception as exc:  # pragma: no cover - build-time safety net
+        logger.warning("Render proto compilation skipped: %s", exc)
+        return False
+
+
 class CMakeExtension(Extension):
     def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
         super().__init__(name, sources=[], py_limited_api=not is_freethreaded(), **kwa)
@@ -1077,6 +1104,8 @@ else:
         if envs.VLLM_USE_PRECOMPILED
         else cmake_build_ext,
     }
+
+compile_render_protos()
 
 setup(
     # static metadata should rather go in pyproject.toml
