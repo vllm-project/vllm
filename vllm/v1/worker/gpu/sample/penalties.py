@@ -284,8 +284,13 @@ def bincount(
     output_bin_counts: torch.Tensor,
     max_prefill_len: int,
 ) -> None:
-    prompt_bin_mask[expanded_idx_mapping] = 0
-    output_bin_counts[expanded_idx_mapping] = 0
+    # Use index_fill_ (which needs int64 indices) instead of
+    # `tensor[idx] = 0`: advanced-indexing scalar assignment lowers to
+    # aten::index_put_ on CUDA, which forces a host sync even with a
+    # GPU-resident index tensor. index_fill_ has no such sync.
+    idx_long = expanded_idx_mapping.long()
+    prompt_bin_mask.index_fill_(0, idx_long, 0)
+    output_bin_counts.index_fill_(0, idx_long, 0)
     num_tokens = expanded_idx_mapping.shape[0]
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
