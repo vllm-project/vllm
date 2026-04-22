@@ -846,6 +846,63 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_fake(
     )
 
 
+def _rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_impl(
+    q_c: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_c: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    group_size: int,
+    transpose_scale: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused dual RMSNorm for MLA.
+
+    Fuses RMSNorm on q_c and kv_c. Returns unquantized BF16 outputs to allow
+    Linear layers to choose optimal quantization strategy and avoid forcing
+    block-scaled GEMM.
+
+    Returns:
+        (q_c_normed, None, kv_c_normed)
+    """
+    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+
+    _, q_c_normed, kv_c_normed, _ = fused_rms_fp8_group_quant(
+        q_c,
+        q_a_layernorm_weight,
+        q_a_layernorm_variance_epsilon,
+        kv_c,
+        kv_a_layernorm_weight,
+        kv_a_layernorm_variance_epsilon,
+        group_size,
+        FP8_DTYPE,
+        None,
+        True,  # output_unquantized_inp1 - return BF16 instead of FP8
+        transpose_scale,
+    )
+    return q_c_normed, None, kv_c_normed
+
+
+def _rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_fake(
+    q_c: torch.Tensor,
+    q_a_layernorm_weight: torch.Tensor,
+    q_a_layernorm_variance_epsilon: float,
+    kv_c: torch.Tensor,
+    kv_a_layernorm_weight: torch.Tensor,
+    kv_a_layernorm_variance_epsilon: float,
+    group_size: int,
+    transpose_scale: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fake implementation for torch.compile/CUDA graphs.
+
+    Returns unquantized BF16 outputs (just RMSNorm) to match real implementation.
+    """
+    # Return BF16 RMSNorm outputs, no quantization or scales
+    out1_normed = torch.empty_like(q_c)  # BF16 q_c after RMSNorm
+    out2_normed = torch.empty_like(kv_c)  # BF16 kv_c after RMSNorm
+    return out1_normed, None, out2_normed
+
+
 def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -1488,6 +1545,12 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
+                op_name="rocm_aiter_mla_dual_rmsnorm_fp8_group_quant",
+                op_func=_rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_impl,
+                fake_impl=_rocm_aiter_mla_dual_rmsnorm_fp8_group_quant_fake,
+            )
+
+            direct_register_custom_op(
                 op_name="rocm_aiter_act_mul_and_fp8_group_quant",
                 op_func=_rocm_aiter_act_mul_and_fp8_group_quant_impl,
                 fake_impl=_rocm_aiter_act_mul_and_fp8_group_quant_fake,
@@ -1577,6 +1640,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_rmsnorm_group_add_fused_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_rmsnorm_with_add_fp8_group_quant.default
+
+    @staticmethod
+    def get_mla_dual_rmsnorm_fp8_group_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_mla_dual_rmsnorm_fp8_group_quant.default
 
     @staticmethod
     def get_per_token_quant_op() -> OpOverload:
