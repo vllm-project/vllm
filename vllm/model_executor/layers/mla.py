@@ -105,6 +105,21 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             self.topk_tokens = self.indexer.topk_tokens
             self.topk_indices_buffer = mla_modules.topk_indices_buffer
 
+        # Extract RoPE caches for AITER fused kernels
+        if self.rotary_emb is not None:
+            # RoPE stores combined cos_sin_cache, need to split it
+            # Format: [seq_len, rotary_dim] where first half is cos, second half is sin
+            cos_sin_cache = self.rotary_emb.cos_sin_cache
+            rotary_dim = self.rotary_emb.rotary_dim
+            half_dim = rotary_dim // 2
+            self.cos_cache = cos_sin_cache[:, :half_dim]
+            self.sin_cache = cos_sin_cache[:, half_dim:]
+            self.is_neox_style = self.rotary_emb.is_neox_style
+        else:
+            self.cos_cache = None
+            self.sin_cache = None
+            self.is_neox_style = False
+
         self.mla_attn = MLAAttention(
             num_heads=self.num_heads,
             scale=scale,
@@ -119,6 +134,12 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_b_proj=self.kv_b_proj,
             use_sparse=self.is_sparse,
             indexer=self.indexer,
+            # Pass RoPE caches for AITER fused kernels
+            cos_cache=self.cos_cache,
+            sin_cache=self.sin_cache,
+            is_neox_style=self.is_neox_style,
+            # Pass RoPE module (static, doesn't change)
+            rotary_emb=self.rotary_emb,
         )
 
         self.prefix = prefix
@@ -215,10 +236,27 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         # Add head dim of 1 to k_pe
         k_pe = k_pe.unsqueeze(1)
 
+        # Check if we can use fused path (RoPE+KV cache fusion)
+        can_use_fused_path = (
+            hasattr(self.mla_attn, "use_aiter_fused")
+            and self.mla_attn.use_aiter_fused  # Platform supports fused kernel
+            and positions is not None  # Required for RoPE
+            and self.rotary_emb is not None  # RoPE module available
+        )
+
+        # Apply RoPE based on fused vs unfused path
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            if can_use_fused_path:
+                # FUSED PATH: Skip RoPE here, custom op will apply it
+                # RoPE will be applied inside the fused kernel along with KV cache write
+                pass
+            else:
+                # UNFUSED PATH: Apply RoPE to ALL tokens
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions,
+                    q[..., self.qk_nope_head_dim :],  # Q PE part gets RoPE
+                    k_pe,  # K PE gets RoPE
+                )
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
@@ -229,10 +267,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             q *= llama_4_scaling
 
         attn_out = self.mla_attn(
-            q,
+            q,  # Has RoPE if unfused, NO RoPE if fused
             kv_c_normed,
-            k_pe,
+            k_pe,  # Has RoPE if unfused, NO RoPE if fused
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            positions=positions,
+            slot_mapping=None,  # Retrieved from attn_metadata in mla_attention.py
+            use_fused_path=can_use_fused_path,  # Single flag for entire forward pass
+            rotary_emb=self.rotary_emb,
         )
 
         return self.o_proj(attn_out)[0]
