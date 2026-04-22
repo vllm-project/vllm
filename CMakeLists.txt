@@ -1231,6 +1231,29 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+
+  #
+  # _tq_k8v4_C extension — TurboQuant k8v4 HIP paged attention kernel.
+  # Only built for gfx942 (MI300X) and gfx950 (MI355X).
+  #
+  set(VLLM_TQ_K8V4_ARCHS)
+  foreach(_arch ${VLLM_GPU_ARCHES})
+    if(_arch MATCHES "gfx942" OR _arch MATCHES "gfx950")
+      list(APPEND VLLM_TQ_K8V4_ARCHS ${_arch})
+    endif()
+  endforeach()
+
+  if(VLLM_TQ_K8V4_ARCHS)
+    define_extension_target(
+      _tq_k8v4_C
+      DESTINATION vllm
+      LANGUAGE ${VLLM_GPU_LANG}
+      SOURCES "csrc/rocm/tq_k8v4_paged_attention.hip"
+      COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+      ARCHITECTURES ${VLLM_TQ_K8V4_ARCHS}
+      USE_SABI 3
+      WITH_SOABI)
+  endif()
 endif()
 
 # For CUDA and HIP builds also build the triton_kernels external package.

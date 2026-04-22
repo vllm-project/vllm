@@ -5,11 +5,16 @@ on AMD MI300X (gfx942) and MI355X (gfx950) GPUs. Uses a hybrid dispatch:
   - Per-Q-head kernel with grid split-K for low batch / short context
   - MFMA GQA kernel for high batch + long context
 
-The kernel is compiled at first use via torch.utils.cpp_extension and
-cached for subsequent calls.
+Limitations:
+  - HEAD_DIM must be 128 (hardcoded in the HIP kernel).
+  - GQA ratio (num_query_heads / num_kv_heads) must be <= 16.
+  - Only supported on gfx942 and gfx950 architectures.
+
+The kernel is loaded from the prebuilt vLLM extension (_tq_k8v4_C) when
+available, or compiled at first use via torch.utils.cpp_extension as a
+fallback.
 """
 
-import ctypes
 import glob
 import logging
 import os
@@ -22,9 +27,32 @@ logger = logging.getLogger(__name__)
 
 _tq_k8v4_loaded = False
 
+# Supported GPU architectures for the TQ k8v4 HIP kernel.
+_SUPPORTED_ARCHS = {"gfx942", "gfx950"}
+
+
+def _get_rocm_arch() -> str:
+    """Return the GCN architecture name of the current GPU (e.g. 'gfx942')."""
+    try:
+        props = torch.cuda.get_device_properties(0)
+        gcn_arch = getattr(props, "gcnArchName", "")
+        # gcnArchName is e.g. "gfx942:sramecc+:xnack-"
+        return gcn_arch.split(":")[0]
+    except Exception:
+        return ""
+
+
+def is_tq_k8v4_supported() -> bool:
+    """Check if the current GPU supports the TQ k8v4 HIP kernel."""
+    arch = _get_rocm_arch()
+    return arch in _SUPPORTED_ARCHS
+
 
 def _load_tq_k8v4_kernel() -> bool:
-    """Build and load the TQ k8v4 HIP paged attention kernel.
+    """Load the TQ k8v4 HIP paged attention kernel.
+
+    Tries the prebuilt _tq_k8v4_C extension first (shipped with vLLM
+    when built for gfx942/gfx950), then falls back to JIT compilation.
 
     Returns True if the kernel is loaded and ready.
     """
@@ -32,59 +60,76 @@ def _load_tq_k8v4_kernel() -> bool:
     if _tq_k8v4_loaded:
         return True
 
-    if not hasattr(torch.ops, "tq_k8v4") or not hasattr(
+    arch = _get_rocm_arch()
+    if arch not in _SUPPORTED_ARCHS:
+        logger.warning(
+            "TQ k8v4 HIP kernel not supported on %s. "
+            "Supported architectures: %s",
+            arch or "unknown GPU",
+            ", ".join(sorted(_SUPPORTED_ARCHS)),
+        )
+        return False
+
+    # Check if the op is already registered (e.g. from prebuilt extension).
+    if hasattr(torch.ops, "tq_k8v4") and hasattr(
         torch.ops.tq_k8v4, "paged_attention"
     ):
-        hip_src = Path(__file__).parent / "tq_k8v4_rocm_decode.hip"
-        if not hip_src.exists():
-            logger.warning("TQ k8v4 HIP kernel source not found: %s", hip_src)
-            return False
+        _tq_k8v4_loaded = True
+        logger.info("TQ k8v4 HIP kernel already registered (prebuilt)")
+        return True
 
-        # Detect GPU architecture
-        arch = "gfx942"  # default
-        try:
-            props = torch.cuda.get_device_properties(0)
-            if hasattr(props, "gcnArchName"):
-                arch = props.gcnArchName.split(":")[0]
-        except Exception:
-            pass
+    # Try loading the prebuilt extension shipped with vLLM.
+    try:
+        import vllm._tq_k8v4_C  # noqa: F401
 
-        # gfx942 needs -O2 (hipcc crashes with -O3 on large kernels)
-        opt_level = "-O2" if arch == "gfx942" else "-O3"
+        _tq_k8v4_loaded = True
+        logger.info("TQ k8v4 HIP kernel loaded from prebuilt _tq_k8v4_C")
+        return True
+    except ImportError:
+        logger.debug("Prebuilt _tq_k8v4_C not found, trying JIT compilation")
 
-        try:
-            import torch.utils.cpp_extension as ext
+    # Fallback: JIT compile from source.
+    hip_src = Path(__file__).parent / "tq_k8v4_rocm_decode.hip"
+    if not hip_src.exists():
+        logger.warning("TQ k8v4 HIP kernel source not found: %s", hip_src)
+        return False
 
-            os.environ["PYTORCH_ROCM_ARCH"] = arch
-            ext.load(
-                name=f"tq_k8v4_pa_{arch}",
-                sources=[str(hip_src)],
-                extra_cuda_cflags=[f"--offload-arch={arch}", opt_level],
-                verbose=False,
-                is_python_module=False,
-            )
+    # gfx942 needs -O2 (hipcc crashes with -O3 on large kernels)
+    opt_level = "-O2" if arch == "gfx942" else "-O3"
 
-            # Find and cache the built .so
-            cache_dir = Path.home() / ".cache" / "vllm" / "tq_k8v4"
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            so_path = cache_dir / f"tq_k8v4_pa_{arch}.so"
+    try:
+        import torch.utils.cpp_extension as ext
 
-            sos = glob.glob(
-                str(
-                    Path.home()
-                    / ".cache"
-                    / "torch_extensions"
-                    / f"**/tq_k8v4_pa_{arch}*.so"
-                ),
-                recursive=True,
-            )
-            if sos:
-                shutil.copy2(sos[0], so_path)
+        os.environ["PYTORCH_ROCM_ARCH"] = arch
+        ext.load(
+            name=f"tq_k8v4_pa_{arch}",
+            sources=[str(hip_src)],
+            extra_cuda_cflags=[f"--offload-arch={arch}", opt_level],
+            verbose=False,
+            is_python_module=False,
+        )
 
-            logger.info("TQ k8v4 HIP kernel built for %s: %s", arch, so_path)
-        except Exception as e:
-            logger.warning("Failed to build TQ k8v4 HIP kernel: %s", e)
-            return False
+        # Find and cache the built .so
+        cache_dir = Path.home() / ".cache" / "vllm" / "tq_k8v4"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        so_path = cache_dir / f"tq_k8v4_pa_{arch}.so"
+
+        sos = glob.glob(
+            str(
+                Path.home()
+                / ".cache"
+                / "torch_extensions"
+                / f"**/tq_k8v4_pa_{arch}*.so"
+            ),
+            recursive=True,
+        )
+        if sos:
+            shutil.copy2(sos[0], so_path)
+
+        logger.info("TQ k8v4 HIP kernel JIT-compiled for %s: %s", arch, so_path)
+    except Exception as e:
+        logger.warning("Failed to build TQ k8v4 HIP kernel: %s", e)
+        return False
 
     _tq_k8v4_loaded = True
     logger.info("TQ k8v4 HIP kernel loaded")
@@ -115,9 +160,19 @@ def tq_k8v4_rocm_decode_attention(
 
     Returns:
         Output tensor [B, Hq, D] in same dtype as query.
+
+    Raises:
+        RuntimeError: If the HIP kernel is not available (unsupported arch
+            or build failure).
+        ValueError: If head_dim != 128 or GQA ratio > 16.
     """
     if not _load_tq_k8v4_kernel():
-        raise RuntimeError("TQ k8v4 HIP kernel not available")
+        raise RuntimeError(
+            "TQ k8v4 HIP kernel not available. "
+            f"Current GPU arch: {_get_rocm_arch()!r}. "
+            f"Supported: {', '.join(sorted(_SUPPORTED_ARCHS))}. "
+            "Falling back to Triton is recommended."
+        )
 
     B, Hq, D = query.shape
     Hk = kv_cache.shape[2]
@@ -127,13 +182,15 @@ def tq_k8v4_rocm_decode_attention(
     if D != 128:
         raise ValueError(
             f"TQ k8v4 HIP kernel requires head_dim=128, got {D}. "
-            "Falling back to Triton is recommended for other head dims."
+            "The MFMA instructions and register layout are hardcoded for "
+            "128-dimensional heads. Use the Triton kernel for other sizes."
         )
     if gqa_ratio > 16:
         raise ValueError(
-            f"TQ k8v4 HIP MFMA kernel supports GQA ratio ≤ 16, "
+            f"TQ k8v4 HIP MFMA kernel supports GQA ratio <= 16, "
             f"got {gqa_ratio} (Hq={Hq}, Hk={Hk}). "
-            "Falling back to Triton is recommended."
+            "The 16x16 MFMA tile maps up to 16 Q-heads per KV-head. "
+            "Use the Triton kernel for larger GQA ratios."
         )
 
     if output_buf is not None and output_buf.shape[0] >= B:
