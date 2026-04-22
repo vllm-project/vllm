@@ -29,6 +29,7 @@ if not SUPPORTED_BACKENDS:
         allow_module_level=True,
     )
 
+
 @torch.inference_mode()
 def test_flashinfer_bf16_gemm_matches_linear() -> None:
     backend = next(
@@ -39,8 +40,10 @@ def test_flashinfer_bf16_gemm_matches_linear() -> None:
 
     x = torch.randn((48, 128), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn((96, 128), dtype=torch.bfloat16, device="cuda")
-    bias = None if backend == "cutlass" else torch.randn(
-        (96,), dtype=torch.bfloat16, device="cuda"
+    bias = (
+        None
+        if backend == "cutlass"
+        else torch.randn((96,), dtype=torch.bfloat16, device="cuda")
     )
 
     expected = torch.nn.functional.linear(x, weight, bias)

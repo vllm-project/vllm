@@ -28,9 +28,7 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_uses_flashinfer_on_sm100(
     )
 
     flashinfer_mm_mock = MagicMock(side_effect=_mock_flashinfer_mm)
-    monkeypatch.setattr(
-        "vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True
-    )
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True)
     monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
     out = utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, None)
@@ -49,12 +47,12 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_allows_forced_cudnn_off_sm100(
     expected = torch.nn.functional.linear(x, weight, bias)
 
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: False)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability_family", lambda _: False
+    )
 
     flashinfer_mm_mock = MagicMock(side_effect=_mock_flashinfer_mm)
-    monkeypatch.setattr(
-        "vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True
-    )
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True)
     monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
     out = utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, "cudnn")
@@ -83,10 +81,10 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_propagates_forced_backend(
     flashinfer_mm_mock = MagicMock(side_effect=RuntimeError("backend unsupported"))
 
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
-    monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: False)
     monkeypatch.setattr(
-        "vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True
+        current_platform, "is_device_capability_family", lambda _: False
     )
+    monkeypatch.setattr("vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True)
     monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
     with pytest.raises(RuntimeError, match="backend unsupported"):
