@@ -40,7 +40,7 @@ def _matmul_launch_metadata(
 
 
 @triton.jit
-def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS):
+def _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M):
     group_id = tile_id // num_pid_in_group
     first_pid_m = group_id * GROUP_SIZE_M
     group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
@@ -86,9 +86,7 @@ def matmul_kernel_persistent(
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
 
     for tile_id in tl.range(start_pid, num_tiles, NUM_SMS, flatten=True):
-        pid_m, pid_n = _compute_pid(
-            tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS
-        )
+        pid_m, pid_n = _compute_pid(tile_id, num_pid_in_group, num_pid_m, GROUP_SIZE_M)
         start_m = pid_m * BLOCK_SIZE_M
         start_n = pid_n * BLOCK_SIZE_N
         offs_am = start_m + tl.arange(0, BLOCK_SIZE_M)
@@ -125,7 +123,7 @@ def matmul_kernel_persistent(
 
         tile_id_c += NUM_SMS
         pid_m, pid_n = _compute_pid(
-            tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M, NUM_SMS
+            tile_id_c, num_pid_in_group, num_pid_m, GROUP_SIZE_M
         )
         offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
         offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)

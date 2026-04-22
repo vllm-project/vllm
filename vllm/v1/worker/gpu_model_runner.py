@@ -3345,7 +3345,6 @@ class GPUModelRunner(
         logits: torch.Tensor | None,
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
-        spec_decode_metadata: SpecDecodeMetadata | None,
     ) -> tuple[
         dict[str, int],
         LogprobsLists | None,
@@ -3613,7 +3612,6 @@ class GPUModelRunner(
                     allow_microbatching=allow_microbatching,
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
-                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
                     cudagraph_mode=cudagraph_mode.value,
                 )
             )
@@ -4291,7 +4289,6 @@ class GPUModelRunner(
                 logits,
                 hidden_states,
                 scheduler_output.total_num_scheduled_tokens,
-                spec_decode_metadata,
             )
 
         if propose_drafts_after_bookkeeping:
@@ -6528,7 +6525,6 @@ class GPUModelRunner(
 
     def _reshape_kv_cache_tensors(
         self,
-        kv_cache_config: KVCacheConfig,
         kv_cache_raw_tensors: dict[str, torch.Tensor],
         kernel_block_sizes: list[int],
     ) -> dict[str, torch.Tensor]:
@@ -6536,7 +6532,6 @@ class GPUModelRunner(
         Reshape the KV cache tensors to the desired shape and dtype.
 
         Args:
-            kv_cache_config: The KV cache config
             kv_cache_raw_tensors: The KV cache buffer of each layer, with
                 correct size but uninitialized shape.
             kernel_block_sizes: The kernel block sizes for each KV cache group.
@@ -6700,7 +6695,7 @@ class GPUModelRunner(
 
             # Change the memory buffer to the desired shape
             kv_caches = self._reshape_kv_cache_tensors(
-                kv_cache_config, kv_cache_raw_tensors, kernel_block_sizes
+                kv_cache_raw_tensors, kernel_block_sizes
             )
 
         # Set up cross-layer KV cache sharing
