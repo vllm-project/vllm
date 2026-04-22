@@ -25,13 +25,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
-from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
 
 class Int8MoeBackend(Enum):
-    NONE = "NONE"
     TRITON = "TRITON"
 
 
@@ -75,7 +73,7 @@ def select_int8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None = kInt8StaticChannelSym,
     activation_key: QuantKey | None = kInt8DynamicTokenSym,
-) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts] | None]:
+) -> tuple[Int8MoeBackend, type[mk.FusedMoEExperts]]:
     """
     Select the primary Int8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
@@ -145,12 +143,9 @@ def select_int8_moe_backend(
             else:
                 logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
 
-    if current_platform.is_cuda() or current_platform.is_rocm():
-        raise NotImplementedError(
-            "No Int8 MoE backend supports the deployment configuration."
-        )
-
-    return Int8MoeBackend.NONE, None
+    raise NotImplementedError(
+        "No Int8 MoE backend supports the deployment configuration."
+    )
 
 
 def make_int8_moe_quant_config(
