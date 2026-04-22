@@ -1,355 +1,197 @@
-# LLM-Based Test Target Determination for vLLM CI
+# LLM-Assisted Test Target Determination
 
-## 1. Problem Statement
+## Objective
 
-### Current Approach
+Select the right set of tests to run for each PR, reducing CI waste without
+missing regressions.
 
-vLLM's CI pipeline uses **static `source_file_dependencies`** in 27 YAML files (`test_areas/*.yaml`) to decide which of the ~150 test jobs to run for a given PR. The external pipeline generator in `vllm-project/ci-infra` compares PR changed files against these path patterns using substring matching.
+Today, vLLM CI uses manually maintained `source_file_dependencies` lists in
+YAML configs to decide which tests to trigger. These lists are static, go stale
+as code evolves, and are either too broad (wasting GPU hours) or too narrow
+(missing affected tests). There is no systematic way to keep them in sync with
+the codebase.
 
-### Pain Points
+This design replaces that approach with a two-part system:
 
-| Problem | Impact |
-|---------|--------|
-| **Over-broad dependencies** — ~30 jobs list `vllm/` as a dependency, triggering on *any* source change | Wasted GPU compute on irrelevant tests; slower CI feedback loop |
-| **No semantic understanding** — substring matching can't reason about what a change actually affects | A one-line fix in `vllm/config/model.py` triggers the same jobs as a rewrite of the config module |
-| **Cross-cutting changes are blind spots** — changes to `vllm/utils/`, `vllm/config/`, `vllm/forward_context.py` have no intelligent mapping | Either runs too few tests (misses regressions) or too many (wastes resources) |
-| **Manual maintenance burden** — every new test file, source module, or refactor requires updating YAML dependencies | Dependencies drift over time; new files silently get missed |
-| **No learning or adaptation** — the system can't improve from past CI failures or test outcomes | Same mistakes repeat; no feedback loop |
+1. **Static import analysis** generates an objective, code-derived mapping from
+   source directories to test directories. It runs fresh on every invocation,
+   so it never goes stale.
+2. **An LLM (Claude Haiku)** combines that mapping with a small set of static
+   rules to produce a final test selection. The LLM handles judgment calls the
+   mapping cannot: non-Python file changes, unmapped subprocess-based tests,
+   and ambiguous edge cases.
 
-### Example: A Small Change Triggers Everything
-
-A PR that fixes a typo in `vllm/entrypoints/openai/serving_chat.py` currently triggers:
-- All Entrypoints jobs (correct)
-- All Models jobs (unnecessary -- they list `vllm/` as dependency)
-- Engine, Misc, and many other groups (unnecessary)
-
-This results in 50+ jobs when only 5-10 are relevant.
-
----
-
-## 2. Proposed Solution
-
-Add an **LLM-based test selector** that analyzes PR diffs semantically and determines which CI jobs to run. It augments (not replaces) the existing `source_file_dependencies` system.
-
-### High-Level Architecture
+## Architecture
 
 ```
-.buildkite/scripts/
-    llm_test_selector.py              # CLI entry point
-    llm_test_selector/                # Python package
-        config.py                     # Provider config (Claude/GPT, API keys)
-        diff_parser.py                # PR diff retrieval
-        codebase_map.py               # Codebase structure map generator
-        context_builder.py            # Assemble LLM context within token budget
-        label_registry.py             # Canonical job labels from test_areas/*.yaml
-        prompt.py                     # Prompt templates
-        llm_client.py                 # Provider-agnostic LLM client
-        response_parser.py            # Parse + validate LLM JSON output
-        fallback.py                   # Graceful degradation
-    llm_test_selector_config.yaml     # Configuration
+PR opened / updated
+        |
+        v
++------------------+
+|  select_tests.sh |  (orchestrator)
++------------------+
+        |
+        |--- Step 1: git diff → list of changed files
+        |
+        |--- Step 2: python3 build_test_mapping.py
+        |            (AST-based import analysis → source→test mapping table)
+        |
+        |--- Step 3: read TEST_SELECTION.md
+        |            (static rules for edge cases the mapping can't cover)
+        |
+        |--- Step 4: claude -p --model haiku
+        |            (LLM combines mapping + rules + changed files → test list)
+        |
+        |--- Step 5: parse output, build PR comment
+        |
+        |--- Step 6: gh pr comment (post to PR for author review)
+        |
+        v
+  PR comment with suggested test targets
 ```
 
-### Core Idea
+## Components
 
-The LLM receives three pieces of context:
-1. **PR diff** — what changed
-2. **Test job catalog** — compressed list of all ~150 job labels with their source dependencies
-3. **Codebase structure map** — module layout and cross-cutting dependency hints
+### 1. `build_test_mapping.py` — Static Import Analysis
 
-It returns a JSON list of job labels to run. The pipeline generator unions this with the existing `source_file_dependencies` result.
+**Location:** `.buildkite/scripts/build_test_mapping.py`
 
----
+Produces a markdown table mapping source directories (e.g., `vllm/config/`) to
+test directories (e.g., `tests/basic_correctness/`, `tests/v1/e2e/`, ...).
 
-## 3. Flow Diagrams
+Resolves three layers of dependencies for each test file:
 
-### 3.1 End-to-End CI Flow
+| Layer | What it captures | How |
+|---|---|---|
+| Direct imports | `test_foo.py` does `from vllm.config import X` | AST parsing of `import` / `from...import` statements |
+| Conftest fixtures | `test_foo.py` uses a pytest fixture defined in a `conftest.py` that imports `vllm.*` | Walk the conftest chain (directory + parents), match fixture names to test function parameters |
+| Transitive helpers | `test_foo.py` imports `tests.utils` which imports `vllm.entrypoints` | Build index of all `tests/*.py` helper modules, recursively follow `tests.*` imports (up to depth 10, with cycle detection) |
 
-```mermaid
-flowchart TB
-    PR["Developer opens/updates PR"] --> BK["Buildkite pipeline triggered"]
-    BK --> PG["Pipeline Generator<br/>(ci-infra repo)"]
+**Coverage:** 98% of test files (865 of 882). The remaining 17 are
+subprocess/HTTP-based tests with no Python-level `vllm` imports.
 
-    PG --> SD["source_file_dependencies<br/>matching (existing)"]
-    PG --> LLM["LLM Test Selector<br/>(new script)"]
+**Maintenance:** None. The script reads the current source tree on every run.
+When tests are added, removed, or refactored, the mapping updates
+automatically.
 
-    SD --> |"matched job labels"| UNION["Union of results"]
-    LLM --> |"selected job labels"| UNION
+### 2. `TEST_SELECTION.md` — Static Rules
 
-    UNION --> FINAL["Final job list"]
-    FINAL --> JOBS["Run selected<br/>Buildkite test jobs"]
+**Location:** `.buildkite/TEST_SELECTION.md`
 
-    style LLM fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    style UNION fill:#fff3e0,stroke:#f57c00,stroke-width:2px
-    style SD fill:#f3f3f3,stroke:#999
-```
+A small instruction file containing only rules that the auto-generated mapping
+**cannot** derive from code:
 
-### 3.2 LLM Selector Internal Flow
+| Rule | Purpose |
+|---|---|
+| Rule 1: Use mapping as baseline | Tells the LLM how to interpret the mapping table (match at directory level) |
+| Rule 2: Manual entries | Maps 8 tests that have no `vllm.*` imports (subprocess/HTTP tests, `forward_context` gap) |
+| Rule 3: Non-Python files | Maps `csrc/`, `CMakeLists.txt`, `pyproject.toml`, `requirements/`, docs, `.md` to appropriate test areas |
+| Rule 4: When in doubt, include | Sets error bias toward inclusion (`tests/basic_correctness/` as default) |
+| Rule 5: Large PRs | Heuristic: 20+ files across 5+ dirs triggers `tests/basic_correctness/` + `tests/v1/e2e/` |
 
-```mermaid
-flowchart TD
-    START["llm_test_selector.py<br/>invoked with --pr-number"] --> CONFIG["Load config<br/>(provider, model, keys)"]
-    CONFIG --> REGISTRY["Build Label Registry<br/>Parse all test_areas/*.yaml<br/>Extract ~150 valid job labels"]
-    REGISTRY --> DIFF["Get PR Diff<br/>(GitHub API or git diff)"]
+Also contains a strict output format specification that constrains the LLM
+response to parseable `test_path | reason` lines.
 
-    DIFF --> RUNALL{"Changed files match<br/>run_all_patterns?<br/>(Dockerfile, CMakeLists,<br/>setup.py, csrc/)"}
+### 3. `select_tests.sh` — Orchestrator
 
-    RUNALL -->|"Yes"| ALLOUT["Output: __RUN_ALL__<br/>mode: run_all_pattern"]
+**Location:** `.buildkite/scripts/select_tests.sh`
 
-    RUNALL -->|"No"| CONTEXT["Build LLM Context"]
+End-to-end shell script that ties everything together:
 
-    CONTEXT --> MAP["Generate codebase map<br/>(module tree + cross-cutting deps)"]
-    CONTEXT --> CATALOG["Build compressed job catalog<br/>(label + deps, ~3.5K tokens)"]
-    CONTEXT --> CDIFF["Condense diff to fit<br/>token budget"]
+1. **Get changed files** — `git diff origin/main...HEAD --name-only`
+2. **Generate mapping** — Runs `build_test_mapping.py` (fresh every time)
+3. **Read instructions** — Loads `TEST_SELECTION.md`
+4. **Ask Claude** — Sends a single prompt containing instructions + mapping +
+   changed files to `claude -p --model haiku`
+5. **Parse output** — Filters response to valid `path | reason` lines via
+   `grep -E '^[a-zA-Z_/.]+ *\|'`. Handles `NONE` case for docs-only PRs.
+6. **Post or print** — Posts a formatted PR comment via `gh pr comment`, or
+   prints to stdout in `--dry-run` mode. Deletes any previous test selection
+   comment to avoid stacking.
 
-    MAP --> PROMPT["Assemble prompt<br/>(system + user message)"]
-    CATALOG --> PROMPT
-    CDIFF --> PROMPT
+Also outputs clean test paths to stdout for future CI pipeline consumption.
 
-    PROMPT --> CALL["Call LLM API<br/>(Claude / GPT / Azure)"]
-
-    CALL -->|"Success"| PARSE["Parse JSON response"]
-    CALL -->|"Error/Timeout"| FALLBACK["Fallback: __RUN_ALL__"]
-
-    PARSE --> VALIDATE["Validate labels against<br/>registry + fuzzy match"]
-    VALIDATE --> OUTPUT["Output JSON to stdout:<br/>{selected_labels, mode, metadata}"]
-
-    PARSE -->|"Parse error"| FALLBACK
-    FALLBACK --> OUTPUT
-
-    style START fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
-    style CALL fill:#e1f5fe,stroke:#0288d1,stroke-width:2px
-    style FALLBACK fill:#ffebee,stroke:#e53935,stroke-width:2px
-    style OUTPUT fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px
-```
-
-### 3.3 Union Mode: How Both Systems Work Together
-
-```mermaid
-flowchart LR
-    CHANGED["Changed files<br/>in PR"] --> SD_MATCH["source_file_deps<br/>matching"]
-    CHANGED --> LLM_SEL["LLM selector"]
-
-    SD_MATCH --> SD_LABELS["source_deps labels:<br/>- Entrypoints Unit Tests<br/>- Language Models (Standard)<br/>- Engine (1 GPU)"]
-
-    LLM_SEL --> LLM_LABELS["LLM labels:<br/>- Entrypoints Unit Tests<br/>- Entrypoints Integration (LLM)<br/>- V1 Sample + Logits"]
-
-    SD_LABELS --> UNION["UNION"]
-    LLM_LABELS --> UNION
-
-    UNION --> RESULT["Final set:<br/>- Entrypoints Unit Tests<br/>- Language Models (Standard)<br/>- Engine (1 GPU)<br/>- Entrypoints Integration (LLM) ← added by LLM<br/>- V1 Sample + Logits ← added by LLM"]
-
-    style LLM_SEL fill:#e1f5fe,stroke:#0288d1
-    style SD_MATCH fill:#f3f3f3,stroke:#999
-    style UNION fill:#fff3e0,stroke:#f57c00,stroke-width:2px
-    style RESULT fill:#e8f5e9,stroke:#4caf50,stroke-width:2px
-```
-
-**Key property:** The LLM can only *add* jobs, never *remove* jobs that `source_file_dependencies` would select. This makes the rollout safe -- regressions from the existing system are impossible.
-
-### 3.4 Rollout Strategy Flow
-
-```mermaid
-flowchart LR
-    S1["Phase 1:<br/>Shadow Mode"] --> S2["Phase 2:<br/>Union Mode"]
-    S2 --> S3["Phase 3:<br/>Tighten source_deps"]
-    S3 --> S4["Future:<br/>LLM-primary"]
-
-    S1 -.- S1D["Run LLM on every PR<br/>Log selections<br/>Compare vs source_deps<br/>No CI impact"]
-    S2 -.- S2D["Union both systems<br/>LLM adds coverage<br/>Monitor accuracy"]
-    S3 -.- S3D["Narrow over-broad<br/>source_deps<br/>LLM catches gaps"]
-    S4 -.- S4D["LLM as primary selector<br/>source_deps as safety net<br/>+ pytest marks for<br/>finer granularity"]
-
-    style S1 fill:#fff3e0,stroke:#f57c00
-    style S2 fill:#e1f5fe,stroke:#0288d1
-    style S3 fill:#e8f5e9,stroke:#4caf50
-    style S4 fill:#f3e5f5,stroke:#8e24aa
-```
-
----
-
-## 4. What the LLM Receives
-
-The LLM gets a single prompt with three sections, carefully budgeted to fit within context windows (100K-200K tokens):
-
-| Section | Content | Size |
-|---------|---------|------|
-| **Codebase map** | Module directory tree + cross-cutting dependency hints (e.g., "vllm/config/ affects ALL tests") + module-to-test-area affinity table | ~2K tokens |
-| **Job catalog** | All ~150 labels with group name and source_deps, compressed to one line per label | ~3.5K tokens |
-| **PR diff** | Changed file list + condensed unified diff (truncated intelligently for large PRs) | 5K-80K tokens |
-
-**Example compressed catalog entry:**
-```
-[Kernels]
-- "Kernels Core Operation Test"     | deps: csrc/, tests/kernels/core
-- "Kernels Attention Test %N"       | deps: csrc/attention/, vllm/v1/attention
-- "Kernels MoE Test %N"            | deps: csrc/moe/, vllm/model_executor/layers/fused_moe/
-```
-
-**LLM output format** (strict JSON):
-```json
-{"selected_labels": ["Kernels Attention Test %N", "V1 attention (H100)", "Basic Correctness"]}
-```
-
-Labels are validated against the canonical registry parsed from YAMLs. Invalid labels are fuzzy-matched; any remaining mismatches are logged as warnings.
-
----
-
-## 5. Key Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| **Augment, don't replace** (union mode) | LLM can only add coverage, never reduce it. Safe rollout with zero regression risk. |
-| **Provider-agnostic** (Claude / GPT / Azure) | Avoids vendor lock-in. Config-driven switching via YAML + env vars. |
-| **Compressed catalog, not raw YAML** | 82KB of raw YAML = ~20K tokens. Compressed = ~3.5K tokens. 5x savings while preserving label names and dependency info. |
-| **Fail-safe to run-all** | Any LLM failure (timeout, API error, parse error) falls back to running all tests. Safety over efficiency. |
-| **Script in vllm repo, not ci-infra** | Domain knowledge (codebase map, dependency hints) belongs with the source code. ci-infra just calls the script. |
-| **JSON output to stdout** | Clean integration interface. Any pipeline generator can consume it. Exit code 0 = success; `mode` field indicates LLM vs fallback. |
-| **Temperature 0.0** | Maximize determinism. Same diff should produce same selections across runs. |
-
----
-
-## 6. Cost and Risk Analysis
-
-### Cost
-
-| Scenario | Input Tokens | Output Tokens | Cost/PR (Claude Sonnet) |
-|----------|-------------|---------------|-------------------------|
-| Small PR (10 files) | ~15K | ~500 | ~$0.05 |
-| Typical PR (30 files) | ~30K | ~500 | ~$0.10 |
-| Large PR (100+ files) | ~80K | ~500 | ~$0.25 |
-| **Daily estimate (100 PRs)** | | | **~$10-25** |
-
-This is negligible compared to the GPU compute saved. A single unnecessary H100 job costs more than an entire day of LLM API calls.
-
-### Risks and Mitigations
-
-| Risk | Likelihood | Impact | Mitigation |
-|------|-----------|--------|------------|
-| LLM hallucinates invalid labels | Medium | Low | Label registry validation + fuzzy matching + fallback |
-| LLM misses a critical test | Low | Medium | Union mode ensures source_deps still catches it |
-| LLM API downtime | Low | Low | Fallback to run-all; CI is never blocked |
-| LLM adds too many unnecessary tests | Medium | Low | Still better than current over-broad source_deps; tune prompt over time |
-| LLM latency slows CI start | Low | Low | Run in parallel with image build; 60s timeout |
-| API key compromise | Low | High | Keys in CI secrets manager only; never in config files |
-
----
-
-## 7. Rollout Strategy
-
-### Phase 1: Shadow Mode
-- Run LLM selector on every PR, log output alongside existing source_deps results
-- Compare selections: what does LLM catch that source_deps misses? What does it miss?
-- No impact on actual CI jobs
-- Duration: 1-2 weeks
-
-### Phase 2: Active Union Mode
-- Enable union mode: jobs selected by EITHER system run
-- Monitor for any increase in test failures caught (positive signal) or CI time (acceptable tradeoff)
-- Tune prompt based on Phase 1 data
-- Duration: 2-4 weeks
-
-### Phase 3: Tighten source_deps
-- With LLM as a safety net, narrow over-broad `source_file_dependencies` (e.g., replace `vllm/` with specific subdirectories)
-- Reduces unnecessary test runs from the static system
-- LLM continues to provide intelligent cross-cutting coverage
-
-### Phase 4 (Future): LLM-Primary Mode
-- LLM becomes the primary selector; source_deps serves as a minimal safety net
-- Optional: add pytest marks for finer-grained within-job selection (see Section 8)
-
----
-
-## 8. Future Phase: Pytest Marks for Finer-Grained Selection
-
-The LLM selector described above operates at the **job level** (~150 jobs). A future enhancement can add **test-level** selection using pytest marks.
-
-### How it works
-
-1. **Mark all ~676 test files** with functional marks (e.g., `@pytest.mark.attention`, `@pytest.mark.quantization`)
-2. **Extend LLM output** to include per-job mark filter expressions:
-   ```json
-   {
-     "selected_labels": ["Kernels Attention Test %N"],
-     "mark_filters": {
-       "Kernels Attention Test %N": "attention and flash_attn"
-     }
-   }
-   ```
-3. **Pipeline generator injects** `-m "expression"` into the pytest command for that job
-
-### Why defer
-
-- Job-level selection already delivers the primary value
-- Marking 676 files is a large, merge-conflict-prone effort
-- Requires changes to test_areas YAMLs and the pipeline generator
-- The job-level system needs to be proven first
-
-### Existing draft work (feature branch, not commited yet). Related work in https://github.com/vllm-project/vllm/pull/31031
-
-- `.buildkite/PYTEST_MARKING_GUIDE.md` — 40+ mark definitions, usage guidelines
-- `.buildkite/scripts/mark_tests.py` — automation script for suggesting/applying marks
-- `.buildkite/PYTEST_MARKS_IMPLEMENTATION_SUMMARY.md` — rollout plan
-
----
-
-## 9. Integration Interface
-
-### CLI
-
+**Usage:**
 ```bash
-# By PR number (fetches diff via GitHub API)
-python .buildkite/scripts/llm_test_selector.py --pr-number 12345
+# Post comment to PR #1234
+.buildkite/scripts/select_tests.sh 1234
 
-# By git diff against base branch
-python .buildkite/scripts/llm_test_selector.py --base-ref origin/main
+# Local testing (no comment posted)
+.buildkite/scripts/select_tests.sh --dry-run
 
-# From a diff file
-python .buildkite/scripts/llm_test_selector.py --diff-file changes.patch
-
-# Shadow mode (log only, no stdout output for pipeline)
-python .buildkite/scripts/llm_test_selector.py --pr-number 12345 --shadow
+# Custom base branch
+.buildkite/scripts/select_tests.sh 1234 origin/release
 ```
 
-### Output Format
+**Requirements:** `claude` CLI, `python3`, `gh` CLI (except in dry-run mode).
 
-```json
-{
-  "selected_labels": ["Entrypoints Unit Tests", "V1 Sample + Logits"],
-  "mode": "llm",
-  "metadata": {
-    "provider": "anthropic",
-    "model": "claude-sonnet-4-20250514",
-    "input_tokens": 28500,
-    "output_tokens": 120,
-    "latency_ms": 3200
-  },
-  "warnings": [],
-  "invalid_labels": []
-}
+## Prompt Structure
+
+The prompt sent to Claude Haiku has four sections:
+
+```
+1. System instruction ("You are selecting tests for a CI pipeline...")
+2. TEST_SELECTION.md content (rules + output format)
+3. Auto-generated mapping table (source dir → test dirs)
+4. Changed files list (from git diff)
 ```
 
-Special values:
-- `"mode": "fallback"` — LLM call failed; labels may be `["__RUN_ALL__"]`
-- `"mode": "run_all_pattern"` — PR matched `run_all_patterns`; labels are `["__RUN_ALL__"]`
+The mapping table and instructions form a stable prefix across invocations,
+which benefits from Anthropic's automatic prompt caching (subsequent calls with
+the same prefix pay 0.1x input token cost on the cached portion).
 
-### Integration in ci-infra
+## Rollout Plan
 
-```python
-source_dep_labels = match_source_deps(changed_files, configs)  # existing
-llm_result = json.loads(subprocess.run([...], capture_output=True).stdout)
+### Phase 1: Shadow mode (current)
 
-if "__RUN_ALL__" in llm_result["selected_labels"]:
-    final_labels = all_labels
-else:
-    final_labels = source_dep_labels | set(llm_result["selected_labels"])
-```
+- Script runs on PRs and posts a comment with suggested test targets
+- PR authors review the suggestion and reply if it looks wrong
+- No CI behavior changes — existing test selection continues as-is
+- Feedback from comments is used to refine `TEST_SELECTION.md` rules
 
----
+### Phase 2: CI integration (future)
 
-## 10. Open Questions for Discussion
+Once confidence is established through Phase 1 feedback:
 
-1. **Model selection**: Should we default to a cheaper/faster model (Haiku / GPT-4o-mini) and only escalate to Sonnet for large or ambiguous diffs?
-2. **Caching**: Should we cache LLM results for identical diffs (e.g., when a PR is rebased without content changes)?
-3. **Feedback loop**: Should CI test outcomes (pass/fail) be fed back to improve the prompt or fine-tune the model over time?
-4. **Opt-out mechanism**: Should PR authors be able to add a label (e.g., `ci:run-all` or `ci:skip-llm`) to override the LLM selector?
-5. **Monitoring dashboard**: What metrics should we track? (LLM accuracy, cost per day, CI time savings, false negative rate)
+- `select_tests.sh` output is consumed by CI pipeline to control which test
+  jobs are triggered
+- Existing `source_file_dependencies` in YAML configs can be removed
+- Fallback: if Claude returns an error or empty response, run the full test
+  suite (fail-open)
+
+## Cost
+
+- **Model:** Claude Haiku (cheapest tier)
+- **Per-invocation:** ~$0.01-0.05 depending on mapping size and changed file count
+- **Estimated monthly:** ~$5-20 at typical PR volume
+- **Caching:** The mapping + instructions prefix is stable across PRs, so
+  repeat calls benefit from automatic prompt caching (0.1x input cost on
+  cache hits)
+
+## Key Design Decisions
+
+**Why an LLM instead of pure static analysis?**
+
+Static import analysis covers 98% of test files but cannot handle:
+non-Python files (C++/CUDA, build configs), subprocess-based tests, or
+judgment calls like "this large PR has cross-cutting risk." The LLM fills
+these gaps using a small rule set, while the mapping provides the objective
+foundation.
+
+**Why generate the mapping at runtime instead of committing it?**
+
+A committed mapping file would go stale as tests are added and imports change.
+Generating it fresh on every run means zero maintenance — the mapping is
+always accurate for the current codebase.
+
+**Why Haiku?**
+
+Test selection is a structured, rule-following task — not a creative or
+reasoning-heavy one. Haiku is the cheapest model and sufficient for matching
+file paths against a mapping table and applying 5 simple rules.
+
+**Why post as a PR comment instead of controlling CI directly?**
+
+Phase 1 uses comments to collect human feedback without risk. If the selection
+is wrong, the worst case is a reply saying "also run X" — not a missed
+regression in production CI.
