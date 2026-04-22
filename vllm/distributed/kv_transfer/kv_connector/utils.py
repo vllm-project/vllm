@@ -441,6 +441,7 @@ class TransferTopology:
     is_mamba: bool
     total_num_kv_heads: int
     attn_backends: list[type[AttentionBackend]]
+    physical_blocks_per_logical: int
     tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
