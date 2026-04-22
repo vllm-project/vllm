@@ -963,8 +963,12 @@ def enable_batch_invariant_mode():
     _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
     _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
 
-    # Also monkeypatch torch.bmm directly as a fallback
-    _batch_invariant_LIB.impl("aten::bmm", bmm_batch_invariant, "CUDA")
+    # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
+    # (torch._native.ops.bmm_outer_product), so we need allow_override
+    # to replace it at the dispatcher level.
+    _batch_invariant_LIB.impl(
+        "aten::bmm", bmm_batch_invariant, "CUDA", allow_override=True
+    )
     _original_torch_bmm = torch.bmm
     torch.bmm = bmm_batch_invariant
 
