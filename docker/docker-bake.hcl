@@ -20,7 +20,7 @@ variable "NVCC_THREADS" {
 }
 
 variable "TORCH_CUDA_ARCH_LIST" {
-  default = "8.0 8.9 9.0 10.0"
+  default = "8.0 8.9 9.0 10.0 12.0 12.1"
 }
 
 variable "COMMIT" {
