@@ -80,10 +80,24 @@ class SharedExperts:
                     "Enabled separate cuda stream for MoE shared_experts", scope="local"
                 )
 
+    @property
+    def _disable_shared_experts_overlap(self) -> bool:
+        # Disable shared expert overlap if:
+        #   - we are using eplb with non-default backend, because of correctness issues
+        #   - we are using flashinfer with DP, since there nothing to gain
+        parallel_config = self._moe_config.moe_parallel_config
+        return (
+            parallel_config.enable_eplb
+            and parallel_config.all2all_backend != "allgather_reducescatter"
+        ) or parallel_config.use_fi_nvl_two_sided_kernels
+
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
     ) -> SharedExpertsOrder:
+        if self._disable_shared_experts_overlap:
+            return SharedExpertsOrder.NO_OVERLAP
+
         if self._quant_method.mk_owns_shared_expert:
             return SharedExpertsOrder.MK_INTERNAL_OVERLAPPED
 
