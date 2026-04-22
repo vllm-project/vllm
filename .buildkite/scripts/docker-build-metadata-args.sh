@@ -9,6 +9,8 @@ staging_image_ref="${2:-}"
 build_kind_default="${VLLM_BUILD_KIND_DEFAULT:-local}"
 if [[ "${NIGHTLY:-}" == "1" ]]; then
   build_kind_default="nightly"
+elif [[ -n "${BUILDKITE:-}" && "${BUILDKITE_PIPELINE_SLUG:-}" == *release* ]]; then
+  build_kind_default="release"
 elif [[ -n "${BUILDKITE:-}" && "${build_kind_default}" == "local" ]]; then
   build_kind_default="ci"
 fi
