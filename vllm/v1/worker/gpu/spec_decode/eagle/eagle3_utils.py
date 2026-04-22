@@ -11,6 +11,30 @@ from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle
 logger = init_logger(__name__)
 
 
+def get_eagle3_use_aux_hidden_state_from_config(
+    spec_config: SpeculativeConfig,
+) -> bool:
+    """
+    Determine whether the EAGLE3 draft head uses auxiliary hidden states.
+
+    Some EAGLE3 heads (e.g., nvidia/gpt-oss-120b-Eagle3-v2) do not use
+    auxiliary hidden states and instead consume only the last layer's output,
+    just like EAGLE-1.  They signal this by setting
+    ``eagle_config["use_aux_hidden_state"] = False`` inside the draft model's
+    HF config.  This helper reads that flag so callers can decide whether to
+    request auxiliary hidden states from the target model at all.
+    """
+    if not (spec_config and spec_config.draft_model_config):
+        return True
+    hf_config = spec_config.draft_model_config.hf_config
+    eagle_config = getattr(hf_config, "eagle_config", None)
+    if eagle_config is not None:
+        if isinstance(eagle_config, dict):
+            return eagle_config.get("use_aux_hidden_state", True)
+        return getattr(eagle_config, "use_aux_hidden_state", True)
+    return True
+
+
 def set_eagle3_aux_hidden_state_layers(
     model: nn.Module,
     spec_config: SpeculativeConfig,

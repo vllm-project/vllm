@@ -92,6 +92,7 @@ from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    get_eagle3_use_aux_hidden_state_from_config,
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
@@ -172,8 +173,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
             if self.speculative_config.method == "eagle3":
-                # EAGLE3 may require auxiliary hidden states from target model outputs.
-                self.use_aux_hidden_state_outputs = True
+                # EAGLE3 may require auxiliary hidden states from the target
+                # model, but only when the draft head is configured to use
+                # them.  Some heads (e.g. nvidia/gpt-oss-120b-Eagle3-v2)
+                # set eagle_config["use_aux_hidden_state"] = False and
+                # consume only the last hidden state, just like EAGLE-1.
+                self.use_aux_hidden_state_outputs = (
+                    get_eagle3_use_aux_hidden_state_from_config(
+                        self.speculative_config
+                    )
+                )
                 if self.use_pp:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
 
