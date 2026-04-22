@@ -859,27 +859,23 @@ void print_logits(const char* name, T* ptr, int32_t row, int32_t col,
   std::printf("%s", ss.str().c_str());
 }
 
-// SFINAE helper: calls impl.init_from_input(input) if the method exists,
-// otherwise does nothing.  This lets FP8 AttentionImpl specializations
-// read per-run parameters from AttentionInput without modifying every ISA
-// specialisation.
 template <typename T>
-auto call_init_from_input(T& impl, const AttentionInput* input, int)
-    -> decltype(impl.init_from_input(input), void()) {
-  impl.init_from_input(input);
-}
-template <typename T>
-void call_init_from_input(T&, const AttentionInput*, ...) {}
+constexpr bool is_fp8_impl_v =
+    std::is_same_v<typename T::kv_cache_t, c10::Float8_e4m3fn> ||
+    std::is_same_v<typename T::kv_cache_t, c10::Float8_e5m2>;
 
-// Returns the per-output v_scale that final_output should apply (FP8 paths).
-// Defaults to 1.0f for non-FP8 implementations.
 template <typename T>
-auto call_get_output_v_scale(T& impl, int)
-    -> decltype(impl.get_output_v_scale()) {
-  return impl.get_output_v_scale();
+void call_init_from_input(T& impl, const AttentionInput* input) {
+  if constexpr (is_fp8_impl_v<T>) {
+    impl.init_from_input(input);
+  }
 }
+
 template <typename T>
-float call_get_output_v_scale(T&, ...) {
+float call_get_output_v_scale(T& impl) {
+  if constexpr (is_fp8_impl_v<T>) {
+    return impl.get_output_v_scale();
+  }
   return 1.0f;
 }
 
@@ -1385,8 +1381,8 @@ class AttentionMainLoop {
       }
 
       attention_impl_t attn_impl;
-      call_init_from_input(attn_impl, input, 0);
-      const float output_v_scale = call_get_output_v_scale(attn_impl, 0);
+      call_init_from_input(attn_impl, input);
+      const float output_v_scale = call_get_output_v_scale(attn_impl);
 
       // general information
       const int32_t q_head_num = input->num_heads;

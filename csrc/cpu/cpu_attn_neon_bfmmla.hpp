@@ -431,12 +431,12 @@ FORCE_INLINE void gemm_macro_neon_bfmmla(
 
 // TileGemm Adapter for Attention
 
-template <typename kv_cache_t, int32_t BlockTokens, int32_t HeadDim>
+template <typename kv_cache_scalar_t, int32_t BlockTokens, int32_t HeadDim>
 class TileGemmNEONBFMMLA {
  public:
   template <AttentionGemmPhase phase, int32_t head_dim_ct>
   FORCE_INLINE static void gemm(const int32_t m_size, void* __restrict__ a_tile,
-                                kv_cache_t* __restrict__ b_tile,
+                                kv_cache_scalar_t* __restrict__ b_tile,
                                 float* __restrict__ c_tile, const int64_t lda,
                                 [[maybe_unused]] const int64_t ldb,
                                 const int64_t ldc,

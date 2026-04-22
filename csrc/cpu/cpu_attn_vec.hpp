@@ -7,13 +7,32 @@
 namespace cpu_attention {
 
 namespace {
+
+// Load 32 kv_cache_t elements starting at ptr and return them as two FP32Vec16s
+// covering the lower 16 and upper 16 positions.
+// For FP8: both halves come from a single BF16Vec32 dequant of 32 bytes.
+// For BF16/FP16/FP32: two separate vector loads at ptr and ptr+16.
+template <typename kv_cache_t>
+FORCE_INLINE std::pair<vec_op::FP32Vec16, vec_op::FP32Vec16> load_b_pair_vec(
+    const kv_cache_t* ptr) {
+  if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+    vec_op::BF16Vec32 b_reg(reinterpret_cast<const uint8_t*>(ptr),
+                            vec_op::fp8_e4m3_tag{});
+    return {vec_op::FP32Vec16(b_reg, 0), vec_op::FP32Vec16(b_reg, 1)};
+  } else if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
+    vec_op::BF16Vec32 b_reg(reinterpret_cast<const uint8_t*>(ptr),
+                            vec_op::fp8_e5m2_tag{});
+    return {vec_op::FP32Vec16(b_reg, 0), vec_op::FP32Vec16(b_reg, 1)};
+  } else {
+    using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
+    return {vec_op::FP32Vec16(load_vec_t(ptr)),
+            vec_op::FP32Vec16(load_vec_t(ptr + 16))};
+  }
+}
+
 // 8-2-16 pattern, 8 regs for A, 2 regs for B, 16 regs for C, [8, K] @ [k, 32]
 template <typename kv_cache_t>
 class TileGemm82 {
-  static constexpr bool fp8_kv =
-      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
-      std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
-
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
@@ -77,57 +96,21 @@ class TileGemm82 {
     }
 
     float* __restrict__ curr_a = a_tile;
+    kv_cache_t* __restrict__ curr_b = b_tile;
 
-    if constexpr (fp8_kv) {
-      const uint8_t* __restrict__ curr_b_0 =
-          reinterpret_cast<const uint8_t*>(b_tile);
-      for (int32_t k = 0; k < dynamic_k_size; ++k) {
-        vec_op::BF16Vec32 fp16_b_reg = [&]() {
-          if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-            return vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e4m3_tag{});
-          } else {
-            return vec_op::BF16Vec32(curr_b_0, vec_op::fp8_e5m2_tag{});
-          }
-        }();
-        vec_op::FP32Vec16 fp32_b_0_reg(fp16_b_reg, 0);
-        vec_op::FP32Vec16 fp32_b_1_reg(fp16_b_reg, 1);
+    for (int32_t k = 0; k < dynamic_k_size; ++k) {
+      auto [fp32_b_0_reg, fp32_b_1_reg] = load_b_pair_vec(curr_b);
 
-        float* __restrict__ curr_m_a = curr_a;
-        vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
-          float v = *curr_m_a;
-          vec_op::FP32Vec16 a_reg(v);
-          c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
-          c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
-          curr_m_a += lda;
-        });
+      float* __restrict__ curr_m_a = curr_a;
+      vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
+        vec_op::FP32Vec16 a_reg(*curr_m_a);
+        c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
+        c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
+        curr_m_a += lda;
+      });
 
-        curr_a += 1;
-        curr_b_0 += ldb;
-      }
-    } else {
-      using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
-
-      kv_cache_t* __restrict__ curr_b_0 = b_tile;
-      kv_cache_t* __restrict__ curr_b_1 = b_tile + 16;
-      for (int32_t k = 0; k < dynamic_k_size; ++k) {
-        load_vec_t b_0_reg(curr_b_0);
-        vec_op::FP32Vec16 fp32_b_0_reg(b_0_reg);
-        load_vec_t b_1_reg(curr_b_1);
-        vec_op::FP32Vec16 fp32_b_1_reg(b_1_reg);
-
-        float* __restrict__ curr_m_a = curr_a;
-        vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
-          float v = *curr_m_a;
-          vec_op::FP32Vec16 a_reg(v);
-          c_regs[i * 2] = c_regs[i * 2] + a_reg * fp32_b_0_reg;
-          c_regs[i * 2 + 1] = c_regs[i * 2 + 1] + a_reg * fp32_b_1_reg;
-          curr_m_a += lda;
-        });
-
-        curr_a += 1;
-        curr_b_0 += ldb;
-        curr_b_1 += ldb;
-      }
+      curr_a += 1;
+      curr_b += ldb;
     }
 
     vec_op::unroll_loop<int32_t, M>([&](int32_t i) {
@@ -224,7 +207,7 @@ class AttentionImpl<ISA::VEC, scalar_t, head_dim, kv_cache_t_> {
   }
 
   // Copy q to q_buffer and cast it to fp32.
-  // FP8 path: scale is applied to logits; copy Q without scaling.
+  // FP8: QK scale is folded into execute_attention; copy Q unscaled here.
   void copy_q_heads_tile(scalar_t* __restrict__ src,
                          float* __restrict__ q_buffer, const int32_t q_num,
                          const int32_t q_heads_per_kv,

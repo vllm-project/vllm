@@ -22,8 +22,7 @@ typedef struct __tile_config {
 // TILE 0, 1: load A matrix, row num should be 16, m - 16
 // TILE 2, 3: load B matrix, row num should be 16
 // TILE 4, 5, 6, 7: store results C matrix, row num should be 16, 16, m - 16, m
-// - 16
-// q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
+// - 16 q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
 template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm224 {
  public:
@@ -43,50 +42,89 @@ class TileGemm224 {
   }
 };
 
-template <>
-class TileGemm224<c10::BFloat16, c10::BFloat16> {
+// Dequantize one FP8 tile (AMX_TILE_ROW_NUM rows × 32 cols) to BF16.
+// Only valid for FP8 kv_cache_t; the BF16 else-branch is dead code when
+// kv_cache_t is BFloat16, but must still compile.
+template <typename kv_cache_t>
+FORCE_INLINE void deq_tile_amx(const uint8_t* src, c10::BFloat16* dst) {
+  for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
+    if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
+      vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e4m3_tag{})
+          .save(dst + r * 32);
+    } else {
+      vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e5m2_tag{})
+          .save(dst + r * 32);
+    }
+  }
+}
+
+// For FP8: dequant src into scratch and return scratch.
+// For BF16: return src directly (scratch is unused; the compiler elides it).
+template <typename kv_cache_t>
+FORCE_INLINE const c10::BFloat16* prepare_b_tile(const kv_cache_t* src,
+                                                 c10::BFloat16* scratch) {
+  if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
+    deq_tile_amx<kv_cache_t>(reinterpret_cast<const uint8_t*>(src), scratch);
+    return scratch;
+  } else {
+    return reinterpret_cast<const c10::BFloat16*>(src);
+  }
+}
+
+// Handles both BF16 and FP8 KV cache (2-2-4 pattern).
+template <typename kv_cache_t>
+class TileGemm224<c10::BFloat16, kv_cache_t> {
+  static_assert(std::is_same_v<kv_cache_t, c10::BFloat16> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
+                "kv_cache_t must be BFloat16, Float8_e4m3fn, or Float8_e5m2");
+
+  static constexpr bool fp8_kv =
+      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+
+  static constexpr int64_t tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+  // BF16 path: scratch_elems=1 so the scratch array is eliminated by the
+  // compiler.
+  static constexpr int64_t scratch_elems = fp8_kv ? tile_elems : 1;
+
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 c10::BFloat16* __restrict__ a_tile,
-                                c10::BFloat16* __restrict__ b_tile,
+                                kv_cache_t* __restrict__ b_tile,
                                 float* __restrict__ c_tile, const int64_t lda,
                                 const int64_t ldb, const int64_t ldc,
                                 const int32_t block_size,
                                 const int32_t dynamic_k_size,
                                 const bool accum_c) {
-    const int32_t k_times =
-        dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
+    const int32_t k_times = dynamic_k_size / 32;
+
     c10::BFloat16* __restrict__ a_tile_0 = a_tile;
     c10::BFloat16* __restrict__ a_tile_1 = a_tile + lda * AMX_TILE_ROW_NUM;
     const int64_t a_tile_stride = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
-        // q_buffer is prepacked
         return AMX_TILE_ROW_BYTES;
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // logits_buffer is row-major
-        return lda * sizeof(c10::BFloat16);
+        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
     }();
 
-    c10::BFloat16* __restrict__ b_tile_2 = b_tile;
-    c10::BFloat16* __restrict__ b_tile_3 = [&]() {
+    kv_cache_t* __restrict__ b_tile_2 = b_tile;
+    kv_cache_t* __restrict__ b_tile_3 = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
-        // k_cache is prepacked
         return b_tile + (k_size * AMX_TILE_ROW_BYTES / 4);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // v_cache is prepacked
         return b_tile + (block_size * AMX_TILE_ROW_BYTES / 4);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
     }();
-    // k_cache, v_cache are prepacked
     const int32_t b_tile_stride = AMX_TILE_ROW_BYTES;
 
-    // logits_buffer, output_buffer are not prepacked
     float* __restrict__ c_tile_4 = c_tile;
     float* __restrict__ c_tile_5 =
         c_tile_4 + AMX_TILE_ROW_BYTES / sizeof(float);
@@ -108,29 +146,31 @@ class TileGemm224<c10::BFloat16, c10::BFloat16> {
     }
 
     for (int32_t k = 0; k < k_times; ++k) {
+      alignas(64) c10::BFloat16 scratch_2[scratch_elems];
+      alignas(64) c10::BFloat16 scratch_3[scratch_elems];
+      const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
+      const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
+
       _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, b_tile_2, b_tile_stride);
+      _tile_stream_loadd(2, const_cast<c10::BFloat16*>(load_2), b_tile_stride);
       _tile_dpbf16ps(4, 0, 2);
-      _tile_stream_loadd(3, b_tile_3, b_tile_stride);
+      _tile_stream_loadd(3, const_cast<c10::BFloat16*>(load_3), b_tile_stride);
       _tile_dpbf16ps(5, 0, 3);
       _tile_loadd(1, a_tile_1, a_tile_stride);
       _tile_dpbf16ps(6, 1, 2);
       _tile_dpbf16ps(7, 1, 3);
 
-      // update ptrs
       if constexpr (phase == AttentionGemmPhase::QK) {
-        // Q buffer is prepacked
         a_tile_0 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
         a_tile_1 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // P buffer is not prepacked
         a_tile_0 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
         a_tile_1 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
-      b_tile_2 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
-      b_tile_3 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
+      b_tile_2 += tile_elems;
+      b_tile_3 += tile_elems;
     }
 
     _tile_stored(4, c_tile_4, c_tile_stride);
@@ -156,11 +196,8 @@ class TileGemm224<c10::BFloat16, c10::BFloat16> {
 
 // 1-2-2 pattern, for 0 < m <= 16
 // TILE 0, (1): load A matrix, use extra 1 tile for prefetch, row num should be
-// m, m
-// TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row
-// num should be 16
-// TILE 6, 7, (6, 7): store results C matrix, row num should be
-// m
+// m, m TILE 2, 3, (4, 5): load B matrix, use extra 2 tiles for prefetch, row
+// num should be 16 TILE 6, 7: store results C matrix, row num should be m
 // q_buffer_t: A (Q/P) tile type; kv_cache_t: B (K/V cache) tile type.
 template <typename q_buffer_t, typename kv_cache_t>
 class TileGemm122 {
@@ -181,13 +218,26 @@ class TileGemm122 {
   }
 };
 
-template <>
-class TileGemm122<c10::BFloat16, c10::BFloat16> {
+// Handles both BF16 and FP8 KV cache (1-2-2 pattern).
+template <typename kv_cache_t>
+class TileGemm122<c10::BFloat16, kv_cache_t> {
+  static_assert(std::is_same_v<kv_cache_t, c10::BFloat16> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+                    std::is_same_v<kv_cache_t, c10::Float8_e5m2>,
+                "kv_cache_t must be BFloat16, Float8_e4m3fn, or Float8_e5m2");
+
+  static constexpr bool fp8_kv =
+      std::is_same_v<kv_cache_t, c10::Float8_e4m3fn> ||
+      std::is_same_v<kv_cache_t, c10::Float8_e5m2>;
+
+  static constexpr int64_t tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
+  static constexpr int64_t scratch_elems = fp8_kv ? tile_elems : 1;
+
  public:
   template <AttentionGemmPhase phase, int32_t k_size>
   FORCE_INLINE static void gemm(const int32_t m_size,
                                 c10::BFloat16* __restrict__ a_tile,
-                                c10::BFloat16* __restrict__ b_tile,
+                                kv_cache_t* __restrict__ b_tile,
                                 float* __restrict__ c_tile, const int64_t lda,
                                 const int64_t ldb, const int64_t ldc,
                                 const int32_t block_size,
@@ -196,10 +246,8 @@ class TileGemm122<c10::BFloat16, c10::BFloat16> {
     c10::BFloat16* __restrict__ a_tile_0 = a_tile;
     c10::BFloat16* __restrict__ a_tile_1 = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
-        // q_buffer is prepacked
         return a_tile + AMX_TILE_BYTES / sizeof(c10::BFloat16);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // logits_buffer is row-major
         return a_tile + AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
       } else {
         TORCH_CHECK(false, "Unreachable");
@@ -207,291 +255,26 @@ class TileGemm122<c10::BFloat16, c10::BFloat16> {
     }();
     const int64_t a_tile_stride = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
-        // q_buffer is prepacked
         return AMX_TILE_ROW_BYTES;
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // logits_buffer is row-major
-        return lda * sizeof(c10::BFloat16);
+        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
     }();
 
-    c10::BFloat16* __restrict__ b_tile_2 = b_tile;
-    c10::BFloat16* __restrict__ b_tile_3 = [&]() {
+    kv_cache_t* __restrict__ b_tile_2 = b_tile;
+    kv_cache_t* __restrict__ b_tile_3 = [&]() {
       if constexpr (phase == AttentionGemmPhase::QK) {
-        // k_cache is prepacked
         return b_tile + (k_size * AMX_TILE_ROW_BYTES / 4);
       } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // v_cache is prepacked
         return b_tile + (block_size * AMX_TILE_ROW_BYTES / 4);
       } else {
         TORCH_CHECK(false, "Unreachable");
       }
     }();
-    c10::BFloat16* __restrict__ b_tile_4 =
-        b_tile_2 + AMX_TILE_BYTES / sizeof(c10::BFloat16);
-    c10::BFloat16* __restrict__ b_tile_5 =
-        b_tile_3 + AMX_TILE_BYTES / sizeof(c10::BFloat16);
-    int64_t b_stride = AMX_TILE_ROW_BYTES;
-
-    float* __restrict__ c_tile_6 = c_tile;
-    float* __restrict__ c_tile_7 = c_tile + AMX_TILE_ROW_BYTES / sizeof(float);
-    int64_t c_stride = ldc * sizeof(float);
-
-    const int32_t k_times =
-        dynamic_k_size / (AMX_TILE_ROW_NUM * 4 / sizeof(c10::BFloat16));
-    const int32_t k_group_times = k_times / 2;
-    const bool has_tail = (k_times % 2 == 1);
-
-    if (accum_c) {
-      _tile_loadd(6, c_tile_6, c_stride);
-      _tile_loadd(7, c_tile_7, c_stride);
-    } else {
-      _tile_zero(6);
-      _tile_zero(7);
-    }
-
-    for (int32_t k = 0; k < k_group_times; ++k) {
-      _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, b_tile_2, b_stride);
-      _tile_dpbf16ps(6, 0, 2);
-      _tile_stream_loadd(3, b_tile_3, b_stride);
-      _tile_dpbf16ps(7, 0, 3);
-      _tile_loadd(1, a_tile_1, a_tile_stride);
-      _tile_stream_loadd(4, b_tile_4, b_stride);
-      _tile_dpbf16ps(6, 1, 4);
-      _tile_stream_loadd(5, b_tile_5, b_stride);
-      _tile_dpbf16ps(7, 1, 5);
-
-      // update ptrs
-      if constexpr (phase == AttentionGemmPhase::QK) {
-        // Q buffer is prepacked
-        a_tile_0 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
-        a_tile_1 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
-      } else if constexpr (phase == AttentionGemmPhase::PV) {
-        // P buffer is not prepacked
-        a_tile_0 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
-        a_tile_1 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
-      }
-      b_tile_2 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
-      b_tile_3 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
-      b_tile_4 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
-      b_tile_5 += 2 * AMX_TILE_BYTES / sizeof(c10::BFloat16);
-    }
-
-    if (has_tail) {
-      _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, b_tile_2, b_stride);
-      _tile_dpbf16ps(6, 0, 2);
-      _tile_stream_loadd(3, b_tile_3, b_stride);
-      _tile_dpbf16ps(7, 0, 3);
-    }
-
-    _tile_stored(6, c_tile_6, c_stride);
-    _tile_stored(7, c_tile_7, c_stride);
-  }
-
-  FORCE_INLINE static void init_tile_config(int32_t m, __tilecfg& config) {
-    config.rows[0] = m;
-    config.rows[1] = m;
-    config.rows[2] = AMX_TILE_ROW_NUM;
-    config.rows[3] = AMX_TILE_ROW_NUM;
-    config.rows[4] = AMX_TILE_ROW_NUM;
-    config.rows[5] = AMX_TILE_ROW_NUM;
-    config.rows[6] = m;
-    config.rows[7] = m;
-    _tile_loadconfig(&config);
-  }
-};
-// Partial specialization for FP8 KV cache (2-2-4 pattern).
-template <typename fp8_t>
-class TileGemm224<c10::BFloat16, fp8_t> {
-  static_assert(std::is_same_v<fp8_t, c10::Float8_e4m3fn> ||
-                    std::is_same_v<fp8_t, c10::Float8_e5m2>,
-                "fp8_t must be Float8_e4m3fn or Float8_e5m2");
-
-  FORCE_INLINE static void deq_tile(const uint8_t* src, c10::BFloat16* dst) {
-    for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
-      if constexpr (std::is_same_v<fp8_t, c10::Float8_e4m3fn>) {
-        vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e4m3_tag{})
-            .save(dst + r * 32);
-      } else {
-        vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e5m2_tag{})
-            .save(dst + r * 32);
-      }
-    }
-  }
-
- public:
-  template <AttentionGemmPhase phase, int32_t k_size>
-  FORCE_INLINE static void gemm(
-      const int32_t m_size, c10::BFloat16* __restrict__ a_tile,
-      fp8_t* __restrict__ b_tile, float* __restrict__ c_tile, const int64_t lda,
-      const int64_t ldb, const int64_t ldc, const int32_t block_size,
-      const int32_t dynamic_k_size, const bool accum_c) {
-    const int32_t k_times = dynamic_k_size / 32;
-    constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
-
-    c10::BFloat16* __restrict__ a_tile_0 = a_tile;
-    c10::BFloat16* __restrict__ a_tile_1 = a_tile + lda * AMX_TILE_ROW_NUM;
-    const int64_t a_tile_stride = [&]() {
-      if constexpr (phase == AttentionGemmPhase::QK) {
-        return AMX_TILE_ROW_BYTES;
-      } else if constexpr (phase == AttentionGemmPhase::PV) {
-        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
-      } else {
-        TORCH_CHECK(false, "Unreachable");
-      }
-    }();
-
-    const uint8_t* __restrict__ b_tile_2 =
-        reinterpret_cast<const uint8_t*>(b_tile);
-    const uint8_t* __restrict__ b_tile_3 = [&]() {
-      if constexpr (phase == AttentionGemmPhase::QK) {
-        return reinterpret_cast<const uint8_t*>(b_tile) +
-               (k_size * AMX_TILE_ROW_BYTES / 4);
-      } else if constexpr (phase == AttentionGemmPhase::PV) {
-        return reinterpret_cast<const uint8_t*>(b_tile) +
-               (block_size * AMX_TILE_ROW_BYTES / 4);
-      } else {
-        TORCH_CHECK(false, "Unreachable");
-      }
-    }();
-    const int32_t b_tile_stride = AMX_TILE_ROW_BYTES;
-
-    float* __restrict__ c_tile_4 = c_tile;
-    float* __restrict__ c_tile_5 =
-        c_tile_4 + AMX_TILE_ROW_BYTES / sizeof(float);
-    float* __restrict__ c_tile_6 = c_tile + AMX_TILE_ROW_NUM * ldc;
-    float* __restrict__ c_tile_7 =
-        c_tile_6 + AMX_TILE_ROW_BYTES / sizeof(float);
-    const int32_t c_tile_stride = ldc * sizeof(float);
-
-    if (accum_c) {
-      _tile_loadd(4, c_tile_4, c_tile_stride);
-      _tile_loadd(5, c_tile_5, c_tile_stride);
-      _tile_loadd(6, c_tile_6, c_tile_stride);
-      _tile_loadd(7, c_tile_7, c_tile_stride);
-    } else {
-      _tile_zero(4);
-      _tile_zero(5);
-      _tile_zero(6);
-      _tile_zero(7);
-    }
-
-    for (int32_t k = 0; k < k_times; ++k) {
-      alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
-      alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
-      deq_tile(b_tile_2, scratch_2);
-      deq_tile(b_tile_3, scratch_3);
-
-      _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, scratch_2, b_tile_stride);
-      _tile_dpbf16ps(4, 0, 2);
-      _tile_stream_loadd(3, scratch_3, b_tile_stride);
-      _tile_dpbf16ps(5, 0, 3);
-      _tile_loadd(1, a_tile_1, a_tile_stride);
-      _tile_dpbf16ps(6, 1, 2);
-      _tile_dpbf16ps(7, 1, 3);
-
-      if constexpr (phase == AttentionGemmPhase::QK) {
-        a_tile_0 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
-        a_tile_1 += AMX_TILE_BYTES / sizeof(c10::BFloat16);
-      } else if constexpr (phase == AttentionGemmPhase::PV) {
-        a_tile_0 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
-        a_tile_1 += AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
-      } else {
-        TORCH_CHECK(false, "Unreachable");
-      }
-      b_tile_2 += fp8_tile_elems;
-      b_tile_3 += fp8_tile_elems;
-    }
-
-    _tile_stored(4, c_tile_4, c_tile_stride);
-    _tile_stored(5, c_tile_5, c_tile_stride);
-    _tile_stored(6, c_tile_6, c_tile_stride);
-    _tile_stored(7, c_tile_7, c_tile_stride);
-  }
-
-  FORCE_INLINE static void init_tile_config(int32_t m, __tilecfg& config) {
-    const int32_t m_0 = AMX_TILE_ROW_NUM;
-    const int32_t m_1 = m - AMX_TILE_ROW_NUM;
-    config.rows[0] = m_0;
-    config.rows[1] = m_1;
-    config.rows[2] = AMX_TILE_ROW_NUM;
-    config.rows[3] = AMX_TILE_ROW_NUM;
-    config.rows[4] = m_0;
-    config.rows[5] = m_0;
-    config.rows[6] = m_1;
-    config.rows[7] = m_1;
-    _tile_loadconfig(&config);
-  }
-};
-
-// Partial specialization for FP8 KV cache (1-2-2 pattern).
-template <typename fp8_t>
-class TileGemm122<c10::BFloat16, fp8_t> {
-  static_assert(std::is_same_v<fp8_t, c10::Float8_e4m3fn> ||
-                    std::is_same_v<fp8_t, c10::Float8_e5m2>,
-                "fp8_t must be Float8_e4m3fn or Float8_e5m2");
-
-  FORCE_INLINE static void deq_tile(const uint8_t* src, c10::BFloat16* dst) {
-    for (int r = 0; r < AMX_TILE_ROW_NUM; ++r) {
-      if constexpr (std::is_same_v<fp8_t, c10::Float8_e4m3fn>) {
-        vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e4m3_tag{})
-            .save(dst + r * 32);
-      } else {
-        vec_op::BF16Vec32(src + r * 32, vec_op::fp8_bf16_e5m2_tag{})
-            .save(dst + r * 32);
-      }
-    }
-  }
-
- public:
-  template <AttentionGemmPhase phase, int32_t k_size>
-  FORCE_INLINE static void gemm(
-      const int32_t m_size, c10::BFloat16* __restrict__ a_tile,
-      fp8_t* __restrict__ b_tile, float* __restrict__ c_tile, const int64_t lda,
-      const int64_t ldb, const int64_t ldc, const int32_t block_size,
-      const int32_t dynamic_k_size, const bool accum_c) {
-    constexpr int64_t fp8_tile_elems = AMX_TILE_BYTES / sizeof(c10::BFloat16);
-
-    c10::BFloat16* __restrict__ a_tile_0 = a_tile;
-    c10::BFloat16* __restrict__ a_tile_1 = [&]() {
-      if constexpr (phase == AttentionGemmPhase::QK) {
-        return a_tile + AMX_TILE_BYTES / sizeof(c10::BFloat16);
-      } else if constexpr (phase == AttentionGemmPhase::PV) {
-        return a_tile + AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
-      } else {
-        TORCH_CHECK(false, "Unreachable");
-      }
-    }();
-    const int64_t a_tile_stride = [&]() {
-      if constexpr (phase == AttentionGemmPhase::QK) {
-        return AMX_TILE_ROW_BYTES;
-      } else if constexpr (phase == AttentionGemmPhase::PV) {
-        return lda * static_cast<int64_t>(sizeof(c10::BFloat16));
-      } else {
-        TORCH_CHECK(false, "Unreachable");
-      }
-    }();
-
-    const uint8_t* __restrict__ b_tile_2 =
-        reinterpret_cast<const uint8_t*>(b_tile);
-    const uint8_t* __restrict__ b_tile_3 = [&]() {
-      if constexpr (phase == AttentionGemmPhase::QK) {
-        return reinterpret_cast<const uint8_t*>(b_tile) +
-               (k_size * AMX_TILE_ROW_BYTES / 4);
-      } else if constexpr (phase == AttentionGemmPhase::PV) {
-        return reinterpret_cast<const uint8_t*>(b_tile) +
-               (block_size * AMX_TILE_ROW_BYTES / 4);
-      } else {
-        TORCH_CHECK(false, "Unreachable");
-      }
-    }();
-    const uint8_t* __restrict__ b_tile_4 = b_tile_2 + fp8_tile_elems;
-    const uint8_t* __restrict__ b_tile_5 = b_tile_3 + fp8_tile_elems;
+    kv_cache_t* __restrict__ b_tile_4 = b_tile_2 + tile_elems;
+    kv_cache_t* __restrict__ b_tile_5 = b_tile_3 + tile_elems;
     const int64_t b_stride = AMX_TILE_ROW_BYTES;
 
     float* __restrict__ c_tile_6 = c_tile;
@@ -511,24 +294,24 @@ class TileGemm122<c10::BFloat16, fp8_t> {
     }
 
     for (int32_t k = 0; k < k_group_times; ++k) {
-      alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
-      alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
-      alignas(64) c10::BFloat16 scratch_4[fp8_tile_elems];
-      alignas(64) c10::BFloat16 scratch_5[fp8_tile_elems];
-      deq_tile(b_tile_2, scratch_2);
-      deq_tile(b_tile_3, scratch_3);
-      deq_tile(b_tile_4, scratch_4);
-      deq_tile(b_tile_5, scratch_5);
+      alignas(64) c10::BFloat16 scratch_2[scratch_elems];
+      alignas(64) c10::BFloat16 scratch_3[scratch_elems];
+      alignas(64) c10::BFloat16 scratch_4[scratch_elems];
+      alignas(64) c10::BFloat16 scratch_5[scratch_elems];
+      const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
+      const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
+      const c10::BFloat16* load_4 = prepare_b_tile(b_tile_4, scratch_4);
+      const c10::BFloat16* load_5 = prepare_b_tile(b_tile_5, scratch_5);
 
       _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, scratch_2, b_stride);
+      _tile_stream_loadd(2, const_cast<c10::BFloat16*>(load_2), b_stride);
       _tile_dpbf16ps(6, 0, 2);
-      _tile_stream_loadd(3, scratch_3, b_stride);
+      _tile_stream_loadd(3, const_cast<c10::BFloat16*>(load_3), b_stride);
       _tile_dpbf16ps(7, 0, 3);
       _tile_loadd(1, a_tile_1, a_tile_stride);
-      _tile_stream_loadd(4, scratch_4, b_stride);
+      _tile_stream_loadd(4, const_cast<c10::BFloat16*>(load_4), b_stride);
       _tile_dpbf16ps(6, 1, 4);
-      _tile_stream_loadd(5, scratch_5, b_stride);
+      _tile_stream_loadd(5, const_cast<c10::BFloat16*>(load_5), b_stride);
       _tile_dpbf16ps(7, 1, 5);
 
       if constexpr (phase == AttentionGemmPhase::QK) {
@@ -538,22 +321,22 @@ class TileGemm122<c10::BFloat16, fp8_t> {
         a_tile_0 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
         a_tile_1 += 2 * AMX_TILE_ROW_BYTES / sizeof(c10::BFloat16);
       }
-      b_tile_2 += 2 * fp8_tile_elems;
-      b_tile_3 += 2 * fp8_tile_elems;
-      b_tile_4 += 2 * fp8_tile_elems;
-      b_tile_5 += 2 * fp8_tile_elems;
+      b_tile_2 += 2 * tile_elems;
+      b_tile_3 += 2 * tile_elems;
+      b_tile_4 += 2 * tile_elems;
+      b_tile_5 += 2 * tile_elems;
     }
 
     if (has_tail) {
-      alignas(64) c10::BFloat16 scratch_2[fp8_tile_elems];
-      alignas(64) c10::BFloat16 scratch_3[fp8_tile_elems];
-      deq_tile(b_tile_2, scratch_2);
-      deq_tile(b_tile_3, scratch_3);
+      alignas(64) c10::BFloat16 scratch_2[scratch_elems];
+      alignas(64) c10::BFloat16 scratch_3[scratch_elems];
+      const c10::BFloat16* load_2 = prepare_b_tile(b_tile_2, scratch_2);
+      const c10::BFloat16* load_3 = prepare_b_tile(b_tile_3, scratch_3);
 
       _tile_loadd(0, a_tile_0, a_tile_stride);
-      _tile_stream_loadd(2, scratch_2, b_stride);
+      _tile_stream_loadd(2, const_cast<c10::BFloat16*>(load_2), b_stride);
       _tile_dpbf16ps(6, 0, 2);
-      _tile_stream_loadd(3, scratch_3, b_stride);
+      _tile_stream_loadd(3, const_cast<c10::BFloat16*>(load_3), b_stride);
       _tile_dpbf16ps(7, 0, 3);
     }
 
@@ -590,9 +373,8 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
   using partial_output_buffer_t = float;
   using prob_buffer_t = scalar_t;
 
-  // FP8 path: AMX_TILE_ROW_BYTES / sizeof(uint8_t) = 64 would reject
-  // block_size=32, so cap at 32. BF16 path: 64/2 = 32 anyway — same value.
-  constexpr static int64_t BlockSizeAlignment = 32;
+  constexpr static int64_t BlockSizeAlignment =
+      32;  // AMX_TILE_ROW_NUM = 16 tokens/tile; 32 = 2 tiles
   constexpr static int64_t HeadDimAlignment =
       2 * (AMX_TILE_ROW_BYTES / 4);  // headdim num unit of PV phase
   constexpr static int64_t MaxQHeadNumPerIteration = 32;
@@ -693,24 +475,12 @@ class AttentionImpl<ISA::AMX, scalar_t, head_dim, kv_cache_t_> {
       scalar_t* __restrict__ src_iter = src;
       for (int32_t q_head_idx = 0; q_head_idx < q_heads_per_kv;
            ++q_head_idx, src_iter += q_head_stride) {
-        if constexpr (fp8_kv) {
-          // FP8 path: k_scale is folded into the attention scale in
-          // execute_attention. Copy Q as plain BF16 without scaling.
-          vec_op::unroll_loop<int32_t, head_size_block_num>([&](int32_t blk) {
-            const scalar_t* src_blk = src_iter + blk * head_elem_num_per_block;
-            c10::BFloat16* dst_blk = reinterpret_cast<c10::BFloat16*>(
-                q_buffer_iter + blk * AMX_TILE_BYTES);
-            vec_op::BF16Vec16(src_blk).save(dst_blk);
-            vec_op::BF16Vec16(src_blk + 16).save(dst_blk + 16);
-          });
-        } else {
-          vec_op::unroll_loop<int32_t, head_size_block_num>(
-              [&](int32_t head_size_block_idx) {
-                vec_op::INT8Vec64 vec(src_iter + head_size_block_idx *
-                                                     head_elem_num_per_block);
-                vec.save(q_buffer_iter + head_size_block_idx * AMX_TILE_BYTES);
-              });
-        }
+        vec_op::unroll_loop<int32_t, head_size_block_num>(
+            [&](int32_t head_size_block_idx) {
+              vec_op::INT8Vec64 vec(src_iter + head_size_block_idx *
+                                                   head_elem_num_per_block);
+              vec.save(q_buffer_iter + head_size_block_idx * AMX_TILE_BYTES);
+            });
 
         ++idx;
         q_buffer_iter += AMX_TILE_ROW_BYTES;
