@@ -3,7 +3,14 @@
 
 from collections.abc import Sequence
 
-from cohere_melody import PyFilter, PyFilterOptions
+try:
+    from cohere_melody import PyFilter, PyFilterOptions
+except ImportError as e:
+    raise ImportError(
+        "The Cohere tool parser requires the `cohere_melody` "
+        "package, which is not installed. Install it with:\n"
+        "    pip install cohere_melody"
+    ) from e
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,

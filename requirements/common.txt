@@ -49,7 +49,6 @@ ijson # Required for mistral streaming tool parser
 setproctitle # Used to set process names for better debugging and monitoring
 openai-harmony >= 0.0.3  # Required for gpt-oss
 anthropic >= 0.71.0
-cohere-melody==0.7.0  # Required for Cohere's reasoning & tool parsers
 model-hosting-container-standards >= 0.1.13, < 1.0.0
 mcp
 opentelemetry-sdk >= 1.27.0

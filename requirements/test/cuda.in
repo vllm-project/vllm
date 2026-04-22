@@ -32,6 +32,7 @@ torchvision==0.26.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 mistral_common[image,audio] >= 1.11.0 # required for voxtral test
+cohere-melody==0.7.0  # required for cohere's reasoning & tool parsers tests
 num2words # required for smolvlm test
 open_clip_torch==2.32.0 # Required for nemotron_vl test, Nemotron Parse in test_common.py
 opencv-python-headless >= 4.13.0 # required for video test

@@ -9,7 +9,16 @@ from typing import Any, NamedTuple, TypedDict, TypeGuard
 
 import regex as re
 import xgrammar as xgr
-from cohere_melody import PyFilter, PyFilterOptions
+
+try:
+    from cohere_melody import PyFilter, PyFilterOptions
+except ImportError as e:
+    raise ImportError(
+        "The Cohere reasoning parser requires the `cohere_melody` "
+        "package, which is not installed. Install it with:\n"
+        "    pip install cohere_melody"
+    ) from e
+
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.chat_completion.protocol import (

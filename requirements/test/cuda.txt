@@ -144,6 +144,8 @@ cligj==0.7.2
     # via
     #   fiona
     #   rasterio
+cohere-melody==0.7.0
+    # via -r requirements/test/cuda.in
 colorama==0.4.6
     # via
     #   perceptron
