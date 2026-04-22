@@ -63,9 +63,9 @@ def static_quant_fp8(
 
 
 _vllm_c_static_group_quant_fp8_args = (
-    lambda x, scale, fp8_dtype, num_token_padding=None: x.ndim == 2
+    lambda x, scale, fp8_dtype, num_token_padding=None: x.ndim == 2 and scale.ndim != 1
 )
-"""vllm_c static_group_quant_fp8 requires a 2D input tensor."""
+"""vllm_c static_group_quant_fp8 requires a 2D input tensor and a non-1D scale."""
 
 
 @ir.ops.static_group_quant_fp8.register_impl(
@@ -77,6 +77,8 @@ def static_group_quant_fp8(
     fp8_dtype: torch.dtype,
     num_token_padding: int | None = None,
 ) -> Tensor:
+    assert x.ndim == 2
+    assert scale.ndim != 1, "1D scale is ambiguous; use shape (n_tokens, n_groups)"
     shape = x.shape
     if num_token_padding:
         shape = (max(num_token_padding, x.shape[0]),) + x.shape[1:]
