@@ -768,9 +768,13 @@ _MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
 def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     """Check if FP8 ViT attention is supported on this platform.
 
-    Requires FlashInfer cuDNN backend and cuDNN >= 9.17.1.
+    Requires native FP8 hardware support, the FlashInfer cuDNN backend,
+    and cuDNN >= 9.17.1.
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    if not current_platform.supports_fp8():
+        return False
 
     try:
         supported = current_platform.get_supported_vit_attn_backends()

@@ -3,7 +3,6 @@
 
 import functools
 import json
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -43,7 +42,10 @@ logger = init_logger(__name__)
 _, _FP8_MAX = get_fp8_min_max()
 _FP8_AMAX_HISTORY_LEN = 16
 
-# Module-level state for auto-saving dynamic scales.
+# Module-level state for auto-saving dynamic scales. The save is a one-shot
+# triggered by the first layer whose amax buffer wraps. Path and margin are
+# captured during layer init (set_current_vllm_config context only lives
+# across model init, not forward passes).
 _fp8_scale_save_path: str | None = None
 _fp8_scale_save_margin: float = MultiModalConfig.mm_encoder_fp8_scale_save_margin
 _fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
@@ -53,32 +55,18 @@ _fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]
 def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
     """Load per-layer FP8 Q/K/V scales from a JSON file. Results are cached.
 
-    Expected format example (keys like ``q_scale`` also accepted)::
+    Expected format (keys ``q_scale`` / ``k_scale`` / ``v_scale`` also accepted)::
 
         {
             "visual.blocks.0.attn.attn": {"q": 224.0, "k": 198.0, "v": 210.0},
             "visual.blocks.1.attn.attn": {"q": 218.0, "k": 195.0, "v": 207.0},
-            ...
         }
 
-    To generate a scale file, enable dynamic scaling (enabled by default when
-    no scale file is provided) and run some forward passes. Then dump::
-
-        scales = {}
-        for name, module in model.named_modules():
-            if hasattr(module, "_fp8_q_scale"):
-                scales[name] = {
-                    "q": module._fp8_q_scale.item(),
-                    "k": module._fp8_k_scale.item(),
-                    "v": module._fp8_v_scale.item(),
-                }
-        with open("fp8_vit_scales.json", "w") as f:
-            json.dump(scales, f, indent=2)
+    To produce such a file, run with ``mm_encoder_fp8_scale_save_path`` set.
     """
     if path is None:
         return {}
 
-    path = str(Path(path).expanduser())
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
@@ -106,6 +94,51 @@ def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
         "Loaded FP8 attention scales from %s (%d layers)", path, len(scales)
     )
     return scales
+
+
+def _maybe_save_fp8_scales(
+    layer_name: str,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+    buffer_wrapped: bool,
+) -> None:
+    """Accumulate a layer's scale tensors; on the first amax buffer wrap,
+    dump all accumulated scales to ``mm_encoder_fp8_scale_save_path``.
+
+    No-op unless auto-save is configured. Tensor references are stored on
+    every call (no GPU->CPU sync); ``.item()`` is only called at the single
+    save point to avoid stalling the forward path.
+    """
+    global _fp8_scale_save_path
+    # Fast path: auto-save either disabled or already finished. Path is
+    # captured at layer init and cleared once the save fires.
+    if _fp8_scale_save_path is None:
+        return
+
+    # Stash scale tensor refs (no GPU->CPU sync yet); wait until the amax
+    # history has seen a full cycle before committing scales to disk.
+    _fp8_saved_scale_refs[layer_name] = (q_scale, k_scale, v_scale)
+    if not buffer_wrapped:
+        return
+
+    # Buffer just wrapped for the first time: materialize scales (with
+    # safety margin) and dump to disk. Clearing _fp8_scale_save_path
+    # makes this a one-shot across all layers.
+    path, margin = _fp8_scale_save_path, _fp8_scale_save_margin
+    scales = {
+        name: {
+            "q": q.item() * margin,
+            "k": k.item() * margin,
+            "v": v.item() * margin,
+        }
+        for name, (q, k, v) in _fp8_saved_scale_refs.items()
+    }
+    _fp8_scale_save_path = None
+    _fp8_saved_scale_refs.clear()
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(scales, f, indent=2)
+    logger.info("Saved FP8 scales (%d layers) to %s", len(scales), path)
 
 
 # Batch buckets for cuDNN graph caching.
@@ -340,82 +373,43 @@ class MMEncoderAttention(CustomOp):
             f"Using {self.attn_backend} for MMEncoderAttention.", scope="local"
         )
 
-        # FP8 attention support (currently only FlashInfer cuDNN backend)
+        self._init_fp8_state()
+
+    def _init_fp8_state(self) -> None:
+        """Initialize FP8 attention state from multimodal config.
+
+        No-op if FP8 is not requested. Raises ``ValueError`` if FP8 is
+        requested but the platform does not support it.
+        """
+        # Defaults so ``_forward_flashinfer`` can check ``self.fp8_enabled``
+        # and friends without worrying about attribute presence.
         self.fp8_enabled = False
         self._fp8_dynamic_scale = False
         self.fp8_quant: QuantFP8 | None = None
+        self.skip_scale_q = False
+        self.skip_scale_k = False
+        self.skip_scale_v = False
 
         mm_cfg = get_multimodal_config()
-        if mm_cfg is not None and mm_cfg.mm_encoder_attn_dtype == "fp8":
-            if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
-                raise ValueError(
-                    "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
-                    "cuDNN backend with cuDNN >= 9.17.1. "
-                    "Try upgrading cuDNN (nvidia-cudnn-cu1x) via pip, "
-                    "e.g.: pip install -U nvidia-cudnn-cu13==9.18.1"
-                )
-            # MMEncoderAttention is not in the model loader's auto-scan for
-            # process_weights_after_loading, so we call it manually here.
-            self.process_weights_after_loading(self.dtype)
-            if (
-                mm_cfg.mm_encoder_fp8_scale_save_path is not None
-                and self._fp8_dynamic_scale
-            ):
-                global _fp8_scale_save_path, _fp8_scale_save_margin
-                _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
-                _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
-
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
-        """Initialize FP8 quantization state for this layer.
-
-        Matches the ``(self, act_dtype)`` interface used by
-        :class:`Attention` and :class:`MLAAttention`. ``act_dtype`` is
-        accepted for signature compatibility but unused here, since FP8
-        scales are stored in float32 regardless of the activation dtype.
-
-        If a scale file is configured via ``mm_encoder_fp8_scale_path``,
-        static per-layer scales are loaded from the JSON file. Otherwise,
-        dynamic scaling is used: a circular buffer of the last 16 observed
-        Q/K/V amax values is maintained and scales are recomputed each
-        forward pass.
-        """
-        mm_cfg = get_multimodal_config()
-        scale_path = mm_cfg.mm_encoder_fp8_scale_path if mm_cfg is not None else None
-        all_scales = _load_fp8_scales_file(scale_path)
-
-        if scale_path is not None:
-            # Static scaling from calibration file.
-            layer_scales = all_scales.get(self.layer_name)
-            if layer_scales is None:
-                raise ValueError(
-                    "FP8 attention enabled but scales not found for layer "
-                    f"'{self.layer_name}' in {scale_path}. "
-                    f"Available layers: {list(all_scales.keys())}"
-                )
-            init_scales = layer_scales
-        else:
-            # Dynamic scaling (auto when no scale file provided).
-            init_scales = {"q": 1.0, "k": 1.0, "v": 1.0}
-            self._fp8_dynamic_scale = True
-            logger.info_once(
-                "FP8 attention enabled with dynamic scaling "
-                "(no scale file provided). Scales will adapt from "
-                "observed Q/K/V amax values (history_len=%d).",
-                _FP8_AMAX_HISTORY_LEN,
+        if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
+            return
+        if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
+            raise ValueError(
+                "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
+                "cuDNN backend with cuDNN >= 9.17.1 on a GPU with native "
+                "FP8 support."
             )
 
-        # Shape (1, 1, 1, 1) as required by cuDNN.
-        for attr, key in (
-            ("_fp8_q_scale", "q"),
-            ("_fp8_k_scale", "k"),
-            ("_fp8_v_scale", "v"),
-        ):
+        self.fp8_enabled = True
+        self._fp8_dynamic_scale = mm_cfg.mm_encoder_fp8_scale_path is None
+        self.fp8_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
+
+        # Register buffers pre-device-move; values populated in
+        # process_weights_after_loading. Shape (1, 1, 1, 1) is required by cuDNN.
+        for attr in ("_fp8_q_scale", "_fp8_k_scale", "_fp8_v_scale"):
             self.register_buffer(
-                attr,
-                torch.tensor([init_scales[key]], dtype=torch.float32).view(1, 1, 1, 1),
+                attr, torch.ones(1, dtype=torch.float32).view(1, 1, 1, 1)
             )
-
-        # Circular amax history buffers for dynamic scaling.
         if self._fp8_dynamic_scale:
             for attr in ("_fp8_q_amax", "_fp8_k_amax", "_fp8_v_amax"):
                 self.register_buffer(
@@ -425,20 +419,63 @@ class MMEncoderAttention(CustomOp):
                 )
             self._fp8_amax_pos = 0
 
-        self.fp8_quant = QuantFP8(static=True, group_shape=GroupShape.PER_TENSOR)
-        self.fp8_enabled = True
+        # Capture auto-save config now: the VllmConfig context only lives
+        # across model init, not forward passes, so ``_maybe_save_fp8_scales``
+        # reads these globals instead of re-querying ``get_multimodal_config``.
+        if (
+            mm_cfg.mm_encoder_fp8_scale_save_path is not None
+            and self._fp8_dynamic_scale
+        ):
+            global _fp8_scale_save_path, _fp8_scale_save_margin
+            _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
+            _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
 
-        self.skip_scale_q = not self._fp8_dynamic_scale and init_scales["q"] == 1.0
-        self.skip_scale_k = not self._fp8_dynamic_scale and init_scales["k"] == 1.0
-        self.skip_scale_v = not self._fp8_dynamic_scale and init_scales["v"] == 1.0
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        """Populate FP8 scale buffers after weights are loaded.
+
+        ``act_dtype`` matches the signature used by :class:`Attention` and
+        :class:`MLAAttention` for the loader auto-scan but is unused:
+        FP8 scales are always float32.
+        """
+        if not self.fp8_enabled:
+            return
+
+        mm_cfg = get_multimodal_config()
+        scale_path = mm_cfg.mm_encoder_fp8_scale_path if mm_cfg is not None else None
+        if scale_path is None:
+            logger.info_once(
+                "FP8 attention enabled with dynamic scaling "
+                "(no scale file provided). Scales will adapt from "
+                "observed Q/K/V amax values (history_len=%d).",
+                _FP8_AMAX_HISTORY_LEN,
+            )
+            return
+
+        all_scales = _load_fp8_scales_file(scale_path)
+        layer_scales = all_scales.get(self.layer_name)
+        if layer_scales is None:
+            raise ValueError(
+                "FP8 attention enabled but scales not found for layer "
+                f"'{self.layer_name}' in {scale_path}. "
+                f"Available layers: {list(all_scales.keys())}"
+            )
+
+        for attr, key in (
+            ("_fp8_q_scale", "q"),
+            ("_fp8_k_scale", "k"),
+            ("_fp8_v_scale", "v"),
+        ):
+            getattr(self, attr).fill_(layer_scales[key])
+        self.skip_scale_q = layer_scales["q"] == 1.0
+        self.skip_scale_k = layer_scales["k"] == 1.0
+        self.skip_scale_v = layer_scales["v"] == 1.0
 
         logger.debug(
-            "FP8 attention enabled for %s: q=%.4f, k=%.4f, v=%.4f%s",
+            "FP8 attention enabled for %s: q=%.4f, k=%.4f, v=%.4f",
             self.layer_name if self.layer_name else "MMEncoderAttention",
-            init_scales["q"],
-            init_scales["k"],
-            init_scales["v"],
-            " (dynamic scaling)" if self._fp8_dynamic_scale else "",
+            layer_scales["q"],
+            layer_scales["k"],
+            layer_scales["v"],
         )
 
     @classmethod
@@ -594,35 +631,14 @@ class MMEncoderAttention(CustomOp):
                 torch.clamp(max_amax, min=torch.finfo(torch.float32).tiny) / _FP8_MAX
             )
 
-        # Auto-save scales once the amax buffer wraps for the first time.
-        # We store tensor references (no GPU->CPU sync) on every call, and
-        # only call .item() at the single save point to avoid stalling.
-        global _fp8_scale_save_path
-        if _fp8_scale_save_path is not None:
-            _fp8_saved_scale_refs[self.layer_name] = (
-                self._fp8_q_scale,
-                self._fp8_k_scale,
-                self._fp8_v_scale,
-            )
-            if self._fp8_amax_pos == 0 and pos == _FP8_AMAX_HISTORY_LEN - 1:
-                m = _fp8_scale_save_margin
-                scales = {
-                    name: {
-                        "q": q.item() * m,
-                        "k": k.item() * m,
-                        "v": v.item() * m,
-                    }
-                    for name, (q, k, v) in _fp8_saved_scale_refs.items()
-                }
-                path = _fp8_scale_save_path
-                _fp8_scale_save_path = None
-                with open(path, "w", encoding="utf-8") as f:
-                    json.dump(scales, f, indent=2)
-                logger.info(
-                    "Saved FP8 scales (%d layers) to %s",
-                    len(scales),
-                    path,
-                )
+        buffer_wrapped = self._fp8_amax_pos == 0 and pos == _FP8_AMAX_HISTORY_LEN - 1
+        _maybe_save_fp8_scales(
+            self.layer_name,
+            self._fp8_q_scale,
+            self._fp8_k_scale,
+            self._fp8_v_scale,
+            buffer_wrapped,
+        )
 
     def _forward_flashinfer(
         self,

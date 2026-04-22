@@ -24,10 +24,14 @@ NUM_HEADS = 16
 HEAD_DIM = 72
 
 
+@contextlib.contextmanager
 def _build_attention(mm_config):
-    """Build an MMEncoderAttention with the given multimodal config.
+    """Yield an MMEncoderAttention with the given multimodal config.
 
-    Returns None if FlashInfer cuDNN is not available.
+    The VllmConfig context stays active while the test runs so that
+    ``get_multimodal_config()`` calls during the forward path resolve. Also
+    invokes ``process_weights_after_loading`` to simulate the model loader's
+    auto-scan. Yields ``None`` if FlashInfer cuDNN is not available.
     """
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -36,15 +40,14 @@ def _build_attention(mm_config):
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
-        return None
+        yield None
+        return
 
     vllm_config = VllmConfig()
     vllm_config.model_config = SimpleNamespace(multimodal_config=mm_config)
 
-    attn = None
     with (
         set_current_vllm_config(vllm_config),
-        contextlib.suppress(ValueError, ImportError),
         patch(
             "vllm.model_executor.layers.attention.mm_encoder_attention"
             ".get_vit_attn_backend",
@@ -56,7 +59,8 @@ def _build_attention(mm_config):
             head_size=HEAD_DIM,
             prefix=LAYER_0,
         )
-    return attn
+        attn.process_weights_after_loading(torch.bfloat16)
+        yield attn
 
 
 @pytest.fixture
@@ -64,7 +68,8 @@ def _make_attention():
     """Create an MMEncoderAttention with dynamic FP8 scaling."""
     from vllm.config.multimodal import MultiModalConfig
 
-    yield _build_attention(MultiModalConfig(mm_encoder_attn_dtype="fp8"))
+    with _build_attention(MultiModalConfig(mm_encoder_attn_dtype="fp8")) as attn:
+        yield attn
 
 
 @pytest.fixture
@@ -81,12 +86,13 @@ def _make_static_attention(tmp_path):
             }
         )
     )
-    yield _build_attention(
+    with _build_attention(
         MultiModalConfig(
             mm_encoder_attn_dtype="fp8",
             mm_encoder_fp8_scale_path=str(scale_file),
         )
-    )
+    ) as attn:
+        yield attn
 
 
 def test_dynamic_scaling_updates_scales(_make_attention) -> None:
@@ -189,13 +195,14 @@ def test_static_scales_missing_layer(tmp_path) -> None:
             ".get_vit_attn_backend",
             return_value=AttentionBackendEnum.FLASHINFER,
         ),
-        pytest.raises(ValueError, match="scales not found for layer"),
     ):
-        MMEncoderAttention(
+        attn = MMEncoderAttention(
             num_heads=NUM_HEADS,
             head_size=HEAD_DIM,
             prefix=LAYER_0,
         )
+        with pytest.raises(ValueError, match="scales not found for layer"):
+            attn.process_weights_after_loading(torch.bfloat16)
 
 
 def test_dynamic_scales_auto_save(tmp_path) -> None:
@@ -206,26 +213,31 @@ def test_dynamic_scales_auto_save(tmp_path) -> None:
     if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
         pytest.skip("FlashInfer cuDNN not available")
 
+    # Reset module-level state between runs (other tests may have left
+    # state behind after triggering a save).
+    _mod._fp8_scale_save_path = None
+    _mod._fp8_saved_scale_refs.clear()
+
     save_file = tmp_path / "auto_scales.json"
-    attn = _build_attention(
+    with _build_attention(
         MultiModalConfig(
             mm_encoder_attn_dtype="fp8",
             mm_encoder_fp8_scale_save_path=str(save_file),
         )
-    )
-    if attn is None or not attn.fp8_enabled:
-        pytest.skip("FP8 attention not available")
+    ) as attn:
+        if attn is None or not attn.fp8_enabled:
+            pytest.skip("FP8 attention not available")
 
-    attn = attn.to("cuda")
-    S, H, D = 16, NUM_HEADS, HEAD_DIM
+        attn = attn.to("cuda")
+        S, H, D = 16, NUM_HEADS, HEAD_DIM
 
-    # Run exactly _FP8_AMAX_HISTORY_LEN forward passes.
-    for i in range(_FP8_AMAX_HISTORY_LEN):
-        mag = float(i + 1)
-        q = torch.full((S, H, D), mag, device="cuda", dtype=torch.bfloat16)
-        k = torch.full((S, H, D), mag * 0.5, device="cuda", dtype=torch.bfloat16)
-        v = torch.full((S, H, D), mag * 0.3, device="cuda", dtype=torch.bfloat16)
-        attn._record_amax_and_update_scales(q, k, v)
+        # Run exactly _FP8_AMAX_HISTORY_LEN forward passes.
+        for i in range(_FP8_AMAX_HISTORY_LEN):
+            mag = float(i + 1)
+            q = torch.full((S, H, D), mag, device="cuda", dtype=torch.bfloat16)
+            k = torch.full((S, H, D), mag * 0.5, device="cuda", dtype=torch.bfloat16)
+            v = torch.full((S, H, D), mag * 0.3, device="cuda", dtype=torch.bfloat16)
+            attn._record_amax_and_update_scales(q, k, v)
 
     # File should have been written on the 16th call (buffer wrap).
     assert save_file.is_file(), "Scale file was not saved"
@@ -235,5 +247,5 @@ def test_dynamic_scales_auto_save(tmp_path) -> None:
     for val in scales[LAYER_0].values():
         assert isinstance(val, float) and val > 0
 
-    # Module-level save path should be cleared (one-shot).
+    # Path is cleared after the one-shot save fires.
     assert _mod._fp8_scale_save_path is None
