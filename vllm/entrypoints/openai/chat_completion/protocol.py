@@ -547,6 +547,36 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def validate_retention_directives_monotonic(cls, data):
+        directives = data.get("retention_directives")
+        if not directives:
+            return data
+
+        # Sort by token start position; ties broken by original order.
+        sorted_directives = sorted(
+            enumerate(directives),
+            key=lambda pair: (pair[1].get("start", 0), pair[0]),
+        )
+        prev_priority = None
+        prev_start = None
+        for _, directive in sorted_directives:
+            priority = directive.get("priority", 0)
+            start = directive.get("start", 0)
+            if prev_priority is not None and priority > prev_priority:
+                raise VLLMValidationError(
+                    "`retention_directives` priorities must be non-increasing "
+                    "across token positions (prefix-cache constraint): "
+                    f"directive at start={start} has priority={priority} > "
+                    f"earlier directive at start={prev_start} with "
+                    f"priority={prev_priority}.",
+                    parameter="retention_directives",
+                )
+            prev_priority = priority
+            prev_start = start
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_response_format(cls, data):
         response_format = data.get("response_format")
         if response_format is None:
