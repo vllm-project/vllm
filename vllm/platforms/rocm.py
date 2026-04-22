@@ -382,6 +382,7 @@ def _get_backend_priorities(
     if is_aiter_found_and_supported():
         backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
     backends.append(AttentionBackendEnum.TRITON_ATTN)
+    backends.append(AttentionBackendEnum.TURBOQUANT)
 
     return backends
 
@@ -799,7 +800,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"])
+        return on_gfx9() or on_gfx12x()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
