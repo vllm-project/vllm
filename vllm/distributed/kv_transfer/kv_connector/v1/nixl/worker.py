@@ -1034,20 +1034,10 @@ class NixlConnectorWorker:
 
         ### Register remote agent memory regions
         blocks_data = self.transfer_policy.build_remote_descs(
-            # TP topology
-            tp_rank=transfer_topo.tp_rank,
-            tp_size=transfer_topo.tp_size,
-            is_mla=transfer_topo.is_mla,
-            total_num_kv_heads=transfer_topo.total_num_kv_heads,
-            tp_ratio=tp_ratio,
-            # Remote engine info
-            nixl_agent_meta=nixl_agent_meta,
-            remote_info=transfer_topo.get_engine_info(engine_id),
-            # Block geometry
-            block_size_ratio=block_size_ratio,
-            block_len_per_layer=self.block_len_per_layer,
-            # Layout
-            is_blocks_first=transfer_topo.is_kv_layout_blocks_first,
+            transfer_topo,
+            engine_id,
+            nixl_agent_meta,
+            self.block_len_per_layer,
         )
         logger.debug(
             "Created %s blocks for dst engine %s with remote rank %s and local rank %s",
