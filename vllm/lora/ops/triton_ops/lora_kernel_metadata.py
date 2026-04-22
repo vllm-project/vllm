@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 
 import torch
 
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
 
 @dataclass
 class LoRAKernelMeta:
@@ -118,12 +120,15 @@ class LoRAKernelMeta:
         self._reset()
 
         # Check and record no-lora case.
-        no_lora = torch.all(token_lora_mapping == -1)
-        self.no_lora_flag_cpu[0] = no_lora
+        # TODO: avoid this sync by computing no_lora on CPU upstream in
+        # `convert_mapping` where the mapping is still a Python list.
+        with gpu_sync_allowed():
+            no_lora = torch.all(token_lora_mapping == -1)
+            self.no_lora_flag_cpu[0] = no_lora
 
-        if no_lora:
-            # Early exit. LoRA kernels will not be run.
-            return
+            if no_lora:
+                # Early exit. LoRA kernels will not be run.
+                return
 
         num_tokens = token_lora_mapping.size(0)
 
