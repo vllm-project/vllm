@@ -336,9 +336,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 attn_metadata.isa,
-                k_scale=layer._k_scale_float if self.is_fp8_kv_cache else 1.0,
-                v_scale=layer._v_scale_float if self.is_fp8_kv_cache else 1.0,
-                kv_cache_dtype=self.kv_cache_dtype if self.is_fp8_kv_cache else "auto",
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                kv_cache_dtype=self.kv_cache_dtype,
             )
 
         if attn_metadata.use_sdpa_prefill:
@@ -370,9 +370,9 @@ class CPUAttentionBackendImpl(AttentionImpl):
                 softcap=self.logits_soft_cap,
                 scheduler_metadata=attn_metadata.scheduler_metadata,
                 s_aux=self.sinks,
-                k_scale=layer._k_scale_float if self.is_fp8_kv_cache else 1.0,
-                v_scale=layer._v_scale_float if self.is_fp8_kv_cache else 1.0,
-                kv_cache_dtype=self.kv_cache_dtype if self.is_fp8_kv_cache else "auto",
+                k_scale=layer._k_scale_float,
+                v_scale=layer._v_scale_float,
+                kv_cache_dtype=self.kv_cache_dtype,
             )
 
         return output
