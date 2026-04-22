@@ -1288,6 +1288,33 @@ class ModelConfig:
     def get_oe_padding_token_id(self) -> int:
         return getattr(self.hf_text_config, "oe_padding_token_id", 0)
 
+    # NOTE(yxing): plt-related config
+    def get_plt_num_loops(self) -> int:
+        return getattr(self.hf_text_config, "plt_num_loops", 0)
+
+    def get_plt_normalize_per_loop(self) -> bool:
+        return getattr(self.hf_text_config, "plt_normalize_per_loop", False)
+
+    def get_plt_gate_use_hidden_states(self) -> bool:
+        return getattr(self.hf_config, "plt_gate_use_hidden_states", False)
+
+    def get_plt_emb_scale(self) -> float:
+        plt_emb_scale = getattr(self.hf_config, "plt_emb_scale", 1.0)
+        if plt_emb_scale is None:
+            return 1.0
+        else:
+            return plt_emb_scale
+
+    def get_plt_hidden_scale(self) -> float:
+        plt_hidden_scale = getattr(self.hf_config, "plt_hidden_scale", 1.0)
+        if plt_hidden_scale is None:
+            return 1.0
+        else:
+            return plt_hidden_scale
+
+    def get_plt_window_size(self) -> tuple:
+        return getattr(self.hf_config, "plt_window_size", [-1, 0])
+
     def get_multimodal_config(self) -> MultiModalConfig:
         """
         Get the multimodal configuration of the model.

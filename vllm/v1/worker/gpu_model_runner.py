@@ -577,6 +577,17 @@ class GPUModelRunner(
                 device="cpu",
             )
 
+        # NOTE(yxing): plt-related config
+        self.plt_loop_nums = self.model_config.get_plt_num_loops()
+        if self.plt_loop_nums > 1:
+            self.plt_loop_hidden_states = torch.zeros(
+                self.plt_loop_nums,
+                self.max_num_tokens,
+                self.model_config.get_hidden_size(),
+                device=self.device,
+                dtype=torch.bfloat16,
+            )
+
         # Input Batch
         # NOTE(Chen): Ideally, we should initialize the input batch inside
         # `initialize_kv_cache` based on the kv cache config. However, as in
@@ -618,6 +629,8 @@ class GPUModelRunner(
             oe_padding_token_id=self.oe_padding_token_id
             if self.enable_oe_embedding
             else 0,
+            plt_hidden_size=self.model_config.get_hidden_size(),
+            plt_loop_nums=self.plt_loop_nums,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -1534,6 +1547,58 @@ class GPUModelRunner(
                 token_indices_tensor,
                 out=self.oe_context[ngram_idx - 1, :total_num_scheduled_tokens],
             )
+
+    def _prepare_loop_hidden_states(
+        self,
+        schedule_tokens_np: np.ndarray,
+        model_kwargs: dict,
+        plt_loop_num_idx: int,
+        prev_model_output: torch.Tensor,
+    ):
+        if plt_loop_num_idx == 0:
+            model_kwargs["loop_hidden_states"] = None
+            return
+
+        # [A, B, C, D, E, F, G] [H, I, J, K]
+        # [0, A, B, C, D, E, F] [G, H, I, J]
+        schedule_tokens_cumsum = np.cumsum(schedule_tokens_np)
+        total_schedule_tokens = schedule_tokens_cumsum[-1]
+        for req_idx, req_sched_tokens in enumerate(schedule_tokens_np):
+            token_end = schedule_tokens_cumsum[req_idx]
+            token_start = token_end - req_sched_tokens + 1
+            if req_sched_tokens > 1:
+                self.plt_loop_hidden_states[plt_loop_num_idx][token_start:token_end] = (
+                    prev_model_output[token_start - 1 : token_end - 1]
+                )
+        model_kwargs["loop_hidden_states"] = self.plt_loop_hidden_states[
+            plt_loop_num_idx
+        ][:total_schedule_tokens]
+
+    def _fill_first_hidden_state_for_plt(self, schedule_tokens_np: np.ndarray):
+        schedule_tokens_cumsum = np.cumsum(schedule_tokens_np)
+        for plt_loop_num_idx in range(1, self.plt_loop_nums):
+            # check the first token
+            for req_idx, req_sched_tokens in enumerate(schedule_tokens_np):
+                token_end = schedule_tokens_cumsum[req_idx]
+                token_start = token_end - req_sched_tokens
+                self.plt_loop_hidden_states[plt_loop_num_idx][token_start] = (
+                    self.input_batch.plt_saved_hidden_states[plt_loop_num_idx - 1][
+                        req_idx
+                    ]
+                )
+
+    def _update_saved_hidden_states(
+        self,
+        model_output: torch.Tensor,
+        schedule_tokens_np: np.ndarray,
+        plt_loop_num_idx: int,
+    ):
+        assert self.plt_loop_nums > 1
+        token_cusum = np.cumsum(schedule_tokens_np)
+        num_seqs = len(schedule_tokens_np)
+        self.input_batch.plt_saved_hidden_states[plt_loop_num_idx][:num_seqs] = (
+            model_output[token_cusum - 1]
+        )
 
     def _get_encoder_seq_lens(
         self,
@@ -3718,13 +3783,46 @@ class GPUModelRunner(
                 scheduler_output, clear_metadata=clear_kv_metadata
             ) as kv_connector_output,
         ):
-            model_output = self._model_forward(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                **model_kwargs,
-            )
+            if self.plt_loop_nums > 1:
+                plt_last_model_output = None
+                # NOTE(yxing): this is a naive plt implementation
+                self._fill_first_hidden_state_for_plt(
+                    schedule_tokens_np=num_scheduled_tokens_np
+                )
+                for plt_loop_num_idx in range(self.plt_loop_nums):
+                    model_kwargs["loop_num_idx"] = plt_loop_num_idx
+                    self._prepare_loop_hidden_states(
+                        schedule_tokens_np=num_scheduled_tokens_np,
+                        model_kwargs=model_kwargs,
+                        plt_loop_num_idx=plt_loop_num_idx,
+                        prev_model_output=plt_last_model_output,
+                    )
+
+                    model_output = self._model_forward(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
+                    )
+                    torch.cuda.synchronize()
+                    # for non-last loop, we save the hidden states for next loop
+                    if plt_loop_num_idx < self.plt_loop_nums - 1:
+                        self._update_saved_hidden_states(
+                            model_output=model_output,
+                            schedule_tokens_np=num_scheduled_tokens_np,
+                            plt_loop_num_idx=plt_loop_num_idx,
+                        )
+                    plt_last_model_output = model_output
+
+            else:
+                model_output = self._model_forward(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
 
         with record_function_or_nullcontext("gpu_model_runner: postprocess"):
             if self.use_aux_hidden_state_outputs:
@@ -5068,13 +5166,24 @@ class GPUModelRunner(
                     slot_mapping=slot_mappings,
                 ),
             ):
-                outputs = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds,
-                    **model_kwargs,
-                )
+                if self.plt_loop_nums > 1:
+                    for plt_loop_num_idx in range(self.plt_loop_nums):
+                        model_kwargs["loop_num_idx"] = plt_loop_num_idx
+                        outputs = self.model(
+                            input_ids=input_ids,
+                            positions=positions,
+                            intermediate_tensors=intermediate_tensors,
+                            inputs_embeds=inputs_embeds,
+                            **model_kwargs,
+                        )
+                else:
+                    outputs = self.model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs,
+                    )
 
             if self.use_aux_hidden_state_outputs:
                 hidden_states, _ = outputs
@@ -5128,6 +5237,10 @@ class GPUModelRunner(
         # both compiled and uncompiled models but they will never
         # be called on the compiled model execution path.
         self._register_layerwise_nvtx_hooks()
+
+        # NOTE(yxing): reinitialize loop state
+        if self.plt_loop_nums > 1:
+            self.input_batch.plt_saved_hidden_states.fill_(0)
 
         # This is necessary to avoid blocking DP.
         # For dummy runs, we typically skip EPLB since we don't have any real
@@ -5992,6 +6105,8 @@ class GPUModelRunner(
                 oe_padding_token_id=self.oe_padding_token_id
                 if self.enable_oe_embedding
                 else 0,
+                plt_hidden_size=self.model_config.get_hidden_size(),
+                plt_loop_nums=self.plt_loop_nums,
             )
 
     def _allocate_kv_cache_tensors(

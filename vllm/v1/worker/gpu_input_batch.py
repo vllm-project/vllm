@@ -97,6 +97,8 @@ class InputBatch:
         cp_kv_cache_interleave_size: int = 1,
         max_ngram_size: int = 1,
         oe_padding_token_id: int = 0,
+        plt_hidden_size: int = 0,
+        plt_loop_nums: int = 0,
     ):
         self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
@@ -283,6 +285,17 @@ class InputBatch:
             )
             self.oe_ngram_token_ids_cpu = self.oe_ngram_token_ids_cpu_tensor.numpy()
 
+        # NOTE(yxing): saved hidden states for plt
+        self.plt_loop_nums = plt_loop_nums
+        if self.plt_loop_nums > 1:
+            self.plt_saved_hidden_states = torch.zeros(
+                self.plt_loop_nums - 1,
+                self.max_num_reqs,
+                plt_hidden_size,
+                dtype=torch.bfloat16,
+                device=self.device,
+            )
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -453,6 +466,14 @@ class InputBatch:
             self.request_lora_mapping[req_index] = 0
 
         return req_index
+
+    def swap_plt_request_saved_hidden_state(self, i1: int, i2: int):
+        if self.plt_loop_nums <= 1:
+            return
+
+        tmp = self.plt_saved_hidden_states[:, i1].clone()
+        self.plt_saved_hidden_states[:, i1] = self.plt_saved_hidden_states[:i2]
+        self.plt_saved_hidden_states[:, i2] = tmp
 
     def update_req_spec_token_ids(
         self, request: CachedRequestState, scheduled_spec_tokens: dict[str, list[int]]
@@ -637,6 +658,17 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i1],
             )
 
+        self.swap_plt_request_saved_hidden_state(i1, i2)
+
+    def _condense_plt_saved_hidden_states(self, empty_index: int, last_req_index: int):
+        if self.plt_loop_nums <= 1:
+            return
+
+        for loop_num_idx in range(self.plt_loop_nums - 1):
+            self.plt_saved_hidden_states[loop_num_idx][empty_index] = (
+                self.plt_saved_hidden_states[loop_num_idx][last_req_index]
+            )
+
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
 
@@ -763,6 +795,11 @@ class InputBatch:
             bad_words_token_ids = self.bad_words_token_ids.pop(last_req_index, None)
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
+
+            # NOTE(yxing): plt-related condense
+            self._condense_plt_saved_hidden_states(
+                empty_index=empty_index, last_req_index=last_req_index
+            )
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
