@@ -324,6 +324,10 @@ class XPUPlatform(Platform):
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
 
     @classmethod
+    def supports_fp8(cls) -> bool:
+        return True
+
+    @classmethod
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
