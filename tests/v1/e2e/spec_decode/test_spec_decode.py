@@ -763,12 +763,22 @@ def test_mtp_correctness(
             )
 
         attn_backend = "TRITON_ATTN" if current_platform.is_rocm() else "auto"
+
+        # Qwen3.5 is a VLM; without this, profile_run runs the ViT warmup
+        # and peaks well above the 18GB MIG slice used by one of the CI
+        # lanes. This test only exercises text generation, so the vision
+        # tower is never needed.
+        extra_kwargs: dict[str, Any] = {}
+        if "Qwen3.5" in model_name:
+            extra_kwargs["limit_mm_per_prompt"] = {"image": 0, "video": 0}
+
         ref_llm = LLM(
             model=model_name,
             max_model_len=2048,
             tensor_parallel_size=tp_size,
             trust_remote_code=True,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         evaluate_llm_for_gsm8k(
@@ -789,6 +799,7 @@ def test_mtp_correctness(
             },
             max_model_len=2048,
             attention_backend=attn_backend,
+            **extra_kwargs,
         )
         # MTP supports async scheduling; assert it is active by default.
         assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
