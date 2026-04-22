@@ -5,6 +5,7 @@ Unit tests for MooncakeECConnector.
 """
 
 import threading
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -18,6 +19,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_connector import (
     MooncakeECConnector,
     MooncakeECConnectorMetadata,
     MooncakeECConnectorWorker,
+    _get_encoder_cache_embed_size,
 )
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -147,6 +149,28 @@ def mock_request_with_3_mm():
 # ------------------ Unit Tests ------------------ #
 class TestMooncakeECConnectorBasics:
     """Test basic Mooncake EC connector functionality."""
+
+    def test_encoder_cache_embed_size_uses_deepstack_width(self):
+        model_config = Mock()
+        out_hidden_size = 4096
+        deepstack_visual_indexes = [7, 15, 23]
+        model_config.get_inputs_embeds_size.return_value = out_hidden_size
+        model_config.hf_config = SimpleNamespace(
+            vision_config=SimpleNamespace(
+                out_hidden_size=out_hidden_size,
+                deepstack_visual_indexes=deepstack_visual_indexes,
+            )
+        )
+
+        expected_embed_size = out_hidden_size * (1 + len(deepstack_visual_indexes))
+        assert _get_encoder_cache_embed_size(model_config) == expected_embed_size
+
+    def test_encoder_cache_embed_size_falls_back_to_language_width(self):
+        model_config = Mock()
+        model_config.get_inputs_embeds_size.return_value = 768
+        model_config.hf_config = SimpleNamespace(vision_config=SimpleNamespace())
+
+        assert _get_encoder_cache_embed_size(model_config) == 768
 
     @patch(
         "vllm.distributed.ec_transfer.ec_connector.mooncake_connector.TransferEngine"
