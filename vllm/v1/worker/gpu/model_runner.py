@@ -43,6 +43,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -1271,7 +1272,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if self.use_async_scheduling:
             return async_output
-        return async_output.get_output()
+
+        with gpu_sync_allowed():
+            return async_output.get_output()
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()

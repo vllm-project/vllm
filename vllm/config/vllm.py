@@ -842,21 +842,6 @@ class VllmConfig:
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
 
-        # VLLM_GPU_SYNC_CHECK presumes a sync-free execute/sample path, which
-        # only holds when async scheduling is enabled. Clear the env var (so
-        # downstream worker code sees it as unset) and warn if it would
-        # otherwise trigger on expected syncs.
-        if (
-            envs.VLLM_GPU_SYNC_CHECK is not None
-            and not self.scheduler_config.async_scheduling
-        ):
-            logger.warning(
-                "Disabling VLLM_GPU_SYNC_CHECK=%s because async scheduling "
-                "is disabled.",
-                envs.VLLM_GPU_SYNC_CHECK,
-            )
-            os.environ.pop("VLLM_GPU_SYNC_CHECK", None)
-
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (
