@@ -641,7 +641,14 @@ class SpeculativeConfig:
                     max_position_embeddings is not None
                     and max_position_embeddings < draft_max_model_len
                 ):
-                    if getattr(hf, "rope_scaling", None) is not None:
+                    rope = getattr(hf, "rope_scaling", None) or getattr(
+                        hf, "rope_parameters", None
+                    )
+                    has_scaling = rope is not None and rope.get("rope_type") not in (
+                        None,
+                        "default",
+                    )
+                    if has_scaling:
                         logger.warning(
                             "Draft model has rope_scaling with "
                             "max_position_embeddings (%d) < "
