@@ -63,7 +63,8 @@ SpeculativeMethod = Literal[
     EagleModelTypes,
     NgramGPUTypes,
 ]
-RejectionSampleMethod = Literal["strict", "probabilistic", "synthetic"]
+RejectionSampleMethod = Literal["standard", "synthetic"]
+DraftSampleMethod = Literal["greedy", "gumbel"]
 
 
 @config
@@ -183,11 +184,11 @@ class SpeculativeConfig:
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
 
-    rejection_sample_method: RejectionSampleMethod = "strict"
-    """Whether to use strict (target and draft sampled tokens match exactly)
-    or probabilistic rejection sampling. Both respect the target model
-    distribution, but the latter yields a higher acceptance rate at the cost
-    of more memory to cache draft logits."""
+    rejection_sample_method: RejectionSampleMethod = "standard"
+    """The rejection sampling method to use. 'standard' uses probabilistic
+    rejection sampling (with or without cached draft logits, controlled by
+    draft_sample_method). 'synthetic' accepts draft tokens with a decaying
+    probability calibrated to synthetic_acceptance_rate."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -247,6 +248,14 @@ class SpeculativeConfig:
                 f"synthetic_acceptance_length must be in [1, {n + 1}], got {length}."
             )
         return SpeculativeConfig._acceptance_length_to_rates(length, n)
+
+    draft_sample_method: DraftSampleMethod = "greedy"
+    """How the draft model samples tokens. 'greedy' always picks the argmax
+    token, and the draft probabilities are treated as one-hot during rejection
+    sampling. 'gumbel' adds Gumbel noise for stochastic sampling, and the full
+    draft logits are used for the probability ratio test during rejection
+    sampling. This comes at the cost of additional GPU memory usage. This
+    parameter currently only applies to Model Runner V2."""
 
     def compute_hash(self) -> str:
         """
