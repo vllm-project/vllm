@@ -40,11 +40,19 @@ def _mcp_apply(x, bias, layer: "ColumnParallelLinearWithLoRA"):
 
     # Since communication is needed, the buffer is directly initialized as a
     # tensor rather than a tuple of tensor.
-    buffers = torch.zeros(
-        (layer.n_slices, x.shape[0], layer.lora_a_stacked[0].shape[2]),
+    local_lora_rank = layer.lora_a_stacked[0].shape[2]
+    buffer_shape = (layer.n_slices, x.shape[0], local_lora_rank)
+    # Under torch.compile, the local-rank-1 fully-sharded path can otherwise
+    # get lowered to a reinterpret view with a non-canonical layout. The
+    # Triton shrink op mutates this buffer in place and expects the standard
+    # contiguous [slice, token, rank] stride contract.
+    buffers = torch.empty_strided(
+        buffer_shape,
+        (x.shape[0] * local_lora_rank, local_lora_rank, 1),
         dtype=torch.float32,
         device=x.device,
     )
+    buffers.zero_()
 
     shrunk_buffers: torch.Tensor | None = layer.punica_wrapper.add_shrink(
         buffers, x, layer.lora_a_stacked, 1.0
@@ -86,7 +94,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
         # The base_layer type is ColumnParallelLinear or
         # MergedColumnParallelLinear, their weight sharding logic is
         # inconsistent when TP is greater than 1.
-        self.is_merged_col_linear = type(base_layer) is MergedColumnParallelLinear
+        self.is_merged_col_linear = isinstance(base_layer, MergedColumnParallelLinear)
         self.output_size = self.base_layer.output_size_per_partition
         # There is only one LoRA layer
         self.n_slices = 1
@@ -158,7 +166,7 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     ) -> bool:
         if type(source_layer) is maybe_get_oot_by_class(ColumnParallelLinear):
             return True
-        if type(source_layer) is maybe_get_oot_by_class(MergedColumnParallelLinear):
+        if isinstance(source_layer, maybe_get_oot_by_class(MergedColumnParallelLinear)):
             if len(packed_modules_list) != 1:
                 return False
             # Exclude layers with 3+ output sizes - those are handled by
@@ -275,19 +283,41 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
                     index, 0, : lora_b_i.shape[0], : lora_b_i.shape[1]
                 ].copy_(lora_b_i, non_blocking=True)
 
+    def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
+        merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
+        # Effectively unsharded subclasses can safely reuse their custom
+        # forward() implementation before applying the LoRA delta.
+        if (
+            self.tp_size == 1
+            and type(self.base_layer) is not merged_cls
+            and type(self.base_layer).forward is not merged_cls.forward
+        ):
+            return self._apply_base_forward(x)
+        return _mcp_apply(x, bias, self)
+
     @classmethod
-    @_not_fully_sharded_can_replace
     def can_replace_layer(
         cls,
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
         model_config: PretrainedConfig | None = None,
+        decorate: bool = True,
     ) -> bool:
-        return (
-            type(source_layer) is MergedColumnParallelLinear
-            and len(packed_modules_list) == 2
-        )
+        merged_cls = maybe_get_oot_by_class(MergedColumnParallelLinear)
+        if not isinstance(source_layer, merged_cls) or len(packed_modules_list) != 2:
+            return False
+
+        tp_size = getattr(source_layer, "tp_size", 1)
+        if type(source_layer) is merged_cls:
+            if not decorate:
+                return True
+            return not lora_config.fully_sharded_loras or tp_size == 1
+
+        # Only support effectively unsharded subclasses here. Sharded
+        # subclasses may have custom communication semantics that the generic
+        # merged-column LoRA path does not know how to preserve.
+        return tp_size == 1
 
 
 class QKVParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
@@ -607,7 +637,9 @@ class MergedColumnParallelLinearVariableSliceWithLoRA(
     ) -> bool:
         # Support MergedColumnParallelLinear with 3 or more slices
         # (2 slices are handled by MergedColumnParallelLinearWithLoRA)
-        if type(source_layer) is not maybe_get_oot_by_class(MergedColumnParallelLinear):
+        if not isinstance(
+            source_layer, maybe_get_oot_by_class(MergedColumnParallelLinear)
+        ):
             return False
 
         # If packed_modules_list has 3+ items, use this class
