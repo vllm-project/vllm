@@ -192,6 +192,9 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
+        if self.use_v2_model_runner and (tags is None or "kv_cache" in tags):
+            self.model_runner.block_tables.refresh_metadata()
+
         # If the KV cache has just been woken up,
         # the internal state of cache_engine must be reset,
         # especially the FP8 scaling factor.

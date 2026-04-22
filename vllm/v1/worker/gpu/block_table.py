@@ -84,6 +84,21 @@ class BlockTables:
             [t.data_ptr() for t in x], dtype=torch.uint64, device=self.device
         )
 
+    def refresh_metadata(self) -> None:
+        # rebuild pointer/stride tensors after CuMem kv_cache wake-up.
+        self.block_table_ptrs = self._make_ptr_tensor(
+            [block_table.gpu for block_table in self.block_tables]
+        )
+        self.block_table_strides = torch.tensor(
+            [block_table.gpu.stride(0) for block_table in self.block_tables],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        self.block_sizes_tensor = torch.tensor(
+            self.block_sizes, dtype=torch.int32, device=self.device
+        )
+        self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
+
     def append_block_ids(
         self,
         req_index: int,
