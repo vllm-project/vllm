@@ -281,6 +281,46 @@ def has_flashinfer_cutlass_fused_moe() -> bool:
 
 
 @functools.cache
+def has_flashinfer_bf16_gemm() -> bool:
+    """Return `True` if FlashInfer BF16 dense GEMM is available."""
+    if not has_flashinfer():
+        return False
+
+    mod = _get_submodule("flashinfer")
+    return bool(mod and hasattr(mod, "mm_bf16"))
+
+
+@functools.cache
+def get_flashinfer_bf16_supported_backends() -> tuple[str, ...]:
+    """Return BF16 GEMM backends supported by FlashInfer on this device."""
+    if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
+        return ()
+
+    mod = _get_submodule("flashinfer")
+    mm_bf16 = getattr(mod, "mm_bf16", None)
+    if mm_bf16 is None or not hasattr(mm_bf16, "is_backend_supported"):
+        return ()
+
+    supported_backends: list[str] = []
+    for backend in ("cudnn", "cutlass", "tgv"):
+        try:
+            if mm_bf16.is_backend_supported(backend):
+                supported_backends.append(backend)
+        except Exception:
+            continue
+
+    return tuple(supported_backends)
+
+
+def is_flashinfer_bf16_backend_supported(backend: str) -> bool:
+    """Return whether FlashInfer BF16 GEMM supports a requested backend."""
+    supported_backends = get_flashinfer_bf16_supported_backends()
+    if backend == "auto":
+        return bool(supported_backends)
+    return backend in supported_backends
+
+
+@functools.cache
 def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_cutedsl():
@@ -561,6 +601,47 @@ if has_flashinfer():
     )
 
     @torch.library.custom_op(
+        "vllm::flashinfer_mm_bf16",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def flashinfer_mm_bf16(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        bias: torch.Tensor | None,
+        pdl: bool,
+        backend: str,
+    ) -> torch.Tensor:
+        from flashinfer import mm_bf16 as flashinfer_mm_bf16_
+
+        return flashinfer_mm_bf16_(
+            A,
+            B,
+            bias=bias,
+            pdl=pdl,
+            out=None,
+            out_dtype=torch.bfloat16,
+            backend=backend,
+        )
+
+    @torch.library.register_fake(
+        "vllm::flashinfer_mm_bf16",
+    )
+    def flashinfer_mm_bf16_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        bias: torch.Tensor | None,
+        pdl: bool,
+        backend: str,
+    ) -> torch.Tensor:
+        return torch.empty(
+            A.shape[0],
+            B.shape[1],
+            dtype=torch.bfloat16,
+            device=A.device,
+        )
+
+    @torch.library.custom_op(
         "vllm::flashinfer_mm_fp4",
         mutates_args=[],
         device_types="cuda",
@@ -737,6 +818,29 @@ if has_flashinfer():
     ) -> torch.Tensor:
         # A is [m, k], B is [k, n] -> output [m, n]
         return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
+
+
+def flashinfer_bf16_mm(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    backend: str = "auto",
+) -> torch.Tensor:
+    """Dense BF16 MM helper for FlashInfer kernels.
+
+    `a` is expected to be row-major [M, K] and `b` column-major [K, N].
+    PDL is enabled for auto/cudnn/tgv dispatch and disabled for explicit
+    CUTLASS because FlashInfer rejects PDL for that backend.
+    """
+    assert a.ndim == 2 and b.ndim == 2
+    assert a.shape[1] == b.shape[0]
+    assert a.dtype == torch.bfloat16 and b.dtype == torch.bfloat16
+    assert a.device.type == "cuda" and b.device.type == "cuda"
+    if bias is not None:
+        assert bias.dtype == torch.bfloat16 and bias.device.type == "cuda"
+
+    pdl = backend != "cutlass"
+    return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias, pdl, backend)
 
 
 def flashinfer_mm_mxfp8(
@@ -1047,6 +1151,10 @@ __all__ = [
     "supports_trtllm_attention",
     "can_use_trtllm_attention",
     "use_trtllm_attention",
+    "has_flashinfer_bf16_gemm",
+    "get_flashinfer_bf16_supported_backends",
+    "is_flashinfer_bf16_backend_supported",
+    "flashinfer_bf16_mm",
     "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",
     "flashinfer_scaled_fp4_mm_out",
