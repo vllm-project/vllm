@@ -17,26 +17,6 @@ static inline cpu_attention::Fp8KVCacheDataType parse_fp8_kv_dtype(
   return cpu_attention::Fp8KVCacheDataType::kFp8E4M3;
 }
 
-// Dispatch E4M3 vs E5M2 at runtime; ISA / scalar_t / head_dim are
-// compile-time constants supplied by the surrounding dispatch macros.
-template <cpu_attention::ISA isa, typename scalar_t, int64_t head_dim>
-static void run_fp8_attn(cpu_attention::Fp8KVCacheDataType fp8_dtype,
-                         cpu_attention::AttentionInput& input) {
-  if (fp8_dtype == cpu_attention::Fp8KVCacheDataType::kFp8E5M2) {
-    using impl_t =
-        cpu_attention::AttentionImpl<isa, scalar_t, head_dim, c10::Float8_e5m2>;
-    TORCH_CHECK_EQ(input.block_size % impl_t::BlockSizeAlignment, 0);
-    cpu_attention::AttentionMainLoop<impl_t> mainloop;
-    mainloop(&input);
-  } else {
-    using impl_t = cpu_attention::AttentionImpl<isa, scalar_t, head_dim,
-                                                c10::Float8_e4m3fn>;
-    TORCH_CHECK_EQ(input.block_size % impl_t::BlockSizeAlignment, 0);
-    cpu_attention::AttentionMainLoop<impl_t> mainloop;
-    mainloop(&input);
-  }
-}
-
 torch::Tensor get_scheduler_metadata(
     const int64_t num_req, const int64_t num_heads_q,
     const int64_t num_heads_kv, const int64_t head_dim,
@@ -86,7 +66,7 @@ torch::Tensor get_scheduler_metadata(
   input.enable_kv_split = enable_kv_split;
 
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "get_scheduler_metadata", [&]() {
-    CPU_ATTN_DISPATCH(head_dim, isa, [&]() {
+    CPU_ATTN_DISPATCH(head_dim, isa, 0, [&]() {
       input.elem_size = sizeof(scalar_t);
       input.q_buffer_elem_size = sizeof(attn_impl::q_buffer_t);
       input.logits_buffer_elem_size = sizeof(attn_impl::logits_buffer_t);
@@ -218,7 +198,7 @@ void cpu_attn_reshape_and_cache(
 
   VLLM_DISPATCH_FLOATING_TYPES(
       key.scalar_type(), "cpu_attn_reshape_and_cache", [&]() {
-        CPU_ATTN_DISPATCH(head_dim, isa_tag, [&]() {
+        CPU_ATTN_DISPATCH(head_dim, isa_tag, 0, [&]() {
           attn_impl::reshape_and_cache(
               key.data_ptr<scalar_t>(), value.data_ptr<scalar_t>(),
               key_cache.data_ptr<scalar_t>(), value_cache.data_ptr<scalar_t>(),
@@ -294,49 +274,24 @@ void cpu_attention_with_kv_cache(
   if (is_fp8) {
     input.k_scale_fp8 = static_cast<float>(k_scale);
     input.v_scale_fp8 = static_cast<float>(v_scale);
-    const auto fp8_dtype = parse_fp8_kv_dtype(kv_cache_dtype);
-
 #if !defined(__AVX2__) && !defined(__AVX512F__)
     TORCH_CHECK(false,
                 "cpu_attention_with_kv_cache requires AVX2 or AVX-512 for "
                 "FP8 KV cache; not supported on this platform.");
 #endif
-
-#if defined(CPU_CAPABILITY_AMXBF16)
-    if (input.metadata->isa == cpu_attention::ISA::AMX) {
-      TORCH_CHECK(query.scalar_type() == at::ScalarType::BFloat16,
-                  "FP8 KV cache AMX path requires BFloat16 query dtype");
-      using scalar_t = c10::BFloat16;
-      CPU_ATTN_DISPATCH(query.size(2), cpu_attention::ISA::AMX, [&]() {
-        if constexpr (attn_impl::ISAType == cpu_attention::ISA::AMX) {
-          run_fp8_attn<cpu_attention::ISA::AMX, scalar_t, attn_impl::HeadDim>(
-              fp8_dtype, input);
-        } else {
-          TORCH_CHECK(false, "FP8 AMX is not supported for head_dim=",
-                      attn_impl::HeadDim, "; use ISA vec instead");
-        }
-      });
-      return;
-    }
-#endif
-
-    VLLM_DISPATCH_FLOATING_TYPES(
-        query.scalar_type(), "cpu_attention_with_kv_cache", [&]() {
-          CPU_ATTN_DISPATCH(query.size(2), cpu_attention::ISA::VEC, [&]() {
-            run_fp8_attn<cpu_attention::ISA::VEC, scalar_t, attn_impl::HeadDim>(
-                fp8_dtype, input);
-          });
-        });
-    return;
   }
 
-  // Non-FP8 path
+  const int64_t kv_cache_idx =
+      is_fp8 ? static_cast<int64_t>(parse_fp8_kv_dtype(kv_cache_dtype)) : 0;
+
   VLLM_DISPATCH_FLOATING_TYPES(
       query.scalar_type(), "cpu_attention_with_kv_cache", [&]() {
-        CPU_ATTN_DISPATCH(query.size(2), input.metadata->isa, [&]() {
-          TORCH_CHECK_EQ(input.block_size % attn_impl::BlockSizeAlignment, 0);
-          cpu_attention::AttentionMainLoop<attn_impl> mainloop;
-          mainloop(&input);
-        });
+        CPU_ATTN_DISPATCH(
+            query.size(2), input.metadata->isa, kv_cache_idx, [&]() {
+              TORCH_CHECK_EQ(input.block_size % attn_impl::BlockSizeAlignment,
+                             0);
+              cpu_attention::AttentionMainLoop<attn_impl> mainloop;
+              mainloop(&input);
+            });
       });
 }

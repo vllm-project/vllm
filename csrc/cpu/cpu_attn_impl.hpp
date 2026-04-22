@@ -14,11 +14,11 @@
 namespace cpu_attention {
 enum class ISA { AMX, VEC, VEC16, NEON, VXE };
 
-// Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType.
-// "fp8" / "fp8_e4m3" -> kFp8E4M3; "fp8_e5m2" -> kFp8E5M2.
+// Mirrors csrc/attention/dtype_fp8.cuh Fp8KVCacheDataType exactly.
 enum class Fp8KVCacheDataType {
-  kFp8E4M3 = 0,
-  kFp8E5M2 = 1,
+  kAuto = 0,
+  kFp8E4M3 = 1,
+  kFp8E5M2 = 2,
 };
 
 template <ISA isa, typename scalar_t, int64_t head_dim,

@@ -16,13 +16,15 @@ template <typename kv_cache_t>
 FORCE_INLINE std::pair<vec_op::FP32Vec16, vec_op::FP32Vec16> load_b_pair_vec(
     const kv_cache_t* ptr) {
   if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e4m3fn>) {
-    vec_op::BF16Vec32 b_reg(reinterpret_cast<const uint8_t*>(ptr),
-                            vec_op::fp8_e4m3_tag{});
-    return {vec_op::FP32Vec16(b_reg, 0), vec_op::FP32Vec16(b_reg, 1)};
+    // BF16 container, but values are in the FP16 exponent range (bias 15 not
+    // 127).
+    vec_op::BF16Vec32 bf16_b_reg(reinterpret_cast<const uint8_t*>(ptr),
+                                 vec_op::fp8_e4m3_tag{});
+    return {vec_op::FP32Vec16(bf16_b_reg, 0), vec_op::FP32Vec16(bf16_b_reg, 1)};
   } else if constexpr (std::is_same_v<kv_cache_t, c10::Float8_e5m2>) {
-    vec_op::BF16Vec32 b_reg(reinterpret_cast<const uint8_t*>(ptr),
-                            vec_op::fp8_e5m2_tag{});
-    return {vec_op::FP32Vec16(b_reg, 0), vec_op::FP32Vec16(b_reg, 1)};
+    vec_op::BF16Vec32 bf16_b_reg(reinterpret_cast<const uint8_t*>(ptr),
+                                 vec_op::fp8_e5m2_tag{});
+    return {vec_op::FP32Vec16(bf16_b_reg, 0), vec_op::FP32Vec16(bf16_b_reg, 1)};
   } else {
     using load_vec_t = typename VecTypeTrait<kv_cache_t>::vec_t;
     return {vec_op::FP32Vec16(load_vec_t(ptr)),
