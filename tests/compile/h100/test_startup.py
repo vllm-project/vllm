@@ -135,10 +135,9 @@ MODEL_SPECS = [
             model="deepseek-ai/DeepSeek-V3.2",
             hf_overrides=_SMALL_MOE_OVERRIDES,
             cold_artifacts_saved=4,
-            # TODO: https://github.com/vllm-project/vllm/issues/38051
-            # We shouldn't be saving any artifacts on warm start.
-            warm_artifacts_saved=4,
-            warm_artifacts_loaded=0,
+            # https://github.com/vllm-project/vllm/issues/38051
+            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 4,
+            warm_artifacts_loaded=4 if is_torch_equal_or_newer("2.12.0") else 0,
         ),
         id="deepseek_v3.2",
     ),
@@ -147,10 +146,9 @@ MODEL_SPECS = [
             model="moonshotai/Kimi-K2.5",
             hf_overrides={"text_config": _SMALL_MOE_OVERRIDES},
             cold_artifacts_saved=4,
-            # TODO: https://github.com/vllm-project/vllm/issues/38051
-            # We shouldn't be saving any artifacts on warm start.
-            warm_artifacts_saved=4,
-            warm_artifacts_loaded=0,
+            # https://github.com/vllm-project/vllm/issues/38051
+            warm_artifacts_saved=0 if is_torch_equal_or_newer("2.12.0") else 4,
+            warm_artifacts_loaded=4 if is_torch_equal_or_newer("2.12.0") else 0,
         ),
         id="kimi_k2.5",
     ),
