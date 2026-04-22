@@ -45,6 +45,20 @@ class QuantMethod(IntEnum):
     BLOCK_128x128 = 5  # block quantized w8a8 (per_128x128)
 
 
+def aiter_supports_activation(activation: MoEActivation) -> bool:
+    """Whether the AITER native MoE kernel correctly supports this activation.
+
+    Activations not in this set should fall back to Triton emulation.
+    When AITER gains native support for a new activation, add it here
+    and to the dispatch mapping in rocm_aiter_fused_experts().
+    """
+    return activation in [
+        MoEActivation.SILU,
+        MoEActivation.GELU,
+        MoEActivation.SWIGLUOAI,
+    ]
+
+
 class ActivationMethod(IntEnum):
     # This allows interfacing with AITER ActivationType enum
     # without importing the ActivationType enum from AITER globally.
@@ -359,11 +373,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        return activation in [
-            MoEActivation.SILU,
-            MoEActivation.GELU,
-            MoEActivation.SWIGLUOAI,
-        ]
+        return aiter_supports_activation(activation)
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:

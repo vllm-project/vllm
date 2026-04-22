@@ -377,9 +377,23 @@ def select_fp8_moe_backend(
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
             backend = Fp8MoeBackend.AITER
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
+            aiter_reason: str | None = None
+            for k_cls in backend_to_kernel_cls(backend):
+                supported, reason = k_cls.is_supported_config(
+                    k_cls, config, weight_key, activation_key, activation_format
+                )
+                if supported:
+                    logger.info_once(_make_log_backend(backend), scope="local")
+                    return backend, k_cls
+                aiter_reason = reason
+            logger.warning_once(
+                f"AITER explicitly requested but "
+                f"{_make_log_unsupported(backend, aiter_reason)} "
+                f"Falling back to priority-based backend selection "
+                f"for activation {config.activation}.",
+                scope="local",
             )
+            AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
 
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)

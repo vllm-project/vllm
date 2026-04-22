@@ -1246,7 +1246,23 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         # TODO(bowenbao): gradually migrate to oracles.
         # secondly, process mxfp weights for other schemes
-        if self.emulate:
+        # Layers whose activation is not natively supported by AITER must
+        # stay in emulated weight format so apply() can route them
+        # to fused_experts() (Triton path).
+        from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+            aiter_supports_activation,
+        )
+
+        needs_emulate = hasattr(layer, "activation") and not aiter_supports_activation(
+            layer.activation
+        )
+        if needs_emulate:
+            logger.warning_once(
+                "AITER does not support activation %s; "
+                "using Triton emulation for this MoE layer.",
+                layer.activation,
+            )
+        if self.emulate or needs_emulate:
             # Build quant config for emulation path
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             torch.accelerator.empty_cache()
@@ -1432,8 +1448,32 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         # Existing code for emulation/AITER paths
         if not self.emulate:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                aiter_supports_activation,
                 rocm_aiter_fused_experts,
             )
+
+            if not aiter_supports_activation(layer.activation):
+                logger.debug_once(
+                    "Routing activation %s to Triton fused_experts "
+                    "(unsupported by AITER).",
+                    layer.activation,
+                )
+
+                from vllm.model_executor.layers.fused_moe import fused_experts
+
+                return fused_experts(
+                    x,
+                    layer.w13_weight,
+                    layer.w2_weight,
+                    topk_weights=topk_weights,
+                    topk_ids=topk_ids,
+                    inplace=not self.moe.disable_inplace,
+                    activation=layer.activation,
+                    global_num_experts=layer.global_num_experts,
+                    apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                    expert_map=layer.expert_map,
+                    quant_config=self.moe_quant_config,
+                )
 
             return rocm_aiter_fused_experts(
                 x,
