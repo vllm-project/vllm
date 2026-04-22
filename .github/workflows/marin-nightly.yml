@@ -69,8 +69,6 @@ jobs:
           Auto-published nightly release for \`$SHA\`.
 
           This release reuses the exact wheel produced by the latest successful \`marin-validate.yml\` run on \`main\`.
-
-          The paired \`tpu-inference\` manifest is attached after the corresponding nightly in \`marin-community/tpu-inference\` completes.
           EOF
 
           bash .github/scripts/marin_release.sh upsert-release \

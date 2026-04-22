@@ -1,6 +1,8 @@
 name: Marin Primary Release
 
 on:
+  schedule:
+    - cron: '0 7 * * *'
   workflow_dispatch:
     inputs:
       nightly_tag:
@@ -44,10 +46,55 @@ jobs:
             "${{ steps.source.outputs.SOURCE_TAG }}" \
             nightly \
             "*.whl" \
-            "marin-build.json" \
-            "marin-release-pair.json"
+            "marin-build.json"
+
+      - name: Evaluate primary eligibility
+        id: eligibility
+        run: |
+          NOW=$(date -u +%s)
+          LATEST_PRIMARY_TAG=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -r '[.[] | select(.tag_name | startswith("marin-primary-"))][0].tag_name // empty')
+
+          if [[ -z "$LATEST_PRIMARY_TAG" ]]; then
+            echo "eligible=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          RELEASE_JSON=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$LATEST_PRIMARY_TAG")
+          PUBLISHED_AT=$(jq -r '.published_at' <<<"$RELEASE_JSON")
+          PUBLISHED_EPOCH=$(date -u -d "$PUBLISHED_AT" +%s)
+          AGE=$((NOW - PUBLISHED_EPOCH))
+
+          bash .github/scripts/marin_release.sh download-release-assets \
+            "$GITHUB_REPOSITORY" \
+            "$LATEST_PRIMARY_TAG" \
+            latest-primary \
+            "marin-build.json"
+
+          if [[ "$AGE" -lt 259200 ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Last immutable primary release is younger than 72 hours." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CURRENT_SHA=$(jq -r '.sha' nightly/marin-build.json)
+          LAST_SHA=$(jq -r '.sha' latest-primary/marin-build.json)
+
+          if [[ "$CURRENT_SHA" == "$LAST_SHA" ]]; then
+            echo "eligible=false" >> "$GITHUB_OUTPUT"
+            echo "reason=Latest nightly is already the current primary release." >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "eligible=true" >> "$GITHUB_OUTPUT"
+
+      - name: Stop when no promotion is due
+        if: steps.eligibility.outputs.eligible != 'true'
+        run: |
+          echo "${{ steps.eligibility.outputs.reason || 'No primary promotion required.' }}"
 
       - name: Promote immutable primary release
+        if: steps.eligibility.outputs.eligible == 'true'
         id: immutable
         run: |
           SHORT_SHA=$(jq -r '.short_sha' nightly/marin-build.json)
@@ -70,13 +117,13 @@ jobs:
             "$TITLE" \
             /tmp/marin-primary-notes.md \
             nightly/*.whl \
-            nightly/marin-build.json \
-            nightly/marin-release-pair.json
+            nightly/marin-build.json
 
           echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
           echo "SHA=${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Update primary alias
+        if: steps.eligibility.outputs.eligible == 'true'
         run: |
           cat > /tmp/marin-primary-alias-notes.md <<EOF
           Moving alias for the latest Marin primary release.
@@ -98,5 +145,4 @@ jobs:
             "Marin primary (latest)" \
             /tmp/marin-primary-alias-notes.md \
             nightly/*.whl \
-            nightly/marin-build.json \
-            nightly/marin-release-pair.json
+            nightly/marin-build.json
