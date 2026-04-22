@@ -185,7 +185,7 @@ class WPIWeightTransferUpdateInfo(WeightTransferUpdateInfo):
 def _import_wpi_client():
     """Lazily import WPIClient with a clear error message."""
     try:
-        from wpi_verl_plugin.client import WPIClient
+        from wpi_client.client import WPIClient
         return WPIClient
     except ImportError:
         raise ImportError(
