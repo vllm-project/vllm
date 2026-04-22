@@ -111,7 +111,7 @@ class StructuredOutputsParams:
         (json, json_object, grammar) that restricts the token space via
         a bitmask and could amplify model repetition tendencies."""
         return (self.json is not None
-                or self.json_object is not None  # noqa: SIM222
+                or self.json_object
                 or self.grammar is not None)
 
 

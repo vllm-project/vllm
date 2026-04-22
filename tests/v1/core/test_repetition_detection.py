@@ -332,6 +332,17 @@ class TestStructuredOutputRepetitionDetection:
         )
         assert params.repetition_detection is not None
 
+    def test_not_auto_enabled_for_json_object_false(self):
+        """json_object=False should not count as grammar-constrained."""
+        structured_outputs = StructuredOutputsParams(json_object=False)
+        assert not structured_outputs._uses_grammar_constraint()
+
+        params = SamplingParams(
+            max_tokens=100,
+            structured_outputs=structured_outputs,
+        )
+        assert params.repetition_detection is None
+
     def test_not_auto_enabled_for_choice(self):
         """choice mode does not use grammar-constrained decoding."""
         params = SamplingParams(
