@@ -376,6 +376,22 @@ def _rocm_aiter_fused_topk_fake(
 
 # Cache whether aiter supports FP8 MLA parameters
 _AITER_MLA_SUPPORTS_FP8: bool | None = None
+_AITER_HAS_FUSED_QK_RMSNORM: bool | None = None
+
+
+def check_aiter_fused_qk_rmsnorm() -> bool:
+    """Check if aiter provides fused_qk_rmsnorm (requires AITer >= PR #2442)."""
+    global _AITER_HAS_FUSED_QK_RMSNORM
+    if _AITER_HAS_FUSED_QK_RMSNORM is None:
+        try:
+            from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
+                fused_qk_rmsnorm,
+            )
+
+            _AITER_HAS_FUSED_QK_RMSNORM = True
+        except (ImportError, ModuleNotFoundError, AttributeError):
+            _AITER_HAS_FUSED_QK_RMSNORM = False
+    return _AITER_HAS_FUSED_QK_RMSNORM
 
 
 def _check_aiter_mla_fp8_support() -> bool:
@@ -962,6 +978,44 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+def _fused_mla_dual_rms_norm_impl(
+    x1: torch.Tensor,
+    x1_weight: torch.Tensor,
+    x2: torch.Tensor,
+    x2_weight: torch.Tensor,
+    x1_epsilon: float,
+    x2_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        from aiter.ops.fused_qk_norm_rope_cache_quant import fused_qk_rmsnorm
+    except (ImportError, ModuleNotFoundError) as exc:
+        raise ImportError(
+            "fused_qk_rmsnorm requires a newer AITer version "
+            "(>= PR #2442). Please upgrade aiter or disable the "
+            "fuse_mla_dual_rms_norm pass."
+        ) from exc
+
+    return fused_qk_rmsnorm(
+        q=x1,
+        q_weight=x1_weight,
+        q_eps=x1_epsilon,
+        k=x2,
+        k_weight=x2_weight,
+        k_eps=x2_epsilon,
+    )
+
+
+def _fused_mla_dual_rms_norm_fake(
+    x1: torch.Tensor,
+    x1_weight: torch.Tensor,
+    x2: torch.Tensor,
+    x2_weight: torch.Tensor,
+    x1_epsilon: float,
+    x2_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return (torch.empty_like(x1), torch.empty_like(x2))
+
+
 def _rocm_aiter_gemm_a8wfp4_impl(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -1491,6 +1545,13 @@ class rocm_aiter_ops:
                 fake_impl=_triton_rotary_embedding_fake,
             )
 
+            direct_register_custom_op(
+                op_name="fused_mla_dual_rms_norm",
+                op_func=_fused_mla_dual_rms_norm_impl,
+                mutates_args=[],
+                fake_impl=_fused_mla_dual_rms_norm_fake,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -1536,6 +1597,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_rotary_embedding_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
+
+    @staticmethod
+    def get_fused_mla_dual_rms_norm_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm.default
 
     @staticmethod
     def rms_norm(
