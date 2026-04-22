@@ -518,6 +518,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
         min_transformers_version="4.56.3",
     ),
+    "Rnj1ForCausalLM": _HfExamplesInfo(
+        "EssentialAI/rnj-1-instruct",
+        is_available_online=False,
+    ),
     "RWForCausalLM": _HfExamplesInfo("tiiuae/falcon-40b"),
     "SarvamMoEForCausalLM": _HfExamplesInfo(
         "sarvamai/sarvam-30b",
