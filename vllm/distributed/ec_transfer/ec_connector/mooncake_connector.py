@@ -79,6 +79,27 @@ def _get_encoder_cache_embed_size(model_config) -> int:
     return language_embed_size
 
 
+def _ensure_mooncake_ec_single_role(vllm_config: VllmConfig) -> None:
+    assert vllm_config.ec_transfer_config is not None
+    if (
+        vllm_config.ec_transfer_config.is_ec_producer
+        and vllm_config.ec_transfer_config.is_ec_consumer
+    ):
+        raise ValueError(
+            "MooncakeECConnector does not support ec_both yet. Use separate "
+            "ec_producer and ec_consumer instances."
+        )
+
+
+def _get_positive_int_extra_config(
+    extra_config: dict[str, Any], key: str, default: int
+) -> int:
+    value = int(extra_config.get(key, default))
+    if value <= 0:
+        raise ValueError(f"{key} must be a positive integer, got {value}")
+    return value
+
+
 @dataclass(frozen=True)
 class Key:
     mm_hash: MMHash
@@ -171,6 +192,7 @@ class MooncakeECConnector(ECConnectorBase):
         super().__init__(vllm_config, role)
 
         assert vllm_config.ec_transfer_config is not None
+        _ensure_mooncake_ec_single_role(vllm_config)
 
         if role == ECConnectorRole.SCHEDULER:
             self.connector_scheduler: MooncakeECConnectorScheduler | None = (
@@ -248,6 +270,13 @@ class MooncakeECConnector(ECConnectorBase):
     ) -> None:
         """Producer save encoder cache to transfer buffer."""
         assert self.connector_worker is not None
+        if not self.is_producer:
+            logger.debug(
+                "[EC_WORKER] Skip Mooncake save_caches on non-producer role: "
+                "mm_hash=%s",
+                mm_hash,
+            )
+            return
         self.connector_worker.save_caches(encoder_cache, mm_hash)
 
     def get_finished(
@@ -518,6 +547,7 @@ class MooncakeECConnectorWorker:
         if TransferEngine is None:
             logger.error("Mooncake is not available")
             raise RuntimeError("Mooncake is not available")
+        _ensure_mooncake_ec_single_role(vllm_config)
 
         self.vllm_config = vllm_config
         self.tp_rank = get_tensor_model_parallel_rank()
@@ -527,9 +557,8 @@ class MooncakeECConnectorWorker:
         self.engine = TransferEngine()
         self.hostname = get_ip()
         assert vllm_config.ec_transfer_config is not None
-        device_name = vllm_config.ec_transfer_config.ec_connector_extra_config.get(
-            "device_name"
-        )
+        extra_config = vllm_config.ec_transfer_config.ec_connector_extra_config
+        device_name = extra_config.get("device_name")
         ret_value = self.engine.initialize(
             self.hostname, "P2PHANDSHAKE", "rdma", device_name
         )
@@ -569,9 +598,16 @@ class MooncakeECConnectorWorker:
 
         # Transfer buffer - initialized immediately
         self._buffer_size = int(
-            vllm_config.ec_transfer_config.ec_connector_extra_config.get(
-                "transfer_buffer_size", self.DEFAULT_BUFFER_SIZE
-            )
+            extra_config.get("transfer_buffer_size", self.DEFAULT_BUFFER_SIZE)
+        )
+        self.transfer_timeout_sec = _get_positive_int_extra_config(
+            extra_config, "transfer_timeout_sec", 30
+        )
+        self.ack_timeout_grace_sec = _get_positive_int_extra_config(
+            extra_config, "ack_timeout_grace_sec", 60
+        )
+        self.consumer_ack_timeout_sec = (
+            self.transfer_timeout_sec + self.ack_timeout_grace_sec
         )
         self.transfer_buffer: EncoderCacheTransferBuffer = EncoderCacheTransferBuffer(
             buffer_size=self._buffer_size,
@@ -583,7 +619,7 @@ class MooncakeECConnectorWorker:
         # reverse map for pool eviction callback: addr -> mm_hash
         self._addr_to_mm_hash: dict[int, MMHash] = {}
         # Lock protecting both maps above; used by save/send/evict paths.
-        self._mm_lock = threading.Lock()
+        self._mm_lock = threading.RLock()
 
         # Keep local_mm_addrs in sync when the buffer evicts
         self.transfer_buffer.on_free = self._on_pool_free
@@ -597,16 +633,14 @@ class MooncakeECConnectorWorker:
 
         logger.info(
             "[EC_WORKER] Initialized and registered EC transfer buffer: size=%d bytes, "
-            "base_addr=0x%x",
+            "base_addr=0x%x, transfer_timeout_sec=%d, ack_timeout_grace_sec=%d",
             self._buffer_size,
             self.transfer_buffer.base_address,
+            self.transfer_timeout_sec,
+            self.ack_timeout_grace_sec,
         )
 
-        self.num_workers = int(
-            vllm_config.ec_transfer_config.ec_connector_extra_config.get(
-                "num_workers", 10
-            )
-        )
+        self.num_workers = int(extra_config.get("num_workers", 10))
         self.mm_hashes_need_recv: set[MMHash] = set()
 
         self.is_producer = vllm_config.ec_transfer_config.is_ec_producer
@@ -685,14 +719,31 @@ class MooncakeECConnectorWorker:
     def save_caches(
         self, encoder_cache: dict[str, torch.Tensor], mm_hash: str, **kwargs
     ) -> None:
+        if not self.is_producer:
+            logger.debug(
+                "[EC_WORKER] Skip save_caches on non-producer role: mm_hash=%s",
+                mm_hash,
+            )
+            return
+
         tensor = encoder_cache[mm_hash]
         tensor_bytes = _tensor_nbytes(tensor)
-        addr = self.transfer_buffer.store_tensor(tensor)
 
-        # Update bookkeeping for this mm_hash. We intentionally do this
-        # after store_tensor returns to avoid deadlock if the pool evicts
-        # internally and calls back into _on_pool_free.
         with self._mm_lock:
+            try:
+                addr = self.transfer_buffer.store_tensor(tensor)
+            except BufferError as e:
+                logger.warning(
+                    "[EC_PRODUCER] Skip saving encoder cache to Mooncake "
+                    "transfer buffer: mm_hash=%s, bytes=%d, reason=%s",
+                    mm_hash,
+                    tensor_bytes,
+                    e,
+                )
+                return
+
+            # Update bookkeeping while holding _mm_lock so source pinning in
+            # _send_caches cannot race with ring-buffer eviction/reuse.
             old_addr = self.local_mm_addrs.get(mm_hash)
             if old_addr is not None:
                 self._addr_to_mm_hash.pop(old_addr, None)
@@ -857,66 +908,87 @@ class MooncakeECConnectorWorker:
         remote_mm_addrs = agent_meta.remote_mm_addrs
         remote_token_bytes = agent_meta.remote_token_bytes
         remote_session = f"{agent_meta.remote_hostname}:{agent_meta.remote_port}"
+        pinned_src_addrs: list[int] = []
 
-        for mm_hash, remote_token_byte, remote_mm_addr in zip(
-            send_mm_hashes, remote_token_bytes, remote_mm_addrs
-        ):
-            if remote_token_byte == 0:
-                logger.warning(
-                    "[EC_PRODUCER] Skip mm_hash=%s (remote_token_byte=0)",
+        try:
+            for mm_hash, remote_token_byte, remote_mm_addr in zip(
+                send_mm_hashes, remote_token_bytes, remote_mm_addrs
+            ):
+                if remote_token_byte == 0:
+                    logger.warning(
+                        "[EC_PRODUCER] Skip mm_hash=%s (remote_token_byte=0)",
+                        mm_hash,
+                    )
+                    continue
+
+                with self._mm_lock:
+                    addr = self.local_mm_addrs.get(mm_hash)
+                    if addr is None:
+                        raise RuntimeError(
+                            f"[EC_PRODUCER] ✗ No buffer entry for mm_hash={mm_hash}: "
+                            "Failing transfer."
+                        )
+                    try:
+                        self.transfer_buffer.pin(addr)
+                    except ValueError as e:
+                        raise RuntimeError(
+                            f"[EC_PRODUCER] ✗ Buffer entry for mm_hash={mm_hash} "
+                            f"cannot be pinned: {e}"
+                        ) from e
+                    pinned_src_addrs.append(addr)
+
+                src_ptrs.append(addr)
+                dst_ptrs.append(remote_mm_addr)
+                lengths.append(remote_token_byte)
+                logger.debug(
+                    "[EC_PRODUCER] Queued Mooncake write: mm_hash=%s, "
+                    "local_addr=0x%x, remote_session=%s, remote_addr=0x%x, bytes=%d",
                     mm_hash,
-                )
-                continue
-
-            with self._mm_lock:
-                addr = self.local_mm_addrs.get(mm_hash)
-            if addr is None:
-                raise RuntimeError(
-                    f"[EC_PRODUCER] ✗ No buffer entry for mm_hash={mm_hash}: "
-                    "Failing transfer."
+                    addr,
+                    remote_session,
+                    remote_mm_addr,
+                    remote_token_byte,
                 )
 
-            src_ptrs.append(addr)
-            dst_ptrs.append(remote_mm_addr)
-            lengths.append(remote_token_byte)
+            if not src_ptrs:
+                logger.warning("[EC_PRODUCER] No valid transfers in batch, skipping")
+                return
+
             logger.debug(
-                "[EC_PRODUCER] Queued Mooncake write: mm_hash=%s, "
-                "local_addr=0x%x, remote_session=%s, remote_addr=0x%x, bytes=%d",
-                mm_hash,
-                addr,
+                "[EC_PRODUCER] Calling Mooncake batch_transfer_sync_write: "
+                "remote_session=%s, num_transfers=%d, total_bytes=%d",
                 remote_session,
-                remote_mm_addr,
-                remote_token_byte,
+                len(src_ptrs),
+                sum(lengths),
+            )
+            ret_value = self.engine.batch_transfer_sync_write(
+                remote_session, src_ptrs, dst_ptrs, lengths
             )
 
-        if not src_ptrs:
-            logger.warning("[EC_PRODUCER] No valid transfers in batch, skipping")
-            return
-
-        logger.debug(
-            "[EC_PRODUCER] Calling Mooncake batch_transfer_sync_write: "
-            "remote_session=%s, num_transfers=%d, total_bytes=%d",
-            remote_session,
-            len(src_ptrs),
-            sum(lengths),
-        )
-        ret_value = self.engine.batch_transfer_sync_write(
-            remote_session, src_ptrs, dst_ptrs, lengths
-        )
-
-        if ret_value != 0:
-            logger.error(
-                "[EC_PRODUCER] ✗ batch_transfer_sync_write FAILED: ret=%d",
-                ret_value,
+            if ret_value != 0:
+                logger.error(
+                    "[EC_PRODUCER] ✗ batch_transfer_sync_write FAILED: ret=%d",
+                    ret_value,
+                )
+                raise RuntimeError(f"Error in batch_transfer_sync_write: {ret_value}")
+            logger.info(
+                "[EC_PRODUCER] Mooncake batch_transfer_sync_write completed: "
+                "remote_session=%s, num_transfers=%d, total_bytes=%d",
+                remote_session,
+                len(src_ptrs),
+                sum(lengths),
             )
-            raise RuntimeError(f"Error in batch_transfer_sync_write: {ret_value}")
-        logger.info(
-            "[EC_PRODUCER] Mooncake batch_transfer_sync_write completed: "
-            "remote_session=%s, num_transfers=%d, total_bytes=%d",
-            remote_session,
-            len(src_ptrs),
-            sum(lengths),
-        )
+        finally:
+            for addr in pinned_src_addrs:
+                try:
+                    self.transfer_buffer.unpin(addr)
+                except ValueError as e:
+                    logger.warning(
+                        "[EC_PRODUCER] Unable to unpin Mooncake source slot "
+                        "addr=0x%x: %s",
+                        addr,
+                        e,
+                    )
 
     async def fetch_finished_recving_mm_hashes(self) -> tuple[set[MMHash], set[MMHash]]:
         """Fetch finished and failed receiving mm_hashes.
@@ -1024,7 +1096,7 @@ class MooncakeECConnectorWorker:
         sock: zmq.asyncio.Socket = make_zmq_socket(
             self.async_zmq_ctx, path, zmq.REQ, bind=False, linger=0
         )
-        sock.setsockopt(zmq.RCVTIMEO, 1000)  # 1 second timeout
+        sock.setsockopt(zmq.RCVTIMEO, self.consumer_ack_timeout_sec * 1000)
 
         transfer_failed = True
         try:
@@ -1054,7 +1126,8 @@ class MooncakeECConnectorWorker:
                 )
         except zmq.Again:
             logger.exception(
-                "[EC_CONSUMER] Transfer TIMEOUT after 1s for mm_hashes=%s",
+                "[EC_CONSUMER] Transfer TIMEOUT after %ds for mm_hashes=%s",
+                self.consumer_ack_timeout_sec,
                 [h for h in mm_hash_list],
             )
         except zmq.ContextTerminated:

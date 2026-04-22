@@ -7,13 +7,14 @@ retrieving encoder cache tensors during distributed transfer operations.
 
 Allocation strategy: circular (ring) buffer.
 
-  - _next_offset is the write head.  It advances forward on every
+  - _next_offset is the write head. It advances forward on every
     allocation and wraps to 0 when the remaining tail is too small.
-  - Before placing a new slot we evict every live slot whose region
-    overlaps [_next_offset, _next_offset + size).  Because the write
-    head always moves forward, the slots it hits first are the oldest
-    ones — giving natural LRU behaviour without any explicit free-list
-    or coalescing step.
+  - Pinned slots are treated as in-flight transfer memory and are never
+    evicted or reused.
+  - Before placing a new slot we evict every unpinned live slot whose
+    region overlaps the chosen allocation range. The slots the write
+    head hits first are the oldest ones, giving natural LRU behaviour
+    without any explicit free-list or coalescing step.
   - An explicit free() (e.g. on transfer failure) simply removes the
     slot from the tracking structures; the reclaimed gap will be
     silently overwritten the next time the write head passes over it.
@@ -84,6 +85,8 @@ class EncoderCacheTransferBuffer:
 
         # addr -> BufferSlot for all live allocations
         self._allocated: dict[int, BufferSlot] = {}
+        # addr -> active pin count. Pinned slots cannot be evicted or freed.
+        self._pin_counts: dict[int, int] = {}
 
         # Parallel sorted list of (offset, addr) used for O(log n) range
         # queries when deciding what to evict.  Always kept in sync with
@@ -129,23 +132,16 @@ class EncoderCacheTransferBuffer:
                 f"Requested size {size} exceeds buffer capacity {self.buffer_size}"
             )
 
+        evicted_addrs: list[int]
         with self._lock:
-            if self._next_offset + size <= self.buffer_size:
-                # Normal case: place at write head, evict anything in the way.
-                offset = self._next_offset
-            else:
-                # Tail too small: wrap the write head back to 0.
-                logger.debug(
-                    "Ring wrap: _next_offset=%d, size=%d, buffer_size=%d",
-                    self._next_offset,
-                    size,
-                    self.buffer_size,
+            offset = self._find_alloc_offset(size)
+            if offset is None:
+                raise BufferError(
+                    f"No unpinned EC transfer buffer space available for {size} bytes"
                 )
-                self._next_offset = 0
-                offset = 0
 
             # Evict all live slots whose region overlaps [offset, offset+size).
-            self._evict_range(offset, offset + size)
+            evicted_addrs = self._evict_range(offset, offset + size)
 
             # Place the new slot.
             addr = self.base_address + offset
@@ -160,7 +156,9 @@ class EncoderCacheTransferBuffer:
                 size,
                 self._next_offset,
             )
-            return addr
+
+        self._notify_free(evicted_addrs)
+        return addr
 
     def free(self, addr: int) -> None:
         """Explicitly free an allocated slot (e.g. on transfer failure).
@@ -174,16 +172,53 @@ class EncoderCacheTransferBuffer:
         Raises:
             ValueError: If address is not allocated.
         """
+        should_notify = False
         with self._lock:
             if addr not in self._allocated:
                 raise ValueError(f"Address 0x{addr:x} is not allocated")
+            if self._pin_counts.get(addr, 0) > 0:
+                raise ValueError(f"Address 0x{addr:x} is pinned")
 
             slot = self._allocated.pop(addr)
             self._remove_from_index(slot.offset, addr)
             logger.debug("Freed slot: addr=0x%x, size=%d", addr, slot.size)
+            should_notify = True
 
-            if self.on_free is not None:
-                self.on_free(addr)
+        if should_notify:
+            self._notify_free([addr])
+
+    def pin(self, addr: int) -> None:
+        """Pin an allocated slot so it cannot be evicted or freed."""
+        with self._lock:
+            if addr not in self._allocated:
+                raise ValueError(f"Address 0x{addr:x} is not allocated")
+            self._pin_counts[addr] = self._pin_counts.get(addr, 0) + 1
+            logger.debug(
+                "Pinned slot: addr=0x%x, pin_count=%d",
+                addr,
+                self._pin_counts[addr],
+            )
+
+    def unpin(self, addr: int) -> None:
+        """Release one pin reference from an allocated slot."""
+        with self._lock:
+            pin_count = self._pin_counts.get(addr, 0)
+            if pin_count == 0:
+                raise ValueError(f"Address 0x{addr:x} is not pinned")
+            if pin_count == 1:
+                self._pin_counts.pop(addr)
+            else:
+                self._pin_counts[addr] = pin_count - 1
+            logger.debug(
+                "Unpinned slot: addr=0x%x, pin_count=%d",
+                addr,
+                self._pin_counts.get(addr, 0),
+            )
+
+    def is_pinned(self, addr: int) -> bool:
+        """Return whether an allocated slot has active pins."""
+        with self._lock:
+            return self._pin_counts.get(addr, 0) > 0
 
     def store_tensor(self, tensor: torch.Tensor) -> int:
         """Store a tensor in the buffer.
@@ -282,6 +317,7 @@ class EncoderCacheTransferBuffer:
         with self._lock:
             self._allocated.clear()
             self._offset_index.clear()
+            self._pin_counts.clear()
             self._next_offset = 0
         logger.debug("EC Buffer cleaned up")
 
@@ -310,38 +346,97 @@ class EncoderCacheTransferBuffer:
     # Internal helpers (caller must hold self._lock)
     # ------------------------------------------------------------------
 
-    def _evict_range(self, start: int, end: int) -> None:
-        """Evict all live slots whose offset falls in [start, end).
+    def _find_alloc_offset(self, size: int) -> int | None:
+        """Find the first ring-order range that does not overlap pinned slots."""
+        start = self._next_offset if self._next_offset < self.buffer_size else 0
+        offset = self._find_alloc_offset_from(start, size)
+        if offset is not None:
+            return offset
+        if start != 0:
+            logger.debug(
+                "Ring wrap: _next_offset=%d, size=%d, buffer_size=%d",
+                self._next_offset,
+                size,
+                self.buffer_size,
+            )
+            return self._find_alloc_offset_from(0, size)
+        return None
 
-        Checking start offset only is sufficient: _next_offset is always
-        placed at the end of the previous allocation, so no live slot can
-        ever straddle the write head — a slot either starts entirely before
-        start (safe, keep it) or starts inside [start, end) (in the way,
-        evict it).
+    def _find_alloc_offset_from(self, start: int, size: int) -> int | None:
+        """Find a candidate offset at or after start.
 
-        Uses the sorted offset index for an O(log n) range search.
+        Unpinned slots do not block allocation because they can be evicted.
         Caller must hold self._lock.
         """
-        # bisect finds the slice of _offset_index whose offsets are in [start, end)
-        lo = bisect.bisect_left(self._offset_index, (start, 0))
-        hi = bisect.bisect_left(self._offset_index, (end, 0))
+        offset = start
+        if offset + size > self.buffer_size:
+            return None
 
-        if lo == hi:
-            return  # nothing in the way
+        pinned_ranges = []
+        for addr, pin_count in self._pin_counts.items():
+            if pin_count <= 0:
+                continue
+            slot = self._allocated.get(addr)
+            if slot is not None:
+                pinned_ranges.append((slot.offset, slot.offset + slot.size))
+        pinned_ranges.sort()
 
-        victims = self._offset_index[lo:hi]
-        del self._offset_index[lo:hi]
+        for pinned_start, pinned_end in pinned_ranges:
+            if pinned_end <= offset:
+                continue
+            if pinned_start >= offset + size:
+                return offset
+            offset = max(offset, pinned_end)
+            if offset + size > self.buffer_size:
+                return None
 
+        return offset
+
+    def _evict_range(self, start: int, end: int) -> list[int]:
+        """Evict all unpinned live slots overlapping [start, end).
+
+        Caller must hold self._lock.
+        """
+        victims: list[tuple[int, int]] = []
+        for offset, addr in self._offset_index:
+            slot = self._allocated[addr]
+            if self._ranges_overlap(start, end, offset, offset + slot.size):
+                if self._pin_counts.get(addr, 0) > 0:
+                    raise BufferError(
+                        f"Cannot evict pinned EC transfer buffer slot 0x{addr:x}"
+                    )
+                victims.append((offset, addr))
+
+        if not victims:
+            return []
+
+        victim_set = set(victims)
+        self._offset_index = [
+            item for item in self._offset_index if item not in victim_set
+        ]
+
+        evicted_addrs = []
         for offset, addr in victims:
             slot = self._allocated.pop(addr)
+            self._pin_counts.pop(addr, None)
+            evicted_addrs.append(addr)
             logger.debug(
                 "Evicted slot (ring): addr=0x%x, offset=%d, size=%d",
                 addr,
                 offset,
                 slot.size,
             )
-            if self.on_free is not None:
-                self.on_free(addr)
+        return evicted_addrs
+
+    @staticmethod
+    def _ranges_overlap(start_a: int, end_a: int, start_b: int, end_b: int) -> bool:
+        return start_a < end_b and start_b < end_a
+
+    def _notify_free(self, addrs: list[int]) -> None:
+        if self.on_free is None:
+            return
+        for addr in addrs:
+            self.on_free(addr)
 
     def _remove_from_index(self, offset: int, addr: int) -> None:
         """Remove a single entry from the sorted offset index.

@@ -10,12 +10,14 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 import torch
+import zmq
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorRole
 from vllm.distributed.ec_transfer.ec_connector.mooncake_connector import (
     TRANS_ERROR,
     MMHashMeta,
+    MooncakeECAgentMetadata,
     MooncakeECConnector,
     MooncakeECConnectorMetadata,
     MooncakeECConnectorWorker,
@@ -127,6 +129,13 @@ def mock_vllm_config_consumer():
 
 
 @pytest.fixture
+def mock_vllm_config_both(mock_vllm_config_producer):
+    """Fixture providing mock VllmConfig for unsupported ec_both role."""
+    mock_vllm_config_producer.ec_transfer_config.is_ec_consumer = True
+    return mock_vllm_config_producer
+
+
+@pytest.fixture
 def mock_request_with_3_mm():
     """Fixture providing mock Request with 3 multimodal items."""
     request_id = "test_req_123"
@@ -227,6 +236,13 @@ class TestMooncakeECConnectorBasics:
         assert not connector.is_producer
         assert connector.connector_scheduler is not None
         assert connector.connector_worker is None
+
+    def test_initialization_rejects_ec_both(self, mock_vllm_config_both):
+        with pytest.raises(ValueError, match="does not support ec_both"):
+            MooncakeECConnector(
+                vllm_config=mock_vllm_config_both,
+                role=ECConnectorRole.SCHEDULER,
+            )
 
     @patch(
         "vllm.distributed.ec_transfer.ec_connector.mooncake_connector.TransferEngine"
@@ -611,6 +627,12 @@ class TestEdgeCases:
         For example, the cache is missing and the hash is failed.
         """
         mock_get_ip.return_value = "127.0.0.1"
+        mock_vllm_config_consumer.ec_transfer_config.ec_connector_extra_config.update(
+            {
+                "transfer_timeout_sec": 2,
+                "ack_timeout_grace_sec": 3,
+            }
+        )
         mock_engine = Mock()
         mock_engine.initialize.return_value = 0
         mock_engine.get_rpc_port.return_value = 5000
@@ -646,6 +668,7 @@ class TestEdgeCases:
 
         assert mm_hash in failed
         assert mm_hash not in encoder_cache
+        mock_sock.setsockopt.assert_any_call(zmq.RCVTIMEO, 5000)
 
     @patch(
         "vllm.distributed.ec_transfer.ec_connector.mooncake_connector.TransferEngine"
@@ -693,6 +716,16 @@ class TestEdgeCases:
 
         connector.connector_worker.maybe_update_remote_cache_state.assert_not_called()
 
+    def test_consumer_save_caches_noop(self):
+        """Consumer-only connector must not write into its receive buffer."""
+        connector = MooncakeECConnector.__new__(MooncakeECConnector)
+        connector._is_producer = False
+        connector.connector_worker = Mock()
+
+        connector.save_caches({"hash1": torch.randn(1)}, "hash1")
+
+        connector.connector_worker.save_caches.assert_not_called()
+
     @patch(
         "vllm.distributed.ec_transfer.ec_connector.mooncake_connector.TransferEngine"
     )
@@ -729,9 +762,10 @@ class TestEdgeCases:
         old_addr = 0x1000
         new_addr = 0x2000
         worker.transfer_buffer.store_tensor.side_effect = [old_addr, new_addr]
+        worker.is_producer = True
         worker.local_mm_addrs = {}
         worker._addr_to_mm_hash = {}
-        worker._mm_lock = threading.Lock()
+        worker._mm_lock = threading.RLock()
 
         mm_hash = "repeat_hash"
         encoder_cache = {mm_hash: torch.randn(2, 4)}
@@ -744,3 +778,63 @@ class TestEdgeCases:
 
         worker._on_pool_free(new_addr)
         assert mm_hash not in worker.local_mm_addrs
+
+    def test_save_caches_skips_when_no_unpinned_buffer_space(self):
+        worker = MooncakeECConnectorWorker.__new__(MooncakeECConnectorWorker)
+        worker.is_producer = True
+        worker.transfer_buffer = Mock()
+        worker.transfer_buffer.store_tensor.side_effect = BufferError("full")
+        worker.local_mm_addrs = {}
+        worker._addr_to_mm_hash = {}
+        worker._mm_lock = threading.RLock()
+
+        worker.save_caches({"hash1": torch.randn(2, 4)}, "hash1")
+
+        assert worker.local_mm_addrs == {}
+        assert worker._addr_to_mm_hash == {}
+
+    def test_send_caches_pins_source_until_transfer_finishes(self):
+        worker = MooncakeECConnectorWorker.__new__(MooncakeECConnectorWorker)
+        worker.transfer_buffer = Mock()
+        worker.local_mm_addrs = {"hash1": 0x1000}
+        worker._mm_lock = threading.RLock()
+        worker.engine = Mock()
+        worker.engine.batch_transfer_sync_write.return_value = 0
+
+        meta = MooncakeECAgentMetadata(
+            remote_hostname="127.0.0.1",
+            remote_port=5000,
+            mm_hashes=[("hash1", ["req1"])],
+            remote_mm_addrs=[0x2000],
+            remote_token_bytes=[16],
+        )
+
+        worker._send_caches(["hash1"], meta)
+
+        worker.transfer_buffer.pin.assert_called_once_with(0x1000)
+        worker.engine.batch_transfer_sync_write.assert_called_once_with(
+            "127.0.0.1:5000", [0x1000], [0x2000], [16]
+        )
+        worker.transfer_buffer.unpin.assert_called_once_with(0x1000)
+
+    def test_send_caches_unpins_source_on_transfer_failure(self):
+        worker = MooncakeECConnectorWorker.__new__(MooncakeECConnectorWorker)
+        worker.transfer_buffer = Mock()
+        worker.local_mm_addrs = {"hash1": 0x1000}
+        worker._mm_lock = threading.RLock()
+        worker.engine = Mock()
+        worker.engine.batch_transfer_sync_write.return_value = 1
+
+        meta = MooncakeECAgentMetadata(
+            remote_hostname="127.0.0.1",
+            remote_port=5000,
+            mm_hashes=[("hash1", ["req1"])],
+            remote_mm_addrs=[0x2000],
+            remote_token_bytes=[16],
+        )
+
+        with pytest.raises(RuntimeError, match="batch_transfer_sync_write"):
+            worker._send_caches(["hash1"], meta)
+
+        worker.transfer_buffer.pin.assert_called_once_with(0x1000)
+        worker.transfer_buffer.unpin.assert_called_once_with(0x1000)
