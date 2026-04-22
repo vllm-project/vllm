@@ -2598,16 +2598,6 @@ def maybe_add_vit_cuda_graph_compilation_config(args, engine_args):
 
         engine_args.compilation_config = {
             "cudagraph_mm_encoder": True,
-            "encoder_cudagraph_token_budgets": [
-                512,
-                1024,
-                1536,
-                2048,
-                2560,
-                3072,
-                3584,
-                4096,
-            ],
             "encoder_cudagraph_max_vision_items_per_batch": vision_items_per_batch,
         }
 
