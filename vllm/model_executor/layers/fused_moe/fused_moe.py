@@ -1954,33 +1954,16 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        p = current_platform
-        if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9, on_gfx12x
-
-            is_rocm_on_gfx9 = on_gfx9()
-            is_rocm_on_gfx12x = on_gfx12x()
-        else:
-            is_rocm_on_gfx9 = False
-            is_rocm_on_gfx12x = False
-
-        device_supports_fp8 = (
-            is_rocm_on_gfx9
-            or is_rocm_on_gfx12x
-            or (p.is_cuda() and p.has_device_capability((8, 9)))
-            or p.is_xpu()
-        )
-
-        # Int8 W8A8 requires DP4A / int8 tensor core support (CC >= 7.5 on CUDA,
-        # gfx9 on ROCm).
-        device_supports_int8 = is_rocm_on_gfx9 or (
-            p.is_cuda() and p.has_device_capability((7, 5))
+        # INT8 requires at least 7.5 (Turing).
+        device_supports_int8 = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability((7, 5))
         )
 
         supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
         if device_supports_int8:
             supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
-        if device_supports_fp8:
+        if current_platform.supports_fp8():
             supported += [
                 (kFp8Static128BlockSym, kFp8Dynamic128Sym),
                 (kFp8StaticChannelSym, kFp8DynamicTokenSym),

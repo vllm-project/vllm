@@ -36,9 +36,9 @@ vllm serve Qwen/Qwen3-4B \
     --port 8000 \
     --seed 42 \
     -tp 1 \
-    --max_model_len 2048 \
-    --gpu_memory_utilization 0.8 \
-    --speculative_config '{"model": "amd/PARD-Qwen3-0.6B", "num_speculative_tokens": 12, "method": "draft_model", "parallel_drafting": true}'
+    --max-model-len 2048 \
+    --gpu-memory-utilization 0.8 \
+    --speculative-config '{"model": "amd/PARD-Qwen3-0.6B", "num_speculative_tokens": 12, "method": "draft_model", "parallel_drafting": true}'
 ```
 
 ## Pre-trained PARD weights

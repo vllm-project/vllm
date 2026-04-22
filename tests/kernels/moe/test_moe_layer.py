@@ -17,6 +17,7 @@ from typing import get_args
 import pytest
 import torch
 
+import vllm.model_executor.layers.quantization.utils.w8a8_utils
 from tests.kernels.moe.modular_kernel_tools.parallel_utils import (
     ProcessGroupInfo,
     _set_vllm_config,
@@ -142,6 +143,24 @@ EPLB_SUPPORTED_QUANTS: list[str | None] = [None, "fp8"]
 # deepep backends fail in get_expert_weights / rearrange_expert_weights_inplace.
 # TODO(bnell): check this
 EPLB_SUPPORTED_BACKENDS: list[str] = ["allgather_reducescatter"]
+
+
+def mock_normalize_e4m3fn_to_e4m3fnuz(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    input_scale: torch.Tensor | None = None,
+):
+    return weight, weight_scale, input_scale
+
+
+# Needed since weights will already be in e4m3fnuz format on platforms that
+# use the fnuz fp8 format and the normalize_e4m3fn_to_e4m3fnuz() function
+# is not being tested here.
+# NOTE: The weights are quantized by moe_quantize_weights_2d in
+# _quantize_fp8_halves.
+# NOTE: Not able to use monkeypatch because of the spawned parallel workers.
+def override_normalize_e4m3fn_to_e4m3fnuz():
+    vllm.model_executor.layers.quantization.utils.w8a8_utils.normalize_e4m3fn_to_e4m3fnuz = mock_normalize_e4m3fn_to_e4m3fnuz  # noqa: E501
 
 
 def maybe_roundup_layer_hidden_size(
@@ -1471,6 +1490,11 @@ def test_moe_layer_no_parallel(
     if os.environ.get("VLLM_LOGGING_LEVEL") is None:
         monkeypatch.setenv("VLLM_LOGGING_LEVEL", "ERROR")
 
+    # Needed since weights will already be in e4m3fnuz format and the
+    # normalize_e4m3fn_to_e4m3fnuz() function is not being tested here.
+    if current_platform.is_fp8_fnuz():
+        override_normalize_e4m3fn_to_e4m3fnuz()
+
     test_config = MoETestConfig(
         m,
         n,
@@ -1546,6 +1570,9 @@ def _parallel_worker(
 
     dp_rank = vllm_config.parallel_config.data_parallel_rank
 
+    if current_platform.is_fp8_fnuz():
+        override_normalize_e4m3fn_to_e4m3fnuz()
+
     for test_config in test_configs:
         cc = vllm_config.compilation_config
         if "from_forward_context" in cc.static_forward_context:
@@ -1593,18 +1620,13 @@ def _parallel_worker(
             else:
                 print("F", end="")
         finally:
-            # Note: for some reason DeepEP buffers don't seem to be
-            # entirely reusable on B200. In order to work around this
-            # we clear the all2all manager's cache after each testpoint.
-            cap = current_platform.get_device_capability()
-            if (
-                cap is not None
-                and cap.major == 10
-                and (
-                    test_config.backend == "deepep_low_latency"
-                    or test_config.backend == "deepep_high_throughput"
-                )
-            ):
+            # DeepEP managers are not reliably reusable across many subtests in
+            # a single worker process. Tear them down after each DeepEP case so
+            # later subtests do not inherit stale communication state.
+            if test_config.backend in {
+                "deepep_low_latency",
+                "deepep_high_throughput",
+            }:
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
