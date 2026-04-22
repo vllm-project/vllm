@@ -375,13 +375,20 @@ def _get_weight_loader(tensor: torch.Tensor):
 
 def _copy_and_restore_kernel_tensors(layer: torch.nn.Module, info: LayerReloadingInfo):
     """Copy processed values into original kernel tensor storage and restore
-    kernel tensor references on the layer. Preserves cudagraph references."""
+    kernel tensor references on the layer. Preserves cudagraph references.
+
+    Only copies tensors actually loaded this round; others (e.g. MambaMixer2's
+    `conv_weights` view, KV-scale sentinels) keep prior values to avoid
+    stamping uninitialized materialize_layer() data into shared storage."""
     assert info.kernel_tensors is not None
+    loaded_names = {n for n, _ in info.loaded_weights}
     parameters, buffers = info.kernel_tensors
     for name, param in parameters.items():
-        param.data.copy_(getattr(layer, name))
+        if name in loaded_names:
+            param.data.copy_(getattr(layer, name))
     for name, buffer in buffers.items():
-        buffer.data.copy_(getattr(layer, name))
+        if name in loaded_names:
+            buffer.data.copy_(getattr(layer, name))
 
     _place_kernel_tensors(layer, info)
 
