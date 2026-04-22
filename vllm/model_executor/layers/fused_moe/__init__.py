@@ -83,6 +83,9 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import (
         DeepGemmExperts,
     )
+    from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
+        AiterExperts,
+    )
     from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
         BatchedTritonExperts,
     )
@@ -91,9 +94,6 @@ if HAS_TRITON:
         TritonWNA16Experts,
         fused_experts,
         get_config_file_name,
-    )
-    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-        AiterExperts,
     )
     from vllm.model_executor.layers.fused_moe.router.fused_topk_router import (
         fused_topk,
