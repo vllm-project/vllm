@@ -26,14 +26,6 @@ def _get_op_provider_pairs() -> list[tuple[str, str]]:
     return pairs
 
 
-# Default kwargs for generate_inputs
-_DEFAULT_INPUT_KWARGS = dict(
-    num_tokens=8,
-    hidden_size=16,
-    dtype=torch.bfloat16,
-)
-
-
 def _make_simple_model(op: IrOp, real_args: tuple) -> nn.Module:
     """Create a simple model that calls the op with given arguments."""
 
@@ -77,7 +69,7 @@ class TestPerOpLowering:
 
         # Step 1: Verify supports_args works with unbacked symint
         with op.enable_symbolic():
-            fake_args = op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+            fake_args = op.generate_inputs()
         impl = op.impls[provider]
         # This should not raise - verifies supports_args is batch-agnostic
         supports_result = impl.supports_args(*fake_args)
@@ -95,7 +87,7 @@ class TestPerOpLowering:
             op.set_priority([provider, "native"]),
             ir.enable_torch_wrap(True),
         ):
-            real_args = op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+            real_args = op.generate_inputs()
             model = _make_simple_model(op, real_args)
             x = torch.randn(8, 16, dtype=torch.bfloat16)
             compiled_model = torch.compile(model, backend=backend, fullgraph=True)
@@ -132,10 +124,8 @@ class TestLoweringUnit:
             return x
 
         @_test_selection_op.register_input_generator
-        def _test_selection_op_input_generator(
-            num_tokens: int, hidden_size: int, dtype: torch.dtype
-        ) -> tuple:
-            return (torch.randn(num_tokens, hidden_size, dtype=dtype),)
+        def _test_selection_op_input_generator() -> tuple:
+            return (torch.randn(8, 16, dtype=torch.bfloat16),)
 
         @_test_selection_op.register_impl(
             "bf16_impl",
@@ -158,7 +148,7 @@ class TestLoweringUnit:
             torch.set_default_device(current_platform.device_type)
 
             with _test_selection_op.set_priority(["bf16_impl", "fp32_impl", "native"]):
-                real_args = _test_selection_op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+                real_args = _test_selection_op.generate_inputs()
                 model = _make_simple_model(_test_selection_op, real_args)
                 x = torch.randn(8, 16, dtype=torch.bfloat16)
                 compiled = torch.compile(model, backend=backend, fullgraph=True)
@@ -208,10 +198,8 @@ class TestLoweringUnit:
             return x
 
         @_test_fallback_op.register_input_generator
-        def _test_fallback_op_input_generator(
-            num_tokens: int, hidden_size: int, dtype: torch.dtype
-        ) -> tuple:
-            return (torch.randn(num_tokens, hidden_size, dtype=dtype),)
+        def _test_fallback_op_input_generator() -> tuple:
+            return (torch.randn(8, 16, dtype=torch.bfloat16),)
 
         @_test_fallback_op.register_impl(
             "never_matches",
@@ -228,7 +216,7 @@ class TestLoweringUnit:
 
             # Set priority WITHOUT native - it will be auto-appended
             with _test_fallback_op.set_priority(["never_matches"]):
-                real_args = _test_fallback_op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+                real_args = _test_fallback_op.generate_inputs()
                 model = _make_simple_model(_test_fallback_op, real_args)
                 x = torch.randn(8, 16, dtype=torch.bfloat16)
                 compiled = torch.compile(model, backend=backend, fullgraph=True)
@@ -257,10 +245,8 @@ class TestLoweringUnit:
             return x
 
         @_test_batch_dep_op.register_input_generator
-        def _test_batch_dep_op_input_generator(
-            num_tokens: int, hidden_size: int, dtype: torch.dtype
-        ) -> tuple:
-            return (torch.randn(num_tokens, hidden_size, dtype=dtype),)
+        def _test_batch_dep_op_input_generator() -> tuple:
+            return (torch.randn(8, 16, dtype=torch.bfloat16),)
 
         # Intentionally buggy: supports_args depends on batch size
         @_test_batch_dep_op.register_impl(
@@ -272,7 +258,7 @@ class TestLoweringUnit:
 
         try:
             with _test_batch_dep_op.enable_symbolic():
-                fake_args = _test_batch_dep_op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+                fake_args = _test_batch_dep_op.generate_inputs()
             impl = _test_batch_dep_op.impls["batch_dep_impl"]
 
             # Call supports_args with unbacked symint
@@ -322,7 +308,7 @@ class TestE2ELowering:
         x = torch.randn(8, 16, dtype=torch.bfloat16)
 
         # Generate inputs once so all models use the same inputs
-        real_args = op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+        real_args = op.generate_inputs()
 
         # Case 1: lowering enabled with torch_wrap=True
         with op.set_priority([provider, "native"]), ir.enable_torch_wrap(True):
@@ -375,7 +361,7 @@ class TestE2ELowering:
             pytest.skip(f"Provider {provider} not supported")
 
         # Get expected result from direct dispatch
-        real_args = op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+        real_args = op.generate_inputs()
         with op.set_priority([provider, "native"]):
             expected_impl = op.dispatch(*real_args)
 
@@ -384,7 +370,7 @@ class TestE2ELowering:
 
         torch.set_default_device(current_platform.device_type)
 
-        real_args = op.generate_inputs(**_DEFAULT_INPUT_KWARGS)
+        real_args = op.generate_inputs()
         model = _make_simple_model(op, real_args)
 
         with (
