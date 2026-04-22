@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
+import gc
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
@@ -196,12 +198,13 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     llm_kwargs = {
         "model": model_name,
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.47,
+        "gpu_memory_utilization": 0.3,
         "kv_transfer_config": kv_transfer_config,
         "max_model_len": 2048,
+        "max_num_seqs": 1,
         # NOTE: Make sure HMA is enabled
         "disable_hybrid_kv_cache_manager": False,
-        "max_num_batched_tokens": 1024,
+        "max_num_batched_tokens": 2048,
         "enable_prefix_caching": False,
         "block_size": block_size,
     }
@@ -248,6 +251,8 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
             assert len(group_block_ids) == expected_num_remote_blocks
 
     def run_test_and_cleanup():
+        gc.collect()
+        torch.accelerator.empty_cache()
         llm = LLM(**llm_kwargs)
         try:
             run_hma_test(llm)
