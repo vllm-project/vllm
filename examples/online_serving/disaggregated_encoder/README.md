@@ -57,7 +57,7 @@ The vllm instances and `disagg_encoder_proxy` supports local URIs with ```{"url"
 
 ## EC connector and KV transfer
 
-The `ECExampleonnector` is used to store the encoder cache on local disk and facilitate transfer. To enable the encoder disaggregation feature, add the following configuration:
+The `ECExampleConnector` is used to store the encoder cache on local disk and facilitate transfer. To enable the encoder disaggregation feature, add the following configuration:
 
 ```bash
 # Add to encoder instance: 
