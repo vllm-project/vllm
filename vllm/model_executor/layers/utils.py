@@ -159,7 +159,7 @@ def rocm_unquantized_gemm_impl(
             and weight.is_contiguous()
         )
     )
-    if envs.VLLM_ROCM_USE_AITER_TUNED_UNQUANTISED_GEMM:
+    if rocm_aiter_ops.is_linear_enabled():
         from aiter.tuned_gemm import tgemm
 
         return tgemm.mm(x, weight, bias)
