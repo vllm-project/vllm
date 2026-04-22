@@ -177,6 +177,7 @@ class LoopCoderAttention(nn.Module):
         hidden_states: torch.Tensor,
         loop_idx: int,
         gate_proj: LoopGateProjection | None = None,
+        gate_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if loop_idx == 0:
             attn = self.attn[0]
@@ -201,7 +202,7 @@ class LoopCoderAttention(nn.Module):
             global_attn_output = global_attn(q, None, None)
             local_attn_output = local_attn(q, k, v)
             assert gate_proj is not None, "gate_proj must be provided for loop_idx > 0"
-            gate = gate_proj(q_reshaped)
+            gate = gate_proj(q_reshaped, hidden_states=gate_hidden_states)
             output = global_attn_output * gate + local_attn_output * (1 - gate)
             output, _ = self.o_proj(output)
             return output
@@ -259,6 +260,8 @@ class LoopCoderDecoderLayer(nn.Module):
         loop_idx: int,
         gate_proj: LoopGateProjection | None = None,
     ) -> torch.Tensor:
+        # residual = pre-layernorm hidden_states, corresponds to training's
+        # gate_hidden_states saved in PLTLayer._preprocess before input_layernorm
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
         hidden_states = self.self_attn(
@@ -266,6 +269,7 @@ class LoopCoderDecoderLayer(nn.Module):
             hidden_states=hidden_states,
             loop_idx=loop_idx,
             gate_proj=gate_proj,
+            gate_hidden_states=residual,
         )
         hidden_states = hidden_states + residual
         residual = hidden_states
@@ -458,6 +462,7 @@ class IQuestLoopCoderModel(nn.Module):
         self.plt_emb_scale = model_config.get_plt_emb_scale()
         self.plt_hidden_scale = model_config.get_plt_hidden_scale()
         self.plt_normalize_per_loop = model_config.get_plt_normalize_per_loop()
+        self.plt_gate_use_hidden_states = model_config.get_plt_gate_use_hidden_states()
 
         # Gate projections for Loop 2+ (one per layer)
         head_dim = config.hidden_size // config.num_attention_heads
@@ -468,6 +473,9 @@ class IQuestLoopCoderModel(nn.Module):
                 head_dim=head_dim,
                 quant_config=quant_config,
                 prefix=prefix,
+                rms_norm_eps=config.rms_norm_eps,
+                use_hidden_states=self.plt_gate_use_hidden_states,
+                hidden_size=config.hidden_size,
             ),
             prefix=f"{prefix}.gate_projections",
         )
@@ -695,7 +703,7 @@ class IQuestLoopCoderForCausalLM(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        loop_num_idx: int | None = None,
+        loop_num_idx: int = 0,
         loop_hidden_states: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
