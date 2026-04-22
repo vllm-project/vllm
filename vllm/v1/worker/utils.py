@@ -5,10 +5,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from vllm.v1.core.sched.output import SchedulerOutput
+from typing import Any
 
 import torch
 
@@ -38,14 +35,6 @@ from vllm.v1.kv_cache_interface import (
 )
 
 logger = init_logger(__name__)
-
-
-def is_decode_only(scheduler_output: "SchedulerOutput") -> bool:
-    """True if every scheduled request is in decode phase (i.e. no prefill
-    tokens in this step)."""
-    return scheduler_output.total_num_scheduled_tokens == len(
-        scheduler_output.num_scheduled_tokens
-    )
 
 
 @triton.jit

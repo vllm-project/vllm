@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import sys
-from collections.abc import Callable
 from contextlib import contextmanager
 
 import torch
@@ -11,16 +10,6 @@ import vllm.envs as envs
 from vllm.platforms import current_platform
 
 _GPU_SYNC_ALLOWED_COUNTS: dict[tuple[str, int], int] = {}
-
-
-def _parse_gpu_sync_check_mode() -> tuple[str, bool] | None:
-    """Returns (mode, exclude_prefill) parsed from `VLLM_GPU_SYNC_CHECK`, or
-    None if the env var is unset."""
-    val = envs.VLLM_GPU_SYNC_CHECK
-    if val is None:
-        return None
-    parts = [p.strip().lower() for p in val.split(",")]
-    return parts[0], "exclude_prefill" in parts[1:]
 
 
 @contextmanager
@@ -63,46 +52,32 @@ if current_platform.is_cuda_alike():
             _GPU_SYNC_ALLOWED_COUNTS[key] = used + 1
         return _suppress_gpu_sync_check(prev_mode)
 
-    def with_gpu_sync_check(check_if: Callable[..., bool] | None = None):
-        """Decorator factory that enables `torch.cuda.set_sync_debug_mode` around
-        `fn` when `VLLM_GPU_SYNC_CHECK` is set. If the env var is suffixed with
-        `,exclude_prefill` and `check_if(*args, **kwargs)` returns False, the
-        check is skipped for that call.
+    def with_gpu_sync_check(fn):
+        """Decorator that enables `torch.cuda.set_sync_debug_mode` around `fn`
+        when `VLLM_GPU_SYNC_CHECK` is set.
 
         The env var is parsed once at decoration time; this module is imported
         lazily after `VllmConfig.__post_init__` has finalized `VLLM_GPU_SYNC_CHECK`.
         """
+        mode = envs.VLLM_GPU_SYNC_CHECK
+        if mode is None:
+            return fn
 
-        def decorator(fn):
-            parsed = _parse_gpu_sync_check_mode()
-            if parsed is None:
-                return fn
-            mode, exclude_prefill = parsed
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            prev_mode = torch.cuda.get_sync_debug_mode()
+            torch.cuda.set_sync_debug_mode(mode)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode(prev_mode)
 
-            @functools.wraps(fn)
-            def wrapper(*args, **kwargs):
-                if (
-                    exclude_prefill
-                    and check_if is not None
-                    and not check_if(*args, **kwargs)
-                ):
-                    return fn(*args, **kwargs)
-
-                prev_mode = torch.cuda.get_sync_debug_mode()
-                torch.cuda.set_sync_debug_mode(mode)
-                try:
-                    return fn(*args, **kwargs)
-                finally:
-                    torch.cuda.set_sync_debug_mode(prev_mode)
-
-            return wrapper
-
-        return decorator
+        return wrapper
 
 else:
 
     def gpu_sync_allowed(count: int | None = None):
         return _noop_cm()
 
-    def with_gpu_sync_check(check_if: Callable[..., bool] | None = None):
-        return lambda fn: fn
+    def with_gpu_sync_check(fn):
+        return fn
