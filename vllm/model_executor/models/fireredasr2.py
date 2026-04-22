@@ -367,7 +367,12 @@ class FireRedASR2ForConditionalGeneration(
                 "Language must be specified when creating the fireredasr2 prompt"
             )
 
-        prompt_str = "<|im_start|>user\n<|AUDIO|>请转写音频为文字<|im_end|>\n<|im_start|>assistant\n"  # noqa: E501
+        prompt_str = (
+            "<|im_start|>user\n"
+            "<|AUDIO|>请转写音频为文字。如果是纯音乐、噪音或其他"
+            "非语音内容，请直接回复空内容。<|im_end|>\n"
+            "<|im_start|>assistant\n"
+        )  # noqa: E501
         prompt = {
             "prompt": prompt_str,
             "multi_modal_data": {
