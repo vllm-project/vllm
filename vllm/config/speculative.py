@@ -722,6 +722,16 @@ class SpeculativeConfig:
                     f"{speculative_max_model_len=} cannot be "
                     f"larger than {target_max_model_len=}"
                 )
+            if speculative_max_model_len < target_max_model_len:
+                logger.warning(
+                    "speculative_max_model_len (%d) < target "
+                    "max_model_len (%d). Sequences longer than "
+                    "%d tokens will skip speculation, which may "
+                    "cause hangs with data parallelism.",
+                    speculative_max_model_len,
+                    target_max_model_len,
+                    speculative_max_model_len,
+                )
             return speculative_max_model_len
 
         if draft_max_model_len < target_max_model_len:
