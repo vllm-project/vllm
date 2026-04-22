@@ -8,6 +8,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 import vllm.ir.ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.ir.ops.quant import make_group_quant_scales
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLAAttention
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -76,7 +77,7 @@ class MLAAttnFp8StaticQuantPattern(VllmPatternReplacement[..., torch.Tensor]):
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
                 # MLA output is already 2D (T, N*V), no reshape needed
-                return self._quant_matcher(at1[1], scale)[0]
+                return vllm.ir.ops.static_quant_fp8(at1[1], scale, FP8_DTYPE)
 
             return _pattern_with_ln
 
@@ -363,7 +364,7 @@ class MLAAttnFp8GroupQuantPattern(
     """
     Fusion for MLA Attention+Fp8GroupQuant (per-group dynamic FP8).
 
-    Matches the pattern: MLA attention -> per_token_group_fp8_quant, and
+    Matches the pattern: MLA attention -> ir.ops.dynamic_group_quant_fp8, and
     replaces it with MLA attention(output_block_scale=group_scale_buffer).
     Used by models with block FP8 quantization (e.g. DeepSeek V3).
     """
@@ -391,13 +392,6 @@ class MLAAttnFp8GroupQuantPattern(
         self._is_e8m0 = is_e8m0
         self._is_tma_aligned = is_tma_aligned
 
-        self._quant_matcher = MatcherQuantFP8(
-            quant_key,
-            has_col_major_scales=has_col_major_scales,
-            is_e8m0=is_e8m0,
-            is_tma_aligned=is_tma_aligned,
-        )
-
     @property
     def pattern(
         self,
@@ -412,7 +406,6 @@ class MLAAttnFp8GroupQuantPattern(
                 k_pe,
                 output_attn,
                 kv_cache_dummy_dep,
-                scale,
                 layer_name,
             ):
                 at1 = auto_functionalized(
@@ -426,25 +419,14 @@ class MLAAttnFp8GroupQuantPattern(
                     output_block_scale=None,
                     kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
-                attn_out = at1[1]
-                result = torch.empty(
-                    attn_out.shape, device=attn_out.device, dtype=FP8_DTYPE
+                return vllm.ir.ops.dynamic_group_quant_fp8(
+                    at1[1],
+                    group_shape=[1, self._group_size],
+                    column_major=self._has_col_major_scales,
+                    use_ue8m0=self._is_e8m0,
+                    fp8_dtype=FP8_DTYPE,
+                    scale_alignment=4 if self._is_tma_aligned else 1,
                 )
-                finfo = torch.finfo(FP8_DTYPE)
-                _, result, scale = auto_functionalized(
-                    self._quant_matcher.QUANT_OP,
-                    input=attn_out,
-                    output_q=result,
-                    output_s=scale,
-                    group_size=self._group_size,
-                    eps=1e-10,
-                    fp8_min=finfo.min,
-                    fp8_max=finfo.max,
-                    scale_ue8m0=self._is_e8m0,
-                    dummy_is_scale_transposed=self._has_col_major_scales,
-                    dummy_is_tma_aligned=self._is_tma_aligned,
-                )
-                return result, scale
 
             return _pattern_with_ln
 
@@ -454,7 +436,6 @@ class MLAAttnFp8GroupQuantPattern(
             k_pe: torch.Tensor,
             output_attn: torch.Tensor,
             kv_cache_dummy_dep: torch.Tensor,
-            scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
             at1 = auto_functionalized(
                 MLA_ATTN_OP,
@@ -467,25 +448,14 @@ class MLAAttnFp8GroupQuantPattern(
                 output_block_scale=None,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
             )
-            attn_out = at1[1]
-            result = torch.empty(
-                attn_out.shape, device=attn_out.device, dtype=FP8_DTYPE
+            return vllm.ir.ops.dynamic_group_quant_fp8(
+                at1[1],
+                group_shape=[1, self._group_size],
+                column_major=self._has_col_major_scales,
+                use_ue8m0=self._is_e8m0,
+                fp8_dtype=FP8_DTYPE,
+                scale_alignment=4 if self._is_tma_aligned else 1,
             )
-            finfo = torch.finfo(FP8_DTYPE)
-            _, result, scale = auto_functionalized(
-                self._quant_matcher.QUANT_OP,
-                input=attn_out,
-                output_q=result,
-                output_s=scale,
-                group_size=self._group_size,
-                eps=1e-10,
-                fp8_min=finfo.min,
-                fp8_max=finfo.max,
-                scale_ue8m0=self._is_e8m0,
-                dummy_is_scale_transposed=self._has_col_major_scales,
-                dummy_is_tma_aligned=self._is_tma_aligned,
-            )
-            return result, scale
 
         return _pattern
 
@@ -503,13 +473,18 @@ class MLAAttnFp8GroupQuantPattern(
                 k_pe,
                 output_attn,
                 kv_cache_dummy_dep,
-                scale,
                 layer_name,
             ):
                 output_attn = torch.empty(
                     [q.shape[0], self._output_dim],
                     dtype=FP8_DTYPE,
                     device=q.device,
+                )
+                scale = make_group_quant_scales(
+                    output_attn,
+                    self._group_size,
+                    self._has_col_major_scales,
+                    4 if self._is_tma_aligned else 1,
                 )
                 at1 = auto_functionalized(
                     MLA_ATTN_OP,
@@ -530,11 +505,17 @@ class MLAAttnFp8GroupQuantPattern(
 
             return _replacement_with_ln
 
-        def _replacement(q, kv_c_normed, k_pe, output_attn, kv_cache_dummy_dep, scale):
+        def _replacement(q, kv_c_normed, k_pe, output_attn, kv_cache_dummy_dep):
             output_attn = torch.empty(
                 [q.shape[0], self._output_dim],
                 dtype=FP8_DTYPE,
                 device=q.device,
+            )
+            scale = make_group_quant_scales(
+                output_attn,
+                self._group_size,
+                self._has_col_major_scales,
+                4 if self._is_tma_aligned else 1,
             )
             at1 = auto_functionalized(
                 MLA_ATTN_OP,
@@ -562,7 +543,6 @@ class MLAAttnFp8GroupQuantPattern(
             self.empty(5, 1, self._qk_rope_head_dim, dtype=self._dtype),
             self.empty(5, self._output_dim, dtype=self._dtype),
             self.empty(0, dtype=self._dtype),
-            self._quant_matcher.empty_f32(1, 1),
         ]
         if _USE_LAYERNAME:
             inputs.append(_encode_layer_name(self._layer_name))
