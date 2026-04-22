@@ -60,14 +60,6 @@ def _register_test_op(
             del IrOp.registry[name]
 
 
-@pytest.fixture
-def lowering_backend(default_vllm_config):
-    """Shared lowering backend fixture."""
-    torch.set_default_device(current_platform.device_type)
-    lowering_pass = VllmIRLoweringPass(get_current_vllm_config())
-    return lowering_pass, TestBackend(lowering_pass)
-
-
 # ============================================================
 # 1. Per-op Lowering tests (parametrized across all ops)
 # ============================================================
@@ -218,6 +210,7 @@ class TestFakeOpLowering:
         """
         Test supports_args signature validation and batch size specialization detection.
         """
+
         # --- Test 1: signature mismatch ---
         @ir.register_op(name="_test_sig_op")
         def _test_sig_op(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
