@@ -15,14 +15,9 @@ from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
     CanonicalKVCaches,
+    GPULoadStoreSpec,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
-from vllm.v1.kv_offload.base import (
-    BlockIDsLoadStoreSpec,
-    GPULoadStoreSpec,
-    CanonicalKVCacheRef,
-    CanonicalKVCaches,
-)
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
