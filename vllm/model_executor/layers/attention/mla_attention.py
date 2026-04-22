@@ -610,7 +610,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        if not use_fused and fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
         # When use_fused: cache writes happen per-section below
 
@@ -628,6 +628,31 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
+
+        # When the fused path is active, the wrapper (mla.py) skips RoPE
+        # for ALL tokens — but the fused kernel only handles decode tokens.
+        # Apply RoPE to prefill tokens and re-write the cache since
+        # do_kv_cache_update (called before forward_impl) wrote raw k_pe.
+        if use_fused and num_mha_tokens > 0:
+            rotary_emb = self.impl.rotary_emb
+            prefill_q_pe = q[num_mqa_tokens:, :, self.qk_nope_head_dim:]
+            prefill_k_pe = k_pe[num_mqa_tokens:]
+            prefill_positions = positions[num_mqa_tokens:]
+            prefill_q_pe[:], prefill_k_pe[:] = rotary_emb(
+                prefill_positions, prefill_q_pe, prefill_k_pe
+            )
+            if kv_cache.numel() > 0 and attn_metadata.slot_mapping is not None:
+                prefill_slot_mapping = attn_metadata.slot_mapping[
+                    num_mqa_tokens:
+                ].flatten()
+                self.impl.do_kv_cache_update(
+                    k_c_normed[num_mqa_tokens:],
+                    k_pe[num_mqa_tokens:],
+                    kv_cache,
+                    prefill_slot_mapping,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
 
         if num_mha_tokens > 0:
             self.impl.forward_mha(
