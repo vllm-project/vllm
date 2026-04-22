@@ -800,7 +800,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95", "gfx12"])
+        return on_gfx9() or on_gfx12x()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:
