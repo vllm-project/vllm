@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from abc import ABC, abstractmethod
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.memshare.handler import MemShareHandler
 from vllm.sequence import Sequence, SequenceGroup, SequenceGroupOutput
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
@@ -32,6 +33,7 @@ class SequenceGroupOutputProcessor(ABC):
         seq_counter: Counter,
         get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer],
         stop_checker: "StopChecker",
+        memshare_handler: Optional[MemShareHandler] = None,
     ):
         """Create an output processor.
 
@@ -44,7 +46,8 @@ class SequenceGroupOutputProcessor(ABC):
                 SingleStepOutputProcessor)
             return SingleStepOutputProcessor(scheduler_config, detokenizer,
                                              scheduler, seq_counter,
-                                             stop_checker)
+                                             stop_checker,
+                                             memshare_handler)
         else:
             # Importing here to avoid cycle.
             from vllm.engine.output_processor.multi_step import (

@@ -25,6 +25,7 @@ from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.memshare.handler import MemShareHandler
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.entrypoints.openai.logits_processors import (
     get_logits_processors as get_openai_logits_processors)
@@ -400,6 +401,9 @@ class LLMEngine:
                 "vllm.llm_engine",
                 self.observability_config.otlp_traces_endpoint)
 
+        # Create MemShare handler for KV cache block sharing detection.
+        self.memshare_handler = MemShareHandler(enabled=True)
+
         # Create sequence output processor, e.g. for beam search or
         # speculative decoding.
         self.output_processor = (
@@ -413,6 +417,7 @@ class LLMEngine:
                     self.scheduler_config.max_model_len,
                     get_tokenizer_for_seq,
                 ),
+                memshare_handler=self.memshare_handler,
             ))
 
         self.seq_id_to_seq_group: Dict[str, SequenceGroupBase] = {}
