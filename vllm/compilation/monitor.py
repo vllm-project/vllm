@@ -45,7 +45,7 @@ def monitor_torch_compile(
     else:
         total_compile_time = time.perf_counter() - torch_compile_start_time
         if compilation_config.mode == CompilationMode.VLLM_COMPILE:
-            logger.info_once(message, total_compile_time, scope="local")
+            logger.info_once(message, total_compile_time)
     finally:
         if depyf_cm is not None:
             try:
@@ -76,7 +76,6 @@ def monitor_profiling_run() -> Generator[None, None, None]:
     logger.info_once(
         "Initial profiling/warmup run took %.2f s",
         elapsed,
-        scope="local",
     )
 
 

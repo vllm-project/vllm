@@ -665,7 +665,6 @@ def _support_torch_compile(
             logger.info_once(
                 "saved AOT compiled function to %s",
                 self._aot_compilation_path,
-                scope="local",
             )
         except Exception as e:
             logger.warning(

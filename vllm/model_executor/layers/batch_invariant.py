@@ -1020,7 +1020,7 @@ def override_envs_for_invariance(
             "You are using a non-decode-invariant form of batch invariance. "
             "This will not be invariant between prefill and decode."
         )
-        logger.warning_once(warning, scope="local")
+        logger.warning_once(warning)
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"

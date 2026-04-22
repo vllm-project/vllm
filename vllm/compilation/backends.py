@@ -292,7 +292,6 @@ class CompilerManager:
                     "from the cache, took %.3f s",
                     str(compile_range),
                     elapsed,
-                    scope="local",
                 )
             return compiled_graph
 
@@ -377,7 +376,6 @@ class CompilerManager:
                 logger.info_once(
                     "Cache the graph of compile range %s for later use",
                     str(compile_range),
-                    scope="local",
                 )
             logger.debug_once(
                 "Store the %s-th graph for compile range%s from %s via handle %s",
@@ -385,7 +383,6 @@ class CompilerManager:
                 str(compile_range),
                 self.compiler.name,
                 handle,
-                scope="local",
             )
 
         # after compiling the last graph, record the end time
@@ -399,7 +396,6 @@ class CompilerManager:
                 "Compiling a graph for compile range %s takes %.2f s",
                 str(compile_range),
                 elapsed,
-                scope="local",
             )
 
         return compiled_graph
@@ -1072,12 +1068,11 @@ class VllmBackend:
         disable_cache = disable_cache or is_ngram_gpu_enabled
 
         if disable_cache:
-            logger.info_once("vLLM's torch.compile cache is disabled.", scope="local")
+            logger.info_once("vLLM's torch.compile cache is disabled.")
         else:
             logger.info_once(
                 "Using cache directory: %s for vLLM's torch.compile",
                 local_cache_dir,
-                scope="local",
             )
 
         self.compiler_manager.initialize_cache(
@@ -1134,9 +1129,7 @@ class VllmBackend:
         from .monitor import torch_compile_start_time
 
         dynamo_time = time.perf_counter() - torch_compile_start_time
-        logger.info_once(
-            "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
-        )
+        logger.info_once("Dynamo bytecode transform time: %.2f s", dynamo_time)
         if self.is_encoder:
             self.compilation_config.encoder_compilation_time += dynamo_time
         else:
@@ -1215,7 +1208,6 @@ class VllmBackend:
             logger.info_once(
                 "Saved compiler manager cache in %.2f seconds.",
                 elapsed,
-                scope="local",
             )
 
         from torch._guards import detect_fake_mode
@@ -1254,9 +1246,7 @@ class VllmBackend:
             with open(graph_path, "w") as f:
                 f.write(src)
 
-            logger.debug_once(
-                "Computation graph saved to %s", graph_path, scope="local"
-            )
+            logger.debug_once("Computation graph saved to %s", graph_path)
 
         self._called = True
         graph_to_serialize = (
