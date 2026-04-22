@@ -928,16 +928,16 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             p.is_cuda() and p.has_device_capability((8, 9))
         )
 
-        SUPPORTED_W_A_FP8 = [
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-        ]
-        return (weight_key, activation_key) == (None, None) or (
-            device_supports_fp8 and (weight_key, activation_key) in SUPPORTED_W_A_FP8
-        )
+        supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
+        if device_supports_fp8:
+            supported += [
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+                (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            ]
+        return (weight_key, activation_key) in supported
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
