@@ -341,8 +341,13 @@ def get_mamba_ssm_config(dstate: int, headdim: int) -> dict | None:
         filename,
     )
     if os.path.exists(config_path):
-        with open(config_path) as f:
-            return json.load(f)
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            if "BLOCK_SIZE_M" in config and "num_warps" in config:
+                return config
+        except (json.JSONDecodeError, OSError):
+            pass
     return None
 
 
