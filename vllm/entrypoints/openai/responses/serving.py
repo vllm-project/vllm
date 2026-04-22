@@ -848,9 +848,7 @@ class OpenAIServingResponses(OpenAIServing):
         ):
             reasoning_parser = self.parser.reasoning_parser_cls(
                 tokenizer,
-                chat_template_kwargs=self._effective_chat_template_kwargs(
-                    context.request
-                ),
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
             )
             accumulated = getattr(context, "_accumulated_token_ids", []) or []
             num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(accumulated)
