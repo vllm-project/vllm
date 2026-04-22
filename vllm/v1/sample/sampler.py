@@ -14,6 +14,7 @@ from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+from vllm.v1.worker.utils import gpu_sync_allowed
 
 _SAMPLING_EPS = 1e-5
 
@@ -328,9 +329,10 @@ class Sampler(nn.Module):
         # of the compiled batched_count_greater_than. mark_unbacked makes
         # the size fully symbolic so dynamo doesn't specialize when
         # batch_size transitions from 1 to >=2.
-        torch._dynamo.decorators.mark_unbacked(logprobs, 0)
-        torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
-        token_ranks = batched_count_greater_than(logprobs, token_logprobs)
+        with gpu_sync_allowed(1):
+            torch._dynamo.decorators.mark_unbacked(logprobs, 0)
+            torch._dynamo.decorators.mark_unbacked(token_logprobs, 0)
+            token_ranks = batched_count_greater_than(logprobs, token_logprobs)
 
         # Concatenate together with the topk.
         indices = torch.cat((token_ids, topk_indices), dim=1)

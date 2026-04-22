@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
+from vllm.v1.worker.utils import gpu_sync_allowed
 
 
 def fused_grouped_topk(
@@ -195,17 +196,18 @@ class GroupedTopk(CustomOp):
         gating_output: torch.Tensor,
         e_score_correction_bias: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        return self.native_impl(
-            hidden_states,
-            gating_output,
-            self.topk,
-            self.renormalize,
-            self.num_expert_group,
-            self.topk_group,
-            self.scoring_func,
-            self.routed_scaling_factor,
-            e_score_correction_bias,
-        )
+        with gpu_sync_allowed(1):
+            return self.native_impl(
+                hidden_states,
+                gating_output,
+                self.topk,
+                self.renormalize,
+                self.num_expert_group,
+                self.topk_group,
+                self.scoring_func,
+                self.routed_scaling_factor,
+                e_score_correction_bias,
+            )
 
     def forward_cuda(
         self,
@@ -338,16 +340,17 @@ class GroupedTopKRouter(BaseRouter):
         else:
             grouped_topk_impl = grouped_topk
 
-        topk_weights, topk_ids = grouped_topk_impl(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            topk=self.top_k,
-            renormalize=self.renormalize,
-            num_expert_group=self.num_expert_group,
-            topk_group=self.topk_group,
-            scoring_func=self.scoring_func,
-            routed_scaling_factor=self.routed_scaling_factor,
-            e_score_correction_bias=self.e_score_correction_bias,
-        )
+        with gpu_sync_allowed(1):
+            topk_weights, topk_ids = grouped_topk_impl(
+                hidden_states=hidden_states,
+                gating_output=router_logits,
+                topk=self.top_k,
+                renormalize=self.renormalize,
+                num_expert_group=self.num_expert_group,
+                topk_group=self.topk_group,
+                scoring_func=self.scoring_func,
+                routed_scaling_factor=self.routed_scaling_factor,
+                e_score_correction_bias=self.e_score_correction_bias,
+            )
 
         return topk_weights, topk_ids

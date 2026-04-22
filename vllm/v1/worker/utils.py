@@ -2,8 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 import math
+import sys
 from collections import defaultdict
 from collections.abc import Callable, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import TYPE_CHECKING, Any
@@ -95,6 +97,46 @@ def with_gpu_sync_check(is_decode_only: Callable[..., bool] | None = None):
         return wrapper
 
     return decorator
+
+
+_GPU_SYNC_ALLOWED_COUNTS: dict[tuple[str, int], int] = {}
+
+
+@contextmanager
+def _suppress_gpu_sync_check(prev_mode: int):
+    torch.cuda.set_sync_debug_mode(0)
+    try:
+        yield
+    finally:
+        torch.cuda.set_sync_debug_mode(prev_mode)
+
+
+@contextmanager
+def _noop_cm():
+    yield
+
+
+def gpu_sync_allowed(count: int | None = None):
+    """Context manager that suppresses `torch.cuda.set_sync_debug_mode` for the
+    duration of the `with` block.
+
+    If `count` is given, only the first `count` entries from this call site
+    suppress the sync check; subsequent entries from the same site are no-ops
+    so any further GPU syncs will be reported. The "site" is the caller's
+    (filename, lineno), so different `with gpu_sync_allowed(count=N):` lines
+    track independent counters automatically.
+    """
+    prev_mode = torch.cuda.get_sync_debug_mode()
+    if not prev_mode:
+        return _noop_cm()
+    if count is not None:
+        frame = sys._getframe(1)
+        key = (frame.f_code.co_filename, frame.f_lineno)
+        used = _GPU_SYNC_ALLOWED_COUNTS.get(key, 0)
+        if used >= count:
+            return _noop_cm()
+        _GPU_SYNC_ALLOWED_COUNTS[key] = used + 1
+    return _suppress_gpu_sync_check(prev_mode)
 
 
 @triton.jit
