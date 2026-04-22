@@ -753,6 +753,7 @@ class MooncakeConnectorWorker:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.use_mla = self.model_config.use_mla
+        self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
         # Get the attention backend from the first layer
@@ -773,6 +774,7 @@ class MooncakeConnectorWorker:
             is_mamba=False,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backends=[backend],
+            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
         )
 
         self.async_zmq_ctx = zmq.asyncio.Context()
@@ -795,6 +797,9 @@ class MooncakeConnectorWorker:
                 kernel_block_size,
             )
             assert self.block_size > kernel_block_size
+            self._physical_blocks_per_logical_kv_block = (
+                self.block_size // kernel_block_size
+            )
             self.block_size = kernel_block_size
 
     def __del__(self):
