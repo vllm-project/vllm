@@ -56,7 +56,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
@@ -374,10 +374,14 @@ class Worker(WorkerBase):
             )
 
             # Profile CUDA graph memory if graphs will be captured.
-            # Skip on ROCm/HIP as graph pool handles and mem_get_info behave
+            # Skip on ROCm/HIP/XPU as graph pool handles and mem_get_info behave
             # differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager and not current_platform.is_rocm():
+            if (
+                not current_platform.is_rocm()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
@@ -450,14 +454,13 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.info(
-                    "CUDA graph memory profiling is enabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
-                    "This will become the default in v0.19. "
-                    "The current --gpu-memory-utilization=%.4f is equivalent "
-                    "to --gpu-memory-utilization=%.4f without CUDA graph "
-                    "memory profiling. To maintain the same effective KV "
-                    "cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f.",
+                    "CUDA graph memory profiling is enabled (default since "
+                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                    "equivalent to --gpu-memory-utilization=%.4f without "
+                    "CUDA graph memory profiling. To maintain the same "
+                    "effective KV cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f. To disable, set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
                     current_util,
                     equiv_util,
                     suggested_util,
@@ -467,14 +470,14 @@ class Worker(WorkerBase):
                     round(current_util + cg_util_delta, 4),
                     1.0,
                 )
-                logger.info(
-                    "In v0.19, CUDA graph memory profiling will be enabled "
-                    "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
-                    "which more accurately accounts for CUDA graph memory "
-                    "during KV cache allocation. To try it now, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase "
-                    "--gpu-memory-utilization from %.4f to %.4f to maintain "
-                    "the same effective KV cache size.",
+                logger.warning(
+                    "CUDA graph memory profiling is disabled "
+                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
+                    "Without it, CUDA graph memory is not accounted for "
+                    "during KV cache allocation, which may require lowering "
+                    "--gpu-memory-utilization to avoid OOM. Consider "
+                    "re-enabling it (the default as of v0.21.0) and increasing "
+                    "--gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,
                 )
@@ -547,7 +550,7 @@ class Worker(WorkerBase):
             self.model_runner._init_kv_zero_meta()
 
     @instrument(span_name="Warmup (GPU)")
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -689,7 +692,10 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-        return self.compilation_config.compilation_time
+        return CompilationTimes(
+            language_model=self.compilation_config.compilation_time,
+            encoder=self.compilation_config.encoder_compilation_time,
+        )
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()

@@ -2,9 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for NixlConnectorScheduler with HMA and Mamba N-1 prefill."""
 
+import gc
 from unittest.mock import patch
 
 import pytest
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.config import KVTransferConfig
@@ -89,6 +91,100 @@ def test_logical_to_kernel_block_ids_with_hma():
     )
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    "has_mamba,swa_enabled,mamba_enabled,remote_ratio,"
+    "remote_block_ids,expected_remote_block_ids",
+    [
+        # Non-mamba (FA+SWA): both groups expanded via _logical_to_kernel_block_ids.
+        # Regression for https://github.com/vllm-project/vllm/pull/39724
+        (
+            False,
+            True,
+            False,
+            1,
+            ([0, 1, 2], [3, 4]),
+            [[0, 1, 2, 3, 4, 5], [6, 7, 8, 9]],
+        ),
+        # Mamba (FA+Mamba): FA expanded via _logical_to_remote_kernel_block_ids,
+        # Mamba passed through unchanged.
+        # remote_ratio=261 (Nemotron 30B TP=1) != local_ratio=2 so that using
+        # the wrong conversion method produces different FA results.
+        (
+            True,
+            False,
+            True,
+            261,
+            ([0, 1, 2], [10, 11]),
+            [[0, 1, 261, 262, 522, 523], [10, 11]],
+        ),
+    ],
+    ids=["non_mamba_fa_swa", "mamba_fa_ssm"],
+)
+def test_read_blocks_for_req_expands_remote_ids(
+    has_mamba,
+    swa_enabled,
+    mamba_enabled,
+    remote_ratio,
+    remote_block_ids,
+    expected_remote_block_ids,
+):
+    """_read_blocks_for_req must expand remote logical block IDs to kernel
+    block IDs when kernel block size != logical block size.
+
+    Non-mamba path uses _logical_to_kernel_block_ids (all groups expanded).
+    Mamba path uses _logical_to_remote_kernel_block_ids (FA expanded, Mamba
+    passed through).
+    """
+    from unittest.mock import MagicMock
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
+        NixlConnectorMetadata,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker import (
+        NixlConnectorWorker,
+    )
+
+    worker = object.__new__(NixlConnectorWorker)
+    worker._has_mamba = has_mamba
+    worker._physical_blocks_per_logical_kv_block = 2
+    worker.kv_cache_config = make_kv_cache_config(
+        block_size=16, swa_enabled=swa_enabled, mamba_enabled=mamba_enabled
+    )
+
+    remote_engine_id = "remote-engine"
+    if has_mamba:
+        worker._physical_blocks_per_logical = {remote_engine_id: remote_ratio}
+
+    # Mock transfer_topo: empty remote ranks skips the transfer machinery
+    # entirely, isolating the block-ID expansion logic.
+    worker.transfer_topo = MagicMock()
+    worker.transfer_topo.target_remote_ranks.return_value = []
+    worker.transfer_topo.get_engine_info.return_value = MagicMock(remote_tp_size=1)
+    worker.transfer_topo.tp_ratio.return_value = 1
+
+    metadata = NixlConnectorMetadata()
+    metadata.add_new_req_to_recv(
+        request_id="test-req",
+        local_block_ids=([0, 1], [2, 3]),
+        kv_transfer_params={
+            "remote_block_ids": remote_block_ids,
+            "remote_engine_id": remote_engine_id,
+            "remote_request_id": "prefill-test-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "tp_size": 1,
+        },
+    )
+
+    meta = metadata.reqs_to_recv["test-req"]
+    worker._read_blocks_for_req("test-req", meta)
+
+    assert meta.remote.block_ids == expected_remote_block_ids, (
+        f"Expected {expected_remote_block_ids}, got {meta.remote.block_ids}"
+    )
+
+
 @pytest.mark.parametrize("model_name, sw_size", [("google/gemma-3-1b-it", 512)])
 def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     """Test that a prefill instance returns fewer "remote blocks" for the SWA groups
@@ -102,12 +198,13 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
     llm_kwargs = {
         "model": model_name,
         "enforce_eager": True,
-        "gpu_memory_utilization": 0.5,
+        "gpu_memory_utilization": 0.3,
         "kv_transfer_config": kv_transfer_config,
         "max_model_len": 2048,
+        "max_num_seqs": 1,
         # NOTE: Make sure HMA is enabled
         "disable_hybrid_kv_cache_manager": False,
-        "max_num_batched_tokens": 1024,
+        "max_num_batched_tokens": 2048,
         "enable_prefix_caching": False,
         "block_size": block_size,
     }
@@ -154,6 +251,8 @@ def test_fewer_blocks_with_hma(monkeypatch, model_name, sw_size):
             assert len(group_block_ids) == expected_num_remote_blocks
 
     def run_test_and_cleanup():
+        gc.collect()
+        torch.accelerator.empty_cache()
         llm = LLM(**llm_kwargs)
         try:
             run_hma_test(llm)
@@ -224,7 +323,7 @@ def test_get_block_descs_ids_hybrid_ssm():
     worker._has_mamba = True
     worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = 1
-    worker._mamba_phys_ratio = {engine_id: 1}
+    worker._physical_blocks_per_logical = {engine_id: 1}
     worker.block_len_per_layer = [100]
     # num_descs = num_regions * num_blocks (no blocks_first doubling)
     worker.num_descs = 2 * num_blocks
@@ -262,7 +361,7 @@ def test_get_block_descs_ids_kernel_block_mismatch():
     worker._has_mamba = True
     worker._is_mamba_group = [False, True]
     worker._physical_blocks_per_logical_kv_block = ratio
-    worker._mamba_phys_ratio = {engine_id: ratio}
+    worker._physical_blocks_per_logical = {engine_id: ratio}
     worker.block_len_per_layer = [100]
     worker.num_descs = 2 * num_blocks  # 800
 
@@ -439,15 +538,15 @@ def test_has_mamba_init(
         ((9216, 524288), 4096, 131),
     ],
 )
-def test_compute_mamba_phys_ratio(ssm_sizes, block_len, expected_ratio):
-    """Verify that compute_mamba_phys_ratio is TP-dependent.
+def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_ratio):
+    """Verify that compute_physical_blocks_per_logical is TP-dependent.
 
     With dimension-sharded Mamba state, the ratio differs across TP sizes
     (e.g. TP=1 → 261, TP=4 → 131 for Nemotron 30B). This is why
-    _mamba_phys_ratio must be stored per-engine.
+    _physical_blocks_per_logical must be stored per-engine.
     """
     from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-        compute_mamba_phys_ratio,
+        compute_physical_blocks_per_logical,
     )
 
-    assert compute_mamba_phys_ratio(ssm_sizes, block_len) == expected_ratio
+    assert compute_physical_blocks_per_logical(ssm_sizes, block_len) == expected_ratio
