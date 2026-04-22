@@ -668,6 +668,7 @@ class InputBatch:
             self.plt_saved_hidden_states[loop_num_idx][empty_index] = (
                 self.plt_saved_hidden_states[loop_num_idx][last_req_index]
             )
+            self.plt_saved_hidden_states[loop_num_idx][last_req_index].fill_(0)
 
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
