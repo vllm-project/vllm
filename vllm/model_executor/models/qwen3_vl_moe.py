@@ -59,6 +59,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    _deepstack_name,
 )
 from .utils import is_pp_missing_parameter, maybe_prefix
 
@@ -434,13 +435,15 @@ class Qwen3VLMoeForConditionalGeneration(
 
             # register buffer for deepstack
             if self.use_deepstack:
-                self.deepstack_input_embeds = [
+                deepstack_input_embeds = [
                     torch.zeros(
                         vllm_config.scheduler_config.max_num_batched_tokens,
                         config.text_config.hidden_size,
                     )
                     for _ in range(self.deepstack_num_level)
                 ]
+                for idx, tensor in enumerate(deepstack_input_embeds):
+                    self.register_buffer(_deepstack_name(idx), tensor, persistent=False)
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
