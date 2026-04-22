@@ -189,9 +189,9 @@ if TYPE_CHECKING:
         "latency"
     )
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
-    VLLM_BF16_GEMM_BACKEND: Literal[
-        "auto", "cudnn", "cutlass", "tgv", "torch"
-    ] | None = None
+    VLLM_BF16_GEMM_BACKEND: (
+        Literal["auto", "cudnn", "cutlass", "tgv", "torch"] | None
+    ) = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
