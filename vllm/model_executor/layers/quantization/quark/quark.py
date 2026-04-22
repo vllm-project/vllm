@@ -5,7 +5,6 @@ import fnmatch
 from typing import TYPE_CHECKING, Any, cast
 
 import torch
-from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -45,10 +44,6 @@ __all__ = ["QuarkLinearMethod"]
 
 logger = init_logger(__name__)
 
-# model_type values that use dynamic MXFP4 re-quantization for
-# OCP MX fp4 Quark checkpoints
-_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3"})
-
 
 class QuarkConfig(QuantizationConfig):
     def __init__(
@@ -66,30 +61,6 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
         self.dynamic_mxfp4_quant = False
-
-    def maybe_update_config(
-        self,
-        model_name: str,
-        hf_config: PretrainedConfig | None = None,
-        revision: str | None = None,
-    ):
-        """Enable dynamic MXFP4 only for DeepSeek-V3-family + fp4 Quark checkpoints."""
-
-        if (
-            getattr(hf_config, "model_type", None)
-            not in _DEEPSEEK_V3_FAMILY_MODEL_TYPES
-        ):
-            return
-
-        quant_config = getattr(hf_config, "quantization_config", None)
-        if quant_config is not None:
-            quant_dtype = (
-                quant_config.get("global_quant_config", {})
-                .get("weight", {})
-                .get("dtype")
-            )
-            if quant_dtype == "fp4":
-                self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":
         return QuarkLinearMethod(self)
@@ -139,11 +110,8 @@ class QuarkConfig(QuantizationConfig):
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
-            import vllm.envs as envs
-
             if (
-                envs.VLLM_ROCM_DISABLE_ATTENTION_LINEAR_LAYER_DYNAMIC_MXFP4_QUANT
-                or "self_attn" not in prefix  # only quantize attention projections
+                "self_attn" not in prefix  # only quantize attention projections
                 or not getattr(self, "dynamic_mxfp4_quant", False)
                 or not isinstance(layer, LinearBase)  # Ignore other methods
             ):
