@@ -2041,7 +2041,7 @@ class CohereAsrForConditionalGeneration(
             )
 
         tokenizer = cached_tokenizer_from_config(model_config)
-        
+
         # prompt_text is None because CoherASR uses fast implementation of
         # sentencepiece tokenizer which needs "▁" as the first token
         # (which is different from "_") and encode("▁ABC") ignores the first token
