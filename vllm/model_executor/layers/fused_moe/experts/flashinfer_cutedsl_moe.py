@@ -21,6 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
+    flashinfer_b12x_fused_moe,
     flashinfer_convert_sf_to_mma_layout,
     flashinfer_cute_dsl_fused_moe_nvfp4,
     flashinfer_cutedsl_grouped_gemm_nt_masked,
@@ -348,10 +349,10 @@ def flashinfer_cutedsl_moe_masked(
 class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
     """FlashInfer CuteDSL fused MoE expert for SM12x (SM120/SM121, RTX Pro 6000 / DGX Spark).
 
-    Uses ``cute_dsl_fused_moe_nvfp4`` from FlashInfer PR #3066 which fuses
-    token dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction
-    into a single kernel call.  Input quantization (BF16→FP4) is performed
-    inside the kernel so BF16 hidden states are passed directly.
+    Uses ``b12x_fused_moe`` from FlashInfer PR #3080 which fuses token
+    dispatch, two GEMMs, SwiGLU activation, and topk-weight reduction into a
+    single kernel call.  Input quantization (BF16→FP4) is performed inside the
+    kernel so BF16 hidden states are passed directly.
 
     Weight scale factors are converted to the MMA layout produced by
     ``convert_sf_to_mma_layout`` once during ``process_weights_after_loading``
@@ -402,13 +403,10 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         # calibrated a2_gscale from the modelopt checkpoint (~tens to hundreds)
         # is intended for static-quantisation backends (TRTLLM/CUTLASS) and
         # causes every intermediate activation to saturate at max FP4 when
-        # multiplied by values that large.  Keep the original a2_gscale intact
-        # and store a separate ones tensor to pass to the SM12x kernel so it
-        # uses its own per-block dynamic scale.
+        # multiplied by values that large.  Force to 1.0 so the kernel uses
+        # its own per-block dynamic scale.
         if self.a2_gscale is not None:
-            self.a2_gscale_ones = torch.ones_like(self.a2_gscale)
-        else:
-            self.a2_gscale_ones = None
+            self.a2_gscale.fill_(1.0)
 
         # Precompute MMA-layout views of the weight scale factors once here
         # rather than recomputing on every forward pass.
@@ -466,7 +464,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         return False
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
-        # cute_dsl_fused_moe_nvfp4 applies topk weights internally.
+        # b12x_fused_moe applies topk weights internally.
         return TopKWeightAndReduceNoOP()
 
     def workspace_shapes(
@@ -480,7 +478,7 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        # cute_dsl_fused_moe_nvfp4 manages its own internal workspace.
+        # b12x_fused_moe manages its own internal workspace.
         workspace1 = (1,)
         workspace2 = (0,)
         output_shape = (M, K)
@@ -488,11 +486,11 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # cute_dsl_fused_moe_nvfp4 expects BF16 hidden states and performs
-        # its own FP4 quantization internally.  Returning True prevents the
-        # modular kernel from pre-quantizing activations, which would produce
-        # an FP4-packed tensor with size(-1)=k//2 and break the scale-factor
-        # conversion that expects size(-1)=k.
+        # b12x_fused_moe expects BF16 hidden states and performs its own FP4
+        # quantization internally.  Returning True prevents the modular kernel
+        # from pre-quantizing activations, which would produce an FP4-packed
+        # tensor with size(-1)=k//2 and break the scale-factor conversion that
+        # expects size(-1)=k.
         return True
 
     def apply(
@@ -524,37 +522,21 @@ class FlashInferCuteDSLSM12xExperts(mk.FusedMoEExpertsModular):
         )
 
         top_k = topk_ids.shape[1]
-        local_expert_offset = self.ep_rank * self.num_local_experts
 
-        # x_sf is ignored by the SM12x kernel (quantization is fused
-        # internally), but the API requires a tensor argument.
-        x_sf_placeholder = (
-            a1q_scale
-            if a1q_scale is not None
-            else hidden_states.new_zeros(1, dtype=torch.float8_e4m3fn)
-        )
-
-        # TODO: Use the plan/run() API from FlashInfer PR #3066 instead of
-        # calling cute_dsl_fused_moe_nvfp4 directly.  The plan object can be
-        # created once in __init__ (shapes are fixed for MoE layers) and
-        # plan.run() called here, avoiding workspace allocation and kernel
-        # parameter setup overhead on every forward pass.
-        flashinfer_cute_dsl_fused_moe_nvfp4(
+        flashinfer_b12x_fused_moe(
             x=hidden_states,
-            x_sf=x_sf_placeholder,
             token_selected_experts=topk_ids.to(torch.int32),
-            token_final_scales=topk_weights.float(),
+            token_final_scales=topk_weights,
             w1_weight=w1,
             w1_weight_sf=self.w1_sf_mma,
             w1_alpha=self.g1_alphas,
-            fc2_input_scale=self.a2_gscale_ones,
+            fc2_input_scale=self.a2_gscale,
             w2_weight=w2,
             w2_weight_sf=self.w2_sf_mma,
             w2_alpha=self.g2_alphas,
             num_experts=global_num_experts,
             top_k=top_k,
             num_local_experts=self.num_local_experts,
-            local_expert_offset=local_expert_offset,
             output_dtype=self.out_dtype,
-            moe_output=output,
+            output=output,
         )

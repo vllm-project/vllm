@@ -120,6 +120,9 @@ flashinfer_cutedsl_grouped_gemm_nt_masked = _lazy_import_wrapper(
 flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
     "flashinfer.fused_moe", "cute_dsl_fused_moe_nvfp4"
 )
+flashinfer_b12x_fused_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "b12x_fused_moe"
+)
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
 )
@@ -283,7 +286,7 @@ def has_flashinfer_b12x_moe() -> bool:
         return False
 
     required_functions = [
-        ("flashinfer.fused_moe", "cute_dsl_fused_moe_nvfp4"),
+        ("flashinfer.fused_moe", "b12x_fused_moe"),
         ("flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"),
     ]
 
@@ -843,6 +846,7 @@ __all__ = [
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "flashinfer_b12x_fused_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "autotune",
