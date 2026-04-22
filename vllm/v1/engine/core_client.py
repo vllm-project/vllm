@@ -1394,7 +1394,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
     ):
         if outputs.finished_requests and self.reqs_in_flight:
             for req_id in outputs.finished_requests:
-                self.reqs_in_flight.pop(req_id, None)
+                engine = self.reqs_in_flight.pop(req_id, None)
+                if engine is not None:
+                    eng_idx = self.core_engines.index(engine)
+                    if eng_idx < len(self.lb_engines):
+                        self.lb_engines[eng_idx][0] = max(
+                            0, self.lb_engines[eng_idx][0] - 1
+                        )
 
     @staticmethod
     async def eep_process_engine_core_notification(
