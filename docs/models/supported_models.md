@@ -472,6 +472,7 @@ th {
 | `Qwen3MoeForCausalLM` | Qwen3MoE | `Qwen/Qwen3-30B-A3B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3NextForCausalLM` | Qwen3NextMoE | `Qwen/Qwen3-Next-80B-A3B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `RWForCausalLM` | Falcon RW | `tiiuae/falcon-40b`, etc. | | ✅︎ |
+| `Rnj1ForCausalLM` | Rnj1 | `EssentialAI/rnj-1-instruct`, etc. | | |
 | `SarvamMoEForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-30b-a3b`, etc. | ✅︎ | ✅︎ |
 | `SarvamMLAForCausalLM` | Sarvam 2 | `sarvamai/sarvam2-105b-a9b`, etc. | | ✅︎ |
 | `SeedOssForCausalLM` | SeedOss | `ByteDance-Seed/Seed-OSS-36B-Instruct`, etc. | ✅︎ | ✅︎ |
@@ -560,6 +561,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Glm4vForConditionalGeneration` | GLM-4.1V-Thinking | T + I<sup>E+</sup> + V<sup>E+</sup> | `zai-org/GLM-4.1V-9B-Thinking`, etc. | ✅︎ | ✅︎ |
 | `Glm4vMoeForConditionalGeneration` | GLM-4.5V | T + I<sup>E+</sup> + V<sup>E+</sup> | `zai-org/GLM-4.5V`, etc. | ✅︎ | ✅︎ |
 | `GlmOcrForConditionalGeneration` | GLM-OCR | T + I<sup>E+</sup> | `zai-org/GLM-OCR`, etc. | ✅︎ | ✅︎ |
+| `Granite4VisionForConditionalGeneration` | Granite 4 Vision | T + I<sup>E+</sup> | `ibm-granite/granite-4.1-3b-vision`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | T + A | `ibm-granite/granite-speech-3.3-8b` | ✅︎ | ✅︎ |
 | `HCXVisionForCausalLM` | HyperCLOVAX-SEED-Vision-Instruct-3B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B` | | |
 | `HCXVisionV2ForCausalLM` | HyperCLOVAX-SEED-Think-32B | T + I<sup>+</sup> + V<sup>+</sup> | `naver-hyperclovax/HyperCLOVAX-SEED-Think-32B` | | |
@@ -681,6 +683,24 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
+
+#### Realtime Transcription
+
+Speech models that support streaming transcription via the
+[`/v1/realtime`](../serving/openai_compatible_server.md#realtime-api)
+WebSocket endpoint.
+
+| Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
+| ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `VoxtralRealtimeGeneration` | Voxtral Realtime | `mistralai/Voxtral-Mini-4B-Realtime-2602` | | |
+| `Qwen3ASRRealtimeGeneration` | Qwen3-ASR Realtime | `Qwen/Qwen3-ASR-0.6B` | | |
+
+!!! note
+    `VoxtralRealtimeGeneration` requires `mistral-common[audio]` to be installed, and must be served with `--tokenizer-mode mistral`.
+
+    `Qwen3ASRRealtimeGeneration` is not auto-detected from `config.json`.
+    You must pass `--hf-overrides '{"architectures":["Qwen3ASRRealtimeGeneration"]}'`
+    when serving.
 
 ## Pooling Models
 
