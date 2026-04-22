@@ -492,14 +492,16 @@ class SingleTypeKVCacheManager(ABC):
             else:
                 to_free.append(blocks[i])
             blocks[i] = self._null_block
-        # Pin: decrement by 1 so ref_cnt goes 2→1 (stays pinned, not in free queue)
+        # is_pinned design: mark pin candidates before freeing. free_blocks
+        # routes ref_cnt==0 blocks to pinned_free_deque if is_pinned=True,
+        # otherwise to the regular free queue. All deltas are 1 (standard).
         for b in to_pin:
-            b.ref_cnt -= 1
-        # Free fully: decrement by 2 when VLLM_PIN_PREFIX_BLOCKS is on
-        # (blocks started at ref_cnt=2). Otherwise normal 1.
-        if to_free:
-            _delta = 2 if envs.VLLM_PIN_PREFIX_BLOCKS else 1
-            self.block_pool.free_blocks(to_free, ref_cnt_delta=_delta)
+            b.is_pinned = True
+        # to_pin and to_free both go through free_blocks (delta=1). The
+        # is_pinned flag determines which tier the freed block lands in.
+        all_released = to_free + to_pin
+        if all_released:
+            self.block_pool.free_blocks(all_released)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """

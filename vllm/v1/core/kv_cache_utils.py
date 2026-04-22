@@ -132,6 +132,12 @@ class KVCacheBlock:
     # Whether the block is a null block that should never be cached.
     is_null: bool = False
 
+    # Whether the block is pinned as a prefix-cache retention candidate.
+    # Pinned blocks at ref_cnt=0 live in BlockPool.pinned_free_deque
+    # instead of the normal free queue; they are only reissued by
+    # get_new_blocks after being demoted via pressure release.
+    is_pinned: bool = False
+
     @property
     def block_hash(self) -> BlockHashWithGroupId | None:
         return self._block_hash

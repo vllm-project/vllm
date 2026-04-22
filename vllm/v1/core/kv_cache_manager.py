@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Literal, overload
 
 from vllm.distributed.kv_events import BlockStored, KVCacheEvent
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
@@ -233,6 +234,54 @@ class KVCacheManager:
 
         return self.create_kv_cache_blocks(computed_blocks), num_new_computed_tokens
 
+    def can_fit_full_sequence(
+        self,
+        request: Request,
+        num_new_computed_tokens: int = 0,
+        new_computed_blocks: KVCacheBlocks | None = None,
+        num_external_computed_tokens: int = 0,
+        num_encoder_tokens: int = 0,
+    ) -> bool:
+        """Check if the KV cache has enough free blocks to hold the full
+        sequence, accounting for prefix cache hits and sliding window.
+
+        This is used as an admission gate to prevent over-admitting requests
+        when chunked prefill would otherwise only check the first chunk.
+        """
+        if new_computed_blocks is not None:
+            new_computed_block_list = new_computed_blocks.blocks
+        else:
+            new_computed_block_list = self.empty_kv_cache_blocks.blocks
+
+        num_local_computed_tokens = (
+            request.num_computed_tokens + num_new_computed_tokens
+        )
+        total_computed_tokens = min(
+            num_local_computed_tokens + num_external_computed_tokens,
+            self.max_model_len,
+        )
+        full_num_tokens = min(request.num_tokens, self.max_model_len)
+
+        num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
+            request_id=request.request_id,
+            num_tokens=full_num_tokens,
+            new_computed_blocks=new_computed_block_list,
+            num_encoder_tokens=num_encoder_tokens,
+            total_computed_tokens=total_computed_tokens,
+            num_tokens_main_model=full_num_tokens,
+        )
+
+        num_free = self.block_pool.get_num_free_blocks()
+        if num_blocks_to_allocate > num_free and envs.VLLM_PIN_PREFIX_BLOCKS:
+            # Under pressure: demote oldest pinned blocks to make room.
+            # can_fit_full_sequence is called before allocate_slots and
+            # gates admission independently; without this hook the
+            # scheduler would stall even if demotable pins exist.
+            deficit = num_blocks_to_allocate - num_free
+            self.block_pool.demote_n(deficit)
+            num_free = self.block_pool.get_num_free_blocks()
+        return num_blocks_to_allocate <= num_free
+
     def allocate_slots(
         self,
         request: Request,
@@ -384,9 +433,16 @@ class KVCacheManager:
             num_tokens_main_model=num_tokens_main_model,
         )
 
-        if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
-            # Cannot allocate new blocks
-            return None
+        num_free_blocks = self.block_pool.get_num_free_blocks()
+        if num_blocks_to_allocate > num_free_blocks:
+            # Under pressure: demote oldest pinned blocks to make room.
+            # Hashes survive until physically recycled, so demoted blocks
+            # remain prefix-cache candidates.
+            deficit = num_blocks_to_allocate - num_free_blocks
+            self.block_pool.demote_n(deficit)
+            num_free_blocks = self.block_pool.get_num_free_blocks()
+            if num_blocks_to_allocate > num_free_blocks:
+                return None
 
         if (
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
@@ -434,6 +490,16 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
+        # is_pinned design: when prefix-cache pinning is enabled, mark
+        # all of this request's remaining (non-null) blocks as pinned so
+        # they land in the pinned_free_deque instead of the regular free
+        # queue. Full-attention blocks protect the full prefix; SWA
+        # window blocks protect the last-window hashes.
+        if envs.VLLM_PIN_PREFIX_BLOCKS:
+            for mgr in self.coordinator.single_type_managers:
+                for b in mgr.req_to_blocks.get(request.request_id, ()):
+                    if not b.is_null:
+                        b.is_pinned = True
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(

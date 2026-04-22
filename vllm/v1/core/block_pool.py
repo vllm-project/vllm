@@ -182,6 +182,13 @@ class BlockPool:
 
         self.metrics_collector = metrics_collector
 
+        # Oldest-first deque of blocks at ref_cnt=0 AND is_pinned=True.
+        # These blocks are prefix-cache retention candidates. They are
+        # NOT drained by get_new_blocks directly; demote_n() under
+        # pressure flips is_pinned=False and moves them to free_block_queue.
+        from collections import deque as _deque
+        self.pinned_free_deque: _deque = _deque()
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -348,18 +355,19 @@ class BlockPool:
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
         # In order to only iterate the list once, we duplicated code a bit
-        _init_refcnt = 2 if envs.VLLM_PIN_PREFIX_BLOCKS else 1
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
-                block.ref_cnt += _init_refcnt
+                block.ref_cnt += 1
+                block.is_pinned = False
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
-                block.ref_cnt += _init_refcnt
+                block.ref_cnt += 1
+                block.is_pinned = False
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
@@ -403,43 +411,76 @@ class BlockPool:
 
     def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
         """Touch a block increases its reference count by 1, and may remove
-        the block from the free queue. This is used when a block is hit by
-        another request with the same prefix.
+        the block from whichever free tier it is in (regular or pinned).
+        This is used when a block is hit by another request with the same
+        prefix.
 
         Args:
             blocks: A list of blocks to touch.
         """
         for block in blocks:
-            # ref_cnt=0 means this block is in the free list (i.e. eviction
-            # candidate), so remove it.
+            # ref_cnt=0 means this block is in some free tier (regular
+            # queue if is_pinned=False, pinned_free_deque if is_pinned=True).
             if block.ref_cnt == 0 and not block.is_null:
-                self.free_block_queue.remove(block)
+                if block.is_pinned:
+                    # Stale entries are common after demote_n; avoid O(n)
+                    # removal by leaving the stale entry in place — demote_n
+                    # will skip it on the next pop.
+                    pass
+                else:
+                    self.free_block_queue.remove(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock],
-                    ref_cnt_delta: int = 1) -> None:
-        """Free a list of blocks. The blocks should be ordered by their
-        eviction priority, where the first block will be evicted first.
+    def demote_n(self, n: int) -> int:
+        """Under memory pressure, move up to n oldest pinned blocks to
+        the normal free queue by setting is_pinned=False. Their hashes
+        survive until _maybe_evict_cached_block fires on physical reuse.
+        Returns the number actually demoted."""
+        if n <= 0:
+            return 0
+        demoted = 0
+        while demoted < n and self.pinned_free_deque:
+            block = self.pinned_free_deque.popleft()
+            # Valid pinned entries satisfy ref_cnt==0 and is_pinned.
+            # Stale entries (e.g., re-touched since being queued) are
+            # just skipped.
+            if block.ref_cnt == 0 and block.is_pinned and not block.is_null:
+                block.is_pinned = False
+                self.free_block_queue.append_n([block])
+                demoted += 1
+        return demoted
+
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+        """Decrement ref_cnt by 1 on each block. Blocks whose ref_cnt
+        reaches 0 are routed to either the normal free queue or the
+        pinned_free_deque based on their is_pinned flag.
 
         Args:
-            ordered_blocks: A list of blocks to free ordered by their eviction
-                priority.
-            ref_cnt_delta: how much to decrement ref_cnt (default 1).
-                SWA-DROP path uses 2 when VLLM_PIN_PREFIX_BLOCKS is on,
-                to fully release OOW blocks while keeping end-of-request
-                blocks pinned at ref_cnt=1.
+            ordered_blocks: list of blocks to free, ordered by eviction
+                priority (first = evicted first within its tier).
         """
-        # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
-            block.ref_cnt -= ref_cnt_delta
-        newly_free = [
-            block for block in blocks_list
-            if block.ref_cnt == 0 and not block.is_null
-        ]
-        self.free_block_queue.append_n(newly_free)
+            # null_block is a shared singleton; its ref_cnt has no real meaning.
+            # Pre-patch code let it drift negative silently. Skip decrement here
+            # so the invariant holds for real blocks.
+            if block.is_null:
+                continue
+            block.ref_cnt -= 1
+            assert block.ref_cnt >= 0, (
+                f"negative ref_cnt on block {block.block_id}"
+            )
+        # Route ref_cnt==0 blocks to the correct tier.
+        regular_free = []
+        for block in blocks_list:
+            if block.ref_cnt == 0 and not block.is_null:
+                if block.is_pinned:
+                    self.pinned_free_deque.append(block)
+                else:
+                    regular_free.append(block)
+        self.free_block_queue.append_n(regular_free)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
