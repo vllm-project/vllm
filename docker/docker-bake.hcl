@@ -27,6 +27,34 @@ variable "COMMIT" {
   default = ""
 }
 
+variable "VLLM_BUILD_KIND" {
+  default = "local"
+}
+
+variable "VLLM_BUILD_REPO" {
+  default = "https://github.com/vllm-project/vllm"
+}
+
+variable "VLLM_BUILD_PIPELINE" {
+  default = "local"
+}
+
+variable "VLLM_BUILD_COMMIT" {
+  default = "unknown"
+}
+
+variable "VLLM_BUILD_URL" {
+  default = ""
+}
+
+variable "VLLM_IMAGE_REF" {
+  default = "local/vllm-openai:dev"
+}
+
+variable "VLLM_STAGING_IMAGE_REF" {
+  default = ""
+}
+
 # Groups
 
 group "default" {
@@ -46,20 +74,36 @@ target "_common" {
     max_jobs             = MAX_JOBS
     nvcc_threads         = NVCC_THREADS
     torch_cuda_arch_list = TORCH_CUDA_ARCH_LIST
+    VLLM_BUILD_KIND      = VLLM_BUILD_KIND
+    VLLM_BUILD_REPO      = VLLM_BUILD_REPO
+    VLLM_BUILD_PIPELINE  = VLLM_BUILD_PIPELINE
+    VLLM_BUILD_COMMIT    = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
+    VLLM_BUILD_URL       = VLLM_BUILD_URL
+    VLLM_IMAGE_REF         = VLLM_IMAGE_REF
+    VLLM_STAGING_IMAGE_REF = VLLM_STAGING_IMAGE_REF
   }
 }
 
 target "_labels" {
   labels = {
-    "org.opencontainers.image.source"      = "https://github.com/vllm-project/vllm"
+    "org.opencontainers.image.source"      = VLLM_BUILD_REPO
     "org.opencontainers.image.vendor"      = "vLLM"
     "org.opencontainers.image.title"       = "vLLM"
     "org.opencontainers.image.description" = "vLLM: A high-throughput and memory-efficient inference and serving engine for LLMs"
     "org.opencontainers.image.licenses"    = "Apache-2.0"
-    "org.opencontainers.image.revision"    = COMMIT
+    "org.opencontainers.image.revision"    = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
+    "org.opencontainers.image.version"     = VLLM_IMAGE_REF
+    "org.opencontainers.image.url"         = VLLM_BUILD_URL
+    "ai.vllm.build.kind"                   = VLLM_BUILD_KIND
+    "ai.vllm.build.repo"                   = VLLM_BUILD_REPO
+    "ai.vllm.build.pipeline"               = VLLM_BUILD_PIPELINE
+    "ai.vllm.build.commit"                 = VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")
+    "ai.vllm.build.url"                    = VLLM_BUILD_URL
+    "ai.vllm.image.ref"                    = VLLM_IMAGE_REF
+    "ai.vllm.image.staging-ref"            = VLLM_STAGING_IMAGE_REF
   }
   annotations = [
-      "index,manifest:org.opencontainers.image.revision=${COMMIT}",
+    "index,manifest:org.opencontainers.image.revision=${VLLM_BUILD_COMMIT != "unknown" ? VLLM_BUILD_COMMIT : (COMMIT != "" ? COMMIT : "unknown")}",
   ]
 }
 
