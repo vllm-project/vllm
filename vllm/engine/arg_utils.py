@@ -105,7 +105,11 @@ from vllm.transformers_utils.config import (
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_model_path
 from vllm.transformers_utils.utils import is_cloud_storage
-from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import (
+    FlexibleArgumentParser,
+    human_readable_int,
+    human_readable_int_or_auto,
+)
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
@@ -271,7 +275,7 @@ def _expand_json_human_readable_numbers(val: str) -> str:
     parts = re.split(r'("(?:[^"\\]|\\.)*")', val)
     for i in range(0, len(parts), 2):  # even indices = outside strings
         parts[i] = re.sub(
-            r"\d+(?:\.\d+)?[kKmMgGtT]",
+            r"\b\d+(?:\.\d+)?[kKmMgGtT]\b",
             lambda m: str(human_readable_int(m.group())),
             parts[i],
         )
@@ -2445,68 +2449,3 @@ def _raise_unsupported_error(feature_name: str):
         f"remove {feature_name} from your config."
     )
     raise NotImplementedError(msg)
-
-
-def human_readable_int(value: str) -> int:
-    """Parse human-readable integers like '1k', '2M', etc.
-    Including decimal values with decimal multipliers.
-
-    Examples:
-    - '1k' -> 1,000
-    - '1K' -> 1,024
-    - '25.6k' -> 25,600
-    """
-    value = value.strip()
-
-    match = re.fullmatch(r"(\d+(?:\.\d+)?)([kKmMgGtT])", value)
-    if match:
-        decimal_multiplier = {
-            "k": 10**3,
-            "m": 10**6,
-            "g": 10**9,
-            "t": 10**12,
-        }
-        binary_multiplier = {
-            "K": 2**10,
-            "M": 2**20,
-            "G": 2**30,
-            "T": 2**40,
-        }
-
-        number, suffix = match.groups()
-        if suffix in decimal_multiplier:
-            mult = decimal_multiplier[suffix]
-            return int(float(number) * mult)
-        elif suffix in binary_multiplier:
-            mult = binary_multiplier[suffix]
-            # Do not allow decimals with binary multipliers
-            try:
-                return int(number) * mult
-            except ValueError as e:
-                raise argparse.ArgumentTypeError(
-                    "Decimals are not allowed "
-                    f"with binary suffixes like {suffix}. Did you mean to use "
-                    f"{number}{suffix.lower()} instead?"
-                ) from e
-
-    # Regular plain number.
-    return int(value)
-
-
-def human_readable_int_or_auto(value: str) -> int:
-    """Parse human-readable integers like '1k', '2M', etc.
-    Including decimal values with decimal multipliers.
-    Also accepts -1 or 'auto' as a special value for auto-detection.
-
-    Examples:
-    - '1k' -> 1,000
-    - '1K' -> 1,024
-    - '25.6k' -> 25,600
-    - '-1' or 'auto' -> -1 (special value for auto-detection)
-    """
-    value = value.strip()
-
-    if value == "-1" or value.lower() == "auto":
-        return -1
-
-    return human_readable_int(value)
