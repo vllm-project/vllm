@@ -130,7 +130,6 @@ if TYPE_CHECKING:
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
     VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE: bool = False
-    VLLM_INDUCTOR_OVERRIDE_BIG_GPU: bool = False
     VLLM_USE_LAYERNAME: bool = True
     Q_SCALE_CONSTANT: int = 200
     K_SCALE_CONSTANT: int = 200
@@ -1098,20 +1097,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # mode="max-autotune-no-cudagraphs" so inductor autotunes across
     # triton/aten/cutlass per shape without compiling the whole model.
     # Opt-in. When tinygemm_bf16 is also available, tinygemm handles
-    # M<=8 shapes and this torch.compile path handles the rest.
+    # M<=8 shapes and this torch.compile path handles the rest. Enabling
+    # this also calls
+    # ``vllm.model_executor.layers.utils.force_inductor_max_autotune_gemm_on_small_gpus``
+    # once, which patches inductor's ``is_big_gpu`` / Blackwell-arch gates
+    # and bumps Dynamo cache limits so the full GEMM autotune template
+    # pool is reachable on sub-data-center devices (GB10 / SM120-121).
     "VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE", "0"))
-    ),
-    # Force inductor max-autotune-gemm on sub-data-center Blackwell devices.
-    # Patches `torch._inductor.utils.is_big_gpu` (68-SM gate) and
-    # `torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch`
-    # (SM100-only whitelist) to unlock Triton templates and Blackwell
-    # codegen on GB10 / DGX Spark (SM121, 48 SMs) and RTX Pro 6000
-    # (SM120). Also sets inductor config to prefer ATEN+TRITON backends
-    # with persistent TMA matmul. Opt-in; affects every torch.compile
-    # call in the process, not just vLLM's own paths.
-    "VLLM_INDUCTOR_OVERRIDE_BIG_GPU": lambda: bool(
-        int(os.getenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "0"))
     ),
     # If set to "0", disable LayerName opaque type for layer_name
     # parameters in custom ops.  Defaults to enabled on torch >= 2.11.

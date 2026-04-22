@@ -8,9 +8,10 @@ triton/aten/cutlass candidates per shape without compiling the whole
 model. It is opt-in via ``VLLM_ENABLE_UNQUANT_BF16_LINEAR_TORCH_COMPILE``.
 
 These tests exercise the dispatch decision, eligibility predicate,
-per-shape cache keys, CUDA-graph capture safety, and the optional
-``is_big_gpu`` override. The only CUDA-required tests are the end-to-end
-numerical correctness checks; the rest run on CPU-only hosts.
+per-shape cache keys, CUDA-graph capture safety, and the
+``force_inductor_max_autotune_gemm_on_small_gpus`` helper that is
+triggered from the compile path. The only CUDA-required tests are the
+end-to-end numerical correctness checks; the rest run on CPU-only hosts.
 """
 
 from __future__ import annotations
@@ -32,9 +33,10 @@ def _reset_compile_state(monkeypatch):
     monkeypatch.setattr(
         utils, "_unquant_bf16_linear_torch_compile_disabled", False
     )
-    monkeypatch.setattr(
-        utils, "_unquant_bf16_linear_torch_compile_configured", True
-    )
+    # Pretend the inductor/dynamo knob helpers already fired so dispatch
+    # tests don't actually mutate global torch config.
+    monkeypatch.setattr(utils, "_inductor_max_autotune_gemm_forced", True)
+    monkeypatch.setattr(utils, "_dynamo_compile_caches_forced", True)
     yield
     utils._unquant_bf16_linear_cache.clear()
     utils._unquant_bf16_linear_capture_safe_keys.clear()
@@ -317,15 +319,16 @@ def test_compile_failure_disables_fast_path(monkeypatch):
 
 
 # --------------------------------------------------------------------- #
-# is_big_gpu / is_datacenter_blackwell_arch override
+# force_inductor_max_autotune_gemm_on_small_gpus / Dynamo cache knobs
 # --------------------------------------------------------------------- #
 
 
 @pytest.fixture
 def _restore_inductor_hooks():
-    """Capture and restore the inductor helpers the override mutates."""
+    """Capture and restore the inductor helpers the forcing helper mutates."""
     pytest.importorskip("torch._inductor.utils")
     pytest.importorskip("torch._inductor.codegen.cuda")
+    import torch._dynamo.config as dynamo_config
     import torch._inductor.config as inductor_config
     import torch._inductor.utils as inductor_utils
     from torch._inductor.codegen.cuda import cuda_env
@@ -338,11 +341,18 @@ def _restore_inductor_hooks():
         "max_autotune_gemm_backends": (
             inductor_config.max_autotune_gemm_backends
         ),
+        "coordinate_descent_tuning": inductor_config.coordinate_descent_tuning,
         "enable_persistent_tma_matmul": getattr(
             inductor_config.triton, "enable_persistent_tma_matmul", None
         ),
+        "cache_size_limit": getattr(
+            dynamo_config, "cache_size_limit", None
+        ),
+        "accumulated_cache_size_limit": getattr(
+            dynamo_config, "accumulated_cache_size_limit", None
+        ),
     }
-    yield inductor_utils, cuda_env, inductor_config
+    yield inductor_utils, cuda_env, inductor_config, dynamo_config
     inductor_utils.is_big_gpu = originals["is_big_gpu"]
     cuda_env.is_datacenter_blackwell_arch = originals[
         "is_datacenter_blackwell_arch"
@@ -352,34 +362,28 @@ def _restore_inductor_hooks():
     inductor_config.max_autotune_gemm_backends = originals[
         "max_autotune_gemm_backends"
     ]
+    inductor_config.coordinate_descent_tuning = originals[
+        "coordinate_descent_tuning"
+    ]
     if originals["enable_persistent_tma_matmul"] is not None:
         inductor_config.triton.enable_persistent_tma_matmul = originals[
             "enable_persistent_tma_matmul"
         ]
+    if originals["cache_size_limit"] is not None:
+        dynamo_config.cache_size_limit = originals["cache_size_limit"]
+    if originals["accumulated_cache_size_limit"] is not None:
+        dynamo_config.accumulated_cache_size_limit = originals[
+            "accumulated_cache_size_limit"
+        ]
 
 
-def test_big_gpu_override_noop_when_env_off(
+def test_force_autotune_patches_is_big_gpu(
     monkeypatch, _restore_inductor_hooks
 ):
-    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
-    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "0")
-    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
+    inductor_utils, cuda_env, inductor_config, _ = _restore_inductor_hooks
+    monkeypatch.setattr(utils, "_inductor_max_autotune_gemm_forced", False)
 
-    before_big = inductor_utils.is_big_gpu
-    before_bw = cuda_env.is_datacenter_blackwell_arch
-    utils._maybe_override_inductor_is_big_gpu()
-    assert inductor_utils.is_big_gpu is before_big
-    assert cuda_env.is_datacenter_blackwell_arch is before_bw
-
-
-def test_big_gpu_override_patches_is_big_gpu(
-    monkeypatch, _restore_inductor_hooks
-):
-    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
-    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
-    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
-
-    utils._maybe_override_inductor_is_big_gpu()
+    utils.force_inductor_max_autotune_gemm_on_small_gpus()
 
     # The override accepts arbitrary args (future-proof signature).
     assert inductor_utils.is_big_gpu() is True
@@ -390,18 +394,17 @@ def test_big_gpu_override_patches_is_big_gpu(
     )
 
 
-def test_big_gpu_override_patches_blackwell_arch(
+def test_force_autotune_patches_blackwell_arch(
     monkeypatch, _restore_inductor_hooks
 ):
-    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
-    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
-    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
+    inductor_utils, cuda_env, inductor_config, _ = _restore_inductor_hooks
+    monkeypatch.setattr(utils, "_inductor_max_autotune_gemm_forced", False)
 
     # Simulate an SM120 device via torch.cuda.get_device_capability.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (12, 0))
 
-    utils._maybe_override_inductor_is_big_gpu()
+    utils.force_inductor_max_autotune_gemm_on_small_gpus()
 
     assert cuda_env.is_datacenter_blackwell_arch() is True
     assert getattr(
@@ -411,17 +414,17 @@ def test_big_gpu_override_patches_blackwell_arch(
     )
 
 
-def test_big_gpu_override_sets_inductor_config(
+def test_force_autotune_sets_inductor_config(
     monkeypatch, _restore_inductor_hooks
 ):
-    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
-    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
-    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
+    inductor_utils, cuda_env, inductor_config, _ = _restore_inductor_hooks
+    monkeypatch.setattr(utils, "_inductor_max_autotune_gemm_forced", False)
 
-    utils._maybe_override_inductor_is_big_gpu()
+    utils.force_inductor_max_autotune_gemm_on_small_gpus()
 
     assert inductor_config.max_autotune is True
     assert inductor_config.max_autotune_gemm is True
+    assert inductor_config.coordinate_descent_tuning is True
     assert "TRITON" in inductor_config.max_autotune_gemm_backends
     assert "ATEN" in inductor_config.max_autotune_gemm_backends
     assert "CUTLASS" in inductor_config.max_autotune_gemm_backends
@@ -429,17 +432,41 @@ def test_big_gpu_override_sets_inductor_config(
         assert inductor_config.triton.enable_persistent_tma_matmul is True
 
 
-def test_big_gpu_override_idempotent(monkeypatch, _restore_inductor_hooks):
-    inductor_utils, cuda_env, inductor_config = _restore_inductor_hooks
-    monkeypatch.setenv("VLLM_INDUCTOR_OVERRIDE_BIG_GPU", "1")
-    monkeypatch.setattr(utils, "_inductor_big_gpu_override_applied", False)
+def test_force_autotune_idempotent(monkeypatch, _restore_inductor_hooks):
+    inductor_utils, cuda_env, inductor_config, _ = _restore_inductor_hooks
+    monkeypatch.setattr(utils, "_inductor_max_autotune_gemm_forced", False)
 
-    utils._maybe_override_inductor_is_big_gpu()
+    utils.force_inductor_max_autotune_gemm_on_small_gpus()
     first_big = inductor_utils.is_big_gpu
     first_bw = cuda_env.is_datacenter_blackwell_arch
-    utils._maybe_override_inductor_is_big_gpu()
+    utils.force_inductor_max_autotune_gemm_on_small_gpus()
     assert inductor_utils.is_big_gpu is first_big
     assert cuda_env.is_datacenter_blackwell_arch is first_bw
+
+
+def test_force_large_dynamo_caches_raises_limits(
+    monkeypatch, _restore_inductor_hooks
+):
+    _, _, _, dynamo_config = _restore_inductor_hooks
+    monkeypatch.setattr(utils, "_dynamo_compile_caches_forced", False)
+    # Set a small baseline so we can check the helper actually raises it.
+    if hasattr(dynamo_config, "cache_size_limit"):
+        dynamo_config.cache_size_limit = 1
+    if hasattr(dynamo_config, "accumulated_cache_size_limit"):
+        dynamo_config.accumulated_cache_size_limit = 1
+
+    utils.force_large_dynamo_compile_caches()
+
+    if hasattr(dynamo_config, "cache_size_limit"):
+        assert (
+            dynamo_config.cache_size_limit
+            >= utils._DYNAMO_CACHE_SIZE_LIMIT
+        )
+    if hasattr(dynamo_config, "accumulated_cache_size_limit"):
+        assert (
+            dynamo_config.accumulated_cache_size_limit
+            >= utils._DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT
+        )
 
 
 # --------------------------------------------------------------------- #
