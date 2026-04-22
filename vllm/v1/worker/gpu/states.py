@@ -70,6 +70,7 @@ class RequestState:
             dtype=torch.int64,
             device=device,
         )
+
         self.next_prefill_tokens = torch.zeros(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
@@ -101,6 +102,18 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
+        if num_computed_tokens > 0 and num_computed_tokens <= prefill_len:
+            # For PD disagg or resumed requests: set last_sampled to the last
+            # computed token so the first decode step gets the right input_id.
+            # For fresh prefill requests (num_computed_tokens == 0) the tensor
+            # is not read by combine_sampled_and_draft_tokens so we skip the
+            # write. Use a slice assignment rather than scalar indexing so the
+            # write is dispatched through fill_ without a host/device sync.
+            self.last_sampled_tokens[req_idx : req_idx + 1] = all_token_ids[
+                num_computed_tokens - 1
+            ]
+        self.draft_tokens[req_idx].zero_()
+
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()
         self.prefill_len.copy_to_uva()
@@ -108,13 +121,14 @@ class RequestState:
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
-    def remove_request(self, req_id: str) -> None:
+    def remove_request(self, req_id: str) -> bool:
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is None:
             # Request not found.
-            return
+            return False
         self.index_to_req_id.pop(req_idx, None)
         self.free_indices.append(req_idx)
+        return True
 
     def any_prefills(self, idx_mapping_np: np.ndarray) -> bool:
         return np.any(

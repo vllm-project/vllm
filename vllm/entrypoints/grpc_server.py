@@ -26,17 +26,22 @@ import time
 
 try:
     import grpc
+    from grpc_health.v1 import health_pb2_grpc
     from grpc_reflection.v1alpha import reflection
     from smg_grpc_proto import vllm_engine_pb2, vllm_engine_pb2_grpc
+    from smg_grpc_servicer.vllm.health_servicer import VllmHealthServicer
     from smg_grpc_servicer.vllm.servicer import VllmEngineServicer
-except ImportError:
+except ImportError as e:
     raise ImportError(
-        "smg-grpc-servicer is required for gRPC mode. "
-        "Install it with: pip install vllm[grpc]"
-    ) from None
+        "gRPC mode requires smg-grpc-servicer. "
+        "If not installed, run: pip install vllm[grpc]. "
+        "If already installed, there may be a broken import due to a "
+        "version mismatch — see the chained exception above for details."
+    ) from e
 
 import uvloop
 
+from vllm import envs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.utils import log_version_and_model
 from vllm.logger import init_logger
@@ -95,9 +100,14 @@ async def serve_grpc(args: argparse.Namespace):
     # Add servicer to server
     vllm_engine_pb2_grpc.add_VllmEngineServicer_to_server(servicer, server)
 
+    # Add standard gRPC health service for Kubernetes probes
+    health_servicer = VllmHealthServicer(async_llm)
+    health_pb2_grpc.add_HealthServicer_to_server(health_servicer, server)
+
     # Enable reflection for grpcurl and other tools
     service_names = (
         vllm_engine_pb2.DESCRIPTOR.services_by_name["VllmEngine"].full_name,
+        "grpc.health.v1.Health",
         reflection.SERVICE_NAME,
     )
     reflection.enable_server_reflection(service_names, server)
@@ -112,6 +122,18 @@ async def serve_grpc(args: argparse.Namespace):
         await server.start()
         logger.info("vLLM gRPC server started on %s", address)
         logger.info("Server is ready to accept requests")
+
+        # Start periodic stats logging (mirrors the HTTP server's lifespan task)
+        if not args.disable_log_stats:
+
+            async def _force_log():
+                while True:
+                    await asyncio.sleep(envs.VLLM_LOG_STATS_INTERVAL)
+                    await async_llm.do_log_stats()
+
+            stats_task = asyncio.create_task(_force_log())
+        else:
+            stats_task = None
 
         # Handle shutdown signals
         loop = asyncio.get_running_loop()
@@ -130,6 +152,12 @@ async def serve_grpc(args: argparse.Namespace):
             logger.info("Interrupted by user")
     finally:
         logger.info("Shutting down vLLM gRPC server...")
+        if stats_task is not None:
+            stats_task.cancel()
+        try:
+            health_servicer.set_not_serving()
+        except Exception:  # broad: must not prevent server.stop() / shutdown()
+            logger.warning("Failed to set health status to NOT_SERVING", exc_info=True)
         await server.stop(grace=5.0)
         logger.info("gRPC server stopped")
         async_llm.shutdown()

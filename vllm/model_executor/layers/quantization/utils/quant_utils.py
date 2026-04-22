@@ -149,6 +149,12 @@ kFp8Dynamic128Sym = QuantKey(FP8_DTYPE, kDynamic128Scale, symmetric=True)
 kStatic128BlockScale = ScaleDesc(torch.float32, True, GroupShape(128, 128))
 kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True)
 
+kMxfp8StaticScale = ScaleDesc(torch.uint8, True, GroupShape(1, 32))
+kMxfp8Static = QuantKey(FP8_DTYPE, kMxfp8StaticScale, symmetric=True)
+
+kMxfp8DynamicScale = ScaleDesc(torch.uint8, False, GroupShape(1, 32))
+kMxfp8Dynamic = QuantKey(FP8_DTYPE, kMxfp8DynamicScale, symmetric=True)
+
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 
@@ -163,6 +169,19 @@ kMxfp8Dynamic = QuantKey(FP8_DTYPE, scale=kMxfp8DynamicGroupScale, symmetric=Tru
 
 kMxfp4StaticGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, True, GroupShape(1, 32))
 kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
+
+kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
+kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
+
+
+def create_fp8_quant_key(
+    static: bool,
+    group_shape: GroupShape,
+    symmetric: bool = True,
+    scale_dtype: torch.dtype = torch.float32,
+) -> QuantKey:
+    scale_desc = ScaleDesc(scale_dtype, static, group_shape)
+    return QuantKey(FP8_DTYPE, scale_desc, symmetric=symmetric)
 
 
 # Normalize the group_shape to the full extent for any dims that are -1
@@ -339,6 +358,12 @@ def get_and_maybe_dequant_weights(
     """Return layer's unquantized weights in [out, in] layout"""
     from vllm.model_executor.layers.linear import UnquantizedLinearMethod
     from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+
+    # LoRA linear wrappers store quantization metadata on `base_layer`.
+    # Unwrap here so callers can pass either a raw linear layer or its LoRA
+    # wrapper without special-casing.
+    while hasattr(layer, "base_layer") and hasattr(layer.base_layer, "quant_method"):
+        layer = layer.base_layer
 
     weight = get_attribute_fallback(layer, ["weight", "qweight", "weight_packed"])
 
@@ -802,7 +827,7 @@ def convert_bf16_scales_to_fp8(
 
     # restore original shape
     fp8_scales = fp8_scales.view(orig_shape)
-    chan_scales = chan_scales.view(orig_shape[:-1], -1)
+    chan_scales = chan_scales.view(*orig_shape[:-1], -1)
 
     return fp8_scales, chan_scales
 

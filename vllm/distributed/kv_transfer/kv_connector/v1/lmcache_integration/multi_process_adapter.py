@@ -80,6 +80,39 @@ def get_lmcache_chunk_size(
 
 
 @dataclass
+class ParallelStrategy:
+    use_mla: bool
+    """Whether to use the MLA."""
+
+    kv_world_size: int
+    """
+    The kv world size, kv_world_size may not be equal to the actual_world_size, 
+    in the case of mla, it will 'exclude' the effect of TP, the value is 
+    calculated by `extract_world_size_and_kv_rank` in `lmcache_mp_connector.py`.
+    """
+
+    kv_worker_id: int
+    """
+    The kv worker id of the sub-process, kv_worker_id may not be equal to the 
+    actual_worker_id, in the case of mla, it will 'exclude' the effect of TP, 
+    the value is calculated by `extract_world_size_and_kv_rank` in 
+    `lmcache_mp_connector.py`.
+    """
+
+    actual_world_size: int
+    """The actual world size."""
+
+    actual_worker_id: int
+    """The actual worker id of the sub-process."""
+
+    tp_size: int
+    """The tensor parallel size."""
+
+    pp_size: int
+    """The pipeline parallel size."""
+
+
+@dataclass
 class LoadStoreOp:
     block_ids: list[int]
     """Block ids for the load/store operation"""
@@ -111,9 +144,8 @@ class LMCacheMPSchedulerAdapter:
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int,
-        kv_rank: int,
         vllm_block_size: int,
+        parallel_strategy: ParallelStrategy,
     ):
         """
         Args:
@@ -121,9 +153,10 @@ class LMCacheMPSchedulerAdapter:
             context: The ZMQ context
 
             model_name: The model name used for LMCache keys
-            world_size: The world size used for LMCache keys
-            kv_rank: The kv rank used for LMCache keys
             vllm_block_size: The block size used in vLLM
+            parallel_strategy:
+                The parallel strategy, which includes `use_mla`,
+                `world_size`, `worker_id` and so on
         """
         self.mq_client = MessageQueueClient(server_url, context)
 
@@ -131,8 +164,7 @@ class LMCacheMPSchedulerAdapter:
         self.lookup_futures: dict[str, MessagingFuture[LookupResult]] = {}
 
         self.model_name = model_name
-        self.world_size = world_size
-        self.worker_id = kv_rank
+        self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
         self.chunk_size = get_lmcache_chunk_size(self.mq_client)
@@ -140,6 +172,21 @@ class LMCacheMPSchedulerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = self.chunk_size // vllm_block_size
+
+    @property
+    def world_size(self) -> int:
+        """The world size."""
+        return self.parallel_strategy.kv_world_size
+
+    @property
+    def worker_id(self) -> int:
+        """The worker id."""
+        return self.parallel_strategy.kv_worker_id
+
+    @property
+    def tp_size(self) -> int:
+        """The tensor parallel size."""
+        return self.parallel_strategy.tp_size
 
     @_lmcache_nvtx_annotate
     def maybe_submit_lookup_request(
@@ -281,6 +328,7 @@ class LMCacheMPSchedulerAdapter:
             start=start,
             end=end,
             request_id=request_id,
+            tp_size=self.tp_size,
         )
 
     def _create_hash_key(
@@ -293,6 +341,7 @@ class LMCacheMPSchedulerAdapter:
             worker_id=None,
             chunk_hash=chunk_hash,
             request_id=request_id,
+            tp_size=self.tp_size,
         )
 
 
@@ -302,9 +351,8 @@ class LMCacheMPWorkerAdapter:
         server_url: str,
         context: zmq.Context,
         model_name: str,
-        world_size: int,
-        kv_rank: int,
         vllm_block_size: int,
+        parallel_strategy: ParallelStrategy,
     ):
         self.mq_client = MessageQueueClient(server_url, context)
 
@@ -330,8 +378,7 @@ class LMCacheMPWorkerAdapter:
         self.previously_finished: set[str] = set()
 
         self.model_name = model_name
-        self.world_size = world_size
-        self.worker_id = kv_rank
+        self.parallel_strategy = parallel_strategy
 
         # Read chunk size from lmcache
         chunk_size = get_lmcache_chunk_size(self.mq_client)
@@ -339,6 +386,29 @@ class LMCacheMPWorkerAdapter:
             "LMCache chunk size should be a multiple of vLLM block size"
         )
         self.blocks_in_chunk = chunk_size // vllm_block_size
+
+    @property
+    def world_size(self) -> int:
+        """The world size."""
+        return self.parallel_strategy.kv_world_size
+
+    @property
+    def worker_id(self) -> int:
+        """The worker id."""
+        return self.parallel_strategy.kv_worker_id
+
+    @property
+    def use_mla(self) -> bool:
+        """Whether to use MLA."""
+        return self.parallel_strategy.use_mla
+
+    @property
+    def is_first_rank_of_pp_group(self) -> bool:
+        """Is the first rank of the pipeline parallel group."""
+        return (
+            self.parallel_strategy.actual_worker_id % self.parallel_strategy.tp_size
+            == 0
+        )
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """

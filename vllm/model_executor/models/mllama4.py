@@ -38,7 +38,7 @@ from vllm.compilation.decorators import (
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.forward_context import set_forward_context
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (
@@ -54,7 +54,6 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -63,12 +62,10 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -456,7 +453,9 @@ class Llama4UnfoldConvolution(nn.Module):
 
 
 @support_torch_compile(
-    dynamic_arg_dims={"images_flattened": 0}, enable_if=should_torch_compile_mm_encoder
+    dynamic_arg_dims={"images_flattened": 0},
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
 )
 class Llama4VisionModel(nn.Module):
     def __init__(
@@ -546,9 +545,6 @@ class Llama4VisionModel(nn.Module):
 
 
 class Mllama4ProcessingInfo(BaseProcessingInfo):
-    def __init__(self, ctx: InputProcessingContext) -> None:
-        super().__init__(ctx)
-
     def get_hf_config(self) -> Llama4Config:
         return self.ctx.get_hf_config(Llama4Config)
 
@@ -556,9 +552,6 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(
             Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
-
-    def get_default_tok_params(self) -> TokenizeParams:
-        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
@@ -597,10 +590,6 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-
-        if mm_data is None:
-            return tokenizer(prompt, add_special_tokens=False)  # exclude bos
         processed_outputs = super()._call_hf_processor(
             prompt=prompt,
             mm_data=mm_data,
@@ -767,12 +756,7 @@ class Llama4ForConditionalGeneration(
         self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, "image"):
-            from vllm.compilation.backends import set_model_tag
-
-            with (
-                set_current_vllm_config(vllm_config),
-                set_model_tag("Llama4VisionModel", is_encoder=True),
-            ):
+            with set_current_vllm_config(vllm_config):
                 self.vision_model = Llama4VisionModel(
                     config=config.vision_config,
                     quant_config=None,
@@ -810,20 +794,16 @@ class Llama4ForConditionalGeneration(
         self.num_moe_layers = len(self.moe_layers)
 
     def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        """Set which layers should output auxiliary hidden states for EAGLE3."""
         # Delegate to underlying language model (Llama4ForCausalLM)
         assert hasattr(self.language_model, "set_aux_hidden_state_layers")
         self.language_model.set_aux_hidden_state_layers(layers)
 
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        """Get the layer indices for auxiliary hidden state outputs.
-
-        Note: The GPU model runner will override this with layers from
-        the speculative config if available, providing dynamic configuration.
-        """
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
         # Delegate to underlying language model (Llama4ForCausalLM)
-        assert hasattr(self.language_model, "get_eagle3_aux_hidden_state_layers")
-        return self.language_model.get_eagle3_aux_hidden_state_layers()
+        assert hasattr(
+            self.language_model, "get_eagle3_default_aux_hidden_state_layers"
+        )
+        return self.language_model.get_eagle3_default_aux_hidden_state_layers()
 
     def set_eplb_state(
         self,
@@ -888,10 +868,7 @@ class Llama4ForConditionalGeneration(
         if image_input is None:
             return []
 
-        with (
-            set_forward_context(None, self.vllm_config),
-        ):
-            return self._process_image_input(image_input)
+        return self._process_image_input(image_input)
 
     def forward(
         self,

@@ -13,11 +13,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
-from vllm.distributed.kv_transfer import (
-    ensure_kv_transfer_shutdown,
-    get_kv_transfer_group,
-    has_kv_transfer_group,
-)
+from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
@@ -38,12 +34,6 @@ logger = init_logger(__name__)
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
-    @staticmethod
-    def ensure_kv_transfer_shutdown() -> None:
-        # has_kv_transfer_group can be None during interpreter shutdown.
-        if has_kv_transfer_group and has_kv_transfer_group():  # type: ignore[truthy-function]
-            ensure_kv_transfer_shutdown()
-
     @staticmethod
     def kv_connector_no_forward(
         scheduler_output: "SchedulerOutput", vllm_config: VllmConfig
@@ -123,6 +113,7 @@ class KVConnectorModelRunnerMixin:
 
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
+            output.kv_connector_worker_meta = kv_connector.build_connector_worker_meta()
 
             if not defer_finalize:
                 kv_connector.clear_connector_metadata()
@@ -190,8 +181,13 @@ class KVConnectorModelRunnerMixin:
         except (AttributeError, NotImplementedError):
             return False
 
-        # check that attention backend include a layers dimension
-        return len(kv_cache_stride_order) == len(kv_cache_shape) + 1
+        # check that attention backend includes a layers dimension
+        if len(kv_cache_stride_order) != len(kv_cache_shape) + 1:
+            return False
+
+        # stride_order[0] == 0 means num_layers stays first in physical
+        # layout (identity permutation), so cross-layer is unsupported.
+        return kv_cache_stride_order[0] != 0
 
     @staticmethod
     def allocate_uniform_kv_caches(
