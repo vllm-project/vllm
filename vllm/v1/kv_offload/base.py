@@ -223,6 +223,18 @@ class OffloadingManager(ABC):
         """
         return ()
 
+    def request_finished(self, req_id: str) -> bool:
+        """
+        Called when a request has finished, before its GPU blocks are freed.
+
+        Returns:
+            True if the manager is still performing async work for this
+            request (e.g. an in-flight store) and GPU blocks must not yet
+            be freed. The scheduler will wait until the transfer completes
+            before releasing blocks.
+        """
+        return False
+
     def shutdown(self) -> None:
         """Shutdown the manager and release any resources."""
         return

@@ -197,6 +197,9 @@ class CPUOffloadingManager(OffloadingManager):
             yield from self.events
             self.events.clear()
 
+    def request_finished(self, req_id: str) -> bool:
+        return False
+
 
 # -----------------------------------------------------------------------------
 # FilterReusedOffloadingManager — reuse-frequency gating for CPU offload stores
@@ -300,3 +303,6 @@ class FilterReusedOffloadingManager(OffloadingManager):
 
     def take_events(self) -> Iterable[OffloadingEvent]:
         return self._backing.take_events()
+
+    def request_finished(self, req_id: str) -> bool:
+        return self._backing.request_finished(req_id)

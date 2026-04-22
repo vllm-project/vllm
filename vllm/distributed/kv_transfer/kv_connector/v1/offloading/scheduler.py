@@ -6,13 +6,16 @@ from itertools import islice
 from typing import Any, NamedTuple
 
 from vllm.distributed.kv_events import BlockRemoved, BlockStored, KVCacheEvent
-from vllm.distributed.kv_transfer.kv_connector.utils import yield_req_data
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     OffloadingWorkerMetadata,
     ReqId,
     TransferJob,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.policy import (
+    OffloadPolicy,
+    StoreOnComputePolicy,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -84,12 +87,10 @@ class SchedulerOffloadConfig(NamedTuple):
 class RequestGroupState:
     offload_keys: list[OffloadKey] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
-    # index of next block (of size offloaded_block_size) to offload
-    next_stored_block_idx: int = 0
 
 
 @dataclass(slots=True)
-class RequestOffloadState:
+class RequestKVState:
     config: SchedulerOffloadConfig
     req: Request
     group_states: tuple[RequestGroupState, ...] = field(init=False)
@@ -143,7 +144,7 @@ class RequestOffloadState:
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, spec: OffloadingSpec):
+    def __init__(self, spec: OffloadingSpec, policy: OffloadPolicy | None = None):
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
 
@@ -154,7 +155,8 @@ class OffloadingConnectorScheduler:
 
         self.lookup_groups = attention_groups
 
-        self._req_status: dict[ReqId, RequestOffloadState] = {}
+        self._policy: OffloadPolicy = policy or StoreOnComputePolicy()
+        self._req_kv_states: dict[ReqId, RequestKVState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
         self._current_batch_jobs_to_flush: set[int] = set()
         # if GPU prefix caching is enabled,
@@ -241,13 +243,13 @@ class OffloadingConnectorScheduler:
                 - `True` if tokens will be loaded asynchronously
                   (between scheduler steps).
         """
-        if req_status := self._req_status.get(request.request_id):
+        if req_status := self._req_kv_states.get(request.request_id):
             # make sure block IDs are cleared
             for group_state in req_status.group_states:
                 group_state.block_ids.clear()
         else:
-            req_status = RequestOffloadState(config=self.config, req=request)
-            self._req_status[request.request_id] = req_status
+            req_status = RequestKVState(config=self.config, req=request)
+            self._req_kv_states[request.request_id] = req_status
 
         req_status.update_offload_keys()
         req_status.num_locally_computed_tokens = num_computed_tokens
@@ -338,8 +340,8 @@ class OffloadingConnectorScheduler:
         if num_external_tokens == 0:
             return
 
-        req_status = self._req_status[request.request_id]
-
+        req_status = self._req_kv_states[request.request_id]
+        
         num_locally_computed_tokens = req_status.num_locally_computed_tokens
         num_cached_tokens = num_locally_computed_tokens + num_external_tokens
 
@@ -428,6 +430,8 @@ class OffloadingConnectorScheduler:
             keys=set(keys_to_load),
             is_store=False,
         )
+        # MH TODO: what happen here now?
+        # self._policy.notify_load_scheduled(request.request_id, [num_blocks])
 
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(keys_to_load)
@@ -583,6 +587,16 @@ class OffloadingConnectorScheduler:
             )
 
         return store_jobs
+    
+    # MH TODO: What to do with this now as _build_store_jobs() replaced this func
+    """def _get_reqs_to_store(self, scheduler_output: SchedulerOutput):
+        return self._policy.get_blocks_to_store(
+            self._req_kv_states,
+            scheduler_output,
+            self.config,
+            self.manager,
+            self._reqs_being_stored,
+        )"""
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -661,11 +675,11 @@ class OffloadingConnectorScheduler:
         """
         # TODO(orozery): possibly kickoff offload for last block
         # which may have been deferred due to async scheduling
-        req_status = self._req_status.get(request.request_id)
+        req_status = self._req_kv_states.get(request.request_id)
         if req_status is None:
             return False, None
         if not req_status.transfer_jobs:
-            del self._req_status[request.request_id]
+            del self._req_kv_states[request.request_id]
             return False, None
         # Pending stores will outlive the request's block ownership.
         # Register them so future block reuse triggers a flush.
@@ -674,6 +688,12 @@ class OffloadingConnectorScheduler:
             for bid in job_status.gpu_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
         return False, None
+
+        # MH TODO: How to merge this or how does it work now?
+        """self._req_kv_states.pop(req_id, None)
+        self._policy.request_finished(req_id)
+
+        return self.manager.request_finished(req_id), None"""
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         """Take the KV cache events from the connector.
