@@ -1041,12 +1041,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
         k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k = self._concat_k_nope_k_pe(k_nope, prefill_k_pe)
+        prefill_q = q.narrow(0, num_decode_tokens, q.size(0) - num_decode_tokens)
         # Prefill attention (cudagraph_unsafe): writes directly into
         # output[num_decode_tokens:] — no intermediate buffer needed.
         torch.ops.vllm.mla_attention_prefill_with_output(
-            q,
-            k,
-            v,
+            prefill_q,  # Pre-sliced to prefill portion
+            k,  # Already prefill-only (from kv_b_proj)
+            v,  # Already prefill-only (from kv_b_proj)
             num_decode_tokens,
             output,
             dummy_tensor,
@@ -1056,7 +1057,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Decode path
         # Only process decode tokens (eliminates wasted computation on prefill tokens)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-
         decode_q_nope = q_nope.narrow(0, 0, num_decode_tokens)
         decode_q_pe = q_pe.narrow(0, 0, num_decode_tokens)
 
@@ -1366,21 +1366,22 @@ direct_register_custom_op(
 
 
 def mla_attention_prefill_with_output(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    v: torch.Tensor,
+    q: torch.Tensor,  # NOTE: prefill portion only (sliced by caller)
+    k: torch.Tensor,  # NOTE: prefill portion only (from kv_b_proj optimization)
+    v: torch.Tensor,  # NOTE: prefill portion only (from kv_b_proj optimization)
     num_decode_tokens: int,
     output: torch.Tensor,
     dummy_tensor: torch.Tensor,
     layer_name: str,
 ) -> None:
+    """
+    Prefill attention with direct output writes.
+    """
     attn_metadata, attn_layer, kv_cache = _get_mla_context(layer_name)
     if attn_layer.kv_cache_dtype.startswith("fp8"):
         kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
-    q = q[num_decode_tokens:]
-    k = k[num_decode_tokens:]
-    v = v[num_decode_tokens:]
+    # Optimization 1.1: Inputs are already prefill-only, no slicing needed!
     num_prefill = q.shape[0]
     if attn_metadata is None or num_prefill == 0:
         return
@@ -1418,15 +1419,17 @@ def mla_attention_prefill_with_output(
         if attn_layer.impl._pad_v:
             context_output = context_output[..., : v.shape[-1]]
             suffix_output = suffix_output[..., : v.shape[-1]]
-        result = q.new_empty(num_prefill, attn_layer.num_heads, attn_layer.v_head_dim)
+
+        prefill_out_reshaped = prefill_out.view(
+            num_prefill, attn_layer.num_heads, attn_layer.v_head_dim
+        )
         merge_attn_states(
-            output=result,
+            output=prefill_out_reshaped,
             prefix_output=context_output,
             prefix_lse=context_lse,
             suffix_output=suffix_output,
             suffix_lse=suffix_lse,
         )
-        prefill_out.copy_(result.flatten(start_dim=-2))
     else:
         assert isinstance(output_prefill, torch.Tensor)
         prefill_out.copy_(output_prefill[..., : v.shape[-1]].flatten(start_dim=-2))
@@ -1453,40 +1456,6 @@ direct_register_custom_op(
     dispatch_key=current_platform.dispatch_key,
     tags=(torch._C.Tag.cudagraph_unsafe,),
 )
-
-
-torch.library.define(
-    "vllm::mla_merge_prefill_decode_output",
-    "(Tensor decode_result, Tensor prefill_result, Tensor(a!) output, SymInt num_decode_tokens) -> ()",  # noqa: E501
-    tags=torch.Tag.pt2_compliant_tag,
-)
-
-
-@torch.library.impl("vllm::mla_merge_prefill_decode_output", "cuda")
-def mla_merge_prefill_decode_output_cuda(
-    decode_result: torch.Tensor,
-    prefill_result: torch.Tensor,
-    output: torch.Tensor,
-    num_decode_tokens: int,
-) -> None:
-    """Merge decode and prefill results into output tensor."""
-    output[0:num_decode_tokens].copy_(decode_result[0:num_decode_tokens])
-    num_prefill = prefill_result.shape[0]
-    if num_prefill > 0:
-        output[num_decode_tokens : num_decode_tokens + num_prefill].copy_(
-            prefill_result
-        )
-
-
-@torch.library.register_fake("vllm::mla_merge_prefill_decode_output")
-def mla_merge_prefill_decode_output_fake(
-    decode_result: torch.Tensor,
-    prefill_result: torch.Tensor,
-    output: torch.Tensor,
-    num_decode_tokens: int,
-) -> None:
-    """Fake implementation for FakeTensor mode and shape inference."""
-    return
 
 
 class QueryLenSupport(Enum):
