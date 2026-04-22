@@ -428,8 +428,9 @@ ENV HF_XET_HIGH_PERFORMANCE=1
 ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens (auto-disabled by the
-# worker when async scheduling is off).
-ENV VLLM_GPU_SYNC_CHECK=error
+# worker when async scheduling is off; skipped on forward passes that include
+# prefill).
+ENV VLLM_GPU_SYNC_CHECK=error,exclude_prefill
 
 # install audio decode package `torchcodec` from source (required due to 
 # ROCm and torch version mismatch) for tests with datasets package

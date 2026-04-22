@@ -82,7 +82,9 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
-    VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
+    VLLM_GPU_SYNC_CHECK: (
+        Literal["warn", "error", "warn,exclude_prefill", "error,exclude_prefill"] | None
+    ) = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -526,10 +528,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
     # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
     # the worker's `execute_model` and `sample_tokens` calls. Valid values
-    # are "warn" (print a warning on each sync) or "error" (raise on sync).
-    # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
+    # are "warn" (print a warning on each sync) or "error" (raise on sync),
+    # optionally suffixed with ",exclude_prefill" to skip the check on steps
+    # that include any prefill work. Unset disables the check. See
+    # `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
-        "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"], case_sensitive=False
+        "VLLM_GPU_SYNC_CHECK",
+        None,
+        ["warn", "error", "warn,exclude_prefill", "error,exclude_prefill"],
+        case_sensitive=False,
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs

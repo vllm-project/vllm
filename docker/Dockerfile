@@ -748,8 +748,9 @@ ENV HF_XET_HIGH_PERFORMANCE 1
 ENV HF_HUB_DOWNLOAD_TIMEOUT 60
 
 # Catch GPU<->CPU syncs in execute_model/sample_tokens (auto-disabled by the
-# worker when async scheduling is off).
-ENV VLLM_GPU_SYNC_CHECK=error
+# worker when async scheduling is off; skipped on forward passes that include
+# prefill).
+ENV VLLM_GPU_SYNC_CHECK=error,exclude_prefill
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1

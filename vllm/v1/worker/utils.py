@@ -3,10 +3,13 @@
 import functools
 import math
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from itertools import product as iprod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 import torch
 
@@ -39,28 +42,59 @@ from vllm.v1.kv_cache_interface import (
 logger = init_logger(__name__)
 
 
-def with_gpu_sync_check(fn):
-    """Decorator that enables `torch.cuda.set_sync_debug_mode` around `fn` when
-    `VLLM_GPU_SYNC_CHECK` is set. No-op (returns `fn` unchanged) otherwise."""
-    if not current_platform.is_cuda_alike():
-        return fn
+def is_decode_only(scheduler_output: "SchedulerOutput") -> bool:
+    """True if every scheduled request is in decode phase (i.e. no prefill
+    tokens in this step)."""
+    return scheduler_output.total_num_scheduled_tokens == len(
+        scheduler_output.num_scheduled_tokens
+    )
 
-    @functools.wraps(fn)
-    def wrapper(*args, **kwargs):
-        # Re-check mode inside the wrapper to support dynamic disabling
-        # (e.g. via os.environ.pop in VllmConfig)
-        mode = envs.VLLM_GPU_SYNC_CHECK
-        if mode is None:
-            return fn(*args, **kwargs)
 
-        prev_mode = torch.cuda.get_sync_debug_mode()
-        torch.cuda.set_sync_debug_mode(mode.lower())
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            torch.cuda.set_sync_debug_mode(prev_mode)
+def _parse_gpu_sync_check_mode() -> tuple[str, bool] | None:
+    """Returns (mode, exclude_prefill) parsed from `VLLM_GPU_SYNC_CHECK`, or
+    None if the env var is unset."""
+    val = envs.VLLM_GPU_SYNC_CHECK
+    if val is None:
+        return None
+    parts = [p.strip().lower() for p in val.split(",")]
+    return parts[0], "exclude_prefill" in parts[1:]
 
-    return wrapper
+
+def with_gpu_sync_check(is_decode_only: Callable[..., bool] | None = None):
+    """Decorator factory that enables `torch.cuda.set_sync_debug_mode` around
+    `fn` when `VLLM_GPU_SYNC_CHECK` is set. If the env var is suffixed with
+    `,exclude_prefill` and `is_decode_only(*args, **kwargs)` returns False, the
+    check is skipped for that call.
+
+    The env var is parsed once at decoration time; this module is imported
+    lazily after `VllmConfig.__post_init__` has finalized `VLLM_GPU_SYNC_CHECK`.
+    """
+
+    def decorator(fn):
+        parsed = _parse_gpu_sync_check_mode()
+        if parsed is None or not current_platform.is_cuda_alike():
+            return fn
+        mode, exclude_prefill = parsed
+
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            if (
+                exclude_prefill
+                and is_decode_only is not None
+                and not is_decode_only(*args, **kwargs)
+            ):
+                return fn(*args, **kwargs)
+
+            prev_mode = torch.cuda.get_sync_debug_mode()
+            torch.cuda.set_sync_debug_mode(mode)
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                torch.cuda.set_sync_debug_mode(prev_mode)
+
+        return wrapper
+
+    return decorator
 
 
 @triton.jit

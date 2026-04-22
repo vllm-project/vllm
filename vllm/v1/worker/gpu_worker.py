@@ -56,7 +56,11 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
-from vllm.v1.worker.utils import is_residual_scattered_for_sp, with_gpu_sync_check
+from vllm.v1.worker.utils import (
+    is_decode_only,
+    is_residual_scattered_for_sp,
+    with_gpu_sync_check,
+)
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
@@ -764,14 +768,16 @@ class Worker(WorkerBase):
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
-    @with_gpu_sync_check
+    @with_gpu_sync_check()
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
-    @with_gpu_sync_check
+    @with_gpu_sync_check(
+        is_decode_only=lambda _self, sched_out: is_decode_only(sched_out)
+    )
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
