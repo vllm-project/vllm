@@ -445,6 +445,7 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = data.reg.val[1];
   }
 
+  explicit FP32Vec16(const FP16Vec16& v);
   explicit FP32Vec16(const BF16Vec16& v) {
     reg.val[0] = (__vector float)vec_mergeh(zero, v.reg.val[0]);
     reg.val[1] = (__vector float)vec_mergel(zero, v.reg.val[0]);
