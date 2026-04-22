@@ -28,7 +28,7 @@ from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.v1.worker.utils import gpu_sync_allowed
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 

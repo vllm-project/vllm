@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.config.model import LogprobsMode
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -14,7 +15,6 @@ from vllm.v1.sample.ops.logprobs import batched_count_greater_than
 from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
-from vllm.v1.worker.utils import gpu_sync_allowed
 
 _SAMPLING_EPS = 1e-5
 

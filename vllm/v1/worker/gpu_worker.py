@@ -45,6 +45,7 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.gpu_sync_debug import with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -59,7 +60,6 @@ from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import (
     is_decode_only,
     is_residual_scattered_for_sp,
-    with_gpu_sync_check,
 )
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -775,9 +775,7 @@ class Worker(WorkerBase):
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
-    @with_gpu_sync_check(
-        is_decode_only=lambda _self, sched_out: is_decode_only(sched_out)
-    )
+    @with_gpu_sync_check(check_if=lambda _self, sched_out: is_decode_only(sched_out))
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:

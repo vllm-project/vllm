@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
-from vllm.v1.worker.utils import gpu_sync_allowed
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 
 def fused_grouped_topk(
