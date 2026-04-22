@@ -269,6 +269,12 @@ class MooncakeECConnector(ECConnectorBase):
                 data hashes (`mm_hash`) to encoder cache tensors.
         """
         assert self.connector_worker is not None
+        if not self.is_producer:
+            logger.debug(
+                "[EC_WORKER] Skip Mooncake remote cache update on non-producer role"
+            )
+            return
+
         metadata: ECConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, MooncakeECConnectorMetadata)
 
@@ -320,7 +326,7 @@ class MooncakeECConnectorScheduler:
 
             use_remote_cache = has_remote_host and has_remote_port and do_remote_encode
             if use_remote_cache:
-                logger.info(
+                logger.debug(
                     "[EC_SCHEDULER] Remote Mooncake cache candidate: "
                     "req_id=%s, mm_hash=%s, producer=%s:%s",
                     getattr(request, "request_id", None),
@@ -355,7 +361,7 @@ class MooncakeECConnectorScheduler:
                     request,
                     num_encoder_tokens,
                 )
-                logger.info(
+                logger.debug(
                     "[EC_SCHEDULER] Scheduled Mooncake receive: req_id=%s, "
                     "mm_hash=%s, producer=%s:%s, encoder_tokens=%d",
                     request.request_id,
@@ -399,7 +405,7 @@ class MooncakeECConnectorScheduler:
                         remote_host=mm_hash_params["remote_host"],
                         remote_port=mm_hash_params["remote_port"],
                     )
-                    logger.info(
+                    logger.debug(
                         "[EC_SCHEDULER] Added Mooncake recv metadata: req_id=%s, "
                         "mm_hash=%s, producer=%s:%s, encoder_tokens=%d",
                         request.request_id,
@@ -428,7 +434,7 @@ class MooncakeECConnectorScheduler:
                             mm_addr=0,
                         ),
                     )
-                    logger.info(
+                    logger.debug(
                         "[EC_SCHEDULER] Added Mooncake save metadata: "
                         "mm_hash=%s, encoder_tokens=%d",
                         mm_hash,
@@ -436,7 +442,7 @@ class MooncakeECConnectorScheduler:
                     )
 
         if meta.mm_hashes_to_recv or meta.mm_hashes_to_save:
-            logger.info(
+            logger.debug(
                 "[EC_SCHEDULER] Built Mooncake metadata: recv=%d, save=%d",
                 len(meta.mm_hashes_to_recv),
                 len(meta.mm_hashes_to_save),
@@ -467,7 +473,7 @@ class MooncakeECConnectorScheduler:
                 "remote_host": self.side_channel_host,
                 "remote_port": self.side_channel_port,
             }
-            logger.info(
+            logger.debug(
                 "[EC_SCHEDULER] Returning Mooncake transfer params: "
                 "req_id=%s, mm_hash=%s, producer=%s:%s",
                 request.request_id,
@@ -714,7 +720,7 @@ class MooncakeECConnectorWorker:
             if mm_hash is not None:
                 if self.local_mm_addrs.get(mm_hash) == addr:
                     self.local_mm_addrs.pop(mm_hash, None)
-                    logger.info(
+                    logger.debug(
                         "[EC_WORKER] Freed Mooncake transfer buffer entry: "
                         "mm_hash=%s, addr=0x%x",
                         mm_hash,
@@ -788,7 +794,7 @@ class MooncakeECConnectorWorker:
 
         try:
             metadata = self._decoder.decode(metadata_bytes)
-            logger.info(
+            logger.debug(
                 "[EC_PRODUCER] Received Mooncake pull request: "
                 "consumer_session=%s:%d, mm_hashes=%s",
                 metadata.remote_hostname,
@@ -813,7 +819,7 @@ class MooncakeECConnectorWorker:
 
     def send_ec_cache(self, meta: MooncakeECAgentMetadata):
         send_mm_hashes = [mm_hash for (mm_hash, _) in meta.mm_hashes]
-        logger.info(
+        logger.debug(
             "[EC_PRODUCER] Preparing Mooncake transfer: consumer_session=%s:%d, "
             "num_hashes=%d, mm_hashes=%s",
             meta.remote_hostname,
@@ -835,7 +841,7 @@ class MooncakeECConnectorWorker:
             for mm_hash, req_ids in meta.mm_hashes:
                 keys.extend([Key(mm_hash, req_id) for req_id in req_ids])
             self.finished_sending_mm_hashes.set.update(keys)
-        logger.info(
+        logger.debug(
             "[EC_PRODUCER] Marked Mooncake send finished: mm_hashes=%s",
             send_mm_hashes,
         )
@@ -873,7 +879,7 @@ class MooncakeECConnectorWorker:
             src_ptrs.append(addr)
             dst_ptrs.append(remote_mm_addr)
             lengths.append(remote_token_byte)
-            logger.info(
+            logger.debug(
                 "[EC_PRODUCER] Queued Mooncake write: mm_hash=%s, "
                 "local_addr=0x%x, remote_session=%s, remote_addr=0x%x, bytes=%d",
                 mm_hash,
@@ -887,7 +893,7 @@ class MooncakeECConnectorWorker:
             logger.warning("[EC_PRODUCER] No valid transfers in batch, skipping")
             return
 
-        logger.info(
+        logger.debug(
             "[EC_PRODUCER] Calling Mooncake batch_transfer_sync_write: "
             "remote_session=%s, num_transfers=%d, total_bytes=%d",
             remote_session,
@@ -1004,7 +1010,7 @@ class MooncakeECConnectorWorker:
         )
 
         encoded_data = self._encoder.encode(metadata)
-        logger.info(
+        logger.debug(
             "[EC_CONSUMER] Starting Mooncake pull: producer_side_channel=%s, "
             "consumer_session=%s:%d, mm_hashes=%s, total_bytes=%d",
             path,
@@ -1023,7 +1029,7 @@ class MooncakeECConnectorWorker:
         transfer_failed = True
         try:
             await sock.send(encoded_data)
-            logger.info(
+            logger.debug(
                 "[EC_CONSUMER] Sent Mooncake pull request: "
                 "producer_side_channel=%s, mm_hashes=%s",
                 path,
@@ -1034,7 +1040,7 @@ class MooncakeECConnectorWorker:
 
             if ret_msg == TRANS_DONE:
                 transfer_failed = False
-                logger.info(
+                logger.debug(
                     "[EC_CONSUMER] Mooncake producer reported transfer done: "
                     "mm_hashes=%s",
                     mm_hash_list,
@@ -1100,7 +1106,7 @@ class MooncakeECConnectorWorker:
                 metadata.remote_token_bytes,
             ):
                 tensor_shape = (num_bytes // self.byte_per_token, self.embed_size)
-                logger.info(
+                logger.debug(
                     "[EC_CONSUMER] Loading tensor from Mooncake receive buffer: "
                     "mm_hash=%s, addr=0x%x, shape=%s, dtype=%s, bytes=%d",
                     mm_hash,
@@ -1158,7 +1164,7 @@ class MooncakeECConnectorWorker:
 
         async with self.finished_recving_mm_hashes.finish_recv_cond:
             self.finished_recving_mm_hashes.set.update(mm_hash_list)
-            logger.info(
+            logger.debug(
                 "[EC_CONSUMER] Marked Mooncake receive finished: mm_hashes=%s",
                 mm_hash_list,
             )
@@ -1181,7 +1187,7 @@ class MooncakeECConnectorWorker:
                 meta.mm_hash_meta.mm_addr = self.transfer_buffer.allocate(alloc_size)
 
                 mm_hashes_meta[key.mm_hash] = ([key.req_id], meta.mm_hash_meta)
-                logger.info(
+                logger.debug(
                     "[EC_CONSUMER] Allocated Mooncake receive buffer: req_id=%s, "
                     "mm_hash=%s, producer=%s:%s, path=%s, addr=0x%x, "
                     "encoder_tokens=%d, bytes=%d",
@@ -1289,7 +1295,7 @@ class MooncakeECConnectorWorker:
         self, encoder_cache, metadata: MooncakeECConnectorMetadata, **kwargs
     ) -> None:
         if metadata.mm_hashes_to_save:
-            logger.info(
+            logger.debug(
                 "[EC_PRODUCER] maybe_update_remote_cache_state: save_candidates=%s",
                 list(metadata.mm_hashes_to_save),
             )
@@ -1308,7 +1314,7 @@ class MooncakeECConnectorWorker:
 
             # Check if transfer buffer doesn't have it but HBM does
             if not self.has_cache_in_buffer(mm_hash):
-                logger.info(
+                logger.debug(
                     "[EC_PRODUCER] Saving HBM encoder cache to Mooncake "
                     "registered transfer buffer: mm_hash=%s",
                     mm_hash,

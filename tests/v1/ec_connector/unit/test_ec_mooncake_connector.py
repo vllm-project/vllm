@@ -683,6 +683,16 @@ class TestEdgeCases:
         result = connector.has_cache_item("hash1", request)
         assert not result
 
+    def test_consumer_does_not_save_remote_cache_state(self):
+        """Consumer-only workers must not allocate producer transfer slots."""
+        connector = MooncakeECConnector.__new__(MooncakeECConnector)
+        connector._is_producer = False
+        connector.connector_worker = Mock()
+
+        connector.maybe_update_remote_cache_state({"hash1": torch.randn(1)})
+
+        connector.connector_worker.maybe_update_remote_cache_state.assert_not_called()
+
     @patch(
         "vllm.distributed.ec_transfer.ec_connector.mooncake_connector.TransferEngine"
     )
