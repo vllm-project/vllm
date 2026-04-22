@@ -501,3 +501,22 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
         num_generation_requests,
         num_generation_tokens,
     )
+
+
+def should_profile_scheduler_output(scheduler_output: SchedulerOutput) -> bool:
+    """Whether a scheduler step should consume profiler iterations.
+
+    Zero-token steps are sometimes used only to advance KV connector state,
+    such as async remote-KV polling or handshake completion. Those steps do
+    not execute model kernels, so profiling them only burns through delayed
+    start and max-iteration budgets without capturing useful data.
+
+    We keep the previous behavior for non-connector zero-token steps (for
+    example, dummy passes in other execution modes) by only skipping the step
+    when a KV connector is active.
+    """
+
+    return (
+        scheduler_output.total_num_scheduled_tokens > 0
+        or scheduler_output.kv_connector_metadata is None
+    )
