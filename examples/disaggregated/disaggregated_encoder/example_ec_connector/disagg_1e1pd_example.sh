@@ -3,11 +3,14 @@ set -euo pipefail
 
 declare -a PIDS=()
 
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+EXAMPLE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
 ###############################################################################
 # Configuration -- override via env before running
 ###############################################################################
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
-LOG_PATH="${LOG_PATH:-./logs}"
+LOG_PATH="${LOG_PATH:-${SCRIPT_DIR}/logs}"
 mkdir -p "$LOG_PATH"
 
 ENCODE_PORT="${ENCODE_PORT:-19534}"
@@ -45,9 +48,9 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 GIT_ROOT=$(git rev-parse --show-toplevel)
 
 START_TIME=$(date +"%Y%m%d_%H%M%S")
-ENC_LOG=$LOG_PATH/encoder_${START_TIME}.log
-PD_LOG=$LOG_PATH/pd_${START_TIME}.log
-PROXY_LOG=$LOG_PATH/proxy_${START_TIME}.log
+ENC_LOG="${LOG_PATH}/encoder_${START_TIME}.log"
+PD_LOG="${LOG_PATH}/pd_${START_TIME}.log"
+PROXY_LOG="${LOG_PATH}/proxy_${START_TIME}.log"
 
 wait_for_server() {
     local port=$1
@@ -152,7 +155,7 @@ wait_for_server "$PREFILL_DECODE_PORT"
 ###############################################################################
 # Proxy
 ###############################################################################
-python disagg_epd_proxy.py \
+python "${EXAMPLE_ROOT}/disagg_epd_proxy.py" \
     --host "0.0.0.0" \
     --port "$PROXY_PORT" \
     --encode-servers-urls "http://localhost:$ENCODE_PORT" \
