@@ -9,7 +9,9 @@ use vllm_engine_core_client::{CoordinatorMode as EngineCoreCoordinatorMode, Tran
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HttpListenerMode {
     /// Bind a fresh TCP listener on the given host/port.
-    Bind { host: String, port: u16 },
+    BindTcp { host: String, port: u16 },
+    /// Bind a fresh Unix domain listener on the given filesystem path.
+    BindUnix { path: String },
     /// Adopt an already-open listening socket inherited from a supervisor process.
     InheritedFd { fd: i32 },
 }

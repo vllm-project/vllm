@@ -372,8 +372,8 @@ pub struct EngineUnsupportedArgs {
 /// - `vllm.entrypoints.openai.cli_args.FrontendArgs`
 ///
 /// These are not engine args. They belong to the Python OpenAI-compatible frontend / API-server
-/// layer itself, for example chat-template configuration, tool/frontend behavior, UDS / TLS /
-/// CORS / HTTP server settings, and other northbound server knobs.
+/// layer itself, for example chat-template configuration, tool/frontend behavior, TLS / CORS /
+/// HTTP server settings, and other northbound server knobs.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Eq, Default, Args, Serialize, Deserialize)]
 pub struct ServerUnsupportedArgs {
@@ -532,10 +532,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub tokens_only: Option<Unsupported>,
-
-    /// Unix domain socket path. If set, host and port arguments are ignored.
-    #[arg(long)]
-    pub uds: Option<Unsupported>,
 
     /// Log level for uvicorn.
     #[arg(long)]

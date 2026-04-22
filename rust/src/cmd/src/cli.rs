@@ -206,8 +206,7 @@ impl SharedRuntimeArgs {
     /// handshake and binds its own HTTP listener.
     fn into_managed_config(
         self,
-        host: String,
-        port: u16,
+        listener_mode: HttpListenerMode,
         handshake_address: String,
         advertised_host: String,
         engine_count: usize,
@@ -225,7 +224,7 @@ impl SharedRuntimeArgs {
             },
             coordinator_mode: CoordinatorMode::MaybeInProc,
             model: self.model,
-            listener_mode: HttpListenerMode::Bind { host, port },
+            listener_mode,
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             renderer: self.renderer,
@@ -309,6 +308,9 @@ pub struct ServeArgs {
     /// HTTP bind port for the OpenAI-compatible server.
     #[arg(long, default_value_t = 8000)]
     pub port: u16,
+    /// Unix domain socket path. If set, host and port arguments are ignored.
+    #[arg(long)]
+    pub uds: Option<String>,
     /// Host/IP used both for the managed-engine handshake endpoint and the frontend-advertised
     /// input/output ZMQ socket addresses.
     #[arg(
@@ -368,9 +370,16 @@ impl ServeArgs {
             .frontend_local_only()
             .then(frontend_ipc_addresses)
             .unzip();
+        let listener_mode = match &self.uds {
+            Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
+            None => HttpListenerMode::BindTcp {
+                host: self.host.clone(),
+                port: self.port,
+            },
+        };
+
         self.runtime.clone().into_managed_config(
-            self.host.clone(),
-            self.port,
+            listener_mode,
             handshake_address,
             self.handshake_host.clone(),
             self.data_parallel_size,

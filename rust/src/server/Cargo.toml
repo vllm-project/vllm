@@ -16,6 +16,7 @@ serde_with.workspace = true
 socket2.workspace = true
 thiserror-ext.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-futures.workspace = true

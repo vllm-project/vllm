@@ -5,21 +5,19 @@
 
 mod config;
 mod error;
+mod listener;
 mod middleware;
 mod routes;
 mod state;
 mod utils;
 
 use std::future::Future;
-use std::net::TcpListener as StdTcpListener;
-use std::os::fd::{FromRawFd, OwnedFd};
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use axum::serve::ListenerExt as _;
 pub use config::{Config, CoordinatorMode, HttpListenerMode};
-use socket2::Socket;
-use tokio::net::TcpListener;
+use tokio_util::either::Either;
 use tracing::{info, trace};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
@@ -27,6 +25,7 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
+use crate::listener::Listener;
 use crate::routes::build_router;
 use crate::state::AppState;
 
@@ -98,18 +97,21 @@ where
         result = build_state(&config) => result?,
         _ = &mut shutdown => return Ok(()),
     };
-    let listener = bind_listener(&config.listener_mode)
+    let listener = Listener::bind(&config.listener_mode)
         .await
         .context("failed to bind listener for OpenAI server")?;
     let bind_address = listener.local_addr()?;
     let model = state.model_id.clone();
     let app = build_router(state.clone());
 
-    info!(%bind_address, model = %model, "starting OpenAI server");
+    info!(%bind_address, %model, "starting OpenAI server");
 
     // Set TCP_NODELAY on accepted connections to reduce latency.
-    let listener = listener.tap_io(|tcp_stream| {
-        if let Err(err) = tcp_stream.set_nodelay(true) {
+    // By `tap_io` we will do this on every accepted connection.
+    let listener = listener.tap_io(|io| {
+        if let Either::Left(tcp_stream) = io
+            && let Err(err) = tcp_stream.set_nodelay(true)
+        {
             trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
         }
     });
@@ -119,26 +121,4 @@ where
         .await?;
 
     state.shutdown().await
-}
-
-/// Construct the Tokio listener that matches the configured listener acquisition strategy.
-async fn bind_listener(mode: &HttpListenerMode) -> Result<TcpListener> {
-    match mode {
-        HttpListenerMode::Bind { host, port } => {
-            Ok(TcpListener::bind((host.as_str(), *port)).await?)
-        }
-        HttpListenerMode::InheritedFd { fd } => {
-            // SAFETY: We trust the caller to only pass valid listener fds, and we only use this fd
-            // once to create a single `TcpListener`.
-            let owned_fd = unsafe { OwnedFd::from_raw_fd(*fd) };
-            let socket = Socket::from(owned_fd);
-            // The Python supervisor pre-binds the socket to reserve the port early, but Rust is
-            // responsible for transitioning inherited TCP sockets into the listening state before
-            // accepting connections.
-            socket.listen(libc::SOMAXCONN)?;
-            socket.set_nonblocking(true)?;
-            let std_listener = StdTcpListener::from(socket);
-            Ok(TcpListener::from_std(std_listener)?)
-        }
-    }
 }

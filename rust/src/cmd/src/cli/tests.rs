@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use expect_test::expect;
 use vllm_engine_core_client::TransportMode;
-use vllm_server::{Config, ParserSelection, RendererSelection};
+use vllm_server::{Config, HttpListenerMode, ParserSelection, RendererSelection};
 
 use super::{Cli, Command};
 
@@ -30,6 +30,7 @@ fn serve_args_forward_python_flags_with_separator() {
                     python: "../vllm/.venv/bin/python",
                     host: "127.0.0.1",
                     port: 8000,
+                    uds: None,
                     handshake_host: "127.0.0.1",
                     handshake_port: None,
                     data_parallel_size: 1,
@@ -119,30 +120,6 @@ fn serve_args_reject_unknown_renderer_value() {
 
     expect![[r#"
         error: invalid value 'definitely_missing' for '--tokenizer-mode <RENDERER>': unknown renderer `definitely_missing` (expected one of: auto, hf, deepseek_v32)
-
-        For more information, try '--help'.
-    "#]]
-    .assert_eq(&error.to_string());
-}
-
-#[test]
-fn serve_args_reject_unsupported_value_arg() {
-    let error = Cli::try_parse_from([
-        "vllm-rs",
-        "serve",
-        "Qwen/Qwen3-0.6B",
-        "--uds",
-        "/tmp/vllm.sock",
-    ])
-    .unwrap_err();
-
-    expect![[r#"
-        error: invalid value '/tmp/vllm.sock' for '--uds <UDS>': argument is not implemented in Rust frontend yet
-
-        Remove this unsupported argument to continue.
-
-        Alternatively, if you intend to pass it only to the Python engine, put it after `--` (e.g., `-- <arg>`).
-        This may lead to unexpected behavior as the Rust frontend will completely ignore that argument.
 
         For more information, try '--help'.
     "#]]
@@ -328,7 +305,7 @@ fn frontend_args_json_ignores_unknown_fields() {
         "--output-address",
         "ipc:///tmp/output.sock",
         "--args-json",
-        r#"{"model_tag":"Qwen/Qwen3-0.6B","unknown_field":"ignored","nested_unknown":{"x":1}}"#,
+        r#"{"model_tag":"Qwen/Qwen3-0.6B","uds":"/tmp/vllm.sock","nested_unknown":{"x":1}}"#,
     ])
     .unwrap();
 
@@ -594,6 +571,7 @@ fn serve_args_accept_handshake_aliases() {
                     python: "python3",
                     host: "127.0.0.1",
                     port: 8000,
+                    uds: None,
                     handshake_host: "10.99.48.128",
                     handshake_port: Some(
                         13345,
@@ -707,7 +685,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
-            listener_mode: Bind {
+            listener_mode: BindTcp {
                 host: "127.0.0.1",
                 port: 8000,
             },
@@ -766,7 +744,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             },
             coordinator_mode: MaybeInProc,
             model: "Qwen/Qwen3-0.6B",
-            listener_mode: Bind {
+            listener_mode: BindTcp {
                 host: "127.0.0.1",
                 port: 8000,
             },
@@ -855,4 +833,28 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
         }
     "#]]
     .assert_debug_eq(&config);
+}
+
+#[test]
+fn serve_frontend_config_uses_unix_listener_when_uds_is_present() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--uds",
+        "/tmp/vllm.sock",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:29550".to_string());
+
+    assert_eq!(
+        config.listener_mode,
+        HttpListenerMode::BindUnix {
+            path: "/tmp/vllm.sock".to_string(),
+        }
+    );
 }
