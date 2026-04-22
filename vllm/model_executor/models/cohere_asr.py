@@ -2041,24 +2041,18 @@ class CohereAsrForConditionalGeneration(
             )
 
         tokenizer = cached_tokenizer_from_config(model_config)
-        if request_prompt:
-            prompt_text = request_prompt
-            prompt_token_ids = tokenizer.encode(
-                request_prompt,
-                add_special_tokens=False,
-            )
-        else:
-            # prompt_text is None because CoherASR uses fast implementation of
-            # sentencepiece tokenizer which needs "▁" as the first token
-            # (which is different from "_") and encode("▁ABC") ignores the first token
-            # so the prompt_text is unreliable. However, prompt_token_ids can be used
-            # to get prompt_text but it wont have the first token "▁".
-            prompt_text = None
-            prompt_token_ids = cls._get_default_prompt_token_ids(
-                tokenizer,
-                model_config,
-                language,
-            )
+        
+        # prompt_text is None because CoherASR uses fast implementation of
+        # sentencepiece tokenizer which needs "▁" as the first token
+        # (which is different from "_") and encode("▁ABC") ignores the first token
+        # so the prompt_text is unreliable. However, prompt_token_ids can be used
+        # to get prompt_text but it wont have the first token "▁".
+        prompt_text = None
+        prompt_token_ids = cls._get_default_prompt_token_ids(
+            tokenizer,
+            model_config,
+            language,
+        )
 
         return TokensPrompt(
             prompt=prompt_text,
