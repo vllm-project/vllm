@@ -8,6 +8,7 @@ Kimi-K2.5 extends Kimi-K2 with vision support.
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from math import isqrt
 from typing import Annotated, Any, Literal
 
 import torch
@@ -547,14 +548,37 @@ class KimiK25ForConditionalGeneration(
 
         frames_per_item = max(max_frames_per_batch // max(max_batch_size, 1), 1)
 
-        # Each output slot corresponds to kh*kw input patches per frame,
-        # so per-item input patches = t * (nh*kh) * (nw*kw) where
-        # nh*nw = per_item_output.  Pick a square-ish layout: use
-        # ``nh = 1`` and ``nw = per_item_output`` for simplicity; the
-        # encoder only cares that h % kh == 0 and w % kw == 0.
+        # Pick a (nh, nw) layout that keeps each dummy item inside the
+        # 2D RoPE table bounds. ``Rope2DPosEmbRepeated`` precomputes a
+        # ``max_height x max_width`` table (512x512 in the Kimi-K2.5
+        # config) and asserts every item satisfies
+        # ``h <= max_height`` and ``w <= max_width`` where
+        # ``h = nh*kh`` and ``w = nw*kw``.  Prefer a square-ish
+        # layout, but clamp each dim so the product of the clamped
+        # dims still covers ``per_item_output`` output slots (if the
+        # budget is too large for the RoPE table, capture the largest
+        # covered sub-grid; budgets beyond that land in the eager
+        # fallback at runtime, which is the correct behavior).
+        rope_2d = self.vision_tower.encoder.rope_2d
+        max_nh = max(rope_2d.max_height // kh, 1)
+        max_nw = max(rope_2d.max_width // kw, 1)
+
+        nh_cap = min(max(isqrt(max(per_item_output, 1)), 1), max_nh)
+        nw_cap = min(
+            (per_item_output + nh_cap - 1) // nh_cap,
+            max_nw,
+        )
+        nw_cap = max(nw_cap, 1)
+
+        # ``Learnable2DInterpPosEmbDivided_fixed`` asserts
+        # ``t <= self.num_frames``; clamp the capture-time t to that
+        # bound so dummy inputs are valid.  Replays with t <= num_frames
+        # still fit; anything beyond would need its own eager path.
+        max_num_frames = self.vision_tower.patch_embed.pos_emb.num_frames
         t_cap = frames_per_item if frames_per_item > 1 else 1
-        h_cap = kh  # 1 output row per item
-        w_cap = per_item_output * kw  # per_item_output output cols per item
+        t_cap = min(t_cap, max_num_frames)
+        h_cap = nh_cap * kh
+        w_cap = nw_cap * kw
 
         grid_config: list[list[int]] = [
             [t_cap, h_cap, w_cap] for _ in range(max(max_batch_size, 1))
@@ -571,10 +595,13 @@ class KimiK25ForConditionalGeneration(
         # patches that fit in the ``token_budget`` output slots.  An
         # output slot is a ``kh*kw`` window, so a frame with
         # ``token_budget`` output slots has ``token_budget * kh * kw``
-        # input patches.  Take that as the capture-time upper bound; any
-        # replay fits because total frames are bounded by
-        # ``max_frames_per_batch`` and per-frame length is <= this.
-        max_seqlen_override = max(token_budget * kh * kw, total_patches)
+        # input patches.  Clamp to the RoPE table footprint so the
+        # scalar baked into the captured graph stays consistent with
+        # the metadata buffers.
+        max_seqlen_override = max(
+            min(token_budget * kh * kw, max_nh * kh * max_nw * kw),
+            total_patches,
+        )
 
         buffers = self.vision_tower.prepare_encoder_metadata(
             grid_config,
