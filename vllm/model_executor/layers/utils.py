@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
+import functools
 from collections.abc import Callable
 
 import torch
@@ -89,12 +90,43 @@ def apply_penalties(
     return logits
 
 
+@functools.cache
+def _tinygemm_bf16_available() -> bool:
+    """Check if FlashInfer's tinygemm_bf16 kernel is available (SM90+)."""
+    from vllm.utils.flashinfer import has_flashinfer
+    if not has_flashinfer():
+        return False
+    try:
+        capability = current_platform.get_device_capability()
+        return capability is not None and capability[0] >= 9
+    except Exception:
+        return False
+
+
 def default_unquantized_gemm(
     layer: torch.nn.Module,
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
+    num_tokens = x.numel() // x.shape[-1]
+    if (
+        _tinygemm_bf16_available()
+        and num_tokens <= 8
+        and x.dtype == torch.bfloat16
+        and weight.dtype == torch.bfloat16
+        and weight.shape[0] % 16 == 0
+        and x.is_contiguous()
+        and weight.is_contiguous()
+        and (bias is None or bias.dtype == torch.bfloat16)
+    ):
+        from vllm.utils.flashinfer import flashinfer_tinygemm_bf16
+        out = x.new_empty((*x.shape[:-1], weight.shape[0]))
+        flashinfer_tinygemm_bf16(
+            x.view(num_tokens, -1), weight,
+            out.view(num_tokens, -1), bias=bias,
+        )
+        return out
     return torch.nn.functional.linear(x, weight, bias)
 
 

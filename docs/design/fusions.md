@@ -347,6 +347,33 @@ when the hidden size is 2880 and AITER Triton GEMMs *not* enabled.
 
 - Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`RocmAiterTritonAddRMSNormPadFusionPass`)
 
+## Small-Batch BF16 GEMM Optimization (Runtime)
+
+!!! info
+    This is a runtime optimization, not a torch.compile fusion pass.
+
+vLLM uses FlashInfer's `tinygemm_bf16` kernel for small-batch BF16 linear layers during decode phase.
+This optimization targets latency-bound GEMVs (matrix-vector products) common in decode workloads.
+
+**Requirements:**
+- NVIDIA Hopper (SM90) or newer
+- FlashInfer installed
+
+**Conditions for activation:**
+- `num_tokens <= 8` (small batch size typical in decode)
+- Input and weight dtype: `bfloat16`
+- Weight output dimension divisible by 16
+- Contiguous input and weight tensors
+- Bias (if present) must be `bfloat16`
+
+**Fallback:** Falls back to `torch.nn.functional.linear` when conditions are not met.
+
+**Code locations.**
+
+- Dispatch logic: [`vllm/model_executor/layers/utils.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/utils.py) (`default_unquantized_gemm`)
+- FlashInfer wrapper: [`vllm/utils/flashinfer.py`](https://github.com/vllm-project/vllm/blob/main/vllm/utils/flashinfer.py) (`flashinfer_tinygemm_bf16`)
+- Tests: [`tests/model_executor/layers/test_tinygemm_bf16.py`](https://github.com/vllm-project/vllm/blob/main/tests/model_executor/layers/test_tinygemm_bf16.py)
+
 ## See Also
 
 - [Optimization Levels](optimization_levels.md) — high-level presets that set
