@@ -529,10 +529,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # are "warn" (print a warning on each sync) or "error" (raise on sync).
     # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
-        "VLLM_GPU_SYNC_CHECK",
-        None,
-        ["warn", "error"],
-        case_sensitive=False,
+        "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"], case_sensitive=False
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
