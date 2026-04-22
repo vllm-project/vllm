@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wpi_client"
+version = "0.1.0"
+description = "Core Python client for Weight Propagation Interface"
+authors = [
+    { name = "Google LLC" }
+]
+dependencies = [
+    "torch",
+    "grpcio>=1.60.0",
+    "protobuf"
+]
+
+[tool.setuptools]
+packages = ["wpi_client", "wpi_client.proto"]
+
+[tool.setuptools.package-dir]
+wpi_client = "."
