@@ -36,8 +36,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
     moe_kernel_quantize_input,
 )
-from vllm.model_executor.layers.quantization.utils.mxfp4_utils import dequant_mxfp4
-from vllm.model_executor.layers.quantization.utils.mxfp6_utils import dequant_mxfp6
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -46,6 +44,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt8DynamicTokenSym,
+    kInt8StaticChannelSym,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -1706,22 +1706,18 @@ def fused_experts_impl(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    if ocp_mx_scheme is not None:
+        raise NotImplementedError(
+            f"Using ocp_mx_scheme={ocp_mx_scheme} in functional fused_experts call is "
+            "deprecated. Please use OCP_MXQuantizationEmulationTritonExperts."
+        )
+
     # Convert string activation to enum for internal use
     activation_enum = MoEActivation.from_str(activation)
 
     # Check constraints.
     if use_int4_w4a16:
         assert hidden_states.size(1) // 2 == w1.size(2), "Hidden size mismatch"
-    elif ocp_mx_scheme is not None:
-        if ocp_mx_scheme.startswith("w_mxfp4"):
-            # 16bit activation and fp4x2 packed weight
-            assert hidden_states.size(1) == w1.size(2) * 2, "hidden size mismatch"
-        elif ocp_mx_scheme.startswith("w_mxfp6"):
-            assert hidden_states.size(1) == (w1.size(2) * 4) // 3, (
-                "hidden size mismatch"
-            )
-        else:
-            raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
     else:
         assert hidden_states.size(1) == w1.size(2), (
             f"Hidden size mismatch {hidden_states.size(1)} != {w1.size(2)}"
@@ -1746,7 +1742,6 @@ def fused_experts_impl(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
         use_int4_w4a16=use_int4_w4a16,
-        ocp_mx_scheme=ocp_mx_scheme,
         dtype=hidden_states.dtype,
     )
 
@@ -1755,7 +1750,7 @@ def fused_experts_impl(
     quant_dtype = _get_config_quant_dtype(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
-        ocp_mx_scheme=ocp_mx_scheme,
+        ocp_mx_scheme=None,
     )
 
     get_config_func = functools.partial(
@@ -1800,44 +1795,12 @@ def fused_experts_impl(
 
     out_hidden_states = hidden_states if inplace else torch.empty_like(hidden_states)
 
-    if ocp_mx_scheme is not None:
-        # TODO: On platforms for which `current_platform.supports_mx()` is True
-        # and for which we have a native OCP mx fused MOE kernel,
-        # this dequantization step should not be done.
-        if ocp_mx_scheme.startswith("w_mxfp4"):
-            # Weight has to be dequantized for mxfp4 emulation.
-            w1 = dequant_mxfp4(w1, w1_scale, hidden_states.dtype)
-            w1_scale = None
-            w2 = dequant_mxfp4(w2, w2_scale, hidden_states.dtype)
-            w2_scale = None
-        elif ocp_mx_scheme.startswith("w_mxfp6_e3m2"):
-            w1 = dequant_mxfp6(
-                w1, w1_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
-            )
-            w1_scale = None
-            w2 = dequant_mxfp6(
-                w2, w2_scale, quant_dtype="fp6_e3m2", float_dtype=hidden_states.dtype
-            )
-            w2_scale = None
-        elif ocp_mx_scheme.startswith("w_mxfp6_e2m3"):
-            w1 = dequant_mxfp6(
-                w1, w1_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
-            )
-            w1_scale = None
-            w2 = dequant_mxfp6(
-                w2, w2_scale, quant_dtype="fp6_e2m3", float_dtype=hidden_states.dtype
-            )
-            w2_scale = None
-        else:
-            raise NotImplementedError(f"Unsupported ocp_mx_scheme={ocp_mx_scheme}")
-
     qhidden_states, a1q_scale = moe_kernel_quantize_input(
         A=hidden_states,
         A_scale=a1_scale,
         quant_dtype=quant_dtype,
         per_act_token_quant=per_channel_quant,
         block_shape=block_shape,
-        ocp_mx_scheme=ocp_mx_scheme,
     )
 
     sorted_token_ids, expert_ids, num_tokens_post_padded = _prepare_expert_assignment(
@@ -1887,7 +1850,6 @@ def fused_experts_impl(
         quant_dtype=quant_dtype,
         per_act_token_quant=per_channel_quant,
         block_shape=block_shape,
-        ocp_mx_scheme=ocp_mx_scheme,
     )
 
     if expert_map is not None:
@@ -1933,6 +1895,9 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
+        # Whether quantized MOE runs natively, or through
+        # higher-precision + activation QDQ.
+        self.quantization_emulation = False
         super().__init__(moe_config, quant_config)
 
     @staticmethod
@@ -1952,35 +1917,24 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        p = current_platform
-        if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9, on_gfx12x
-
-            is_rocm_on_gfx9 = on_gfx9()
-            is_rocm_on_gfx12x = on_gfx12x()
-        else:
-            is_rocm_on_gfx9 = False
-            is_rocm_on_gfx12x = False
-
-        device_supports_fp8 = (
-            is_rocm_on_gfx9
-            or is_rocm_on_gfx12x
-            or (p.is_cuda() and p.has_device_capability((8, 9)))
-            or p.is_xpu()
+        # INT8 requires at least 7.5 (Turing).
+        device_supports_int8 = (
+            current_platform.is_cuda()
+            and current_platform.has_device_capability((7, 5))
         )
 
-        if not device_supports_fp8:
-            return (weight_key, activation_key) == (None, None)
-
-        SUPPORTED_W_A = [
-            (None, None),
-            (kFp8Static128BlockSym, kFp8Dynamic128Sym),
-            (kFp8StaticChannelSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
-            (kFp8StaticTensorSym, kFp8StaticTensorSym),
-            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
-        ]
-        return (weight_key, activation_key) in SUPPORTED_W_A
+        supported: list[tuple[QuantKey | None, QuantKey | None]] = [(None, None)]
+        if device_supports_int8:
+            supported.append((kInt8StaticChannelSym, kInt8DynamicTokenSym))
+        if current_platform.supports_fp8():
+            supported += [
+                (kFp8Static128BlockSym, kFp8Dynamic128Sym),
+                (kFp8StaticChannelSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8DynamicTokenSym),
+                (kFp8StaticTensorSym, kFp8StaticTensorSym),
+                (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            ]
+        return (weight_key, activation_key) in supported
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
@@ -2153,6 +2107,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
             self.quant_dtype,
             self.per_act_token_quant,
             self.block_shape,
+            quantization_emulation=self.quantization_emulation,
         )
 
         invoke_fused_moe_triton_kernel(
