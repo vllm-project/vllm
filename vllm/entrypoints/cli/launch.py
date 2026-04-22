@@ -9,16 +9,17 @@ import time
 import grpc
 import uvloop
 from grpc_reflection.v1alpha import reflection
-from smg_grpc_proto import (  # type: ignore[import-untyped]
-    vllm_render_pb2,
-    vllm_render_pb2_grpc,
-)
-from smg_grpc_servicer.vllm import RenderGrpcServicer
 from starlette.datastructures import State
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
+from vllm.entrypoints.grpc import (  # type: ignore[attr-defined]
+    vllm_render_pb2,
+    vllm_render_pb2_grpc,
+)
+from vllm.entrypoints.grpc.render_servicer import RenderGrpcServicer
 from vllm.entrypoints.openai.api_server import (
     build_and_serve_renderer,
     init_render_app_state,
@@ -133,12 +134,24 @@ def cmd_init() -> list[CLISubcommand]:
     return [LaunchSubcommand()]
 
 
+def _prepare_render_model_config(args: argparse.Namespace) -> VllmConfig:
+    """Build a VllmConfig suitable for a GPU-less render server.
+
+    Render servers preprocess data only — no inference, no quantized kernels,
+    and no KV cache — so clear quantization and silence the CPU KV cache
+    warning before constructing VllmConfig.
+    """
+    engine_args = AsyncEngineArgs.from_cli_args(args)
+    model_config = engine_args.create_model_config()
+    model_config.quantization = None
+    envs.VLLM_CPU_KVCACHE_SPACE = 0
+    return VllmConfig(model_config=model_config)
+
+
 async def run_launch_grpc(args: argparse.Namespace) -> None:
     """Run the render serving layer with gRPC (no GPU inference)."""
     # 1. Create VllmConfig
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    model_config = engine_args.create_model_config()
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = _prepare_render_model_config(args)
 
     # 2. Initialize app state
     state = State()
@@ -194,9 +207,7 @@ async def run_launch_http(args: argparse.Namespace) -> None:
     listen_address, sock = setup_server(args)
 
     # 2. Build and serve the API server
-    engine_args = AsyncEngineArgs.from_cli_args(args)
-    model_config = engine_args.create_model_config()
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = _prepare_render_model_config(args)
     shutdown_task = await build_and_serve_renderer(
         vllm_config, listen_address, sock, args
     )

@@ -507,6 +507,7 @@ def merge_16x16_to_64x64_inverse_kernel(
 def solve_tril(
     A: torch.Tensor,
     cu_seqlens: torch.Tensor | None = None,
+    chunk_indices: torch.Tensor | None = None,
     output_dtype: torch.dtype = torch.float,
 ) -> torch.Tensor:
     """
@@ -518,6 +519,8 @@ def solve_tril(
             [B, T, H, BT], where BT should only be 16, 32, or 64.
         cu_seqlens (torch.Tensor):
             The cumulative sequence lengths of the input tensor. Default: `None`.
+        chunk_indices (torch.Tensor):
+            Pre-computed chunk indices. Default: `None`.
         output_dtype (torch.dtype):
             The dtype of the output tensor. Default: `torch.float`.
             If `None`, the output dtype will be the same as the input dtype.
@@ -529,9 +532,8 @@ def solve_tril(
     output_dtype = A.dtype if output_dtype is None else output_dtype
 
     B, T, H, BT = A.shape
-    chunk_indices = (
-        prepare_chunk_indices(cu_seqlens, BT) if cu_seqlens is not None else None
-    )
+    if chunk_indices is None and cu_seqlens is not None:
+        chunk_indices = prepare_chunk_indices(cu_seqlens, BT)
     NT = len(chunk_indices) if cu_seqlens is not None else triton.cdiv(T, BT)
 
     Ai = torch.zeros_like(A, dtype=output_dtype)

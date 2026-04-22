@@ -315,10 +315,11 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.set_host_xfer_buffer_ops(copy_operation)
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         """Handle preempted requests for all sub-connectors."""
-        for c in self._connectors:
-            c.handle_preemptions(preempted_req_ids)
+        assert isinstance(kv_connector_metadata, MultiKVConnectorMetadata)
+        for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
+            c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)
@@ -547,7 +548,13 @@ class MultiConnector(KVConnectorBase_V1):
             if stats_by_connector is None:
                 # Lazy init to allow optional return value.
                 stats_by_connector = MultiKVConnectorStats()
-            stats_by_connector[c.__class__.__name__] = stats
+            connector_id = c.__class__.__name__
+            if connector_id in stats_by_connector.data:
+                stats_by_connector[connector_id] = stats_by_connector[
+                    connector_id
+                ].aggregate(stats)
+            else:
+                stats_by_connector[connector_id] = stats
         return stats_by_connector
 
     @classmethod
@@ -559,9 +566,13 @@ class MultiConnector(KVConnectorBase_V1):
         per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         prom_metrics: dict[str, KVConnectorPromMetrics] = {}
+        seen_classes: set[type] = set()
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
             vllm_config
         ):
+            if connector_cls in seen_classes:
+                continue
+            seen_classes.add(connector_cls)
             connector_prom = connector_cls.build_prom_metrics(
                 temp_config, metric_types, labelnames, per_engine_labelvalues
             )

@@ -16,7 +16,7 @@ class ModelArchitectureConfig:
     Configuration for model architecture that required by vLLM runtime
     """
 
-    architectures: list[str] | None
+    architectures: list[str]
     """List of model architecture class names (e.g., ['LlamaForCausalLM']).
        It can be None upon calling `vllm_config.with_hf_config(config.text_config)`"""
 

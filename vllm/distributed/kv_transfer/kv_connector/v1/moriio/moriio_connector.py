@@ -846,7 +846,7 @@ class MoRIIOConnectorWorker:
         ]
 
     def _ping(self, zmq_context):
-        http_request_address = f"http://{self.request_address}/v1/completions"
+        http_request_address = f"http://{self.request_address}/v1"
         role = "P" if self.is_producer else "D"
 
         retry_count = 0
@@ -1395,9 +1395,6 @@ class MoRIIOConnectorWorker:
             remote_notify_port=meta.remote_notify_port,
             remote_ip=meta.remote_host,
         )
-
-    def _is_last_layer(self, layer_name):
-        return layer_name == list(self.kv_caches.keys())[-1]
 
     def merge_contiguous_blocks(
         self,
