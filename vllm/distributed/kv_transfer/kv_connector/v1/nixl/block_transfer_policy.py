@@ -23,6 +23,7 @@ import torch
 
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
+    EngineId,
     EngineTransferInfo,
     MambaEngineTransferInfo,
     TransferTopology,
@@ -221,20 +222,10 @@ class ModelBlockTransferPolicy(ABC):
     @abstractmethod
     def build_remote_descs(
         self,
-        # TP topology
-        tp_rank: int,
-        tp_size: int,
-        is_mla: bool,
-        total_num_kv_heads: int,
-        tp_ratio: int,
-        # Remote engine info
+        transfer_topo: TransferTopology,
+        engine_id: EngineId,
         nixl_agent_meta: NixlAgentMetadata,
-        remote_info: EngineTransferInfo,
-        # Block geometry
-        block_size_ratio: int,
         block_len_per_layer: list[int],
-        # Layout
-        is_blocks_first: bool,
     ) -> list[tuple[int, int, int]]:
         """Build remote (dst) descriptor tuples."""
         ...
@@ -481,43 +472,42 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     def build_remote_descs(
         self,
-        tp_rank,
-        tp_size,
-        is_mla,
-        total_num_kv_heads,
-        tp_ratio,
+        transfer_topo,
+        engine_id,
         nixl_agent_meta,
-        remote_info,
-        block_size_ratio,
         block_len_per_layer,
-        is_blocks_first,
     ):
         # With homogeneous TP, D pulls the whole kv cache from corresponding
         # rank. With heterogeneous TP, prepare the descriptors by splitting the
         # P KV cache along kv_head dim, of D worker's kv_head size (D>P).
         # Eg. PTP1 DTP2 => P0 KV:[block0-KV_0 | block0-KV_1..].
         # Register all remote blocks, but only the corresponding kv heads.
+        remote_info = transfer_topo.get_engine_info(engine_id)
         assert isinstance(remote_info, EngineTransferInfo)
+        tp_rank = transfer_topo.tp_rank
+        is_mla = transfer_topo.is_mla
+        is_blocks_first = transfer_topo.is_kv_layout_blocks_first
+        tp_ratio = transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        block_size_ratio = transfer_topo.block_size_ratio(remote_info.remote_block_size)
         indexes_into_remote = (
-            not (is_mla or remote_info.remote_tp_size > total_num_kv_heads)
+            not (
+                is_mla or remote_info.remote_tp_size > transfer_topo.total_num_kv_heads
+            )
             and tp_ratio > 0
         )
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(
             nixl_agent_meta.kv_caches_base_addr,
         ):
-            # Read our whole local region size from remote.
             local_block_len = self.get_kv_block_len(
                 i,
                 block_len_per_layer,
                 is_blocks_first,
             )
-            # using remote kv_block_len as transfer unit
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
                 local_block_len = remote_kv_block_len
             if tp_ratio < 0 and not is_mla:
-                # Remote tp is bigger: read a chunk of local region from remote
                 local_block_len = local_block_len // (-tp_ratio)
             rank_offset = (
                 tp_rank % tp_ratio * remote_kv_block_len if indexes_into_remote else 0
@@ -808,31 +798,22 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     def build_remote_descs(
         self,
-        tp_rank,
-        tp_size,
-        is_mla,
-        total_num_kv_heads,
-        tp_ratio,
+        transfer_topo,
+        engine_id,
         nixl_agent_meta,
-        remote_info,
-        block_size_ratio,
         block_len_per_layer,
-        is_blocks_first,
     ):
+        remote_info = transfer_topo.get_engine_info(engine_id)
         assert isinstance(remote_info, MambaEngineTransferInfo)
         info = remote_info
+        tp_ratio = transfer_topo.tp_ratio(info.remote_tp_size)
         result: list[tuple[int, int, int]] = []
         result.extend(
             self._build_fa_remote_descs(
+                transfer_topo,
                 nixl_agent_meta,
                 info,
                 tp_ratio,
-                tp_rank,
-                tp_size,
-                total_num_kv_heads,
-                block_size_ratio,
-                is_blocks_first,
-                is_mla,
                 block_len_per_layer,
             )
         )
@@ -840,7 +821,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
             self._build_mamba_remote_descs(
                 nixl_agent_meta,
                 tp_ratio,
-                tp_rank,
+                transfer_topo.tp_rank,
                 info.remote_physical_blocks_per_logical,
             )
         )
@@ -850,19 +831,20 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
     # This method also handles FA replication (see ABC helpers above).
     def _build_fa_remote_descs(
         self,
-        nixl_agent_meta,
+        transfer_topo: TransferTopology,
+        nixl_agent_meta: NixlAgentMetadata,
         info: MambaEngineTransferInfo,
         tp_ratio: int,
-        tp_rank: int,
-        tp_size: int,
-        total_num_kv_heads: int,
-        block_size_ratio: int,
-        is_blocks_first: bool,
-        use_mla: bool,
         block_len_per_layer: list[int],
     ):
         """Build remote FA descriptors for mamba models using
         transfer_cfg for GQA-aware sizing."""
+        tp_rank = transfer_topo.tp_rank
+        tp_size = transfer_topo.tp_size
+        is_mla = transfer_topo.is_mla
+        total_num_kv_heads = transfer_topo.total_num_kv_heads
+        is_blocks_first = transfer_topo.is_kv_layout_blocks_first
+        block_size_ratio = transfer_topo.block_size_ratio(info.remote_block_size)
         assert block_size_ratio == 1, (
             "Mamba 3-read transfer with block_size_ratio != 1 "
             f"is not tested. Got {block_size_ratio=}."
@@ -879,14 +861,14 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
             remote_kv_block_len = local_block_len // block_size_ratio
             if block_size_ratio > 1:
                 local_block_len = remote_kv_block_len
-            if tp_ratio < 0 and not use_mla:
+            if tp_ratio < 0 and not is_mla:
                 local_block_len = local_block_len // info.remote_num_fa_reads
             rank_offset = self._fa_rank_offset(
                 info,
                 remote_kv_block_len,
                 tp_rank=tp_rank,
                 tp_size=tp_size,
-                is_mla=use_mla,
+                is_mla=is_mla,
                 total_num_kv_heads=total_num_kv_heads,
             )
             num_blocks = nixl_agent_meta.num_blocks
@@ -901,7 +883,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                     block_len_per_layer,
                     is_blocks_first,
                 )
-                if tp_ratio < 0 and not use_mla:
+                if tp_ratio < 0 and not is_mla:
                     second_split = second_split // info.remote_num_fa_reads
                 for blk in range(num_blocks):
                     addr = base_addr + blk * page_size + rank_offset
