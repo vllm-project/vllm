@@ -846,7 +846,7 @@ class MoRIIOConnectorWorker:
         ]
 
     def _ping(self, zmq_context):
-        http_request_address = f"http://{self.request_address}/v1/completions"
+        http_request_address = f"http://{self.request_address}/v1"
         role = "P" if self.is_producer else "D"
 
         retry_count = 0
