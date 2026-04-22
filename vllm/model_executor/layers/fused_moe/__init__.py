@@ -29,7 +29,6 @@ from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
-from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -64,7 +63,6 @@ __all__ = [
     "FusedMoEPrepareAndFinalizeModular",
     "GateLinear",
     "RoutingMethodType",
-    "SharedFusedMoE",
     "activation_without_mul",
     "apply_moe_activation",
     "override_config",
