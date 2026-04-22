@@ -291,7 +291,7 @@ class Scheduler(SchedulerInterface):
         num_new_tokens: int,
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
-        mamba_tokens_lag: int = 0,
+        num_uncached_common_prefix_tokens: int = 0,
     ) -> int:
         assert num_external_computed_tokens == 0, (
             "External KV connector is not verified yet"
@@ -339,20 +339,23 @@ class Scheduler(SchedulerInterface):
             # Create cache entries at divergence points of common prefixes.
             #
             # Implementation:
-            # If uncached common prefix (mamba_tokens_lag) is long enough
-            # to justify its caching ( >= block_size)
+            # If uncached common prefix (num_uncached_common_prefix_tokens)
+            # is long enough to justify its caching ( >= block_size)
             #   AND
             # currently scheduled token count is longer than the common prefix
-            if mamba_tokens_lag >= block_size and num_new_tokens > mamba_tokens_lag:
+            if (
+                num_uncached_common_prefix_tokens >= block_size
+                and num_new_tokens > num_uncached_common_prefix_tokens
+            ):
                 # Then force to cache at the end of the common prefix
                 # by limiting the num_new_tokens to the length of that prefix:
-                num_new_tokens = mamba_tokens_lag
+                num_new_tokens = num_uncached_common_prefix_tokens
                 # This should be still block aligned as:
                 #  - token hit counts are block aligned
-                #  - thus mamba_tokens_lag is block aligned
+                #  - thus num_uncached_common_prefix_tokens is block aligned
                 #  - attention and mamba block sizes are equal
                 # Optionally, we can verify this:
-                assert mamba_tokens_lag % block_size == 0
+                assert num_new_tokens % block_size == 0
                 # Or force block re-alignment:
                 # num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
@@ -639,7 +642,9 @@ class Scheduler(SchedulerInterface):
                             len(new_computed_blocks.blocks[0]) * self.block_size
                         )
                         # How many tokens mamba cache is behind the longest hit:
-                        mamba_tokens_lag = longest_hit_length - common_hit_length
+                        num_uncached_common_prefix_tokens = (
+                            longest_hit_length - common_hit_length
+                        )
                         # Resume default scheduler logic based on the common hit
                         num_new_local_computed_tokens = common_hit_length
 
@@ -734,7 +739,7 @@ class Scheduler(SchedulerInterface):
                         num_new_tokens,
                         num_new_local_computed_tokens,
                         num_external_computed_tokens,
-                        mamba_tokens_lag,
+                        num_uncached_common_prefix_tokens,
                     )
                     if num_new_tokens == 0:
                         break
