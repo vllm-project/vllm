@@ -55,14 +55,47 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
     }
 }
 
+/// Try a short tail suffix first (covers a CJK glyph straddling 1-2 token
+/// boundaries); beyond 6 tokens the fallback full-prompt decode is no worse
+/// than baseline so widening the sweep just adds overhead.
+const SAFE_SUFFIX_MIN: usize = 4;
+const SAFE_SUFFIX_MAX: usize = 6;
+
+impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
+    /// Seed `self.prefix` from the shortest trailing suffix whose decoded text
+    /// has no U+FFFD — a clean decode means the suffix starts and ends at
+    /// valid UTF-8/token boundaries, so priming from it is equivalent to
+    /// priming from the full prompt.
+    fn seed_prefix(&mut self) -> Result<()> {
+        let prompt_len = self.ids.len();
+        if prompt_len > SAFE_SUFFIX_MIN {
+            let max_try = SAFE_SUFFIX_MAX.min(prompt_len - 1);
+            for suffix_len in SAFE_SUFFIX_MIN..=max_try {
+                let start = prompt_len - suffix_len;
+                let decoded = self
+                    .tokenizer
+                    .decode(&self.ids[start..], self.skip_special_tokens)?;
+                if !decoded.contains('\u{FFFD}') {
+                    self.prefix = decoded;
+                    self.ids.drain(..start);
+                    self.prefix_index = self.ids.len();
+                    return Ok(());
+                }
+            }
+        }
+        let decoded = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
+        if !decoded.ends_with('\u{FFFD}') {
+            self.prefix = decoded;
+            self.prefix_index = self.ids.len();
+        }
+        Ok(())
+    }
+}
+
 impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     fn push_token(&mut self, token_id: u32) -> Result<usize> {
         if self.prefix.is_empty() && !self.ids.is_empty() {
-            let new_prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
-            if !new_prefix.ends_with('\u{FFFD}') {
-                self.prefix = new_prefix;
-                self.prefix_index = self.ids.len();
-            }
+            self.seed_prefix()?;
         }
 
         self.ids.push(token_id);

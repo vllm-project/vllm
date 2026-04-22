@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fastokens::Tokenizer as FastokensTokenizer;
+use fastokens::decoders::Decoder as FastokensDecoder;
 use thiserror_ext::AsReport as _;
 use tokenizers::Tokenizer as HfTokenizer;
 use tracing::{info, warn};
@@ -9,10 +10,43 @@ use tracing::{info, warn};
 use crate::Error;
 use crate::error::Result;
 use crate::tokenizer::Tokenizer;
+use crate::tokenizer::byte_level_decode::decode_byte_level;
 
 enum Backend {
     Hf(Box<HfTokenizer>),
     Fastokens(Box<FastokensTokenizer>),
+    /// Fastokens tokenizer whose decoder is pure GPT-2 byte-level, so we can
+    /// bypass `Decoder::decode`'s `Vec<String>`/`join("")` assembly.
+    FastokensByteLevel(Box<FastokensTokenizer>),
+}
+
+/// True if `dec` is effectively a single `ByteLevel` stage — one `ByteLevel`
+/// leaf in a tree of `Sequence`s (fastokens represents `Fuse` as an empty
+/// `Sequence`, which is a no-op for our purposes).
+fn is_byte_level_only(dec: &FastokensDecoder) -> bool {
+    fn count_byte_level(dec: &FastokensDecoder) -> usize {
+        match dec {
+            FastokensDecoder::ByteLevel(_) => 1,
+            FastokensDecoder::Sequence(steps) => steps.iter().map(count_byte_level).sum(),
+        }
+    }
+    count_byte_level(dec) == 1
+}
+
+fn decode_fastokens_byte_level(
+    t: &FastokensTokenizer,
+    token_ids: &[u32],
+    skip_special_tokens: bool,
+) -> Result<String> {
+    let tokens: Vec<&str> = token_ids
+        .iter()
+        .filter(|&&id| !(skip_special_tokens && t.is_special_token(id)))
+        .map(|&id| {
+            t.id_to_token(id)
+                .ok_or_else(|| Error::Tokenizer(format!("decoding failed: unknown token ID: {id}")))
+        })
+        .collect::<Result<_>>()?;
+    Ok(decode_byte_level(tokens))
 }
 
 /// Tokenizer from `tokenizer.json` in HuggingFace format.
@@ -57,8 +91,14 @@ impl HuggingFaceTokenizer {
             ids.dedup();
             Arc::from(ids)
         };
+        let byte_level = tokenizer.decoder().is_some_and(is_byte_level_only);
+        let backend = if byte_level {
+            Backend::FastokensByteLevel(Box::new(tokenizer))
+        } else {
+            Backend::Fastokens(Box::new(tokenizer))
+        };
         Self {
-            backend: Backend::Fastokens(Box::new(tokenizer)),
+            backend,
             special_token_ids,
         }
     }
@@ -106,7 +146,7 @@ impl Tokenizer for HuggingFaceTokenizer {
                 })?;
                 Ok(encoding.get_ids().to_vec())
             }
-            Backend::Fastokens(t) => t
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t
                 .encode_with_special_tokens(text, add_special_tokens)
                 .map_err(|error| {
                     Error::Tokenizer(format!("encoding failed: {}", error.as_report()))
@@ -122,13 +162,16 @@ impl Tokenizer for HuggingFaceTokenizer {
             Backend::Fastokens(t) => t.decode(token_ids, skip_special_tokens).map_err(|error| {
                 Error::Tokenizer(format!("decoding failed: {}", error.as_report()))
             }),
+            Backend::FastokensByteLevel(t) => {
+                decode_fastokens_byte_level(t, token_ids, skip_special_tokens)
+            }
         }
     }
 
     fn token_to_id(&self, token: &str) -> Option<u32> {
         match &self.backend {
             Backend::Hf(t) => t.token_to_id(token),
-            Backend::Fastokens(t) => t.token_to_id(token),
+            Backend::Fastokens(t) | Backend::FastokensByteLevel(t) => t.token_to_id(token),
         }
     }
 
@@ -198,10 +241,105 @@ mod tests {
 
         let wrapper = HuggingFaceTokenizer::new_fastokens(&path)
             .expect("load wrapper with fastokens backend");
-        assert!(matches!(wrapper.backend, super::Backend::Fastokens(_)));
+        assert!(matches!(
+            wrapper.backend,
+            super::Backend::Fastokens(_) | super::Backend::FastokensByteLevel(_),
+        ));
         let special_id = wrapper
             .token_to_id("<|im_end|>")
             .expect("resolve added special token id");
         assert!(wrapper.is_special_id(special_id));
+    }
+
+    /// BPE tokenizer that round-trips through fastokens with a genuine
+    /// `ByteLevel` decoder; vocab covers both GPT-2 (Ġ U+0120) and non-GPT-2
+    /// (｜ U+FF5C) codepoints.
+    fn tiny_byte_level_bpe() -> fastokens::Tokenizer {
+        let raw = r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {"id": 0, "content": "<|endoftext|>", "single_word": false,
+                 "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+            ],
+            "normalizer": null,
+            "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": false,
+                              "trim_offsets": true, "use_regex": true},
+            "post_processor": null,
+            "decoder": {"type": "ByteLevel", "add_prefix_space": false,
+                        "trim_offsets": true, "use_regex": true},
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": false,
+                "ignore_merges": false,
+                "vocab": {
+                    "<|endoftext|>": 0,
+                    "H": 1, "e": 2, "l": 3, "o": 4, "w": 5, "r": 6, "d": 7,
+                    "Ġ": 8, "!": 9,
+                    "｜": 10
+                },
+                "merges": []
+            }
+        }"#;
+        let value: serde_json::Value = serde_json::from_str(raw).expect("parse tokenizer json");
+        fastokens::Tokenizer::from_json(value).expect("build fastokens tokenizer")
+    }
+
+    #[test]
+    fn byte_level_detected_direct() {
+        let t = tiny_byte_level_bpe();
+        assert!(super::is_byte_level_only(t.decoder().expect("decoder")));
+    }
+
+    #[test]
+    fn byte_level_detected_inside_sequence() {
+        let raw = r#"{
+            "type": "Sequence",
+            "decoders": [
+                {"type": "ByteLevel", "add_prefix_space": false,
+                 "trim_offsets": true, "use_regex": true},
+                {"type": "Fuse"}
+            ]
+        }"#;
+        let config: fastokens::DecoderConfig =
+            serde_json::from_str(raw).expect("parse decoder config");
+        let dec =
+            fastokens::decoders::Decoder::from_config(config).expect("build decoder from config");
+        assert!(super::is_byte_level_only(&dec));
+    }
+
+    /// Fast path must produce byte-identical output to fastokens' own decode.
+    #[test]
+    fn fast_byte_level_matches_fastokens_decode() {
+        let t = tiny_byte_level_bpe();
+        let cases: &[&[u32]] = &[
+            &[],
+            &[1, 2, 3, 3, 4],                   // "Hello"
+            &[1, 2, 3, 3, 4, 8, 5, 4, 6, 3, 7], // "Hello world"
+            &[0, 1, 2, 3, 3, 4, 0, 9, 0],       // specials interleaved
+            &[10, 1, 2, 3, 3, 4, 10],           // ｜Hello｜ (non-GPT2 chars)
+        ];
+        for ids in cases {
+            for &skip in &[false, true] {
+                let expected = t.decode(ids, skip).expect("fastokens decode");
+                let got =
+                    super::decode_fastokens_byte_level(&t, ids, skip).expect("fast-path decode");
+                assert_eq!(got, expected, "ids={ids:?} skip={skip}");
+            }
+        }
+    }
+
+    #[test]
+    fn fast_byte_level_errors_on_unknown_id() {
+        let t = tiny_byte_level_bpe();
+        let err = super::decode_fastokens_byte_level(&t, &[999], false)
+            .expect_err("unknown id must error");
+        assert!(format!("{err:?}").contains("999"));
     }
 }

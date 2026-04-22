@@ -734,7 +734,7 @@ async fn chat_stream_reports_decode_failure_as_error_event() {
                 send_outputs(
                     push,
                     EngineCoreOutputs {
-                        outputs: vec![request_output("chat-4", vec![b'X' as u32], None, None)],
+                        outputs: vec![request_output("chat-4", vec![b'i' as u32], None, None)],
                         ..Default::default()
                     },
                 )

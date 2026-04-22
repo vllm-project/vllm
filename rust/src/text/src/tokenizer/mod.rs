@@ -3,6 +3,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::incremental::{DecodeStream, IncrementalDecoder};
 
+mod byte_level_decode;
 mod hf;
 mod tekken;
 mod tiktoken;
