@@ -177,6 +177,8 @@ def compute_tile_loop_bounds(
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
     IS_3D: tl.constexpr,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -214,7 +216,13 @@ def compute_tile_loop_bounds(
             qpos_lo + (BLOCK_M - 1) // num_queries_per_kv,
             cur_batch_query_len - 1,
         )
-        first_allowed_key = context_len + qpos_lo - SLIDING_WINDOW + 1
+        q_abs = context_len + qpos_lo
+        if CHUNK_LOOKBACK > -1:
+            # Chunked attention: align lower bound to the start of the
+            # lookback'th previous chunk.
+            first_allowed_key = ((q_abs // CHUNK_SIZE) - CHUNK_LOOKBACK) * CHUNK_SIZE
+        else:
+            first_allowed_key = q_abs - SLIDING_WINDOW + 1
         last_allowed_key = context_len + qpos_hi
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
@@ -268,16 +276,27 @@ def compute_kv_seq_mask(
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
     MAX_MM_RANGES: tl.constexpr,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
 ):
     """Build the KV mask for one tile.
 
-    Causal (key <= query) by default; AND-ed with the sliding window when
-    enabled; OR-ed with the bidirectional ranges from ``mm_prefix_range``
-    when PrefixLM / multimodal attention is active.  The order matches
-    FlexAttention: ``(causal AND sliding_window) OR mm_prefix``.
+    Causal (key <= query) by default; AND-ed with either chunked
+    attention (``CHUNK_LOOKBACK >= 0``) or sliding window
+    (``SLIDING_WINDOW > 0``); OR-ed with the bidirectional ranges from
+    ``mm_prefix_range`` when PrefixLM / multimodal attention is active.
+    Order matches FlexAttention: ``(causal AND window) OR mm_prefix``.
+    Chunked attention takes precedence over sliding window when both
+    are non-default — the launcher zeros ``CHUNK_LOOKBACK`` whenever
+    sliding window is disabled.
     """
     seq_mask = seq_offset[None, :] <= query_abs_pos
-    if SLIDING_WINDOW > 0:
+    if CHUNK_LOOKBACK > -1:
+        seq_mask = seq_mask & (
+            (query_abs_pos // CHUNK_SIZE - seq_offset[None, :] // CHUNK_SIZE)
+            <= CHUNK_LOOKBACK
+        )
+    elif SLIDING_WINDOW > 0:
         seq_mask = seq_mask & ((query_abs_pos - seq_offset) < SLIDING_WINDOW)
     if USE_MM_PREFIX:
         for i in range(MAX_MM_RANGES):

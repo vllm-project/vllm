@@ -566,7 +566,9 @@ class OpenAIServingRender:
         if reasoning_parser is not None:
             tokenizer = renderer.get_tokenizer()
             request = reasoning_parser(
-                tokenizer, model_config=self.model_config
+                tokenizer,
+                model_config=self.model_config,
+                chat_template_kwargs=chat_params.chat_template_kwargs,
             ).adjust_request(request=request)
 
         # tool parsing is done only if a tool_parser has been set and if

@@ -119,6 +119,11 @@ def kernel_unified_attention(
     KV_QUANT_MODE: tl.constexpr = 0,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # Chunked / block-local attention.  ``CHUNK_LOOKBACK >= 0`` enables
+    # chunked masking (used by Gemma3 block-local layers); takes precedence
+    # over ``SLIDING_WINDOW`` inside the helpers.  ``-1`` disables.
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
 
@@ -202,6 +207,8 @@ def kernel_unified_attention(
         SLIDING_WINDOW,
         USE_MM_PREFIX,
         IS_3D,
+        CHUNK_LOOKBACK,
+        CHUNK_SIZE,
     )
 
     for j in range(loop_lo, loop_hi):
@@ -265,6 +272,8 @@ def kernel_unified_attention(
             SLIDING_WINDOW,
             USE_MM_PREFIX,
             MAX_MM_RANGES,
+            CHUNK_LOOKBACK,
+            CHUNK_SIZE,
         )
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -499,6 +508,8 @@ def unified_attention(
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
+    # Chunked attention: restrict attention to aligned blocks with lookback.
+    chunk_lookback=-1,
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
@@ -590,6 +601,15 @@ def unified_attention(
     total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
+
+    # Compute chunked block size from sliding window if needed.
+    chunk_size = -1
+    if sliding_window_val > 0 and chunk_lookback > -1:
+        chunk_size = sliding_window_val // (chunk_lookback + 1)
+        assert chunk_size > 0, "sliding_window must be > chunk_lookback+1"
+    elif sliding_window_val <= 0:
+        chunk_lookback = -1
+
     TILE_SIZE_PREFILL = _get_tile_size(
         head_size, sliding_window_val, q.element_size(), is_prefill=True
     )
@@ -705,6 +725,8 @@ def unified_attention(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
+        CHUNK_LOOKBACK=chunk_lookback,
+        CHUNK_SIZE=chunk_size,
     )
 
     if use_3d:
