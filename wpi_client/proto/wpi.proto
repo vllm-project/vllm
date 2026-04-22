@@ -1,0 +1,182 @@
+// Copyright 2025 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// Weight Propagation Interface (WPI) v1alpha1 protocol definition.
+//
+// Defines the gRPC API between the WPI consumer (e.g., verl checkpoint engine)
+// and the WPI driver DaemonSet running on each Kubernetes node.
+//
+// See: https://github.com/kubernetes-sigs/wg-serving/tree/main/wpi
+
+syntax = "proto3";
+
+package wpi.v1alpha1;
+
+option go_package = "wpi.sig.k8s.io/operator/pkg/wpi;wpi";
+
+// ---------------------------------------------------------------------------
+// 2.1 WPI Identity Service
+// ---------------------------------------------------------------------------
+
+message GetPluginInfoRequest {}
+
+message GetPluginInfoResponse {
+  string name = 1;
+  string vendor_version = 2;
+}
+
+message GetPluginCapabilitiesRequest {}
+
+message GetPluginCapabilitiesResponse {
+  repeated PluginCapability capabilities = 1;
+
+  message PluginCapability {
+    Capability capability = 1;
+
+    enum Capability {
+      UNKNOWN = 0;
+      CROSS_VENDOR_TRANSFER = 1;
+      ON_THE_FLY_RESHAPING = 2;
+      PRE_STAGING_SUPPORT = 3;
+    }
+  }
+}
+
+service IdentityService {
+  rpc GetPluginInfo(GetPluginInfoRequest) returns (GetPluginInfoResponse);
+  rpc GetPluginCapabilities(GetPluginCapabilitiesRequest) returns (GetPluginCapabilitiesResponse);
+}
+
+// ---------------------------------------------------------------------------
+// 2.2 WPI Controller Service (The "Handshake")
+// ---------------------------------------------------------------------------
+
+message CreateWeightBufferRequest {
+  string buffer_id = 1;
+  uint64 size_bytes = 2;
+}
+
+message CreateWeightBufferResponse {}
+
+message AuthorizeTransferRequest {
+  string buffer_id = 1;
+  string target_node_id = 2;
+}
+
+message AuthorizeTransferResponse {
+  bytes rkey = 1;
+}
+
+message QueryTopologyRequest {
+  string node_id = 1;
+}
+
+message QueryTopologyResponse {
+  string topology_info = 1;
+}
+
+service ControllerService {
+  rpc CreateWeightBuffer(CreateWeightBufferRequest) returns (CreateWeightBufferResponse);
+  rpc AuthorizeTransfer(AuthorizeTransferRequest) returns (AuthorizeTransferResponse);
+  rpc QueryTopology(QueryTopologyRequest) returns (QueryTopologyResponse);
+}
+
+// ---------------------------------------------------------------------------
+// 2.3 WPI Node Service (The "Mover")
+// ---------------------------------------------------------------------------
+
+message NodeRegisterWeightRequest {
+  string buffer_id = 1;
+  uint64 size_bytes = 2;
+}
+
+message NodeRegisterWeightResponse {
+  string dma_buf_handle = 1;
+}
+
+message NodeStageWeightRequest {
+  string claim_id = 1;
+  string buffer_id = 2;
+  string source_path = 3;
+  uint64 size_bytes = 4;
+  // Shard-aware staging: which shard to stage.
+  // -1 or absent means stage the entire buffer (legacy behavior).
+  int32 shard_index = 5;
+  // Total number of shards for validation.
+  int32 total_shards = 6;
+}
+
+message NodeStageWeightResponse {}
+
+message NodeUnstageWeightRequest {
+  string claim_id = 1;
+}
+
+message NodeUnstageWeightResponse {}
+
+message LayoutDescriptor {
+  LayoutType type = 1;
+  bytes tiling_metadata = 2;
+
+  enum LayoutType {
+    ROW_MAJOR = 0;
+    COLUMN_MAJOR = 1;
+    VENDOR_SPECIFIC_TILING = 2;
+  }
+}
+
+// PropagateMode controls whether all targets receive the same data
+// or each target receives a different shard.
+enum PropagateMode {
+  BROADCAST = 0;  // All targets get the same data (default, current behavior)
+  SCATTER = 1;    // Each target gets a different shard
+}
+
+// ShardAssignment maps a target node to a specific byte range of the source buffer.
+message ShardAssignment {
+  string target_node_id = 1;
+  int32 shard_index = 2;
+  uint64 offset_bytes = 3;  // Byte offset into the source buffer
+  uint64 length_bytes = 4;  // Size of this shard in bytes
+  int32 target_gpu_id = 5;  // Which GPU on the target node receives this shard
+}
+
+message NodePropagateRequest {
+  string buffer_id = 1;
+  repeated string target_node_ids = 2;
+  LayoutDescriptor target_layout = 3;
+  // Scatter mode: each target gets a different shard
+  PropagateMode mode = 4;
+  repeated ShardAssignment shard_assignments = 5;
+}
+
+message NodePropagateResponse {}
+
+message NodeTranslateAndMapRequest {
+  string claim_id = 1;
+  LayoutDescriptor source_layout = 2;
+  LayoutDescriptor target_layout = 3;
+}
+
+message NodeTranslateAndMapResponse {
+  string device_path = 1;
+}
+
+service NodeService {
+  rpc NodeRegisterWeight(NodeRegisterWeightRequest) returns (NodeRegisterWeightResponse);
+  rpc NodeStageWeight(NodeStageWeightRequest) returns (NodeStageWeightResponse);
+  rpc NodeUnstageWeight(NodeUnstageWeightRequest) returns (NodeUnstageWeightResponse);
+  rpc NodePropagate(NodePropagateRequest) returns (NodePropagateResponse);
+  rpc NodeTranslateAndMap(NodeTranslateAndMapRequest) returns (NodeTranslateAndMapResponse);
+}

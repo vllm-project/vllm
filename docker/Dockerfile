@@ -624,6 +624,10 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system accelerate modelscope \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
+# Copy and install WPI client
+COPY wpi_client /tmp/wpi_client
+RUN uv pip install --system /tmp/wpi_client
+
 # ============================================================
 # VLLM INSTALLATION (depends on build stage)
 # ============================================================
