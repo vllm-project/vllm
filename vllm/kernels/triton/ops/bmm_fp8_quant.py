@@ -385,8 +385,7 @@ def bmm_fp8_group_quant(
             f"got {tuple(output_scales.shape)}"
         )
         assert output_scales.stride(0) == 1, (
-            f"tma_aligned scales must have stride(0)==1, "
-            f"got {output_scales.stride()}"
+            f"tma_aligned scales must have stride(0)==1, got {output_scales.stride()}"
         )
         # Kernel uses atomic_or to pack disjoint bytes — requires zero init on
         # the visible region, which also handles mn / head padding bytes

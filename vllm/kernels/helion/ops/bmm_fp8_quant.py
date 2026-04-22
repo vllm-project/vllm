@@ -283,7 +283,9 @@ def bmm_fp8_group_quant_helion(
         if scale_ue8m0:
             # Round scale up to the next power of 2 (UE8M0).
             group_scale = abs_max / _FP8_MAX
-            group_scale = torch.exp2(torch.ceil(torch.log2(group_scale.clamp(min=1e-10))))
+            group_scale = torch.exp2(
+                torch.ceil(torch.log2(group_scale.clamp(min=1e-10)))
+            )
             inv_scale = 1.0 / group_scale
         else:
             group_scale = abs_max / _FP8_MAX
