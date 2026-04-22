@@ -634,6 +634,16 @@ class SpeculativeConfig:
                     )
                 )
 
+                hf_config = self.draft_model_config.hf_config
+                max_pos = getattr(hf_config, "max_position_embeddings", None)
+                if (
+                    max_pos is not None
+                    and max_pos < self.draft_model_config.max_model_len
+                ):
+                    hf_config.max_position_embeddings = (
+                        self.draft_model_config.max_model_len
+                    )
+
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
                         self.target_parallel_config, self.draft_tensor_parallel_size
