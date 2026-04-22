@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -61,6 +62,8 @@ class Mxfp4MoeBackend(Enum):
     TRITON_UNFUSED = "TRITON_UNFUSED"
     # XPU
     XPU = "XPU"
+    # Emulation
+    EMULATION = "EMULATION"
 
 
 # Backends that share the same TRTLLM weight format
@@ -142,11 +145,18 @@ def backend_to_kernel_cls(
 
         return [XPUExpertsMXFp4]
 
+    elif backend == Mxfp4MoeBackend.EMULATION:
+        from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+            OCP_MXQuantizationEmulationTritonExperts,
+        )
+
+        return [OCP_MXQuantizationEmulationTritonExperts]
+
     else:
         raise ValueError(f"Unknown MXFP4 MoE backend: {backend.value}")
 
 
-def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
+def map_mxfp4_backend(runner_backend: MoEBackend) -> Mxfp4MoeBackend:
     """Map user's moe_backend string to Mxfp4MoeBackend."""
     mapping: dict[str, Mxfp4MoeBackend] = {
         "flashinfer_trtllm": Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
@@ -157,6 +167,7 @@ def map_mxfp4_backend(runner_backend: str) -> Mxfp4MoeBackend:
         "marlin": Mxfp4MoeBackend.MARLIN,
         "aiter": Mxfp4MoeBackend.AITER,
         "xpu": Mxfp4MoeBackend.XPU,
+        "emulation": Mxfp4MoeBackend.EMULATION,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -180,6 +191,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.MARLIN,
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.EMULATION,
     ]
     return _AVAILABLE_BACKENDS
 
@@ -201,10 +213,12 @@ def select_gpt_oss_mxfp4_moe_backend(
     Select the primary MXFP4 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    triton_kernels_supported = has_triton_kernels() and (
-        9,
-        0,
-    ) <= current_platform.get_device_capability() < (11, 0)
+    device_capability = current_platform.get_device_capability()
+    triton_kernels_supported = (
+        has_triton_kernels()
+        and device_capability is not None
+        and (9, 0) <= device_capability < (11, 0)
+    )
 
     # LoRA: separate experts backend path
     if config.is_lora_enabled:
@@ -757,6 +771,17 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
         )
     elif mxfp4_backend == Mxfp4MoeBackend.XPU:
         # No additional transformation needed for XPU backend
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
+    elif mxfp4_backend == Mxfp4MoeBackend.EMULATION:
+        # No additional transformation needed for emulation backend,
+        # weights are dequantized on the fly in the experts class.
         return (
             w13_weight,
             w2_weight,
