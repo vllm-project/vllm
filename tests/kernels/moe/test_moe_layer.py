@@ -1620,18 +1620,13 @@ def _parallel_worker(
             else:
                 print("F", end="")
         finally:
-            # Note: for some reason DeepEP buffers don't seem to be
-            # entirely reusable on B200. In order to work around this
-            # we clear the all2all manager's cache after each testpoint.
-            cap = current_platform.get_device_capability()
-            if (
-                cap is not None
-                and cap.major == 10
-                and (
-                    test_config.backend == "deepep_low_latency"
-                    or test_config.backend == "deepep_high_throughput"
-                )
-            ):
+            # DeepEP managers are not reliably reusable across many subtests in
+            # a single worker process. Tear them down after each DeepEP case so
+            # later subtests do not inherit stale communication state.
+            if test_config.backend in {
+                "deepep_low_latency",
+                "deepep_high_throughput",
+            }:
                 torch.accelerator.synchronize()
                 all2all_manager = get_ep_group().device_communicator.all2all_manager
                 if all2all_manager is not None:
