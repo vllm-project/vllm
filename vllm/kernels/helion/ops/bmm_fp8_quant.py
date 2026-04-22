@@ -229,15 +229,24 @@ def pick_bmm_fp8_group_quant_config(
 def bmm_fp8_group_quant_helion(
     input: torch.Tensor,
     weight: torch.Tensor,
+    scale_ue8m0: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused batched matrix multiply + per-group dynamic FP8 quantization.
 
     Each group is one head's V elements for one token. Scales are computed
     dynamically as abs_max / FP8_MAX per group.
 
+    The TMA-aligned packed scale layout is not implemented in this Helion
+    kernel — callers that need it should use the Triton version in
+    `vllm/kernels/triton/ops/bmm_fp8_quant.py` (see `_v_up_proj`). The
+    packing relies on atomic byte writes which Helion doesn't expose. The
+    returned (B, N) fp32 scales are compatible with the column-major layout
+    by viewing with swapped strides at the caller.
+
     Args:
         input: (N, B, L) input tensor in bf16/fp16
         weight: (N, L, V) weight tensor in bf16/fp16
+        scale_ue8m0: if True, round scales up to the next power of 2.
 
     Returns:
         out: (B, N, V) tensor in FP8
@@ -270,12 +279,20 @@ def bmm_fp8_group_quant_helion(
         # triggers a Helion codegen bug with 2D→3D broadcasting.
         abs_max = result_f32.abs().amax(dim=-1, keepdim=True)  # (tile_n, tile_b, 1)
         abs_max = abs_max.clamp(min=1e-12)
-        inv_scale = _FP8_MAX / abs_max  # (tile_n, tile_b, 1) — broadcasts naturally
+
+        if scale_ue8m0:
+            # Round scale up to the next power of 2 (UE8M0).
+            group_scale = abs_max / _FP8_MAX
+            group_scale = torch.exp2(torch.ceil(torch.log2(group_scale.clamp(min=1e-10))))
+            inv_scale = 1.0 / group_scale
+        else:
+            group_scale = abs_max / _FP8_MAX
+            inv_scale = _FP8_MAX / abs_max  # broadcast
 
         result_scaled = (result_f32 * inv_scale).clamp(-_FP8_MAX, _FP8_MAX)
 
         # Transpose first two dims in registers and write directly to (B, N, V)
         out[tile_b, tile_n, :] = result_scaled.transpose(0, 1).to(out.dtype)
-        scales[tile_b, tile_n] = (abs_max.squeeze(-1) / _FP8_MAX).transpose(0, 1)
+        scales[tile_b, tile_n] = group_scale.squeeze(-1).transpose(0, 1)
 
     return out, scales
