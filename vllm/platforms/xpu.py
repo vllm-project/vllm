@@ -61,6 +61,12 @@ class XPUPlatform(Platform):
             "only NHD layout is supported by XPU attention kernels."
         )
 
+        # TurboQuant KV cache: route directly to TQ backend
+        kv_cache_dtype = attn_selector_config.kv_cache_dtype
+        if kv_cache_dtype is not None and kv_cache_dtype.startswith("turboquant_"):
+            logger.info_once("Using TurboQuant attention backend.")
+            return AttentionBackendEnum.TURBOQUANT.get_path()
+
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
             logger.info_once("Using XPU MLA Sparse backend.")
@@ -222,6 +228,10 @@ class XPUPlatform(Platform):
         # ref. https://openucx.readthedocs.io/en/master/faq.html
         os.environ["UCX_MEMTYPE_CACHE"] = "n"
 
+        # spawn is the only supported multiprocessing method on XPU
+        if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
         super().update_block_size_for_backend(vllm_config)
@@ -312,6 +322,10 @@ class XPUPlatform(Platform):
                 " is not available."
             )
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
+
+    @classmethod
+    def supports_fp8(cls) -> bool:
+        return True
 
     @classmethod
     def get_default_ir_op_priority(

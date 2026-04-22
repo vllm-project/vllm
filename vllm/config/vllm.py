@@ -37,6 +37,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
+from .mamba import MambaConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -164,6 +165,13 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
+    """Enable MLA dual RMS norm fusion when AITer has fused_qk_rmsnorm."""
+    from vllm._aiter_ops import check_aiter_fused_qk_rmsnorm, rocm_aiter_ops
+
+    return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -174,6 +182,7 @@ OPTIMIZATION_LEVEL_00 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
+            "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
@@ -193,6 +202,7 @@ OPTIMIZATION_LEVEL_01 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
@@ -212,6 +222,7 @@ OPTIMIZATION_LEVEL_02 = {
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -231,6 +242,7 @@ OPTIMIZATION_LEVEL_03 = {
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -275,6 +287,8 @@ class VllmConfig:
     """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    mamba_config: MambaConfig = Field(default_factory=MambaConfig)
+    """Mamba configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
     """Kernel configuration."""
     lora_config: LoRAConfig | None = None
@@ -716,6 +730,18 @@ class VllmConfig:
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
+
+        if (
+            self.mamba_config.enable_stochastic_rounding
+            and self.cache_config.mamba_ssm_cache_dtype != "float16"
+        ):
+            raise ValueError(
+                "Stochastic rounding for Mamba cache requires "
+                "the SSM cache to be float16. Please set it explicitly, "
+                "by specifying `--mamba-ssm-cache-dtype float16`, or disable "
+                "stochastic rounding by not specifying "
+                "`--enable-mamba-cache-stochastic-rounding`."
+            )
 
         if self.quant_config is None and self.model_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
