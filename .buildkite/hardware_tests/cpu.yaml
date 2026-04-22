@@ -25,7 +25,7 @@ steps:
 - label: AMD-CPU-Kernel Tests
   depends_on: []
   soft_fail: false
-  device: amd-zen-cpu-inference
+  device: zen5
   no_plugin: true
   source_file_dependencies:
   - setup.py
@@ -61,7 +61,7 @@ steps:
 - label: AMD-CPU-Compatibility Tests
   depends_on: []
   soft_fail: false
-  device: amd-zen-cpu-inference
+  device: zen5
   no_plugin: true
   source_file_dependencies:
   - setup.py
@@ -96,7 +96,7 @@ steps:
 - label: AMD-CPU-Language Generation and Pooling Model Tests
   depends_on: []
   soft_fail: false
-  device: amd-zen-cpu-inference
+  device: zen5
   no_plugin: true
   source_file_dependencies:
   - setup.py
@@ -170,7 +170,7 @@ steps:
 - label: AMD-CPU-Distributed Tests
   depends_on: []
   soft_fail: false
-  device: amd-zen-cpu-inference
+  device: zen5
   no_plugin: true
   source_file_dependencies:
   - setup.py
