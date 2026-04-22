@@ -254,6 +254,9 @@ if TYPE_CHECKING:
     VLLM_USE_FBGEMM: bool = False
     VLLM_GC_DEBUG: str = ""
     VLLM_DEBUG_WORKSPACE: bool = False
+    VLLM_PIN_PREFIX_BLOCKS: bool = False
+    VLLM_PIN_SWA_TOKENS: int = 0
+    VLLM_PIN_MIN_DROP_SIZE: int = 16
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
@@ -1858,6 +1861,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Debug workspace allocations.
     # logging of workspace resize operations.
     "VLLM_DEBUG_WORKSPACE": lambda: bool(int(os.getenv("VLLM_DEBUG_WORKSPACE", "0"))),
+    # Pin prefix-cached blocks by starting ref_cnt=2 and making SWA-DROP
+    # decrement by 2. End-of-request free() decrements by 1, leaving blocks
+    # at ref_cnt=1 (pinned, not in free queue). OOW blocks drain first.
+    "VLLM_PIN_PREFIX_BLOCKS": lambda: bool(int(os.getenv("VLLM_PIN_PREFIX_BLOCKS", "0"))),
+    # Number of tokens per SWA group to pin at each SWA-DROP (most-recent-N).
+    # When > 0 and VLLM_PIN_PREFIX_BLOCKS=1, the most recent
+    # (VLLM_PIN_SWA_TOKENS // block_size) blocks being dropped stay pinned
+    # at ref_cnt=1 instead of being freed. Older blocks free normally.
+    "VLLM_PIN_SWA_TOKENS": lambda: int(os.getenv("VLLM_PIN_SWA_TOKENS", "0")),
+    # Minimum drop size (in blocks) required to activate pinning.
+    # Decode-step drops (usually 1 block) skip pinning to avoid bloating the
+    # pinned set with unique-tail hashes that provide no prefix-match value.
+    "VLLM_PIN_MIN_DROP_SIZE": lambda: int(os.getenv("VLLM_PIN_MIN_DROP_SIZE", "16")),
     # Disables parallel execution of shared_experts via separate cuda stream
     "VLLM_DISABLE_SHARED_EXPERTS_STREAM": lambda: bool(
         int(os.getenv("VLLM_DISABLE_SHARED_EXPERTS_STREAM", "0"))

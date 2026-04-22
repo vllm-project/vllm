@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 from collections import defaultdict
 from collections.abc import Sequence
 
+import vllm.envs as envs
+
 from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
@@ -455,7 +457,28 @@ class SingleTypeKVCacheManager(ABC):
         # range), so we must cap to the number of blocks that currently exist for
         # this request.
         num_skipped_blocks = min(num_skipped_blocks, len(blocks))
-        removed_blocks: list[KVCacheBlock] = []
+        # Split removed blocks into pinned (most-recent N) vs freed (older).
+        # pin_blocks is the number of MOST-RECENT blocks (closest to current
+        # window) to pin at each call — controlled by VLLM_PIN_SWA_TOKENS.
+        pin_blocks = 0
+        if envs.VLLM_PIN_PREFIX_BLOCKS and envs.VLLM_PIN_SWA_TOKENS > 0:
+            from vllm.v1.kv_cache_interface import SlidingWindowSpec
+            if isinstance(self.kv_cache_spec, SlidingWindowSpec):
+                pin_blocks = envs.VLLM_PIN_SWA_TOKENS // self.block_size
+        # Decode-step drops (small) contain unique-tail hashes; skip pinning.
+        # Count how many NEW blocks are being dropped this call
+        # (i.e., non-null blocks in the range [0, num_skipped_blocks-1]).
+        num_new_drops = 0
+        for _j in range(num_skipped_blocks - 1, -1, -1):
+            if blocks[_j] == self._null_block:
+                break
+            num_new_drops += 1
+        if num_new_drops < envs.VLLM_PIN_MIN_DROP_SIZE:
+            pin_blocks = 0
+        pin_threshold = max(0, num_skipped_blocks - pin_blocks)
+
+        to_free: list[KVCacheBlock] = []
+        to_pin: list[KVCacheBlock] = []
         # Because the block starts from index 0, the num_skipped_block-th block
         # corresponds to index num_skipped_blocks - 1.
         for i in range(num_skipped_blocks - 1, -1, -1):
@@ -464,9 +487,19 @@ class SingleTypeKVCacheManager(ABC):
                 # should also have been set to null blocks by the previous calls
                 # to this function.
                 break
-            removed_blocks.append(blocks[i])
+            if pin_blocks > 0 and i >= pin_threshold:
+                to_pin.append(blocks[i])
+            else:
+                to_free.append(blocks[i])
             blocks[i] = self._null_block
-        self.block_pool.free_blocks(removed_blocks)
+        # Pin: decrement by 1 so ref_cnt goes 2→1 (stays pinned, not in free queue)
+        for b in to_pin:
+            b.ref_cnt -= 1
+        # Free fully: decrement by 2 when VLLM_PIN_PREFIX_BLOCKS is on
+        # (blocks started at ref_cnt=2). Otherwise normal 1.
+        if to_free:
+            _delta = 2 if envs.VLLM_PIN_PREFIX_BLOCKS else 1
+            self.block_pool.free_blocks(to_free, ref_cnt_delta=_delta)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """

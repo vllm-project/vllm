@@ -10,6 +10,7 @@ from vllm.distributed.kv_events import (
     BlockStored,
     KVCacheEvent,
 )
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
@@ -347,17 +348,18 @@ class BlockPool:
         ret: list[KVCacheBlock] = self.free_block_queue.popleft_n(num_blocks)
 
         # In order to only iterate the list once, we duplicated code a bit
+        _init_refcnt = 2 if envs.VLLM_PIN_PREFIX_BLOCKS else 1
         if self.enable_caching:
             for block in ret:
                 self._maybe_evict_cached_block(block)
                 assert block.ref_cnt == 0
-                block.ref_cnt += 1
+                block.ref_cnt += _init_refcnt
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         else:
             for block in ret:
                 assert block.ref_cnt == 0
-                block.ref_cnt += 1
+                block.ref_cnt += _init_refcnt
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
         return ret
@@ -416,21 +418,28 @@ class BlockPool:
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
-    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock]) -> None:
+    def free_blocks(self, ordered_blocks: Iterable[KVCacheBlock],
+                    ref_cnt_delta: int = 1) -> None:
         """Free a list of blocks. The blocks should be ordered by their
         eviction priority, where the first block will be evicted first.
 
         Args:
             ordered_blocks: A list of blocks to free ordered by their eviction
                 priority.
+            ref_cnt_delta: how much to decrement ref_cnt (default 1).
+                SWA-DROP path uses 2 when VLLM_PIN_PREFIX_BLOCKS is on,
+                to fully release OOW blocks while keeping end-of-request
+                blocks pinned at ref_cnt=1.
         """
         # Materialize the iterable to allow multiple passes.
         blocks_list = list(ordered_blocks)
         for block in blocks_list:
-            block.ref_cnt -= 1
-        self.free_block_queue.append_n(
-            [block for block in blocks_list if block.ref_cnt == 0 and not block.is_null]
-        )
+            block.ref_cnt -= ref_cnt_delta
+        newly_free = [
+            block for block in blocks_list
+            if block.ref_cnt == 0 and not block.is_null
+        ]
+        self.free_block_queue.append_n(newly_free)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
