@@ -1,8 +1,48 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from vllm.config.utils import config
+
+if TYPE_CHECKING:
+    import numpy as np
+
+    from vllm.config.model import ModelConfig
+
+
+@dataclass
+class SpeechToTextParams:
+    """All parameters consumed by ``get_generation_prompt()``.
+
+    ``TranscriptionRequest.build_stt_params()`` constructs this object,
+    mapping API-level fields into typed attributes.  Models only receive
+    this object, so new parameters can be added here without changing the
+    ``get_generation_prompt`` signature.
+    """
+
+    audio: np.ndarray
+    """Resampled audio waveform for a single chunk."""
+
+    stt_config: SpeechToTextConfig
+    """Server-level speech-to-text configuration."""
+
+    model_config: ModelConfig
+    """Model configuration."""
+
+    language: str | None = None
+    """ISO 639-1 language code (validated / auto-detected)."""
+
+    task_type: str = "transcribe"
+    """``"transcribe"`` or ``"translate"``."""
+
+    request_prompt: str = ""
+    """Optional text prompt to guide the model."""
+
+    to_language: str | None = None
+    """Target language for translation (model-dependent)."""
 
 
 @config
