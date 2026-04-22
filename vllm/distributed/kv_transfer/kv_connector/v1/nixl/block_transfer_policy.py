@@ -58,6 +58,125 @@ class ReadSpec:
     remote_block_ids: BlockIds
 
 
+# ------------------------------------------------------------------
+# Private module-level helpers
+# ------------------------------------------------------------------
+
+
+def _get_kv_block_len(
+    layer_idx: int,
+    block_len_per_layer: list[int],
+    is_blocks_first: bool,
+) -> int:
+    """Byte length of one K or V descriptor for a layer.
+
+    For FA/KV layers only — Mamba SSM descriptors use ``_ssm_sizes``
+    directly.  When ``is_blocks_first``, K and V are interleaved so
+    the descriptor covers half the block.
+    """
+    if is_blocks_first:
+        return block_len_per_layer[layer_idx] // 2
+    return block_len_per_layer[layer_idx]
+
+
+def _physical_head_range(tp_size: int, num_heads: int, rank: int) -> range:
+    """Physical KV head range stored in a rank's KV cache tensor.
+
+    When ``tp_size <= num_heads``: sharded, K/TP contiguous heads per rank.
+    When ``tp_size > num_heads``: 1 physical head per rank.  Heads are
+    distributed **contiguously** (matching vLLM's GQA weight
+    partitioning): consecutive ranks share a head before moving to
+    the next one.
+    """
+    if tp_size <= num_heads:
+        assert num_heads % tp_size == 0
+        per_rank = num_heads // tp_size
+        return range(rank * per_rank, (rank + 1) * per_rank)
+    else:
+        h = rank * num_heads // tp_size
+        return range(h, h + 1)
+
+
+def _range_overlap(a: range, b: range) -> range:
+    start = max(a.start, b.start)
+    stop = min(a.stop, b.stop)
+    return range(start, max(start, stop))
+
+
+def _should_skip_fa(info: EngineTransferInfo, remote_rank: int) -> bool:
+    """Whether to skip FA groups for this remote rank.
+
+    Returns False unless ``info`` carries FA source tracking
+    (``MambaEngineTransferInfo``) and the rank is a replicated
+    duplicate.
+    """
+    if not isinstance(info, MambaEngineTransferInfo):
+        return False
+    return remote_rank not in info.fa_source_set
+
+
+def _fa_head_slot(
+    info: EngineTransferInfo,
+    remote_rank: int,
+    total_num_kv_heads: int,
+) -> int:
+    """Index into local FA block for this remote rank's head data.
+
+    For remote ranks in ``fa_source_ranks``, returns 0, 1, …, reads-1.
+    For ranks NOT in ``fa_source_ranks`` (replicated duplicates),
+    returns the slot of the matching source rank with the same head.
+    Returns 0 when ``info`` has no FA source tracking.
+    """
+    if not isinstance(info, MambaEngineTransferInfo):
+        return 0
+    fa_index = info.fa_source_indices
+    if remote_rank in fa_index:
+        return fa_index[remote_rank]
+    K = total_num_kv_heads
+    remote_tp = info.remote_tp_size
+    r_head = _physical_head_range(remote_tp, K, remote_rank)
+    for target in info.remote_fa_source_ranks:
+        t_head = _physical_head_range(remote_tp, K, target)
+        if _range_overlap(r_head, t_head):
+            return fa_index[target]
+    return 0
+
+
+def _fa_rank_offset(
+    info: EngineTransferInfo,
+    remote_kv_block_len: int,
+    tp_rank: int,
+    tp_size: int,
+    is_mla: bool,
+    total_num_kv_heads: int,
+) -> int:
+    """Byte offset into remote FA block for this local rank.
+
+    When local TP is replicated (local_tp > K), multiple local ranks
+    share a head.  Computes offset *relative to the target remote
+    rank's first head* so it works regardless of how many heads the
+    remote has.  Returns 0 when ``info`` has no FA source tracking
+    or when local does not index into remote.
+    """
+    if not isinstance(info, MambaEngineTransferInfo):
+        return 0
+    tp_ratio = (
+        tp_size // info.remote_tp_size
+        if tp_size >= info.remote_tp_size
+        else -(info.remote_tp_size // tp_size)
+    )
+    if is_mla or tp_ratio <= 0:
+        return 0
+    K = total_num_kv_heads
+    is_local_replicated = tp_size > K
+    if is_local_replicated:
+        local_head = tp_rank * K // tp_size
+        p_rank = info.remote_fa_source_ranks[0]
+        p_start = p_rank * K // info.remote_tp_size
+        return (local_head - p_start) * remote_kv_block_len
+    return tp_rank % tp_ratio * remote_kv_block_len
+
+
 class ModelBlockTransferPolicy(ABC):
     """Abstract base for model-specific block transfer logic.
 
@@ -98,26 +217,6 @@ class ModelBlockTransferPolicy(ABC):
         Dense models return ``EngineTransferInfo``.
         Mamba models return ``MambaEngineTransferInfo``.
         """
-
-    # ------------------------------------------------------------------
-    # KV block length helper (used by FA descriptor building)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def get_kv_block_len(
-        layer_idx: int,
-        block_len_per_layer: list[int],
-        is_blocks_first: bool,
-    ) -> int:
-        """Byte length of one K or V descriptor for a layer.
-
-        For FA/KV layers only — Mamba SSM descriptors use ``_ssm_sizes``
-        directly.  When ``is_blocks_first``, K and V are interleaved so
-        the descriptor covers half the block.
-        """
-        if is_blocks_first:
-            return block_len_per_layer[layer_idx] // 2
-        return block_len_per_layer[layer_idx]
 
     # ------------------------------------------------------------------
     # Descriptor ID computation (abstract — genuinely different per model)
@@ -175,7 +274,7 @@ class ModelBlockTransferPolicy(ABC):
             # The new block_len is using prefill block_len;
             # and num_blocks is multiple with N
             kv_block_len = (
-                self.get_kv_block_len(
+                _get_kv_block_len(
                     i,
                     block_len_per_layer,
                     is_blocks_first,
@@ -195,7 +294,7 @@ class ModelBlockTransferPolicy(ABC):
                     )
                 )
             if is_blocks_first:
-                second_split = self.get_kv_block_len(
+                second_split = _get_kv_block_len(
                     i,
                     block_len_per_layer,
                     is_blocks_first,
@@ -263,127 +362,6 @@ class ModelBlockTransferPolicy(ABC):
         calling this method.
         """
         ...
-
-    # ------------------------------------------------------------------
-    # FA head replication helpers (hetero-TP: tp_size > num_kv_heads)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _physical_head_range(tp_size: int, num_heads: int, rank: int) -> range:
-        """Physical KV head range stored in a rank's KV cache tensor.
-
-        When ``tp_size <= num_heads``: sharded, K/TP contiguous heads per rank.
-        When ``tp_size > num_heads``: 1 physical head per rank.  Heads are
-        distributed **contiguously** (matching vLLM's GQA weight
-        partitioning): consecutive ranks share a head before moving to
-        the next one.
-        """
-        if tp_size <= num_heads:
-            assert num_heads % tp_size == 0
-            per_rank = num_heads // tp_size
-            return range(rank * per_rank, (rank + 1) * per_rank)
-        else:
-            h = rank * num_heads // tp_size
-            return range(h, h + 1)
-
-    @staticmethod
-    def _range_overlap(a: range, b: range) -> range:
-        start = max(a.start, b.start)
-        stop = min(a.stop, b.stop)
-        return range(start, max(start, stop))
-
-    @staticmethod
-    def _fa_descs_ids(
-        block_ids_arr: np.ndarray,
-        num_regions: int,
-        stride: int,
-    ) -> np.ndarray:
-        """FA descriptor IDs: region_id * stride + block_id."""
-        region_ids = np.arange(num_regions)[:, None]
-        return (region_ids * stride + block_ids_arr[None, :]).flatten()
-
-    # NOTE (ZhanqiuHu): The helpers below (_should_skip_fa, _fa_head_slot,
-    # _fa_rank_offset) handle FA replication, where num_kv_heads < tp_size
-    # and multiple ranks share the same physical KV head data.  As of now
-    # they are only used for Mamba hybrid models because pure FA models
-    # typically have enough KV heads to avoid replication.  We may modify
-    # and reuse these for Gemma4 hybrid cases.
-
-    @staticmethod
-    def _should_skip_fa(info: EngineTransferInfo, remote_rank: int) -> bool:
-        """Whether to skip FA groups for this remote rank.
-
-        Returns False unless ``info`` carries FA source tracking
-        (``MambaEngineTransferInfo``) and the rank is a replicated
-        duplicate.
-        """
-        if not isinstance(info, MambaEngineTransferInfo):
-            return False
-        return remote_rank not in info.fa_source_set
-
-    @staticmethod
-    def _fa_head_slot(
-        info: EngineTransferInfo,
-        remote_rank: int,
-        total_num_kv_heads: int,
-    ) -> int:
-        """Index into local FA block for this remote rank's head data.
-
-        For remote ranks in ``fa_source_ranks``, returns 0, 1, …, reads-1.
-        For ranks NOT in ``fa_source_ranks`` (replicated duplicates),
-        returns the slot of the matching source rank with the same head.
-        Returns 0 when ``info`` has no FA source tracking.
-        """
-        if not isinstance(info, MambaEngineTransferInfo):
-            return 0
-        fa_index = info.fa_source_indices
-        if remote_rank in fa_index:
-            return fa_index[remote_rank]
-        K = total_num_kv_heads
-        remote_tp = info.remote_tp_size
-        phr = ModelBlockTransferPolicy._physical_head_range
-        rov = ModelBlockTransferPolicy._range_overlap
-        r_head = phr(remote_tp, K, remote_rank)
-        for target in info.remote_fa_source_ranks:
-            t_head = phr(remote_tp, K, target)
-            if rov(r_head, t_head):
-                return fa_index[target]
-        return 0
-
-    @staticmethod
-    def _fa_rank_offset(
-        info: EngineTransferInfo,
-        remote_kv_block_len: int,
-        tp_rank: int,
-        tp_size: int,
-        is_mla: bool,
-        total_num_kv_heads: int,
-    ) -> int:
-        """Byte offset into remote FA block for this local rank.
-
-        When local TP is replicated (local_tp > K), multiple local ranks
-        share a head.  Computes offset *relative to the target remote
-        rank's first head* so it works regardless of how many heads the
-        remote has.  Returns 0 when ``info`` has no FA source tracking
-        or when local does not index into remote.
-        """
-        if not isinstance(info, MambaEngineTransferInfo):
-            return 0
-        tp_ratio = (
-            tp_size // info.remote_tp_size
-            if tp_size >= info.remote_tp_size
-            else -(info.remote_tp_size // tp_size)
-        )  # noqa: E501
-        if is_mla or tp_ratio <= 0:
-            return 0
-        K = total_num_kv_heads
-        is_local_replicated = tp_size > K
-        if is_local_replicated:
-            local_head = tp_rank * K // tp_size
-            p_rank = info.remote_fa_source_ranks[0]
-            p_start = p_rank * K // info.remote_tp_size
-            return (local_head - p_start) * remote_kv_block_len
-        return tp_rank % tp_ratio * remote_kv_block_len
 
     # ------------------------------------------------------------------
     # Factory
@@ -463,7 +441,9 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
             num_blocks = int(num_blocks * block_size_ratio)
-        return self._fa_descs_ids(np.concatenate(block_ids), num_regions, num_blocks)
+        block_ids_arr = np.concatenate(block_ids)
+        region_ids = np.arange(num_regions)[:, None]
+        return (region_ids * num_blocks + block_ids_arr[None, :]).flatten()
 
     def build_remote_descs(
         self,
@@ -494,7 +474,7 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
         for i, base_addr in enumerate(
             nixl_agent_meta.kv_caches_base_addr,
         ):
-            local_block_len = self.get_kv_block_len(
+            local_block_len = _get_kv_block_len(
                 i,
                 block_len_per_layer,
                 is_blocks_first,
@@ -514,7 +494,7 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
                 addr = base_addr + blk * page_size + rank_offset
                 result.append((addr, local_block_len, dev_id))
             if is_blocks_first:
-                second_split = self.get_kv_block_len(
+                second_split = _get_kv_block_len(
                     i,
                     block_len_per_layer,
                     is_blocks_first,
@@ -703,7 +683,10 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                     ).flatten()
                 )
             else:
-                all_descs.append(self._fa_descs_ids(group_arr, num_regions, num_blocks))
+                region_ids = np.arange(num_regions)[:, None]
+                all_descs.append(
+                    (region_ids * num_blocks + group_arr[None, :]).flatten()
+                )
         return np.concatenate(all_descs)
 
     def build_local_descs(
@@ -847,7 +830,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         for i, base_addr in enumerate(
             nixl_agent_meta.kv_caches_base_addr,
         ):
-            local_block_len = self.get_kv_block_len(
+            local_block_len = _get_kv_block_len(
                 i,
                 block_len_per_layer,
                 is_blocks_first,
@@ -857,7 +840,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                 local_block_len = remote_kv_block_len
             if tp_ratio < 0 and not is_mla:
                 local_block_len = local_block_len // info.remote_num_fa_reads
-            rank_offset = self._fa_rank_offset(
+            rank_offset = _fa_rank_offset(
                 info,
                 remote_kv_block_len,
                 tp_rank=tp_rank,
@@ -872,7 +855,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                 addr = base_addr + blk * page_size + rank_offset
                 result.append((addr, local_block_len, dev_id))
             if is_blocks_first:
-                second_split = self.get_kv_block_len(
+                second_split = _get_kv_block_len(
                     i,
                     block_len_per_layer,
                     is_blocks_first,
@@ -1070,15 +1053,15 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                 else [local_rank // tp_ratio if tp_ratio > 0 else local_rank]
             )
         else:
-            local_needs = self._physical_head_range(local_tp, K, local_rank)
+            local_needs = _physical_head_range(local_tp, K, local_rank)
             search_range = (
                 mamba_range if mamba_range is not None else range(remote_tp_size)
             )
             seen: set[tuple[int, int]] = set()
             fa_source_ranks = []
             for p in search_range:
-                p_has = self._physical_head_range(remote_tp_size, K, p)
-                ov = self._range_overlap(local_needs, p_has)
+                p_has = _physical_head_range(remote_tp_size, K, p)
+                ov = _range_overlap(local_needs, p_has)
                 if len(ov) > 0:
                     key = (ov.start, ov.stop)
                     if key not in seen:
@@ -1086,8 +1069,8 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                         fa_source_ranks.append(p)
             if not fa_source_ranks:
                 for p in range(remote_tp_size):
-                    p_has = self._physical_head_range(remote_tp_size, K, p)
-                    ov = self._range_overlap(local_needs, p_has)
+                    p_has = _physical_head_range(remote_tp_size, K, p)
+                    ov = _range_overlap(local_needs, p_has)
                     if len(ov) > 0:
                         key = (ov.start, ov.stop)
                         if key not in seen:
@@ -1190,11 +1173,9 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         all_handle_data: list[list[tuple[int, int, int]]] = []
         for p_idx, p_rank in enumerate(info.remote_all_source_ranks):
             handle_data: list[tuple[int, int, int]] = []
-            skip_fa = self._should_skip_fa(info, p_rank)
+            skip_fa = _should_skip_fa(info, p_rank)
             fa_slot = (
-                self._fa_head_slot(info, p_rank, total_num_kv_heads)
-                if not skip_fa
-                else 0
+                _fa_head_slot(info, p_rank, total_num_kv_heads) if not skip_fa else 0
             )
             for j, (addr, local_len, dev) in enumerate(src_blocks_data):
                 if j < num_fa_descs:
@@ -1220,7 +1201,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
         remote rank carries FA data for this local rank, returns the
         inputs unchanged.
         """
-        if not self._should_skip_fa(info, remote_rank):
+        if not _should_skip_fa(info, remote_rank):
             return local_ids, remote_ids
         num_groups = len(local_ids)
         filtered_local: list[list[int]] = [
