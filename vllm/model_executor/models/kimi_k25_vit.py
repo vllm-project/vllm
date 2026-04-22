@@ -603,6 +603,22 @@ class MoonViT3dEncoder(nn.Module):
             f'video_attn_type must be "spatial_temporal", got {video_attn_type}'
         )
         self.video_attn_type = video_attn_type
+        # Cached encoder-shape fields so the (eager) forward can ask
+        # ``MMEncoderAttention`` for backend-specific metadata rewrites
+        # (FlashInfer ``cu_seqlens`` recomputation, ``sequence_lengths``
+        # padding, bucketed ``max_seqlen``) without a round-trip to the
+        # parent module.
+        self.hidden_size = hidden_dim
+        head_size = block_cfg["hidden_dim"] // block_cfg["num_heads"]
+        self.tp_size = (
+            1
+            if is_vit_use_data_parallel()
+            else get_tensor_model_parallel_world_size()
+        )
+        self.attn_backend = get_vit_attn_backend(
+            head_size=head_size,
+            dtype=torch.get_default_dtype(),
+        )
         self.rope_2d = Rope2DPosEmbRepeated(
             block_cfg["hidden_dim"] // block_cfg["num_heads"], 512, 512
         )
@@ -630,18 +646,44 @@ class MoonViT3dEncoder(nn.Module):
                 grid_thws=grid_thws, device=hidden_states.device
             )
 
-            lengths = torch.cat(
-                (
-                    torch.zeros(1, dtype=grid_thws.dtype, device=grid_thws.device),
-                    grid_thws[:, 0] * grid_thws[:, 1] * grid_thws[:, 2],
+            # Build cu_seqlens in numpy so we can feed it through the
+            # backend-aware MMEncoderAttention helpers (FlashInfer needs
+            # ``sequence_lengths`` + rewritten ``cu_seqlens`` + bucketed
+            # ``max_seqlen`` — if we hand it a bare CUDA tensor those
+            # helpers are never invoked and it asserts).
+            shapes_np = (
+                grid_thws.detach().cpu().numpy()
+                if isinstance(grid_thws, torch.Tensor)
+                else np.asarray(grid_thws, dtype=np.int32)
+            )
+            patches_per_frame = np.repeat(
+                (shapes_np[:, 1] * shapes_np[:, 2]).astype(np.int32),
+                shapes_np[:, 0].astype(np.int64),
+            )
+            if patches_per_frame.size > 0:
+                cu_seqlens_np = np.concatenate(
+                    [
+                        np.zeros(1, dtype=np.int32),
+                        patches_per_frame.cumsum(dtype=np.int32),
+                    ]
                 )
+            else:
+                cu_seqlens_np = np.zeros(1, dtype=np.int32)
+            device = hidden_states.device
+            sequence_lengths = MMEncoderAttention.maybe_compute_seq_lens(
+                self.attn_backend, cu_seqlens_np, device
             )
-
-            cu_seqlens = lengths.to(hidden_states.device).cumsum(
-                dim=0, dtype=torch.int32
+            max_seqlen_val = MMEncoderAttention.compute_max_seqlen(
+                self.attn_backend, cu_seqlens_np
             )
-            max_seqlen = None
-            sequence_lengths = None
+            max_seqlen = torch.tensor(max_seqlen_val, dtype=torch.int32)
+            cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(
+                self.attn_backend,
+                cu_seqlens_np,
+                self.hidden_size,
+                self.tp_size,
+                device,
+            )
         else:
             rope_freqs_cis = encoder_metadata["rope_freqs_cis"]
             cu_seqlens = encoder_metadata["cu_seqlens"]
