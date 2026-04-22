@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
+
 from vllm.logger import init_logger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
@@ -14,6 +16,10 @@ class AsyncScheduler(Scheduler):
         super().__init__(*args, **kwargs)
         # reusable read-only placeholder list for speculative decoding.
         self._spec_token_placeholders: list[int] = [-1] * self.num_spec_tokens
+        disable_above = os.getenv("VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN")
+        self._disable_spec_above_seq_len = (
+            int(disable_above) if disable_above else None
+        )
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
@@ -32,7 +38,14 @@ class AsyncScheduler(Scheduler):
             request.num_output_placeholders += 1 + cur_num_spec_tokens
             # Add placeholders for the new draft/spec tokens.
             # We will update the actual spec token ids in the worker process.
-            request.spec_token_ids = self._spec_token_placeholders
+            if (
+                self._disable_spec_above_seq_len is not None
+                and request.num_computed_tokens
+                >= self._disable_spec_above_seq_len
+            ):
+                request.spec_token_ids = []
+            else:
+                request.spec_token_ids = self._spec_token_placeholders
 
     def _update_request_with_output(
         self, request: Request, new_token_ids: list[int]

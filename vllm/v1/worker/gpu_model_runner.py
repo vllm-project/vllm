@@ -4,6 +4,7 @@
 import functools
 import gc
 import itertools
+import os
 import threading
 import time
 from collections import defaultdict
@@ -588,6 +589,19 @@ class GPUModelRunner(
                 self.effective_drafter_max_model_len = draft_config.max_model_len
             else:
                 self.effective_drafter_max_model_len = self.max_model_len
+            draft_disable_above_seq_len = int(
+                os.getenv("VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN", "0")
+            )
+            if draft_disable_above_seq_len > 0:
+                self.effective_drafter_max_model_len = min(
+                    self.effective_drafter_max_model_len,
+                    draft_disable_above_seq_len,
+                )
+                logger.info(
+                    "Speculative decoding will be disabled for sequence lengths "
+                    "above %d via VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN.",
+                    self.effective_drafter_max_model_len,
+                )
         self.use_async_spec_decode = (
             self.use_async_scheduling and self.num_spec_tokens > 0
         )
@@ -862,6 +876,14 @@ class GPUModelRunner(
             draft_config = self.speculative_config.draft_model_config
             if draft_config is None or draft_config.max_model_len is None:
                 self.effective_drafter_max_model_len = self.max_model_len
+            draft_disable_above_seq_len = int(
+                os.getenv("VLLM_SPECULATIVE_DISABLE_ABOVE_SEQ_LEN", "0")
+            )
+            if draft_disable_above_seq_len > 0:
+                self.effective_drafter_max_model_len = min(
+                    self.effective_drafter_max_model_len,
+                    draft_disable_above_seq_len,
+                )
 
     def reset_mm_cache(self) -> None:
         """
@@ -4209,6 +4231,19 @@ class GPUModelRunner(
                 spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
                 <= self.effective_drafter_max_model_len
             )
+            # The draft attention metadata can under-report long prompt length for
+            # EAGLE-style decode paths, so also gate on the actual request seq len.
+            if input_fits_in_drafter and self.input_batch.num_reqs > 0:
+                actual_max_seq_len = int(
+                    self.optimistic_seq_lens_cpu[: self.input_batch.num_reqs].max()
+                )
+                # optimistic_seq_lens_cpu already tracks the global request length.
+                # Multiplying by dcp_world_size double-counts context length and
+                # incorrectly disables drafting for DCP runs.
+                if actual_max_seq_len + self.num_spec_tokens > (
+                    self.effective_drafter_max_model_len
+                ):
+                    input_fits_in_drafter = False
             use_gpu_toks = (
                 spec_config.use_eagle()
                 or spec_config.uses_draft_model()
