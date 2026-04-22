@@ -329,30 +329,35 @@ def rocm_fp8_paged_mqa_logits(
         aiter_paged_mqa_logits_module = paged_mqa_logits_module()
 
     if aiter_paged_mqa_logits_module is not None:
-        deepgemm_fp8_paged_mqa_logits_stage1 = (
-            aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
-        )
-        batch_size, next_n, heads, _ = q_fp8.shape
-        out_qk = torch.full(
-            (heads, batch_size * next_n, max_model_len),
-            float("-inf"),
-            device="cuda",
-            dtype=torch.float32,
-        )
-        deepgemm_fp8_paged_mqa_logits_stage1(
-            q_fp8,
-            kv_cache_fp8,
-            weights,
-            out_qk,
-            context_lens,
-            block_tables,
-            max_model_len,
-        )
-        return out_qk.sum(dim=0)
-    else:
-        return fp8_paged_mqa_logits_torch(
-            q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
-        )
+        # Check if any context_len exceeds 2048 - aiter kernel has a bug
+        # for context_len > 2048 (see issue #39303)
+        max_context_len = context_lens.max().item() if context_lens.numel() > 0 else 0
+        if max_context_len <= 2048:
+            deepgemm_fp8_paged_mqa_logits_stage1 = (
+                aiter_paged_mqa_logits_module.deepgemm_fp8_paged_mqa_logits_stage1
+            )
+            batch_size, next_n, heads, _ = q_fp8.shape
+            out_qk = torch.full(
+                (heads, batch_size * next_n, max_model_len),
+                float("-inf"),
+                device="cuda",
+                dtype=torch.float32,
+            )
+            deepgemm_fp8_paged_mqa_logits_stage1(
+                q_fp8,
+                kv_cache_fp8,
+                weights,
+                out_qk,
+                context_lens,
+                block_tables,
+                max_model_len,
+            )
+            return out_qk.sum(dim=0)
+
+    # Fallback to torch implementation
+    return fp8_paged_mqa_logits_torch(
+        q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
+    )
 
 
 # Take from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L84
