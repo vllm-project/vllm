@@ -33,11 +33,7 @@ logger = init_logger(__name__)
 
 
 class WNA16MoEBackend(Enum):
-    # No modular-kernel support (e.g. 8-bit weights).
-    NONE = "None"
-    # Standard (TP / no EP) path – uses MarlinExperts.
     MARLIN = "MARLIN"
-    # Expert-Parallel batched path – uses BatchedMarlinExperts.
     BATCHED_MARLIN = "BATCHED_MARLIN"
 
 
