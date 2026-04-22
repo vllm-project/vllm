@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
     BlockIds,
     EngineTransferInfo,
     MambaEngineTransferInfo,
+    TransferTopology,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -77,17 +78,15 @@ class ModelBlockTransferPolicy(ABC):
     # Per-engine transfer info (data operations)
     # ------------------------------------------------------------------
 
-    # TODO (ZhanqiuHu): Revisit data packing for local facts and remote facts.
     @abstractmethod
     def build_engine_transfer_info(
         self,
         *,
-        tp_rank: int,
-        tp_size: int,
-        is_mla: bool,
-        total_num_kv_heads: int,
-        is_kv_layout_blocks_first: bool,
+        # Local topology
+        transfer_topo: TransferTopology,
+        # Block geometry
         local_block_len: int,
+        # Remote facts (from NixlAgentMetadata handshake)
         remote_tp_size: int,
         remote_block_size: int,
         remote_block_len: int,
@@ -591,17 +590,17 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
     def build_engine_transfer_info(
         self,
         *,
-        tp_rank: int,
-        tp_size: int,
-        is_mla: bool,
-        total_num_kv_heads: int,
-        is_kv_layout_blocks_first: bool,
+        # Local topology
+        transfer_topo: TransferTopology,
+        # Block geometry
         local_block_len: int,
+        # Remote facts (from NixlAgentMetadata handshake)
         remote_tp_size: int,
         remote_block_size: int,
         remote_block_len: int,
         remote_physical_blocks_per_logical: int,
     ) -> EngineTransferInfo:
+        _ = (transfer_topo, local_block_len)
         return EngineTransferInfo(
             remote_tp_size=remote_tp_size,
             remote_block_len=remote_block_len,
@@ -1054,20 +1053,21 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
     def build_engine_transfer_info(
         self,
         *,
-        tp_rank: int,
-        tp_size: int,
-        is_mla: bool,
-        total_num_kv_heads: int,
-        is_kv_layout_blocks_first: bool,
+        # Local topology
+        transfer_topo: TransferTopology,
+        # Block geometry
         local_block_len: int,
+        # Remote facts (from NixlAgentMetadata handshake)
         remote_tp_size: int,
         remote_block_size: int,
         remote_block_len: int,
         remote_physical_blocks_per_logical: int,
     ) -> MambaEngineTransferInfo:
-        K = total_num_kv_heads
-        local_tp = tp_size
-        local_rank = tp_rank
+        K = transfer_topo.total_num_kv_heads
+        local_tp = transfer_topo.tp_size
+        local_rank = transfer_topo.tp_rank
+        is_mla = transfer_topo.is_mla
+        is_kv_layout_blocks_first = transfer_topo.is_kv_layout_blocks_first
 
         is_remote_replicated = remote_tp_size > K
         remote_physical_heads = max(1, K // remote_tp_size)
