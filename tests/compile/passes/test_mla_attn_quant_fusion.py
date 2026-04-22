@@ -83,10 +83,6 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         self.vllm_config = vllm_config
         self.dtype = vllm_config.model_config.dtype
 
-        # Create kv_b_proj (ColumnParallelLinear) on device.
-        # Reuse weights from prior model instance when available, because
-        # ColumnParallelLinear may get NaN from recycled CUDA memory after
-        # torch.compile runs in the same process.
         kv_b_proj = ColumnParallelLinear(
             input_size=kv_lora_rank,
             output_size=num_heads * (qk_nope_head_dim + v_head_dim),
@@ -96,8 +92,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         kv_b_proj_weight = kwargs.get("kv_b_proj_weight")
         if kv_b_proj_weight is not None:
             kv_b_proj.weight.data.copy_(kv_b_proj_weight)
-        elif kv_b_proj.weight.data.isnan().any():
-            # Sanitize NaN from recycled CUDA memory
+        else:
             kv_b_proj.weight.data.normal_()
 
         # Create MLAAttention
