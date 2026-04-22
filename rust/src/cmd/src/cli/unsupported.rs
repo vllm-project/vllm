@@ -471,7 +471,7 @@ pub struct ServerUnsupportedArgs {
         default_missing_value = "true",
         num_args = 0..=1
     )]
-    pub enable_server_load_tracking: Option<Unsupported>,
+    pub enable_server_load_tracking: Option<Noop>,
 
     /// If set to True, including usage on every request.
     #[arg(
