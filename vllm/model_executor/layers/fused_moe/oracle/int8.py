@@ -156,8 +156,8 @@ def select_int8_moe_backend(
 def make_int8_moe_quant_config(
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    a1_scale: torch.Tensor | None,
-    a2_scale: torch.Tensor | None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
     assert (a1_scale is None and a2_scale is None) or (
@@ -185,7 +185,6 @@ def make_int8_moe_kernel(
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
-    int8_backend: Int8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:

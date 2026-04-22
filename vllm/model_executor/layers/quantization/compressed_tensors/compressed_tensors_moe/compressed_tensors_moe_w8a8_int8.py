@@ -146,7 +146,6 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         self.moe_kernel = make_int8_moe_kernel(
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
-            int8_backend=self.int8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._maybe_init_expert_routing_tables(),
             shared_experts=layer.shared_experts,
