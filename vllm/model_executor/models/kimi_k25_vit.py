@@ -195,16 +195,25 @@ class Learnable2DInterpPosEmbDivided_fixed(nn.Module):
         ``device`` and optionally cast to ``dtype``.
         """
         pos_embs: list[torch.Tensor] = []
+        # Cache interpolated 2D grids per (h, w) within a single call so
+        # multiple items in the same batch with identical spatial shapes
+        # (common: a batch of same-resolution images) share one
+        # F.interpolate kernel launch.
+        pos_emb_2d_cache: dict[tuple[int, int], torch.Tensor] = {}
         for t, h, w in grid_thw_list:
             assert t <= self.num_frames, f"t:{t} > self.num_frames:{self.num_frames}"
-            if (h, w) == self.weight.shape[:-1]:
-                pos_emb_2d = self.weight.flatten(end_dim=1)
-            else:
-                pos_emb_2d = get_rope_shape(
-                    self.weight,
-                    interpolation_mode=self.interpolation_mode,
-                    shape=(h, w),
-                )
+            hw_key = (h, w)
+            pos_emb_2d = pos_emb_2d_cache.get(hw_key)
+            if pos_emb_2d is None:
+                if (h, w) == self.weight.shape[:-1]:
+                    pos_emb_2d = self.weight.flatten(end_dim=1)
+                else:
+                    pos_emb_2d = get_rope_shape(
+                        self.weight,
+                        interpolation_mode=self.interpolation_mode,
+                        shape=(h, w),
+                    )
+                pos_emb_2d_cache[hw_key] = pos_emb_2d
 
             if t == 1:
                 pos_emb_3d = pos_emb_2d
@@ -368,10 +377,18 @@ class Rope2DPosEmbRepeated(nn.Module):
             self.max_height,
             self.max_width,
         )
-        parts = [
-            self.freqs_cis[:h, :w].reshape(-1, self.dim // 2).repeat(t, 1)
-            for t, h, w in shapes
-        ]
+        # Cache per-(h, w) slices within a single call — common batches
+        # have repeated spatial shapes, and each cache hit replaces a
+        # narrow ``[:h, :w]`` slice + reshape on the GPU with a Python
+        # dict lookup.
+        slice_cache: dict[tuple[int, int], torch.Tensor] = {}
+        parts: list[torch.Tensor] = []
+        for t, h, w in shapes:
+            base = slice_cache.get((h, w))
+            if base is None:
+                base = self.freqs_cis[:h, :w].reshape(-1, self.dim // 2)
+                slice_cache[(h, w)] = base
+            parts.append(base.repeat(t, 1) if t != 1 else base)
         freqs_cis = (
             torch.cat(parts, dim=0)
             if parts
@@ -709,48 +726,61 @@ def _build_tpool_indices(
     post_tpool_offset = 1  # start at 1; slot 0 is the dead slot
     slot_offset = 0  # offset into flattened output slots (per-item nh*nw)
 
+    # Precompute kh*kw/kw-sized ranges once; reused per item to
+    # vectorize the inner fill and avoid Python-level loops (those
+    # dominated replay cost before: ~18K iters per typical batch).
+    kh_range = np.arange(kh, dtype=np.int64)
+    kw_range = np.arange(kw, dtype=np.int64)
+
     for t, h, w in grid_thw_list:
-        assert h % kh == 0 and w % kw == 0, (
-            f"grid ({h}, {w}) not divisible by merge kernel ({kh}, {kw})"
-        )
+        if h % kh != 0 or w % kw != 0:
+            raise ValueError(
+                f"grid ({h}, {w}) not divisible by merge kernel ({kh}, {kw})"
+            )
         nh = h // kh
         nw = w // kw
+        hw = h * w
+        n_item_patches = t * hw
+        n_item_slots = nh * nw
 
         # --- temporal scatter target ---
-        # Input patch flat index = t_idx * (h*w) + row * w + col
-        # Post-tpool slot = post_tpool_offset + row * w + col
-        # (all t_idx for the same (row, col) collapse to one slot)
-        for t_idx in range(t):
-            base = input_offset + t_idx * (h * w)
-            for r in range(h):
-                for c in range(w):
-                    temporal_gather_idx[base + r * w + c] = (
-                        post_tpool_offset + r * w + c
-                    )
-        # One slot per (row, col); each accumulates `t` frames
-        temporal_divisor[post_tpool_offset : post_tpool_offset + h * w] = float(t)
+        # For every input patch (t_idx, r, c) the post-tpool target is
+        # ``post_tpool_offset + r*w + c`` — independent of ``t_idx``.
+        # Build one (h*w,) row and tile it ``t`` times.
+        row_targets = post_tpool_offset + np.arange(hw, dtype=np.int64)
+        # Equivalent to ``np.tile(row_targets, t)`` but written as a
+        # broadcast to keep the allocation linear.
+        temporal_gather_idx[
+            input_offset : input_offset + n_item_patches
+        ] = np.broadcast_to(row_targets, (t, hw)).reshape(-1)
+        # Each post-tpool slot accumulates ``t`` frames.
+        temporal_divisor[post_tpool_offset : post_tpool_offset + hw] = float(t)
 
         # --- spatial rearrangement gather table ---
-        # Output layout per item: (nh*nw, kh*kw).
-        # Output position (slot, sub) -> src post-tpool slot
-        #   slot = nh_i*nw + nw_i, sub = kh_i*kw + kw_i
-        #   src = post_tpool_offset + (nh_i*kh + kh_i)*w + (nw_i*kw + kw_i)
-        for nh_i in range(nh):
-            for nw_i in range(nw):
-                for kh_i in range(kh):
-                    for kw_i in range(kw):
-                        out_slot = slot_offset + nh_i * nw + nw_i
-                        out_idx = out_slot * (kh * kw) + kh_i * kw + kw_i
-                        src = (
-                            post_tpool_offset
-                            + (nh_i * kh + kh_i) * w
-                            + (nw_i * kw + kw_i)
-                        )
-                        spatial_gather_idx[out_idx] = src
+        # For every (nh_i, nw_i, kh_i, kw_i):
+        #   out_slot = slot_offset + nh_i*nw + nw_i
+        #   out_idx  = out_slot*(kh*kw) + kh_i*kw + kw_i
+        #   src      = post_tpool_offset + (nh_i*kh+kh_i)*w + (nw_i*kw+kw_i)
+        # Build the 4D grid with broadcasting in one shot.
+        nh_i = np.arange(nh, dtype=np.int64).reshape(nh, 1, 1, 1)
+        nw_i = np.arange(nw, dtype=np.int64).reshape(1, nw, 1, 1)
+        kh_i = kh_range.reshape(1, 1, kh, 1)
+        kw_i = kw_range.reshape(1, 1, 1, kw)
+        src = (
+            post_tpool_offset
+            + (nh_i * kh + kh_i) * w
+            + (nw_i * kw + kw_i)
+        )  # (nh, nw, kh, kw)
+        # Output layout: ``(slot=nh*nw, kh*kw)`` flattened.  The 4D src
+        # is already in ``(nh, nw, kh, kw)`` order, so a flat reshape
+        # gives exactly the order expected by ``spatial_gather_idx``.
+        spatial_gather_idx[
+            slot_offset * (kh * kw) : (slot_offset + n_item_slots) * (kh * kw)
+        ] = src.reshape(-1)
 
-        input_offset += t * h * w
-        post_tpool_offset += h * w
-        slot_offset += nh * nw
+        input_offset += n_item_patches
+        post_tpool_offset += hw
+        slot_offset += n_item_slots
 
     # Dead-slot divisor stays 1.0 to keep the division finite.
     temporal_divisor[DEAD_SLOT] = 1.0

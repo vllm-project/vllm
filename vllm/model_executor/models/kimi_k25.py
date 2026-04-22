@@ -480,12 +480,25 @@ class KimiK25ForConditionalGeneration(
         return (min_budget, max_budget)
 
     def _get_grid_thws(self, mm_kwargs: dict[str, Any]) -> list[tuple[int, int, int]]:
+        # Cache the converted tuple list on the mm_kwargs dict itself.
+        # The manager invokes ``get_encoder_cudagraph_num_items``,
+        # ``get_encoder_cudagraph_per_item_output_tokens``,
+        # ``get_encoder_cudagraph_per_item_input_sizes``,
+        # ``select_encoder_cudagraph_items`` and
+        # ``prepare_encoder_cudagraph_replay_buffers`` per request — all
+        # of which need this list.  Without caching we do ``.tolist()``
+        # and tuple coercion 5+ times, which shows up on the hot path.
+        cached = mm_kwargs.get("_cached_grid_thws_tuples")
+        if cached is not None:
+            return cached
         grid = mm_kwargs["grid_thws"]
         if isinstance(grid, torch.Tensor):
             grid_list = grid.reshape(-1, grid.shape[-1]).tolist()
         else:
             grid_list = [list(x) for x in grid]
-        return [(int(t), int(h), int(w)) for t, h, w in grid_list]
+        out = [(int(t), int(h), int(w)) for t, h, w in grid_list]
+        mm_kwargs["_cached_grid_thws_tuples"] = out
+        return out
 
     def get_encoder_cudagraph_num_items(self, mm_kwargs: dict[str, Any]) -> int:
         return len(self._get_grid_thws(mm_kwargs))
