@@ -233,15 +233,10 @@ class ModelBlockTransferPolicy(ABC):
     @abstractmethod
     def build_src_split_handles(
         self,
-        # Local src data
+        transfer_topo: TransferTopology,
+        engine_id: EngineId,
         src_blocks_data: list[tuple[int, int, int]],
         num_descs: int,
-        # TP topology
-        tp_size: int,
-        is_mla: bool,
-        total_num_kv_heads: int,
-        # Remote engine info
-        remote_info: EngineTransferInfo,
     ) -> list[list[tuple[int, int, int]]]:
         """Build split handle data for P_TP > D_TP scenario."""
         ...
@@ -534,17 +529,16 @@ class DenseModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     def build_src_split_handles(
         self,
+        transfer_topo,
+        engine_id,
         src_blocks_data,
         num_descs,
-        tp_size,
-        is_mla,
-        total_num_kv_heads,
-        remote_info,
     ):
-        _ = (num_descs, is_mla, total_num_kv_heads)
+        remote_info = transfer_topo.get_engine_info(engine_id)
         assert isinstance(remote_info, EngineTransferInfo)
-        assert remote_info.remote_tp_size > tp_size
-        abs_tp = remote_info.remote_tp_size // tp_size
+        _ = num_descs
+        assert remote_info.remote_tp_size > transfer_topo.tp_size
+        abs_tp = remote_info.remote_tp_size // transfer_topo.tp_size
         result: list[list[tuple[int, int, int]]] = []
         for i in range(abs_tp):
             blocks_data: list[tuple[int, int, int]] = []
@@ -969,21 +963,21 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
 
     def build_src_split_handles(
         self,
+        transfer_topo,
+        engine_id,
         src_blocks_data,
         num_descs,
-        tp_size,
-        is_mla,
-        total_num_kv_heads,
-        remote_info,
     ):
+        remote_info = transfer_topo.get_engine_info(engine_id)
         assert isinstance(remote_info, MambaEngineTransferInfo)
         info = remote_info
+        tp_size = transfer_topo.tp_size
         assert info.remote_tp_size > tp_size
         abs_tp = info.remote_tp_size // tp_size
         if self.needs_split_handles(
             info,
             tp_size=tp_size,
-            is_mla=is_mla,
+            is_mla=transfer_topo.is_mla,
         ):
             result = list(
                 self.compute_split_handle_data(
@@ -991,7 +985,7 @@ class MambaModelBlockTransferPolicy(ModelBlockTransferPolicy):
                     src_blocks_data,
                     num_descs,
                     abs_tp,
-                    total_num_kv_heads=total_num_kv_heads,
+                    total_num_kv_heads=transfer_topo.total_num_kv_heads,
                 )
             )
             logger.info(
