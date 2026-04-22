@@ -1952,24 +1952,7 @@ class TritonExperts(mk.FusedMoEExpertsModular):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        p = current_platform
-        if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9, on_gfx12x
-
-            is_rocm_on_gfx9 = on_gfx9()
-            is_rocm_on_gfx12x = on_gfx12x()
-        else:
-            is_rocm_on_gfx9 = False
-            is_rocm_on_gfx12x = False
-
-        device_supports_fp8 = (
-            is_rocm_on_gfx9
-            or is_rocm_on_gfx12x
-            or (p.is_cuda() and p.has_device_capability((8, 9)))
-            or p.is_xpu()
-        )
-
-        if not device_supports_fp8:
+        if not current_platform.supports_fp8():
             return (weight_key, activation_key) == (None, None)
 
         SUPPORTED_W_A = [
