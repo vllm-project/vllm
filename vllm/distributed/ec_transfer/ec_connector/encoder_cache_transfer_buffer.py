@@ -70,15 +70,15 @@ class EncoderCacheTransferBuffer:
         self.buffer_size = buffer_size
         self.device = device
 
-        # Allocate contiguous memory
-        num_elements = buffer_size // 4  # 4 bytes per float32
+        # Allocate byte-addressed contiguous memory so transfer_buffer_size
+        # exactly matches the registered backing storage capacity.
         if device == "cpu":
             self.base_tensor = torch.empty(
-                num_elements, dtype=torch.float32, pin_memory=True
+                buffer_size, dtype=torch.uint8, pin_memory=True
             )
         else:
             self.base_tensor = torch.empty(
-                num_elements, dtype=torch.float32, device=device
+                buffer_size, dtype=torch.uint8, device=device
             ).contiguous()
         self.base_address = self.base_tensor.data_ptr()
 
