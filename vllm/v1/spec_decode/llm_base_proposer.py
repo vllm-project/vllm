@@ -1259,15 +1259,44 @@ class SpecDecodeBaseProposer:
         Subclasses may override to apply additional config changes.
         """
         spec_cfg = self.speculative_config
+        config = replace(
+            self.vllm_config,
+            parallel_config=replace(
+                spec_cfg.draft_parallel_config,
+                rank=self.vllm_config.parallel_config.rank,
+            ),
+            model_config=spec_cfg.draft_model_config,
+        )
         if spec_cfg.moe_backend is not None:
-            return replace(
-                self.vllm_config,
+            config = replace(
+                config,
                 kernel_config=replace(
-                    self.vllm_config.kernel_config,
+                    config.kernel_config,
                     moe_backend=spec_cfg.moe_backend,
                 ),
             )
-        return self.vllm_config
+        if spec_cfg.draft_kv_cache_dtype is not None:
+            config = replace(
+                config,
+                cache_config=replace(
+                    config.cache_config,
+                    cache_dtype=spec_cfg.draft_kv_cache_dtype,
+                ),
+            )
+        if spec_cfg.draft_attention_backend is not None:
+            draft_backend = (
+                None
+                if spec_cfg.draft_attention_backend == "auto"
+                else spec_cfg.draft_attention_backend
+            )
+            config = replace(
+                config,
+                attention_config=replace(
+                    config.attention_config,
+                    backend=draft_backend,
+                ),
+            )
+        return config
 
     def _get_model(self) -> nn.Module:
         """
