@@ -175,9 +175,11 @@ kMxfp4Static = QuantKey(FP4_DTYPE, scale=kMxfp4StaticGroupScale, symmetric=True)
 # TODO: convert this to use SCALAR_TYPE. This is not right.
 kInt4StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
-
 kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
+
+kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
+kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
 
 
 def create_fp8_quant_key(
