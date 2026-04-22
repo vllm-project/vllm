@@ -6,6 +6,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.triton_utils import tl, triton
 
 __all__ = [
     "break_fp4_bytes",
@@ -20,173 +21,173 @@ kE2M1ToFloat_handle = SimpleNamespace(
     val=torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 )
 
-if current_platform.is_cuda_alike():
-    import triton
-    import triton.language as tl
 
-    @triton.jit
-    def _dequantize_nvfp4_kernel(
-        fp4_ptr,
-        scale_ptr,
-        global_scale_ptr,
-        output_ptr,
-        e2m1_lut_ptr,
-        rows_per_batch: tl.constexpr,
-        num_blocks: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
-        has_batch_global_scale: tl.constexpr,
-        TILE_BLOCKS: tl.constexpr,
-    ):
-        """Triton kernel for NVFP4 dequantization (swizzle=False).
+@triton.jit
+def _dequantize_nvfp4_kernel(
+    fp4_ptr,
+    scale_ptr,
+    global_scale_ptr,
+    output_ptr,
+    e2m1_lut_ptr,
+    rows_per_batch: tl.constexpr,
+    num_blocks: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    has_batch_global_scale: tl.constexpr,
+    TILE_BLOCKS: tl.constexpr,
+):
+    """Triton kernel for NVFP4 dequantization (swizzle=False).
 
-        Uses a 2D grid (rows x tiles) to parallelize across both rows
-        and quantization groups within a row. Each program handles
-        TILE_BLOCKS groups at once using vectorized 2D operations.
-        """
-        BLOCK_PACKED: tl.constexpr = BLOCK_SIZE // 2
+    Uses a 2D grid (rows x tiles) to parallelize across both rows
+    and quantization groups within a row. Each program handles
+    TILE_BLOCKS groups at once using vectorized 2D operations.
+    """
+    BLOCK_PACKED: tl.constexpr = BLOCK_SIZE // 2
 
-        row_idx = tl.program_id(0)
-        tile_idx = tl.program_id(1)
+    row_idx = tl.program_id(0)
+    tile_idx = tl.program_id(1)
 
-        if has_batch_global_scale:
-            batch_idx = row_idx // rows_per_batch
-            global_scale = tl.load(global_scale_ptr + batch_idx).to(tl.float32)
-        else:
-            global_scale = tl.load(global_scale_ptr).to(tl.float32)
-
-        fp4_row_offset = row_idx * num_blocks * BLOCK_PACKED
-        scale_row_offset = row_idx * num_blocks
-        output_row_offset = row_idx * num_blocks * BLOCK_SIZE
-
-        start_block = tile_idx * TILE_BLOCKS
-        block_offsets = tl.arange(0, TILE_BLOCKS)
-        block_mask = (start_block + block_offsets) < num_blocks
-
-        raw_scales = tl.load(
-            scale_ptr + scale_row_offset + start_block + block_offsets,
-            mask=block_mask,
-            other=0,
-        )
-        # Bitcast uint8 → float8_e4m3fn to decode scales
-        scale_f32 = tl.cast(raw_scales, tl.float8e4nv, bitcast=True).to(tl.float32)
-        scale_values = (scale_f32 * global_scale)[:, None]
-
-        # Load [TILE_BLOCKS, BLOCK_PACKED] packed bytes (each byte holds
-        # two FP4 values), then unpack both nibbles in registers.
-        packed_offsets = tl.arange(0, BLOCK_PACKED)[None, :]
-        byte_indices = (
-            fp4_row_offset
-            + (start_block + block_offsets[:, None]) * BLOCK_PACKED
-            + packed_offsets
-        )
-        elem_mask = block_mask[:, None]
-        raw_bytes = tl.load(fp4_ptr + byte_indices, mask=elem_mask, other=0)
-
-        low_nibble = raw_bytes & 0x0F
-        high_nibble = (raw_bytes >> 4) & 0x0F
-
-        low_sign = (low_nibble >> 3) & 1
-        low_val = tl.load(e2m1_lut_ptr + (low_nibble & 0x07))
-        low_result = tl.where(low_sign == 1, -low_val, low_val) * scale_values
-
-        high_sign = (high_nibble >> 3) & 1
-        high_val = tl.load(e2m1_lut_ptr + (high_nibble & 0x07))
-        high_result = tl.where(high_sign == 1, -high_val, high_val) * scale_values
-
-        # Interleave low/high into [TILE_BLOCKS, BLOCK_SIZE] for a single
-        # contiguous store: [l0, h0, l1, h1, ...].
-        result = tl.interleave(low_result, high_result)
-
-        elem_offsets = tl.arange(0, BLOCK_SIZE)[None, :]
-        out_indices = (
-            output_row_offset
-            + (start_block + block_offsets[:, None]) * BLOCK_SIZE
-            + elem_offsets
-        )
-        tl.store(output_ptr + out_indices, result, mask=block_mask[:, None])
-
-    @triton.jit
-    def _e2m1_lookup(magnitude):
-        """Lookup E2M1 float value from 3-bit magnitude."""
-        result = tl.where(magnitude == 1, 0.5, 0.0)
-        result = tl.where(magnitude == 2, 1.0, result)
-        result = tl.where(magnitude == 3, 1.5, result)
-        result = tl.where(magnitude == 4, 2.0, result)
-        result = tl.where(magnitude == 5, 3.0, result)
-        result = tl.where(magnitude == 6, 4.0, result)
-        result = tl.where(magnitude == 7, 6.0, result)
-        return result
-
-    @triton.jit
-    def _round_to_fp4(x):
-        """Round float values to the nearest E2M1 representable value.
-
-        Matches the thresholds in the Python ``cast_to_fp4`` exactly.
-        """
-        sign = tl.where(x < 0.0, -1.0, 1.0)
-        abs_x = tl.abs(x)
-        result = tl.where(abs_x > 5.0, 6.0, 0.0)
-        result = tl.where((abs_x >= 3.5) & (abs_x <= 5.0), 4.0, result)
-        result = tl.where((abs_x > 2.5) & (abs_x < 3.5), 3.0, result)
-        result = tl.where((abs_x >= 1.75) & (abs_x <= 2.5), 2.0, result)
-        result = tl.where((abs_x > 1.25) & (abs_x < 1.75), 1.5, result)
-        result = tl.where((abs_x >= 0.75) & (abs_x <= 1.25), 1.0, result)
-        result = tl.where((abs_x > 0.25) & (abs_x < 0.75), 0.5, result)
-        return result * sign
-
-    @triton.jit
-    def _nvfp4_quant_dequant_kernel(
-        input_ptr,
-        output_ptr,
-        global_scale_ptr,
-        k: tl.constexpr,
-        num_blocks: tl.constexpr,
-        BLOCK_SIZE: tl.constexpr,
-        FP4_MAX_RECIPROCAL: tl.constexpr,
-        TILE_BLOCKS: tl.constexpr,
-    ):
-        """Fused NVFP4 quantize-dequantize kernel.
-
-        Uses a 2D grid (rows x tiles) to parallelize across both rows
-        and quantization groups within a row. Each program handles
-        TILE_BLOCKS groups at once using vectorized 2D operations.
-        """
-        row_idx = tl.program_id(0)
-        tile_idx = tl.program_id(1)
+    if has_batch_global_scale:
+        batch_idx = row_idx // rows_per_batch
+        global_scale = tl.load(global_scale_ptr + batch_idx).to(tl.float32)
+    else:
         global_scale = tl.load(global_scale_ptr).to(tl.float32)
-        row_offset = row_idx * k
 
-        start_block = tile_idx * TILE_BLOCKS
-        block_offsets = tl.arange(0, TILE_BLOCKS)
-        block_mask = (start_block + block_offsets) < num_blocks
+    fp4_row_offset = row_idx * num_blocks * BLOCK_PACKED
+    scale_row_offset = row_idx * num_blocks
+    output_row_offset = row_idx * num_blocks * BLOCK_SIZE
 
-        # Load [TILE_BLOCKS, BLOCK_SIZE] elements
-        indices = (
-            row_offset
-            + (start_block + block_offsets[:, None]) * BLOCK_SIZE
-            + tl.arange(0, BLOCK_SIZE)[None, :]
-        )
-        mask_2d = block_mask[:, None]
-        x = tl.load(input_ptr + indices, mask=mask_2d, other=0.0).to(tl.float32)
+    start_block = tile_idx * TILE_BLOCKS
+    block_offsets = tl.arange(0, TILE_BLOCKS)
+    block_mask = (start_block + block_offsets) < num_blocks
 
-        # Per-group scale: [TILE_BLOCKS]
-        vec_max = tl.max(tl.abs(x), axis=1)
-        scale = global_scale * (vec_max * FP4_MAX_RECIPROCAL)
-        scale = tl.clamp(scale, -448.0, 448.0)
-        scale = scale.to(tl.float8e4nv).to(tl.float32)
+    raw_scales = tl.load(
+        scale_ptr + scale_row_offset + start_block + block_offsets,
+        mask=block_mask,
+        other=0,
+    )
+    # Bitcast uint8 → float8_e4m3fn to decode scales
+    scale_f32 = tl.cast(raw_scales, tl.float8e4nv, bitcast=True).to(tl.float32)
+    scale_values = (scale_f32 * global_scale)[:, None]
 
-        # Safe reciprocal, broadcast to [TILE_BLOCKS, 1]
-        output_scale = tl.where(scale == 0.0, 0.0, global_scale / scale)[:, None]
+    # Load [TILE_BLOCKS, BLOCK_PACKED] packed bytes (each byte holds
+    # two FP4 values), then unpack both nibbles in registers.
+    packed_offsets = tl.arange(0, BLOCK_PACKED)[None, :]
+    byte_indices = (
+        fp4_row_offset
+        + (start_block + block_offsets[:, None]) * BLOCK_PACKED
+        + packed_offsets
+    )
+    elem_mask = block_mask[:, None]
+    raw_bytes = tl.load(fp4_ptr + byte_indices, mask=elem_mask, other=0)
 
-        # Quantize: scale, clamp, round to FP4
-        scaled_x = tl.clamp(x * output_scale, -6.0, 6.0)
-        fp4_val = _round_to_fp4(scaled_x)
+    low_nibble = raw_bytes & 0x0F
+    high_nibble = (raw_bytes >> 4) & 0x0F
 
-        # Dequantize: fp4_val * (scale / global_scale)
-        dequant_scale = (scale / global_scale)[:, None]
-        result = fp4_val * dequant_scale
+    low_sign = (low_nibble >> 3) & 1
+    low_val = tl.load(e2m1_lut_ptr + (low_nibble & 0x07))
+    low_result = tl.where(low_sign == 1, -low_val, low_val) * scale_values
 
-        tl.store(output_ptr + indices, result, mask=mask_2d)
+    high_sign = (high_nibble >> 3) & 1
+    high_val = tl.load(e2m1_lut_ptr + (high_nibble & 0x07))
+    high_result = tl.where(high_sign == 1, -high_val, high_val) * scale_values
+
+    # Interleave low/high into [TILE_BLOCKS, BLOCK_SIZE] for a single
+    # contiguous store: [l0, h0, l1, h1, ...].
+    result = tl.interleave(low_result, high_result)
+
+    elem_offsets = tl.arange(0, BLOCK_SIZE)[None, :]
+    out_indices = (
+        output_row_offset
+        + (start_block + block_offsets[:, None]) * BLOCK_SIZE
+        + elem_offsets
+    )
+    tl.store(output_ptr + out_indices, result, mask=block_mask[:, None])
+
+
+@triton.jit
+def _e2m1_lookup(magnitude):
+    """Lookup E2M1 float value from 3-bit magnitude."""
+    result = tl.where(magnitude == 1, 0.5, 0.0)
+    result = tl.where(magnitude == 2, 1.0, result)
+    result = tl.where(magnitude == 3, 1.5, result)
+    result = tl.where(magnitude == 4, 2.0, result)
+    result = tl.where(magnitude == 5, 3.0, result)
+    result = tl.where(magnitude == 6, 4.0, result)
+    result = tl.where(magnitude == 7, 6.0, result)
+    return result
+
+
+@triton.jit
+def _round_to_fp4(x):
+    """Round float values to the nearest E2M1 representable value.
+
+    Matches the thresholds in the Python ``cast_to_fp4`` exactly.
+    """
+    sign = tl.where(x < 0.0, -1.0, 1.0)
+    abs_x = tl.abs(x)
+    result = tl.where(abs_x > 5.0, 6.0, 0.0)
+    result = tl.where((abs_x >= 3.5) & (abs_x <= 5.0), 4.0, result)
+    result = tl.where((abs_x > 2.5) & (abs_x < 3.5), 3.0, result)
+    result = tl.where((abs_x >= 1.75) & (abs_x <= 2.5), 2.0, result)
+    result = tl.where((abs_x > 1.25) & (abs_x < 1.75), 1.5, result)
+    result = tl.where((abs_x >= 0.75) & (abs_x <= 1.25), 1.0, result)
+    result = tl.where((abs_x > 0.25) & (abs_x < 0.75), 0.5, result)
+    return result * sign
+
+
+@triton.jit
+def _nvfp4_quant_dequant_kernel(
+    input_ptr,
+    output_ptr,
+    global_scale_ptr,
+    k: tl.constexpr,
+    num_blocks: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    FP4_MAX_RECIPROCAL: tl.constexpr,
+    TILE_BLOCKS: tl.constexpr,
+):
+    """Fused NVFP4 quantize-dequantize kernel.
+
+    Uses a 2D grid (rows x tiles) to parallelize across both rows
+    and quantization groups within a row. Each program handles
+    TILE_BLOCKS groups at once using vectorized 2D operations.
+    """
+    row_idx = tl.program_id(0)
+    tile_idx = tl.program_id(1)
+    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+    row_offset = row_idx * k
+
+    start_block = tile_idx * TILE_BLOCKS
+    block_offsets = tl.arange(0, TILE_BLOCKS)
+    block_mask = (start_block + block_offsets) < num_blocks
+
+    # Load [TILE_BLOCKS, BLOCK_SIZE] elements
+    indices = (
+        row_offset
+        + (start_block + block_offsets[:, None]) * BLOCK_SIZE
+        + tl.arange(0, BLOCK_SIZE)[None, :]
+    )
+    mask_2d = block_mask[:, None]
+    x = tl.load(input_ptr + indices, mask=mask_2d, other=0.0).to(tl.float32)
+
+    # Per-group scale: [TILE_BLOCKS]
+    vec_max = tl.max(tl.abs(x), axis=1)
+    scale = global_scale * (vec_max * FP4_MAX_RECIPROCAL)
+    scale = tl.clamp(scale, -448.0, 448.0)
+    scale = scale.to(tl.float8e4nv).to(tl.float32)
+
+    # Safe reciprocal, broadcast to [TILE_BLOCKS, 1]
+    output_scale = tl.where(scale == 0.0, 0.0, global_scale / scale)[:, None]
+
+    # Quantize: scale, clamp, round to FP4
+    scaled_x = tl.clamp(x * output_scale, -6.0, 6.0)
+    fp4_val = _round_to_fp4(scaled_x)
+
+    # Dequantize: fp4_val * (scale / global_scale)
+    dequant_scale = (scale / global_scale)[:, None]
+    result = fp4_val * dequant_scale
+
+    tl.store(output_ptr + indices, result, mask=mask_2d)
 
 
 def _triton_nvfp4_quant_dequant(
