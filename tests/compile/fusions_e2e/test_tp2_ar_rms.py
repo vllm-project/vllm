@@ -21,6 +21,7 @@ from .models import (
     FLASHMLA_SPARSE_ATTN,
     TRITON_ATTN,
     deepseek_coder_v2_lite_fp8,
+    deepseek_r1_fp4,
     deepseek_v3_fp8,
     deepseek_v32_fp4,
     gpt_oss_20b,
@@ -113,11 +114,11 @@ def test_tp2_ar_rms_fp8_fusions(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
     "model_name, matches_fn, model_kwargs, hf_overrides",
-    [llama3_8b_fp4, llama4_scout_fp4, deepseek_v32_fp4],
+    [llama3_8b_fp4, llama4_scout_fp4, deepseek_r1_fp4, deepseek_v32_fp4],
 )
 @pytest.mark.parametrize(
     "attn_backend",
-    [FLASHINFER_ATTN, FLASHMLA_SPARSE_ATTN],
+    [FLASHINFER_ATTN, FLASHINFER_MLA_ATTN, FLASHMLA_SPARSE_ATTN],
 )
 @pytest.mark.parametrize("n_layers", [4])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("rms_norm"))
