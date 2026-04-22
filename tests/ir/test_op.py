@@ -574,39 +574,29 @@ class TestTolerance:
             op.get_tolerance(torch.complex64)
 
 
-class TestEnableSymbolic:
-    def test_enable_symbolic_context_manager(self):
-        """Test context manager toggles symbolic mode on/off."""
-        assert rms_norm._symbolic_mode is False
-
-        with rms_norm.enable_symbolic():
-            assert rms_norm._symbolic_mode is True
-
-        assert rms_norm._symbolic_mode is False
-
-    def test_generate_inputs_symbolic_replaces_first_dim(self):
-        """Test symbolic mode replaces first dim with SymInt."""
+class TestGenerateSymbolicInputs:
+    def test_generate_symbolic_inputs_replaces_first_dim(self):
+        """Test symbolic inputs replace first dim with SymInt."""
         from torch import SymInt
 
-        # Normal mode
+        # Normal inputs
         result = rms_norm.generate_inputs(
             num_tokens=128, hidden_size=64, dtype=torch.float32
         )
         assert result[0].shape == (128, 64)
         assert result[1].shape == (64,)
 
-        # Symbolic mode
-        with rms_norm.enable_symbolic():
-            result = rms_norm.generate_inputs(
-                num_tokens=128, hidden_size=64, dtype=torch.float32
-            )
-            # First dim is SymInt
-            assert isinstance(result[0].shape[0], SymInt)
-            # Remaining dims preserved
-            assert result[0].shape[1:] == (64,)
-            # First tensor converted to meta device
-            assert result[0].device.type == "meta"
-            # Weight unchanged (kept as original, not converted to meta)
-            assert result[1].device.type != "meta"
-            # dtype preserved
-            assert result[0].dtype == torch.float32
+        # Symbolic inputs
+        result = rms_norm.generate_symbolic_inputs(
+            num_tokens=128, hidden_size=64, dtype=torch.float32
+        )
+        # First dim is SymInt
+        assert isinstance(result[0].shape[0], SymInt)
+        # Remaining dims preserved
+        assert result[0].shape[1:] == (64,)
+        # First tensor converted to meta device
+        assert result[0].device.type == "meta"
+        # Weight unchanged (kept as original, not converted to meta)
+        assert result[1].device.type != "meta"
+        # dtype preserved
+        assert result[0].dtype == torch.float32

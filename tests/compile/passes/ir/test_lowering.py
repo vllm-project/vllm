@@ -21,9 +21,15 @@ from ...backend import TestBackend
 
 
 def _get_op_provider_pairs() -> list[tuple[str, str]]:
-    """Get all (op_name, provider) pairs for parametrization."""
+    """Get all (op_name, provider) pairs for parametrization.
+
+    Only includes ops that have an input generator registered (i.e. real vLLM IR ops,
+    not test ops from other test files).
+    """
     pairs: list[tuple[str, str]] = []
     for op_name, op in IrOp.registry.items():
+        if not op.has_input_generator:
+            continue
         for provider in op.supported_providers():
             pairs.append((op_name, provider))
     return pairs
@@ -91,8 +97,7 @@ class TestPerOpLowering:
             pytest.skip(f"Provider {provider} not supported")
 
         # Step 1: Verify supports_args works with unbacked symint
-        with op.enable_symbolic():
-            fake_args = op.generate_inputs()
+        fake_args = op.generate_symbolic_inputs()
         impl = op.impls[provider]
         supports_result = impl.supports_args(*fake_args)
         assert isinstance(supports_result, bool), (
@@ -244,8 +249,7 @@ class TestFakeOpLowering:
                 "batch_dep_impl": (lambda x: x.size(0) == 8, _batch_dep_impl_fn),
             },
         ) as batch_op:
-            with batch_op.enable_symbolic():
-                fake_args = batch_op.generate_inputs()
+            fake_args = batch_op.generate_symbolic_inputs()
             impl = batch_op.impls["batch_dep_impl"]
             result = impl.supports_args(*fake_args)
 

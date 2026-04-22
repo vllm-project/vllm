@@ -157,7 +157,6 @@ class IrOp:
         self._schema_str = infer_schema(native_impl, mutates_args=[])
         self._input_generator: InputGenerator | None = None
         self._tolerance_overrides: ToleranceSpec = {}
-        self._symbolic_mode: bool = False
 
         # native implementation
         self.impls["native"] = IrOpImpl(
@@ -384,29 +383,6 @@ class IrOp:
         self._input_generator = fn
         return fn
 
-    @contextlib.contextmanager
-    def enable_symbolic(self, enabled: bool = True):
-        """
-        Context manager to enable/disable symbolic mode for input generation.
-
-        In symbolic mode, generate_inputs() replaces the first dimension
-        (num_tokens) of input tensors with a SymInt, making them suitable
-        for torch.compile graph tracing.
-
-        Example:
-            with rms_norm.enable_symbolic():
-                inputs = rms_norm.generate_inputs(
-                    num_tokens=128, hidden_size=4096, dtype=torch.float16
-                )
-                # inputs[0].shape[0] is a SymInt, not a concrete number
-        """
-        old = self._symbolic_mode
-        try:
-            self._symbolic_mode = enabled
-            yield
-        finally:
-            self._symbolic_mode = old
-
     def _make_symbolic(self, args: tuple) -> tuple[Any, ...]:
         """Replace the first dimension of the first tensor with an unbacked SymInt.
 
@@ -440,10 +416,22 @@ class IrOp:
                 f"No input generator registered for op '{self.name}'. "
                 f"Use @ir.ops.{self.name}.register_input_generator"
             )
-        args = self._input_generator(**kwargs)
-        if self._symbolic_mode:
-            return self._make_symbolic(args)
-        return args
+        return self._input_generator(**kwargs)
+
+    def generate_symbolic_inputs(self, **kwargs: Any) -> tuple[Any, ...]:
+        """Generate inputs with unbacked SymInts for the first dimension.
+
+        This is useful for testing that `supports_args` works correctly
+        with symbolic shapes during torch.compile graph tracing.
+
+        Example:
+            fake_args = rms_norm.generate_symbolic_inputs(
+                num_tokens=128, hidden_size=4096, dtype=torch.float16
+            )
+            # fake_args[0].shape[0] is a SymInt, not a concrete number
+        """
+        args = self.generate_inputs(**kwargs)
+        return self._make_symbolic(args)
 
     def override_tolerance(
         self, dtype: torch.dtype, *, atol: float, rtol: float
