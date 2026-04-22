@@ -8,27 +8,27 @@ For a detailed explanation of the EPD features, please refer to the [Disaggregat
 
 - `disagg_epd_proxy.py` - Proxy script that demonstrates the XeYpZd setup (X encode instances, Y prefill instances, Z decode instances). Currently stable for the 1e1p1d configuration.
 
-- `disagg_1e1p1d_example.sh` - Sets up the 1e1p1d configuration, runs the VisionArena benchmark, and processes a single request with a local image.
+- `example_ec_connector/disagg_1e1p1d_example.sh` - Sets up the 1e1p1d configuration, runs the VisionArena benchmark, and processes a single request with a local image.
 
-- `disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
+- `example_ec_connector/disagg_1e1pd_example.sh` - Sets up the 1e1pd configuration, runs the VisionArena benchmark, and processes a single request with a local image.
 
 ### Custom Configuration
 
 ```bash
 # Use specific GPUs
-GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 bash disagg_1e1p1d_example.sh
+GPU_E=0 GPU_PD=1 GPU_P=1 GPU_D=2 bash example_ec_connector/disagg_1e1p1d_example.sh
 
 # Use specific ports
-ENDPOINT_PORT=10001 bash disagg_1e1p1d_example.sh
+PROXY_PORT=10001 bash example_ec_connector/disagg_1e1p1d_example.sh
 
 # Use specific model
-MODEL="Qwen/Qwen2.5-VL-3B-Instruct" bash disagg_1e1p1d_example.sh
+MODEL="Qwen/Qwen2.5-VL-3B-Instruct" bash example_ec_connector/disagg_1e1p1d_example.sh
 
 # Use specific storage path
-EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash disagg_1e1p1d_example.sh
+EC_SHARED_STORAGE_PATH="/tmp/my_ec_cache" bash example_ec_connector/disagg_1e1p1d_example.sh
 
 # Run on XPU; scripts switch from CUDA_VISIBLE_DEVICES to ZE_AFFINITY_MASK
-DEVICE_PLATFORM=xpu GPU_E=0 GPU_PD=1 bash disagg_1e1pd_example.sh
+DEVICE_PLATFORM=xpu GPU_E=0 GPU_PD=1 bash example_ec_connector/disagg_1e1pd_example.sh
 ```
 
 `DEVICE_PLATFORM` defaults to `cuda`. Set `DEVICE_PLATFORM=xpu` when running these examples on Intel GPUs so the scripts use `ZE_AFFINITY_MASK` instead of `CUDA_VISIBLE_DEVICES` for device selection.
