@@ -145,14 +145,15 @@ class PlaceholderRange:
     """
 
     @cached_property
-    def embeds_cumsum(self) -> torch.Tensor | None:
-        return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
+    def embeds_cumsum(self) -> list[int] | None:
+        # python list so python indexing avoids torch C++ overhead/conversions/deallocs
+        return None if self.is_embed is None else self.is_embed.cumsum(dim=0).tolist()
 
     def get_num_embeds(self) -> int:
         if self.embeds_cumsum is None:
             return self.length
 
-        return int(self.embeds_cumsum[-1])
+        return self.embeds_cumsum[-1] if self.embeds_cumsum else 0
 
     def get_embeds_indices_in_range(
         self, start_idx: int, end_idx: int
@@ -170,10 +171,8 @@ class PlaceholderRange:
         if self.embeds_cumsum is None:
             return start_idx, end_idx
 
-        embeds_start_idx = (
-            int(self.embeds_cumsum[start_idx - 1]) if start_idx > 0 else 0
-        )
-        embeds_end_idx = int(self.embeds_cumsum[end_idx - 1])
+        embeds_start_idx = self.embeds_cumsum[start_idx - 1] if start_idx > 0 else 0
+        embeds_end_idx = self.embeds_cumsum[end_idx - 1] if end_idx > 0 else 0
 
         return embeds_start_idx, embeds_end_idx
 
@@ -238,12 +237,29 @@ def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
         return isinstance(a, torch.Tensor) and torch.equal(b, a)
 
     if isinstance(a, list):
-        return isinstance(b, list) and all(
-            nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b)
+        return (
+            isinstance(b, list)
+            and len(a) == len(b)
+            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
         )
     if isinstance(b, list):
-        return isinstance(a, list) and all(
-            nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a)
+        return (
+            isinstance(a, list)
+            and len(b) == len(a)
+            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
+        )
+
+    if isinstance(a, tuple):
+        return (
+            isinstance(b, tuple)
+            and len(a) == len(b)
+            and all(nested_tensors_equal(a_, b_) for a_, b_ in zip(a, b))
+        )
+    if isinstance(b, tuple):
+        return (
+            isinstance(a, tuple)
+            and len(b) == len(a)
+            and all(nested_tensors_equal(b_, a_) for b_, a_ in zip(b, a))
         )
 
     # Both a and b are scalars

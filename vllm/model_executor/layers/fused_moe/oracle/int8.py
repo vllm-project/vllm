@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     int8_w8a8_moe_quant_config,
+    int8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -160,9 +161,18 @@ def make_int8_moe_quant_config(
     a2_scale: torch.Tensor | None,
     per_act_token_quant: bool = False,
 ) -> FusedMoEQuantConfig:
-    """
-    Create FusedMoEQuantConfig for the specified Int8 backend.
-    """
+    assert (a1_scale is None and a2_scale is None) or (
+        a1_scale is not None and a2_scale is not None
+    ), "a1_scale and a2_scale must both be provided or both be None"
+
+    if a1_scale is None or a2_scale is None:
+        return int8_w8a16_moe_quant_config(
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            w1_zp=None,
+            w2_zp=None,
+        )
+
     return int8_w8a8_moe_quant_config(
         w1_scale=w1_scale,
         w2_scale=w2_scale,

@@ -174,6 +174,16 @@ kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
 
 
+def create_fp8_quant_key(
+    static: bool,
+    group_shape: GroupShape,
+    symmetric: bool = True,
+    scale_dtype: torch.dtype = torch.float32,
+) -> QuantKey:
+    scale_desc = ScaleDesc(scale_dtype, static, group_shape)
+    return QuantKey(FP8_DTYPE, scale_desc, symmetric=symmetric)
+
+
 # Normalize the group_shape to the full extent for any dims that are -1
 def _normalize_quant_group_shape(x: torch.Tensor, group_shape: GroupShape):
     # -1 means full extent
