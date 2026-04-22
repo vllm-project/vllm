@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
 import tempfile
 
 import huggingface_hub.constants
 import pytest
 from huggingface_hub.utils import LocalEntryNotFoundError
 
+from vllm.model_executor.model_loader import weight_utils
 from vllm.model_executor.model_loader.weight_utils import (
+    _prefetch_all_checkpoints,
     download_weights_from_hf,
     maybe_remap_kv_scale_name,
 )
@@ -158,6 +161,62 @@ class TestMaybeRemapKvScaleName:
             "model.layers.0.self_attn.qkv_proj.k_scale", empty_params
         )
         assert result is None
+
+
+def test_prefetch_quiet_on_executor_shutdown(monkeypatch, caplog):
+    """When the prefetch thread pool is shut down mid-prefetch, the remaining
+    tasks should not each emit a full WARNING traceback.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/40564
+    """
+
+    def _raise_shutdown(*_args, **_kwargs) -> None:
+        raise RuntimeError("cannot schedule new futures after shutdown")
+
+    monkeypatch.setattr(weight_utils, "_prefetch_checkpoint", _raise_shutdown)
+
+    paths = [f"/tmp/shard-{i}.safetensors" for i in range(16)]
+    with caplog.at_level(logging.DEBUG, logger=weight_utils.logger.name):
+        thread = _prefetch_all_checkpoints(paths)
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "prefetch thread did not finish"
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name == weight_utils.logger.name
+    ]
+    assert warnings == [], (
+        f"expected no WARNING-level records on shutdown, got: "
+        f"{[r.getMessage() for r in warnings]}"
+    )
+
+
+def test_prefetch_warns_on_non_shutdown_failure(monkeypatch, caplog):
+    """A prefetch failure that is *not* the executor-shutdown case must still
+    produce a WARNING — the shutdown short-circuit must not swallow real bugs.
+    """
+
+    def _raise_other(*_args, **_kwargs) -> None:
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(weight_utils, "_prefetch_checkpoint", _raise_other)
+
+    paths = [f"/tmp/shard-{i}.safetensors" for i in range(2)]
+    with caplog.at_level(logging.WARNING, logger=weight_utils.logger.name):
+        thread = _prefetch_all_checkpoints(paths)
+        thread.join(timeout=5.0)
+        assert not thread.is_alive(), "prefetch thread did not finish"
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name == weight_utils.logger.name
+    ]
+    assert len(warnings) == len(paths), (
+        f"expected one WARNING per file, got {len(warnings)}: "
+        f"{[r.getMessage() for r in warnings]}"
+    )
 
 
 if __name__ == "__main__":

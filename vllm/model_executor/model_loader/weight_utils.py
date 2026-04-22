@@ -815,12 +815,23 @@ def _prefetch_checkpoint(
             pass
 
 
+# Raised by concurrent.futures.ThreadPoolExecutor.submit (and therefore by
+# loop.run_in_executor / asyncio.to_thread) once the pool's _shutdown flag is
+# set. There is no dedicated exception subclass for this case in CPython, so we
+# match on the message text.
+_EXECUTOR_SHUTDOWN_MSG = "cannot schedule new futures after shutdown"
+
+
 def _prefetch_all_checkpoints(
     sorted_files: list[str],
     num_prefetch_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
-) -> None:
-    """Start prefetching checkpoint files into page cache in a background thread."""
+) -> threading.Thread:
+    """Start prefetching checkpoint files into page cache in a background thread.
+
+    Returns the background thread so tests (and callers that care) can wait on
+    it. Daemon=True, so callers that ignore the return value are unaffected.
+    """
     if num_prefetch_threads < 1:
         raise ValueError("safetensors prefetch num threads must be >= 1")
     if block_size < 1:
@@ -835,16 +846,19 @@ def _prefetch_all_checkpoints(
     paths_to_prefetch = sorted_files[rank::world_size]
     total_for_rank = len(paths_to_prefetch)
 
-    async def _prefetch_all() -> None:
+    async def _prefetch_all() -> bool:
         loop = asyncio.get_running_loop()
         completed = 0
         next_log_pct = 10
+        aborted = False
 
         async def prefetch_one(
             path: str,
             executor: concurrent.futures.ThreadPoolExecutor,
         ) -> None:
-            nonlocal completed, next_log_pct
+            nonlocal completed, next_log_pct, aborted
+            if aborted:
+                return
             try:
                 await loop.run_in_executor(
                     executor, _prefetch_checkpoint, path, block_size
@@ -860,6 +874,19 @@ def _prefetch_all_checkpoints(
                             total_for_rank,
                         )
                         next_log_pct += 10
+            except RuntimeError as e:
+                # On interpreter/engine teardown the thread pool is shut down,
+                # so further submits fail. Short-circuit the remaining tasks
+                # rather than emitting one traceback per file (which would
+                # bury the real startup error).
+                if _EXECUTOR_SHUTDOWN_MSG in str(e):
+                    if not aborted:
+                        aborted = True
+                        logger.debug("Prefetch aborted: executor is shutting down.")
+                    return
+                logger.warning(
+                    "Failed to prefetch checkpoint file %r.", path, exc_info=True
+                )
             except Exception:
                 logger.warning(
                     "Failed to prefetch checkpoint file %r.", path, exc_info=True
@@ -871,15 +898,22 @@ def _prefetch_all_checkpoints(
             await asyncio.gather(
                 *(prefetch_one(p, executor) for p in paths_to_prefetch)
             )
+        return aborted
 
     def _run_prefetch() -> None:
         start = time.perf_counter()
-        asyncio.run(_prefetch_all())
+        aborted = asyncio.run(_prefetch_all())
         elapsed = time.perf_counter() - start
-        logger.info(
-            "Prefetching checkpoint files into page cache finished in %.2fs",
-            elapsed,
-        )
+        if aborted:
+            logger.info(
+                "Prefetching checkpoint files interrupted by shutdown after %.2fs.",
+                elapsed,
+            )
+        else:
+            logger.info(
+                "Prefetching checkpoint files into page cache finished in %.2fs",
+                elapsed,
+            )
 
     logger.info(
         "Prefetching checkpoint files into page cache started "
@@ -887,7 +921,9 @@ def _prefetch_all_checkpoints(
         num_prefetch_threads,
         block_size,
     )
-    threading.Thread(target=_run_prefetch, daemon=True).start()
+    thread = threading.Thread(target=_run_prefetch, daemon=True)
+    thread.start()
+    return thread
 
 
 def safetensors_weights_iterator(
