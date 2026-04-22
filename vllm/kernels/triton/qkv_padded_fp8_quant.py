@@ -8,6 +8,7 @@ head_dim to a multiple of 16 for cuDNN compatibility.
 
 import torch
 
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
 )
@@ -148,3 +149,32 @@ def quantize_fp8_pad_head_dim_triton(
     )
 
     return output.view((*original_shape[:-1], padded_head_dim))
+
+
+def quantize_fp8_maybe_pad_head_dim(
+    tensor: torch.Tensor,
+    scale: torch.Tensor,
+    fp8_quant: QuantFP8,
+    skip_scale: bool = False,
+) -> torch.Tensor:
+    """Quantize a 3D/4D tensor to FP8, padding head_dim to a multiple of 16
+    only when needed.
+
+    Accepts (S, H, D) or (B, S, H, D) input. Uses ``fp8_quant`` (a
+    :class:`QuantFP8` CustomOp) when head_dim is already aligned to 16
+    (no padding); otherwise falls back to a stride-aware Triton kernel
+    that pads head_dim to a multiple of 16.
+    """
+    head_dim = tensor.shape[-1]
+    if head_dim % 16 != 0:
+        return quantize_fp8_pad_head_dim_triton(tensor, scale, skip_scale=skip_scale)
+
+    if skip_scale:
+        return tensor.to(current_platform.fp8_dtype())
+
+    # QuantFP8 expects 2D: flatten all dims except (H, D).
+    orig_shape = tensor.shape
+    total_tokens = tensor.numel() // (orig_shape[-1] * orig_shape[-2])
+    tensor_2d = tensor.reshape(total_tokens, -1)
+    fp8_tensor, _ = fp8_quant(tensor_2d, scale=scale)
+    return fp8_tensor.reshape(orig_shape)

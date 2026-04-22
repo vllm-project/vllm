@@ -8,9 +8,9 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from vllm.config import get_current_vllm_config_or_none
+from vllm.config import MultiModalConfig
 from vllm.kernels.triton.qkv_padded_fp8_quant import (
-    quantize_fp8_pad_head_dim_triton,
+    quantize_fp8_maybe_pad_head_dim,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp, maybe_get_oot_by_class
@@ -21,8 +21,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     get_fp8_min_max,
 )
-from vllm.model_executor.models.vision import get_vit_attn_backend
-from vllm.platforms import current_platform
+from vllm.model_executor.models.vision import (
+    get_multimodal_config,
+    get_vit_attn_backend,
+)
 from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
@@ -41,11 +43,9 @@ logger = init_logger(__name__)
 _, _FP8_MAX = get_fp8_min_max()
 _FP8_AMAX_HISTORY_LEN = 16
 
-_FP8_SCALE_SAVE_MARGIN_DEFAULT = 1.5
-
 # Module-level state for auto-saving dynamic scales.
 _fp8_scale_save_path: str | None = None
-_fp8_scale_save_margin: float = _FP8_SCALE_SAVE_MARGIN_DEFAULT
+_fp8_scale_save_margin: float = MultiModalConfig.mm_encoder_fp8_scale_save_margin
 _fp8_saved_scale_refs: dict[str, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
 
 
@@ -106,26 +106,6 @@ def _load_fp8_scales_file(path: str | None) -> dict[str, dict[str, float]]:
         "Loaded FP8 attention scales from %s (%d layers)", path, len(scales)
     )
     return scales
-
-
-def _get_mm_encoder_fp8_config() -> tuple[str | None, str | None, str | None, float]:
-    """Read FP8 encoder config from multimodal_config, if available.
-
-    Returns (mm_encoder_attn_dtype, mm_encoder_fp8_scale_path,
-             mm_encoder_fp8_scale_save_path, mm_encoder_fp8_scale_save_margin).
-    """
-    vllm_config = get_current_vllm_config_or_none()
-    if vllm_config is None or vllm_config.model_config is None:
-        return None, None, None, _FP8_SCALE_SAVE_MARGIN_DEFAULT
-    mm_config = vllm_config.model_config.multimodal_config
-    if mm_config is None:
-        return None, None, None, _FP8_SCALE_SAVE_MARGIN_DEFAULT
-    return (
-        mm_config.mm_encoder_attn_dtype,
-        mm_config.mm_encoder_fp8_scale_path,
-        mm_config.mm_encoder_fp8_scale_save_path,
-        mm_config.mm_encoder_fp8_scale_save_margin,
-    )
 
 
 # Batch buckets for cuDNN graph caching.
@@ -365,10 +345,8 @@ class MMEncoderAttention(CustomOp):
         self._fp8_dynamic_scale = False
         self.fp8_quant: QuantFP8 | None = None
 
-        attn_dtype, fp8_scale_path, fp8_save_path, fp8_save_margin = (
-            _get_mm_encoder_fp8_config()
-        )
-        if attn_dtype == "fp8":
+        mm_cfg = get_multimodal_config()
+        if mm_cfg is not None and mm_cfg.mm_encoder_attn_dtype == "fp8":
             if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
                 raise ValueError(
                     "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
@@ -376,29 +354,42 @@ class MMEncoderAttention(CustomOp):
                     "Try upgrading cuDNN (nvidia-cudnn-cu1x) via pip, "
                     "e.g.: pip install -U nvidia-cudnn-cu13==9.18.1"
                 )
-            self._init_fp8_attention(prefix, fp8_scale_path)
-            if fp8_save_path is not None and self._fp8_dynamic_scale:
+            # MMEncoderAttention is not in the model loader's auto-scan for
+            # process_weights_after_loading, so we call it manually here.
+            self.process_weights_after_loading(self.dtype)
+            if (
+                mm_cfg.mm_encoder_fp8_scale_save_path is not None
+                and self._fp8_dynamic_scale
+            ):
                 global _fp8_scale_save_path, _fp8_scale_save_margin
-                _fp8_scale_save_path = fp8_save_path
-                _fp8_scale_save_margin = fp8_save_margin
+                _fp8_scale_save_path = mm_cfg.mm_encoder_fp8_scale_save_path
+                _fp8_scale_save_margin = mm_cfg.mm_encoder_fp8_scale_save_margin
 
-    def _init_fp8_attention(self, layer_name: str, scale_path: str | None) -> None:
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         """Initialize FP8 quantization state for this layer.
 
-        If *scale_path* is provided, static per-layer scales are loaded from
-        the JSON file. Otherwise, dynamic scaling is used: a circular buffer
-        of the last 16 observed Q/K/V amax values is maintained and scales
-        are recomputed each forward pass.
+        Matches the ``(self, act_dtype)`` interface used by
+        :class:`Attention` and :class:`MLAAttention`. ``act_dtype`` is
+        accepted for signature compatibility but unused here, since FP8
+        scales are stored in float32 regardless of the activation dtype.
+
+        If a scale file is configured via ``mm_encoder_fp8_scale_path``,
+        static per-layer scales are loaded from the JSON file. Otherwise,
+        dynamic scaling is used: a circular buffer of the last 16 observed
+        Q/K/V amax values is maintained and scales are recomputed each
+        forward pass.
         """
+        mm_cfg = get_multimodal_config()
+        scale_path = mm_cfg.mm_encoder_fp8_scale_path if mm_cfg is not None else None
         all_scales = _load_fp8_scales_file(scale_path)
 
         if scale_path is not None:
             # Static scaling from calibration file.
-            layer_scales = all_scales.get(layer_name)
+            layer_scales = all_scales.get(self.layer_name)
             if layer_scales is None:
                 raise ValueError(
                     "FP8 attention enabled but scales not found for layer "
-                    f"'{layer_name}' in {scale_path}. "
+                    f"'{self.layer_name}' in {scale_path}. "
                     f"Available layers: {list(all_scales.keys())}"
                 )
             init_scales = layer_scales
@@ -443,7 +434,7 @@ class MMEncoderAttention(CustomOp):
 
         logger.debug(
             "FP8 attention enabled for %s: q=%.4f, k=%.4f, v=%.4f%s",
-            layer_name if layer_name else "MMEncoderAttention",
+            self.layer_name if self.layer_name else "MMEncoderAttention",
             init_scales["q"],
             init_scales["k"],
             init_scales["v"],
@@ -574,35 +565,6 @@ class MMEncoderAttention(CustomOp):
             output = output.reshape(bsz, q_len, -1)
         return output
 
-    def _quantize_to_fp8(
-        self,
-        tensor: torch.Tensor,
-        scale: torch.Tensor,
-        skip_scale: bool = False,
-    ) -> torch.Tensor:
-        """Quantize a 3D/4D tensor to FP8.
-
-        Accepts (S, H, D) or (B, S, H, D) input. Uses QuantFP8 CustomOp
-        when head_dim is aligned to 16; otherwise falls back to a
-        stride-aware Triton kernel that pads head_dim to a multiple of 16.
-        """
-        assert self.fp8_quant is not None
-        orig_shape = tensor.shape
-        head_dim = orig_shape[-1]
-
-        if head_dim % 16 == 0:
-            if skip_scale:
-                return tensor.to(current_platform.fp8_dtype())
-
-            # QuantFP8 expects 2D: flatten all dims except (H, D).
-            total_tokens = tensor.numel() // (tensor.shape[-1] * tensor.shape[-2])
-            tensor_2d = tensor.reshape(total_tokens, -1)
-            fp8_tensor, _ = self.fp8_quant(tensor_2d, scale=scale)
-            return fp8_tensor.reshape(orig_shape)
-
-        # Triton kernel pads head_dim to a multiple of 16
-        return quantize_fp8_pad_head_dim_triton(tensor, scale, skip_scale=skip_scale)
-
     @torch.no_grad()
     def _record_amax_and_update_scales(
         self,
@@ -678,14 +640,23 @@ class MMEncoderAttention(CustomOp):
             if self._fp8_dynamic_scale:
                 self._record_amax_and_update_scales(query, key, value)
 
-            query = self._quantize_to_fp8(
-                query, self._fp8_q_scale, skip_scale=self.skip_scale_q
+            query = quantize_fp8_maybe_pad_head_dim(
+                query,
+                self._fp8_q_scale,
+                skip_scale=self.skip_scale_q,
+                fp8_quant=self.fp8_quant,
             )
-            key = self._quantize_to_fp8(
-                key, self._fp8_k_scale, skip_scale=self.skip_scale_k
+            key = quantize_fp8_maybe_pad_head_dim(
+                key,
+                self._fp8_k_scale,
+                skip_scale=self.skip_scale_k,
+                fp8_quant=self.fp8_quant,
             )
-            value = self._quantize_to_fp8(
-                value, self._fp8_v_scale, skip_scale=self.skip_scale_v
+            value = quantize_fp8_maybe_pad_head_dim(
+                value,
+                self._fp8_v_scale,
+                skip_scale=self.skip_scale_v,
+                fp8_quant=self.fp8_quant,
             )
 
         output = vit_flashinfer_wrapper(

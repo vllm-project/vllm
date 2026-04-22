@@ -10,7 +10,12 @@ from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 import torch
 from transformers import PretrainedConfig
 
-from vllm.config import MultiModalConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (
+    MultiModalConfig,
+    VllmConfig,
+    get_current_vllm_config,
+    get_current_vllm_config_or_none,
+)
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -122,6 +127,15 @@ def get_vit_attn_backend(
         attn_backend_override=attn_backend_override,
     )
     return attn_backend
+
+
+def get_multimodal_config() -> MultiModalConfig | None:
+    """Return the current ``MultiModalConfig``, or ``None`` when no engine
+    config context is active (e.g., during unit tests)."""
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None or vllm_config.model_config is None:
+        return None
+    return vllm_config.model_config.multimodal_config
 
 
 def is_vit_use_data_parallel():

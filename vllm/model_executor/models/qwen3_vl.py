@@ -49,7 +49,7 @@ from transformers.models.qwen3_vl.video_processing_qwen3_vl import (
 from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.logger import init_logger
@@ -134,6 +134,7 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import (
+    get_multimodal_config,
     get_vit_attn_backend,
     is_vit_use_data_parallel,
     run_dp_sharded_mrope_vision_model,
@@ -368,10 +369,10 @@ class Qwen3_VisionTransformer(nn.Module):
 
         # FP8 attention: Q/K/V become independent contiguous tensors
         # after quantization, so cu_seqlens uses uniform stride (no 3x V).
-        _mm_cfg = get_current_vllm_config().model_config.multimodal_config
+        mm_cfg = get_multimodal_config()
         self.fp8_padded_hidden_size = (
             self.num_heads * round_up(head_dim, 16)
-            if _mm_cfg is not None and _mm_cfg.mm_encoder_attn_dtype == "fp8"
+            if mm_cfg is not None and mm_cfg.mm_encoder_attn_dtype == "fp8"
             else None
         )
 
