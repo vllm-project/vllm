@@ -9,7 +9,14 @@ from vllm.config.utils import config
 class WeightTransferConfig:
     """Configuration for weight transfer during RL training."""
 
-    backend: Literal["nccl", "ipc"] | str = "nccl"
+    backend: Literal["nccl", "ipc", "wpi"] | str = "nccl"
     """The backend to use for weight transfer. Validated against the
     `WeightTransferEngineFactory` registry at engine creation time.
+
+    Available backends:
+    - "nccl": Direct NCCL broadcast between trainer and workers
+    - "ipc": CUDA IPC handles for same-node weight sharing
+    - "wpi": Weight Propagation Interface — driver-managed NCCL broadcast
+             with persistent VRAM buffers and zero-copy FD sharing.
+             Requires `wpi_verl_plugin` package.
     """
