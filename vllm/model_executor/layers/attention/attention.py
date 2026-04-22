@@ -336,6 +336,12 @@ class Attention(nn.Module, AttentionLayerBase):
             )
             cache_config.enable_prefix_caching = False
 
+        if extra_impl_args.get("chunk_lookback", -1) > -1:
+            assert self.attn_backend.get_name() == "TRITON_ATTN", (
+                f"Chunked attention with lookback requires the Triton backend, "
+                f"but got {self.attn_backend.get_name()}."
+            )
+
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
