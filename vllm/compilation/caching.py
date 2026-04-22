@@ -33,6 +33,26 @@ assert isinstance(SerializableCallable, type)
 logger = init_logger(__name__)
 
 
+_COMPILE_CACHE_ROOT: str | None = None
+
+
+@contextlib.contextmanager
+def use_compile_cache_root(root: str):
+    global _COMPILE_CACHE_ROOT
+    old_root = _COMPILE_CACHE_ROOT
+    _COMPILE_CACHE_ROOT = root
+    try:
+        yield
+    finally:
+        _COMPILE_CACHE_ROOT = old_root
+
+
+def compile_cache_prefix() -> str:
+    return os.path.join(
+        _COMPILE_CACHE_ROOT or envs.VLLM_CACHE_ROOT, "torch_compile_cache"
+    )
+
+
 class StandaloneCompiledArtifacts:
     """Storage for standalone compiled artifacts with content-based deduplication.
 
