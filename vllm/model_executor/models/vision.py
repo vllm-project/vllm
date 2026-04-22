@@ -23,6 +23,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 logger = init_logger(__name__)
@@ -136,6 +137,20 @@ def get_multimodal_config() -> MultiModalConfig | None:
     if vllm_config is None or vllm_config.model_config is None:
         return None
     return vllm_config.model_config.multimodal_config
+
+
+def get_fp8_padded_hidden_size(num_heads: int, head_dim: int) -> int | None:
+    """Return the padded hidden size for FP8 ViT encoder attention, or
+    ``None`` when FP8 is not enabled.
+
+    cuDNN FP8 prefill attention requires ``head_dim`` to be a multiple of
+    16. For non-aligned ``head_dim`` (e.g. 72), Q/K/V are padded to the
+    nearest multiple of 16.
+    """
+    mm_cfg = get_multimodal_config()
+    if mm_cfg is None or mm_cfg.mm_encoder_attn_dtype != "fp8":
+        return None
+    return num_heads * round_up(head_dim, 16)
 
 
 def is_vit_use_data_parallel():
