@@ -57,6 +57,11 @@ class CPUOffloadingSpec(OffloadingSpec):
 
     def get_manager(self) -> OffloadingManager:
         if not self._manager:
+            from vllm.v1.kv_offload.cpu.manager import (
+                CPUOffloadingManager,
+                FilterReusedOffloadingManager,
+            )
+
             kv_events_config = self.vllm_config.kv_events_config
             enable_events = (
                 kv_events_config is not None and kv_events_config.enable_kv_cache_events
