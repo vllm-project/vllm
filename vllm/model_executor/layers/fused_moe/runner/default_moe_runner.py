@@ -54,11 +54,13 @@ class DefaultMoERunner(MoERunnerBase):
         # NOTE: this will be removed once all kernels are migrated into the
         # MoEKernel framework.
         if self.do_naive_dispatch_combine:
-            hidden_states, router_logits = get_ep_group().dispatch_router_logits(
+            res = get_ep_group().dispatch_router_logits(
                 hidden_states,
                 router_logits,
                 self.moe_config.is_sequence_parallel,
             )
+            assert len(res) == 2
+            hidden_states, router_logits = res
 
         # NOTE: Similar with DP, PCP also needs dispatch and combine. For
         # simplicity, AgRsAll2All was added separately for PCP here. Maybe

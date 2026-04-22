@@ -117,17 +117,20 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
+            device_communicator = get_ep_group().device_communicator
+            assert device_communicator is not None
+            assert device_communicator.all2all_manager is not None
             return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
-                num_dispatchers=(
-                    get_ep_group().device_communicator.all2all_manager.world_size
-                ),
+                num_dispatchers=(device_communicator.all2all_manager.world_size),
                 use_monolithic=use_monolithic,
             )
         else:
             return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
-    all2all_manager = get_ep_group().device_communicator.all2all_manager
+    device_communicator = get_ep_group().device_communicator
+    assert device_communicator is not None
+    all2all_manager = device_communicator.all2all_manager
     assert all2all_manager is not None
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
