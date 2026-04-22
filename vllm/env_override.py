@@ -553,7 +553,7 @@ def _apply_constrain_to_fx_strides_patch():
     _lowering.constrain_to_fx_strides = _patched
 
 
-if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0"):
+if is_torch_equal_or_newer("2.10.0") and not is_torch_equal_or_newer("2.12.0.dev"):
     import builtins as _builtins
     import pickle
 
