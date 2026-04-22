@@ -7,7 +7,6 @@ import torch
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_bf16_mm,
-    get_flashinfer_bf16_supported_backends,
     has_flashinfer_bf16_gemm,
 )
 
@@ -17,7 +16,13 @@ if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
         allow_module_level=True,
     )
 
-SUPPORTED_BACKENDS = get_flashinfer_bf16_supported_backends()
+import flashinfer
+
+SUPPORTED_BACKENDS = tuple(
+    backend
+    for backend in ("cudnn", "cutlass", "tgv")
+    if flashinfer.mm_bf16.is_backend_supported(backend)
+)
 if not SUPPORTED_BACKENDS:
     pytest.skip(
         reason="FlashInfer BF16 GEMM has no supported backend on this device.",
@@ -26,8 +31,6 @@ if not SUPPORTED_BACKENDS:
 
 @torch.inference_mode()
 def test_flashinfer_bf16_gemm_matches_linear() -> None:
-    import flashinfer
-
     backend = next(
         backend
         for backend in ("cudnn", "cutlass", "tgv")
