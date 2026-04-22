@@ -2254,7 +2254,6 @@ class EngineArgs:
                 "This model does not officially support disabling chunked prefill. "
                 "Disabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
-                scope="local",
             )
         elif (
             model_config.runner_type == "pooling"
@@ -2265,7 +2264,6 @@ class EngineArgs:
                 "This model does not officially support chunked prefill. "
                 "Enabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
-                scope="local",
             )
 
         if self.enable_prefix_caching is None:
@@ -2284,7 +2282,6 @@ class EngineArgs:
                 "This model does not officially support prefix caching. "
                 "Enabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
-                scope="local",
             )
 
         # Disable chunked prefill and prefix caching for:
