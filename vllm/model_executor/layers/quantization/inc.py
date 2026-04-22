@@ -435,7 +435,7 @@ class INCConfig(QuantizationConfig):
         if isinstance(layer, (LinearBase, ParallelLMHead)):
             is_ark_available, ark_error, _ = _get_auto_round_ark_state()
             if is_ark_available:
-                return INCXPULinearARKMethod(
+                return INCARKLinearMethod(
                     weight_bits=weight_bits,
                     group_size=group_size,
                     sym=sym,
@@ -473,6 +473,21 @@ class INCConfig(QuantizationConfig):
                 "INC W4A16 on CPU only supports symmetric quantization for now."
             )
         if isinstance(layer, (LinearBase, ParallelLMHead)):
+            is_ark_available, ark_error, _ = _get_auto_round_ark_state()
+            if is_ark_available:
+                return INCARKLinearMethod(
+                    weight_bits=weight_bits,
+                    group_size=group_size,
+                    sym=sym,
+                )
+
+            logger.warning(
+                "ARK backend is unavailable for layer %s; "
+                "falling back to the default CPU INC path. Error: %s",
+                prefix,
+                ark_error or "unknown error",
+            )
+
             return self.apply_gptq_quant_layer(layer, prefix)
         return None
 
@@ -483,6 +498,7 @@ class INCConfig(QuantizationConfig):
                     layer_name == prefix or layer_name == f"model.{prefix}"
                 ) and self.extra_config[layer_name].get("bits", 16) >= 16:
                     return UnquantizedLinearMethod()
+
         if current_platform.is_xpu():
             return self.apply_xpu_w4a16_quant_layer(layer, prefix)
         is_gptq = "gptq" in self.packing_format or "gptq" in self.backend
@@ -642,8 +658,8 @@ def _get_ark_type_str(dtype: torch.dtype) -> str:
         raise ValueError(f"Unsupported dtype for ARK: {dtype}")
 
 
-class INCXPULinearARKMethod(_INCXPULinearBase):
-    """XPU linear method for INC quantization utilizing the ARK backend.
+class INCARKLinearMethod(_INCXPULinearBase):
+    """XPU & CPU w4a16 linear method for INC quantization utilizing the ARK backend.
 
     Repacks GPTQ/INC weights into ARK's layout.
     """
@@ -680,6 +696,7 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         device = layer.qweight.device
+        is_cpu = device.type == "cpu"
 
         compute_type = _get_ark_type_str(layer.params_dtype)
         scale_type = _get_ark_type_str(layer.scales.dtype)
@@ -718,7 +735,11 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
         # along the K dimension.
         unpacked_w = unpacked_w.transpose(1, 2).reshape(-1, N).contiguous()
 
-        scale = layer.scales.data.contiguous()
+        if is_cpu:
+            scale = layer.scales.data.float().contiguous()
+            scale_type = "fp32"
+        else:
+            scale = layer.scales.data.contiguous()
 
         if self.sym:
             # Per the ARK C++ implementation, symmetric quantization passes
@@ -745,10 +766,21 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
         # Wrap as a Parameter and disable gradients.
         layer.packed_weight = Parameter(packw, requires_grad=False)
 
-        if hasattr(layer, "bias") and layer.bias is not None:
-            layer.safe_bias = layer.bias.data.detach().contiguous()
+        bias = getattr(layer, "bias", None)
+        if bias is not None:
+            if is_cpu:
+                layer.safe_bias = bias.data.float().reshape(1, -1).contiguous()
+            else:
+                layer.safe_bias = bias.data.detach().contiguous()
         else:
-            layer.safe_bias = torch.empty(0, dtype=layer.params_dtype, device=device)
+            if is_cpu:
+                layer.safe_bias = torch.zeros(
+                    (1, layer.out_features), dtype=torch.float32, device=device
+                )
+            else:
+                layer.safe_bias = torch.empty(
+                    0, dtype=layer.params_dtype, device=device
+                )
 
         layer.compute_type = compute_type
         layer.scale_type = scale_type
@@ -771,6 +803,10 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
         out_shape = x.shape[:-1] + (layer.out_features,)
         reshaped_x = x.reshape(-1, x.shape[-1]).contiguous()
 
+        is_cpu = x.device.type == "cpu"
+        if is_cpu:
+            reshaped_x = reshaped_x.float()
+
         assert self.ark is not None
         out = self.ark.woqgemm(
             reshaped_x,  # Input activations [M, K]
@@ -784,6 +820,9 @@ class INCXPULinearARKMethod(_INCXPULinearBase):
             layer.scale_type,  # fp16 / bf16
             not self.sym,
         )
+
+        if is_cpu:
+            out = out.to(x.dtype)
 
         return out.reshape(out_shape)
 
