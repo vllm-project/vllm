@@ -23,7 +23,7 @@ logger = init_logger(__name__)
 def select_int8_moe_backend(
     config: FusedMoEConfig,
 ) -> type[mk.FusedMoEExperts]:
-    from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 
     supported, reason = TritonExperts.is_supported_config(
         TritonExperts,

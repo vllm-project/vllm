@@ -22,11 +22,11 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.gpt_oss_triton_kernels_moe import (
     UnfusedOAITritonExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonExperts,
+)
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     MarlinExperts,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    TritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
