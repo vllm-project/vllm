@@ -420,7 +420,19 @@ class KimiK25ForConditionalGeneration(
 
         return EncoderCudaGraphConfig(
             modalities=["vision_chunk"],
-            input_key_by_modality={"vision_chunk": "pixel_values"},
+            # NOTE: ``EncoderCudaGraphManager._capture_budget_graph`` in
+            # ``encoder_cudagraph.py:178`` hardcodes a lookup on
+            # ``input_key_by_modality["image"]`` at capture time to
+            # locate the dummy input buffer.  Kimi's only runtime
+            # modality is ``"vision_chunk"`` (see
+            # ``KimiK25ProcessingInfo``), so we alias both keys to the
+            # same ``"pixel_values"`` tensor to satisfy both the
+            # capture-time hardcoded lookup and the replay-time
+            # ``get_input_modality`` → ``input_key_by_modality`` lookup.
+            input_key_by_modality={
+                "image": "pixel_values",
+                "vision_chunk": "pixel_values",
+            },
             buffer_keys=[
                 "pos_embeds",
                 "rope_freqs_cis",
