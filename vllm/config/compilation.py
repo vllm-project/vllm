@@ -138,7 +138,7 @@ class PassConfig:
     """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
     enable_qk_norm_rope_fusion: bool = False
     """Enable fused Q/K RMSNorm + RoPE pass."""
-    fuse_rope_kvcache_cat_mla: bool = Field(default=None)
+    fuse_rope_kvcache_cat_mla: bool = False
     """Enable fused MLA KV cache update with RoPE."""
 
     # ROCm/AITER specific fusions

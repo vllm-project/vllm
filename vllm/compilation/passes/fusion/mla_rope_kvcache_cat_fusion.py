@@ -102,7 +102,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 num_kv_heads=self.num_kv_heads,
             )
         else:
-            self.rope_matcher = MatcherRotaryEmbedding(
+            self.rope_matcher = MatcherRotaryEmbedding(  # type: ignore
                 is_neox=self.is_neox,
                 head_size=self.qk_rope_head_dim,
                 num_heads=self.num_heads,
@@ -134,12 +134,10 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
     @property
     def pattern(self):
         _ln = self._ln
-        rope_matcher = self.rope_matcher
-        kv_cache_dtype = self.kv_cache_dtype
 
         if _USE_LAYERNAME:
 
-            def _pattern(
+            def _pattern_with_ln(
                 q: torch.Tensor,
                 k_pe: torch.Tensor,
                 kv_c_normed: torch.Tensor,
@@ -149,13 +147,15 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 layer_name: LayerNameType,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 k_pe_unsqueezed = k_pe.unsqueeze(1)
-                q_pe, k_pe = rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
+                q_pe, k_pe = self.rope_matcher(
+                    positions, q, k_pe_unsqueezed, cos_sin_cache
+                )
                 dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-                    kv_c_normed, k_pe, layer_name, kv_cache_dtype, k_scale
+                    kv_c_normed, k_pe, layer_name, self.kv_cache_dtype, k_scale
                 )
                 return dummy, q_pe, k_pe
 
-            return _pattern
+            return _pattern_with_ln
 
         def _pattern(
             q: torch.Tensor,
@@ -166,9 +166,9 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             k_pe_unsqueezed = k_pe.unsqueeze(1)
-            q_pe, k_pe = rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
+            q_pe, k_pe = self.rope_matcher(positions, q, k_pe_unsqueezed, cos_sin_cache)
             dummy = torch.ops.vllm.unified_mla_kv_cache_update(
-                kv_c_normed, k_pe, _ln, kv_cache_dtype, k_scale
+                kv_c_normed, k_pe, _ln, self.kv_cache_dtype, k_scale
             )
             return dummy, q_pe, k_pe
 
@@ -177,13 +177,10 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
     @property
     def replacement(self):
         _ln = self._ln
-        is_neox = self.is_neox
-        kv_cache_dtype = self.kv_cache_dtype
-        FUSED_OP = self.FUSED_OP
 
         if _USE_LAYERNAME:
 
-            def _replacement(
+            def _replacement_with_ln(
                 q: torch.Tensor,
                 k_pe: torch.Tensor,
                 kv_c_normed: torch.Tensor,
@@ -193,14 +190,14 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 layer_name: LayerNameType,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
                 at = auto_functionalized(
-                    FUSED_OP,
+                    self.FUSED_OP,
                     positions=positions,
                     q_pe=q,
                     k_pe=k_pe,
                     kv_c=kv_c_normed,
                     cos_sin_cache=cos_sin_cache,
-                    is_neox=is_neox,
-                    kv_cache_dtype=kv_cache_dtype,
+                    is_neox=self.is_neox,
+                    kv_cache_dtype=self.kv_cache_dtype,
                     kv_cache_scale=k_scale,
                     layer_name=layer_name,
                 )
@@ -208,7 +205,7 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
                 k_pe = k_pe_squeezed.unsqueeze(1)
                 return dummy, q_pe, k_pe
 
-            return _replacement
+            return _replacement_with_ln
 
         def _replacement(
             q: torch.Tensor,
@@ -219,14 +216,14 @@ class MLARoPEKVCacheCatPattern(VllmPatternReplacement):
             k_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             at = auto_functionalized(
-                FUSED_OP,
+                self.FUSED_OP,
                 positions=positions,
                 q_pe=q,
                 k_pe=k_pe,
                 kv_c=kv_c_normed,
                 cos_sin_cache=cos_sin_cache,
-                is_neox=is_neox,
-                kv_cache_dtype=kv_cache_dtype,
+                is_neox=self.is_neox,
+                kv_cache_dtype=self.kv_cache_dtype,
                 kv_cache_scale=k_scale,
                 layer_name=_ln,
             )
