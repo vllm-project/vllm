@@ -60,6 +60,10 @@ class InputBatch:
     query_start_loc_np: np.ndarray
     # [num_reqs]
     seq_lens: torch.Tensor
+    # [num_reqs] CPU upper bound on seq_lens. Precise when not running
+    # async spec decode; an upper bound otherwise (assumes all scheduled
+    # tokens were accepted in the previous step).
+    seq_lens_cpu_upper_bound: torch.Tensor
     # [num_reqs]
     dcp_local_seq_lens: torch.Tensor | None
 
@@ -121,6 +125,8 @@ class InputBatch:
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
+        # Dummy: seq_len == query_len (fresh-prefill shape).
+        seq_lens_cpu_upper_bound = torch.from_numpy(num_scheduled_tokens.copy())
         return cls(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -136,6 +142,7 @@ class InputBatch:
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
             input_ids=input_ids,
             positions=positions,

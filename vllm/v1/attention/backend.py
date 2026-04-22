@@ -390,6 +390,15 @@ class CommonAttentionMetadata:
     (num_computed_tokens < num_prompt_tokens). Used by some backends to
     distinguish actual decodes from short extends."""
 
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    """(batch_size,) CPU int32 tensor: an upper bound on each request's
+    context length (``num_computed_tokens + query_len``). Precise for prefill
+    rows in all cases, and precise for all rows outside async spec decode.
+    Under async spec decode the decode entries are optimistic (assume every
+    draft from the previous step was accepted). Safe for chunk-planning /
+    workspace-sizing and for prefill-only consumers; NOT safe to feed into
+    kernels that require exact per-row context lengths on decode rows."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None

@@ -57,6 +57,11 @@ class RequestState:
         self.num_computed_tokens = StagedWriteTensor(
             self.max_num_reqs, dtype=torch.int32, device=device
         )
+        # CPU mirror of num_computed_tokens. Advanced optimistically each step
+        # (assumes all scheduled tokens accepted), so it is an upper bound on
+        # the authoritative GPU value. Used to produce CPU-side seq_lens
+        # without triggering a GPU->CPU sync.
+        self.num_computed_tokens_np = np.zeros(self.max_num_reqs, dtype=np.int32)
 
         # Last sampled tokens.
         self.last_sampled_tokens = torch.zeros(
@@ -100,6 +105,7 @@ class RequestState:
         self.total_len.stage_write_elem(req_idx, prefill_len)
         self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
         if num_computed_tokens > 0 and num_computed_tokens <= prefill_len:

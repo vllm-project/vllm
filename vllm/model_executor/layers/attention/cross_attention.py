@@ -90,15 +90,27 @@ def create_cross_attention_backend(
             assert new_metadata.encoder_seq_lens_cpu is not None
             max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
-            # Any computed tokens indicated decode step>1 (no chunked prefill)
-            num_cache_decodes = (
-                (common_attn_metadata.num_computed_tokens_cpu > 0).sum().item()
+            # Any computed tokens indicated decode step>1 (no chunked prefill).
+            # Derive num_computed_tokens from the CPU upper bound to avoid a
+            # blocking GPU->CPU sync. The upper bound is precise for this
+            # test: fresh-prefill rows have num_computed == 0 exactly (no
+            # speculation is involved during prefill), and any decode row has
+            # num_computed > 0 under both upper bound and actual — so the
+            # "> 0" / "== 0" check matches either way.
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:]
+                - common_attn_metadata.query_start_loc_cpu[:-1]
             )
+            assert common_attn_metadata.seq_lens_cpu_upper_bound is not None
+            num_computed_tokens_cpu = (
+                common_attn_metadata.seq_lens_cpu_upper_bound - query_lens_cpu
+            )
+            num_cache_decodes = (num_computed_tokens_cpu > 0).sum().item()
             if num_cache_decodes > 0:
                 # CrossAttn KV cache has already been populated on first decoder step,
                 # skip slot_mapping calculation for requests that do not need
                 # reshape_and_cache.
-                num_tokens = common_attn_metadata.num_computed_tokens_cpu.numpy()
+                num_tokens = num_computed_tokens_cpu.numpy()
                 new_metadata.encoder_seq_lens_cpu = np.where(
                     num_tokens > 0, 0, new_metadata.encoder_seq_lens_cpu
                 )
