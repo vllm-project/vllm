@@ -455,12 +455,28 @@ class KimiK25ForConditionalGeneration(
         vllm_config: VllmConfig,
     ) -> tuple[int, int]:
         kh, kw = self.vision_tower.merge_kernel_size
-        # Min: one image item with one spatial merge window ->
-        # (h, w) = (kh, kw), so 1 output slot.
-        min_budget = 1
-        # Max: capped by the scheduler's batched-token budget.  The
-        # multimodal prefill path never exceeds this anyway.
-        max_budget = vllm_config.scheduler_config.max_num_batched_tokens
+        # Per-item output tokens lower bound: a small 448x448 image
+        # (32x32 patches, spatial_merge=2) ≈ 256 output slots.  Use
+        # that as the min budget so ``_generate_budgets`` doesn't emit
+        # ``[1, 2, 4, 8, ...]`` which would inflate to 30+ graphs and
+        # push ``max_batch_size = max_budget // min_budget`` to an
+        # absurd value (e.g. 32k).
+        min_budget = 256
+
+        # Per-item output tokens upper bound: the RoPE table footprint.
+        # ``Rope2DPosEmbRepeated(head_dim, 512, 512)`` can only address
+        # (h<=512, w<=512), so a single item never has more than
+        # (512//kh) * (512//kw) output slots.  Capturing graphs bigger
+        # than that is wasted memory — any such request will always
+        # land in the eager fallback.
+        rope_2d = self.vision_tower.encoder.rope_2d
+        rope_max_slots = (rope_2d.max_height // kh) * (rope_2d.max_width // kw)
+
+        # Also cap by the scheduler budget so we never over-provision
+        # relative to the runtime batch.
+        scheduler_cap = vllm_config.scheduler_config.max_num_batched_tokens
+        max_budget = min(rope_max_slots, scheduler_cap)
+        max_budget = max(max_budget, min_budget)
         return (min_budget, max_budget)
 
     def _get_grid_thws(self, mm_kwargs: dict[str, Any]) -> list[tuple[int, int, int]]:
