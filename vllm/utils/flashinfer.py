@@ -291,36 +291,6 @@ def has_flashinfer_bf16_gemm() -> bool:
 
 
 @functools.cache
-def get_flashinfer_bf16_supported_backends() -> tuple[str, ...]:
-    """Return BF16 GEMM backends supported by FlashInfer on this device."""
-    if not current_platform.is_cuda() or not has_flashinfer_bf16_gemm():
-        return ()
-
-    mod = _get_submodule("flashinfer")
-    mm_bf16 = getattr(mod, "mm_bf16", None)
-    if mm_bf16 is None or not hasattr(mm_bf16, "is_backend_supported"):
-        return ()
-
-    supported_backends: list[str] = []
-    for backend in ("cudnn", "cutlass", "tgv"):
-        try:
-            if mm_bf16.is_backend_supported(backend):
-                supported_backends.append(backend)
-        except Exception:
-            continue
-
-    return tuple(supported_backends)
-
-
-def is_flashinfer_bf16_backend_supported(backend: str) -> bool:
-    """Return whether FlashInfer BF16 GEMM supports a requested backend."""
-    supported_backends = get_flashinfer_bf16_supported_backends()
-    if backend == "auto":
-        return bool(supported_backends)
-    return backend in supported_backends
-
-
-@functools.cache
 def has_flashinfer_cutedsl_grouped_gemm_nt_masked() -> bool:
     """Return ``True`` if FlashInfer CUTLASS fused MoE is available."""
     if not has_flashinfer_cutedsl():
@@ -1152,8 +1122,6 @@ __all__ = [
     "can_use_trtllm_attention",
     "use_trtllm_attention",
     "has_flashinfer_bf16_gemm",
-    "get_flashinfer_bf16_supported_backends",
-    "is_flashinfer_bf16_backend_supported",
     "flashinfer_bf16_mm",
     "flashinfer_mxfp4_quantize",
     "flashinfer_scaled_fp4_mm",

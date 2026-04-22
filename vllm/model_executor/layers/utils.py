@@ -110,12 +110,7 @@ def maybe_flashinfer_bf16_unquantized_gemm(
     bias: torch.Tensor | None,
     backend: str | None,
 ) -> torch.Tensor | None:
-    from vllm.utils.flashinfer import (
-        flashinfer_bf16_mm,
-        get_flashinfer_bf16_supported_backends,
-        has_flashinfer_bf16_gemm,
-        is_flashinfer_bf16_backend_supported,
-    )
+    from vllm.utils.flashinfer import flashinfer_bf16_mm, has_flashinfer_bf16_gemm
 
     if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
         return None
@@ -157,16 +152,6 @@ def maybe_flashinfer_bf16_unquantized_gemm(
         raise ValueError(
             "VLLM_BF16_GEMM_BACKEND='cutlass' does not support bias for "
             "FlashInfer BF16 GEMM."
-        )
-
-    if not is_flashinfer_bf16_backend_supported(flashinfer_backend):
-        if backend is None:
-            return None
-        supported_backends = get_flashinfer_bf16_supported_backends()
-        supported_str = ", ".join(supported_backends) if supported_backends else "none"
-        raise ValueError(
-            f"VLLM_BF16_GEMM_BACKEND={backend!r} is not supported on this device. "
-            f"Supported FlashInfer BF16 backends: {supported_str}."
         )
 
     x_2d = x.reshape(-1, x.shape[-1])

@@ -31,10 +31,6 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_uses_flashinfer_on_sm100(
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True
     )
-    monkeypatch.setattr(
-        "vllm.utils.flashinfer.is_flashinfer_bf16_backend_supported",
-        lambda backend: backend == "auto",
-    )
     monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
     out = utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, None)
@@ -59,10 +55,6 @@ def test_maybe_flashinfer_bf16_unquantized_gemm_allows_forced_cudnn_off_sm100(
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True
     )
-    monkeypatch.setattr(
-        "vllm.utils.flashinfer.is_flashinfer_bf16_backend_supported",
-        lambda backend: backend == "cudnn",
-    )
     monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
     out = utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, "cudnn")
@@ -83,25 +75,19 @@ def test_default_unquantized_gemm_cpu_falls_back_to_torch():
     torch.testing.assert_close(out, expected)
 
 
-def test_maybe_flashinfer_bf16_unquantized_gemm_rejects_unsupported_forced_backend(
+def test_maybe_flashinfer_bf16_unquantized_gemm_propagates_forced_backend(
     monkeypatch,
 ):
     x = torch.randn(2, 16, dtype=torch.bfloat16)
     weight = torch.randn(8, 16, dtype=torch.bfloat16)
+    flashinfer_mm_mock = MagicMock(side_effect=RuntimeError("backend unsupported"))
 
     monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
     monkeypatch.setattr(current_platform, "is_device_capability_family", lambda _: False)
     monkeypatch.setattr(
         "vllm.utils.flashinfer.has_flashinfer_bf16_gemm", lambda: True
     )
-    monkeypatch.setattr(
-        "vllm.utils.flashinfer.is_flashinfer_bf16_backend_supported",
-        lambda backend: False,
-    )
-    monkeypatch.setattr(
-        "vllm.utils.flashinfer.get_flashinfer_bf16_supported_backends",
-        lambda: ("cudnn",),
-    )
+    monkeypatch.setattr("vllm.utils.flashinfer.flashinfer_bf16_mm", flashinfer_mm_mock)
 
-    with pytest.raises(ValueError, match="VLLM_BF16_GEMM_BACKEND"):
+    with pytest.raises(RuntimeError, match="backend unsupported"):
         utils.maybe_flashinfer_bf16_unquantized_gemm(x, weight, None, "tgv")
