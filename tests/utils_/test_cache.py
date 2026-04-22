@@ -211,8 +211,10 @@ def test_lru_cache_touch_reorders():
 
 def test_lru_cache_touch_missing_key():
     cache = _TrackingLRUCache(3)
-    cache.touch(99)  # should not raise
+    cache.touch(99)
     assert len(cache) == 0
+    # Ensure the missing key was not added to the internal order tracking
+    assert 99 not in cache.order
 
 
 # ---- Tests for capacity / usage properties ----
