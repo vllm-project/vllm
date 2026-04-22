@@ -414,7 +414,10 @@ class IrOp:
         replaced with a SymInt. Other parameters like weight, bias, epsilon
         remain unchanged.
         """
-        from torch._dynamo.decorators import mark_unbacked
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        shape_env = ShapeEnv()
+        sym_num_tokens = shape_env.create_unbacked_symint()
 
         result: list[Any] = []
         first_tensor_found = False
@@ -425,9 +428,8 @@ class IrOp:
                 and not first_tensor_found
             ):
                 first_tensor_found = True
-                sym_tensor = torch.empty_like(arg, device="meta")
-                mark_unbacked(sym_tensor, 0)
-                result.append(sym_tensor)
+                new_shape = (sym_num_tokens,) + arg.shape[1:]
+                result.append(torch.empty(new_shape, device="meta", dtype=arg.dtype))
             else:
                 result.append(arg)
         return tuple(result)
