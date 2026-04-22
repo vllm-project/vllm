@@ -479,21 +479,28 @@ class MistralToolParser(ToolParser):
                 )
             stringified_tool_calls = raw_tool_calls[0].strip()
             try:
-                tool_calls = json.loads(stringified_tool_calls)
+                # Use raw_decode to parse the first valid JSON value,
+                # ignoring trailing tokens the model may emit after
+                # the tool call array.
+                tool_calls, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
             except json.JSONDecodeError:
-                # use a regex to find the part corresponding to the tool call.
-                # NOTE: This use case should not happen if the model is trained
-                # correctly. It's an easy possible fix so it's included, but
-                # can be brittle for very complex / highly nested tool calls
                 try:
                     raw_tool_call = self.tool_call_regex.findall(
                         stringified_tool_calls
                     )[0]
                     tool_calls = json.loads(raw_tool_call)
+                    tool_calls = [
+                        {
+                            "name": tool_call["name"],
+                            "arguments": json.dumps(
+                                tool_call.get("arguments", {}),
+                                ensure_ascii=False,
+                            ),
+                        }
+                        for tool_call in tool_calls
+                    ]
                 except (IndexError, json.JSONDecodeError):
                     logger.exception("Error in extracting tool call from response.")
-                    # If raw decoding and decoding post regex rule fails, then just
-                    # return content.
                     return ExtractedToolCallInformation(
                         tools_called=False,
                         tool_calls=[],
@@ -504,7 +511,8 @@ class MistralToolParser(ToolParser):
                     {
                         "name": tool_call["name"],
                         "arguments": json.dumps(
-                            tool_call["arguments"], ensure_ascii=False
+                            tool_call.get("arguments", {}),
+                            ensure_ascii=False,
                         ),
                     }
                     for tool_call in tool_calls
@@ -515,7 +523,7 @@ class MistralToolParser(ToolParser):
                 type="function",
                 function=FunctionCall(
                     name=tool_call["name"],
-                    arguments=tool_call["arguments"],
+                    arguments=tool_call.get("arguments", "{}"),
                 ),
             )
             for tool_call in tool_calls
