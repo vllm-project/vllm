@@ -571,8 +571,6 @@ class DelegatingParser(Parser):
     def _in_reasoning_phase(self, state: StreamState) -> bool:
         if self._reasoning_parser is None:
             return False
-        if self._tool_parser is None:
-            return True
         return not state.reasoning_ended
 
     def _in_tool_call_phase(self, state: StreamState) -> bool:
@@ -638,8 +636,11 @@ class DelegatingParser(Parser):
                 request=request,  # type: ignore[arg-type]
             )
 
-        # No parsers: pass through as content
-        if self._reasoning_parser is None and self._tool_parser is None:
+        if (
+            delta_message is None
+            and not self._in_reasoning_phase(state)
+            and not self._in_tool_call_phase(state)
+        ):
             delta_message = DeltaMessage(content=delta_text)
 
         state.previous_text = current_text
