@@ -916,7 +916,7 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """Sparse MLA attention implementation with only forward_mqa method.
 
     Sparse MLA implementations only support decode (MQA-style) attention.
-    They do not support prefill (MHA-style) attention.
+    Dense prefill fallback for short sequences is handled in forward_impl().
     """
 
     def fused_output_quant_supported(self, quant_key: "QuantKey"):
