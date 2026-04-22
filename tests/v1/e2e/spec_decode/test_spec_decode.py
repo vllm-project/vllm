@@ -723,7 +723,11 @@ def test_eagle_correctness_heavy(
     [
         (("mtp", "XiaomiMiMo/MiMo-7B-Base", 1), False, 0.5),  # ref: 65%-70%
         (("mtp", "ZixiQi/DeepSeek-V3-4layers-MTP-FP8", 1), False, 0.0),  # dummy model
-        (("mtp", "Qwen/Qwen3.5-0.8B", 1), False, 0.15),  # hybrid + MTP, ref: ~31%-32%
+        (
+            ("mtp", "Qwen/Qwen3.5-0.8B-Base", 1),
+            False,
+            0.20,
+        ),  # hybrid + MTP, ref: ~34%-35%
     ],
     ids=["mimo", "deepseek", "qwen3_5-hybrid"],
 )
