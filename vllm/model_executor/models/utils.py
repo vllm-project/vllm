@@ -772,14 +772,13 @@ def extract_layer_index(layer_name: str, num_attn_module: int = 1) -> int:
         return layer_index
 
 
-def cast_overflow_tensors(
-    tensors: torch.Tensor,
-    offset: float = 1000,
-) -> torch.Tensor:
-    if tensors.isinf().any() or tensors.isnan().any():
-        clamp_value = torch.finfo(tensors.dtype).max - offset
-        tensors = torch.clamp(tensors, min=-clamp_value, max=clamp_value)
-    return tensors
+def cast_overflow_tensors(tensors: torch.Tensor, offset: float = 1000) -> torch.Tensor:
+    # Always clamp rather than guarding with `.isinf().any()`/`.isnan().any()`,
+    # which would force a GPU->CPU sync on the hot path. Clamp is a no-op for
+    # in-range values and turns +/-inf into the finite min/max; NaN passes
+    # through either way, matching the previous guard's behavior.
+    clamp_value = torch.finfo(tensors.dtype).max - offset
+    return torch.clamp(tensors, min=-clamp_value, max=clamp_value)
 
 
 def fast_topk(

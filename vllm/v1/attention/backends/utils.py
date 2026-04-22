@@ -332,8 +332,10 @@ def make_local_attention_virtual_batches(
     # regression when using numpy arrays (batch and block indices) to index into
     # torch tensor (block_table). As a workaround, convert numpy arrays to torch
     # tensor first, which recovers perf.
-    batch_indices_torch = torch.from_numpy(batch_indices)
-    block_indices_torch = torch.from_numpy(block_indices)
+    # Upload the index tensors to the block_table's device up-front so that the
+    # fancy indexing below doesn't implicitly force a synchronous H2D copy.
+    batch_indices_torch = torch.from_numpy(batch_indices).to(device, non_blocking=True)
+    block_indices_torch = torch.from_numpy(block_indices).to(device, non_blocking=True)
 
     # Save as a lambda so we can return this for update_block_table
     make_block_table = lambda block_table: block_table[

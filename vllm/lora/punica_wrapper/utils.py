@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from vllm.utils.platform_utils import is_pin_memory_available
+
 if TYPE_CHECKING:
     # avoid circuit import
     from vllm.lora.layers import LoRAMapping
@@ -110,10 +112,12 @@ def convert_mapping(
         embedding_indices,
     ]
 
-    indices = torch.tensor(indices_list, dtype=torch.long, device=device)
+    pin_memory = is_pin_memory_available()
+    indices = torch.tensor(indices_list, dtype=torch.long, pin_memory=pin_memory)
+    indices = indices.to(device, non_blocking=True)
     prompt_mapping_tensor = torch.tensor(
-        prompt_mapping, dtype=torch.long, device=device
-    )
+        prompt_mapping, dtype=torch.long, pin_memory=pin_memory
+    ).to(device, non_blocking=True)
     embeddings_indices = torch.stack(
         [
             indices[2] * extra_vocab_size,
