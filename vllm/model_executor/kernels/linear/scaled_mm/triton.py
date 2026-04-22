@@ -45,25 +45,16 @@ class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         params = self._get_layer_params(layer)
 
         azp_adj = params.azp_adj
-        w = params.weight
-        w_s = params.weight_scale
-        i_zp = params.input_zero_point
+        w_q, w_s = params.weight, params.weight_scale
+        i_s, i_zp = params.input_scale, params.input_zero_point
 
         symmetric = azp_adj is None
         x_q, x_s, x_zp = ops.scaled_int8_quant(
-            x.contiguous(), params.input_scale, i_zp, symmetric=symmetric
+            x.contiguous(), i_s, i_zp, symmetric=symmetric
         )
 
-        assert x_zp is None, "Triton kernel only supports symmetric quantization"
-
-        out = self.apply_scaled_mm(
-            A=x_q,
-            B=w,
-            As=x_s,
-            Bs=w_s,
-            out_dtype=x.dtype,
-            bias=bias,
-            output_shape=[],
+        out = triton_scaled_mm(
+            x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias
         )
 
         if azp_adj is not None:
@@ -85,26 +76,6 @@ class TritonInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                 out -= (x_s * w_s_row * azp_adj).to(x.dtype)
 
         return out
-
-    def apply_scaled_mm(
-        self,
-        *,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        out_dtype: torch.dtype,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-        bias: torch.Tensor | None,
-        output_shape: list,
-    ) -> torch.Tensor:
-        return triton_scaled_mm(
-            A,
-            B,
-            scale_a=As,
-            scale_b=Bs,
-            out_dtype=out_dtype,
-            bias=bias,
-        )
 
 
 class TritonFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):

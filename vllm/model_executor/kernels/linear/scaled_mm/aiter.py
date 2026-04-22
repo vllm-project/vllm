@@ -80,6 +80,7 @@ class AiterInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         """
         params = self._get_layer_params(layer)
         w_q, w_s = params.weight, params.weight_scale
+        i_s, i_zp = params.input_scale, params.input_zero_point
 
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
@@ -88,10 +89,7 @@ class AiterInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         assert symmetric, (
             "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
         )
-        x_q, x_s, x_zp = ops.scaled_int8_quant(
-            x, params.input_scale, params.input_zero_point, symmetric=symmetric
-        )
-
+        x_q, x_s, x_zp = ops.scaled_int8_quant(x, i_s, i_zp, symmetric=symmetric)
         assert x_zp is None, (
             "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
         )
@@ -128,28 +126,7 @@ class AiterInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # a to be [M, K]
         # b to be [N, K]
         # CutlassInt8ScaledMMLinearKernel prepare weight `w_q` in [K, N] format
-        return self.apply_scaled_mm(
-            A=x_q,
-            B=w_q.t(),
-            As=x_s,
-            Bs=w_s,
-            bias=bias,
-            out_dtype=out_dtype,
-            output_shape=[],
-        )
-
-    def apply_scaled_mm(
-        self,
-        *,
-        A: torch.Tensor,
-        B: torch.Tensor,
-        out_dtype: torch.dtype,
-        As: torch.Tensor,
-        Bs: torch.Tensor,
-        bias: torch.Tensor | None,
-        output_shape: list,
-    ) -> torch.Tensor:
-        return rocm_aiter_ops.w8a8_gemm(A, B, As, Bs, bias, out_dtype)
+        return rocm_aiter_ops.w8a8_gemm(x_q, w_q.t(), x_s, w_s, bias, out_dtype)
 
 
 class AiterPreshuffledPerTokenFp8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
