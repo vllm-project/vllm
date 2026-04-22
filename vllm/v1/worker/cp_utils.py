@@ -28,6 +28,7 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     f"supported in {layer_impl.__class__.__name__}."
                 )
             effective_dcp_size = getattr(layer_impl, "dcp_world_size", dcp_size)
+            effective_pcp_size = getattr(layer_impl, "pcp_world_size", pcp_size)
             if dcp_size > 1 and effective_dcp_size > 1:
                 assert layer_impl.need_to_return_lse_for_decode, (
                     "Decode Context Parallelism (DCP) requires attention "
@@ -37,7 +38,7 @@ def check_attention_cp_compatibility(vllm_config: VllmConfig) -> None:
                     "--attention-backend or disable DCP."
                 )
 
-            if pcp_size > 1:
+            if pcp_size > 1 and effective_pcp_size > 1:
                 assert layer_impl.supports_pcp, (
                     "PCP requires attention impls' support, "
                     f"but the impl {layer_impl.__class__.__name__} "
