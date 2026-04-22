@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 from collections.abc import Callable
+from contextlib import nullcontext
 from functools import wraps
 from weakref import WeakKeyDictionary
 
 import torch
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, get_current_vllm_config, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
@@ -43,6 +44,28 @@ LAYERWISE_INFO: WeakKeyDictionary[torch.nn.Module, LayerReloadingInfo] = (
     WeakKeyDictionary()
 )
 
+# Capture VllmConfig at init so reload-path process_weights_after_loading
+# (which runs outside set_current_vllm_config) can re-enter the context.
+_cached_vllm_config = None
+
+
+def _capture_vllm_config() -> None:
+    global _cached_vllm_config
+    try:
+        _cached_vllm_config = get_current_vllm_config()
+    except Exception:
+        pass
+
+
+def _vllm_config_ctx():
+    if _cached_vllm_config is None:
+        return nullcontext()
+    try:
+        get_current_vllm_config()
+        return nullcontext()
+    except Exception:
+        return set_current_vllm_config(_cached_vllm_config)
+
 
 def get_layerwise_info(layer: torch.nn.Module) -> LayerReloadingInfo:
     """
@@ -65,6 +88,7 @@ def record_metadata_for_reloading(model: torch.nn.Module):
     Stores parameter and buffer metadata as meta tensors for restoration.
     Must be called before `initialize_layerwise_reload`.
     """
+    _capture_vllm_config()
     for layer in model.modules():
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
@@ -90,6 +114,10 @@ def initialize_layerwise_reload(model: torch.nn.Module):
     # disable torchao reloading to avoid infinite recursion
     model._original_do_torchao_reload = getattr(model, "_do_torchao_reload", False)
     model._do_torchao_reload = False
+
+    # Fallback capture if record_metadata_for_reloading ran before ctx was set.
+    if _cached_vllm_config is None:
+        _capture_vllm_config()
 
     for layer in model.modules():
         info = get_layerwise_info(layer)
@@ -259,7 +287,8 @@ def _finalize_attention_layer(
         )
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading(model_config.dtype)
+    with _vllm_config_ctx():
+        layer.process_weights_after_loading(model_config.dtype)
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
@@ -282,7 +311,8 @@ def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -
         args.arguments["param"] = param
         _get_weight_loader(param)(*args.args, **args.kwargs)
 
-    quant_method.process_weights_after_loading(layer)
+    with _vllm_config_ctx():
+        quant_method.process_weights_after_loading(layer)
 
     _copy_and_restore_kernel_tensors(layer, info)
 
@@ -318,7 +348,8 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
     if isinstance(quant_method, QuantizeMethodBase):
-        quant_method.process_weights_after_loading(layer)
+        with _vllm_config_ctx():
+            quant_method.process_weights_after_loading(layer)
 
     # Copy processed values into original tensor storage (preserves cudagraph refs)
     # this code is a no-op if not reloading (because kernel tensors is empty)
