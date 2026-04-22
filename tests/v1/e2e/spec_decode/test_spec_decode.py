@@ -1310,6 +1310,57 @@ def test_dflash_acceptance_rates(dflash_config):
     cleanup_dist_env_and_memory()
 
 
+@single_gpu_only
+def test_synthetic_acceptance_rate():
+    """Verify that synthetic rejection sampling produces an acceptance
+    length close to the theoretically expected value."""
+    per_pos_rate = 0.5
+    num_spec_tokens = 3
+    expected_acceptance_len = 1 + per_pos_rate * (1 - per_pos_rate**num_spec_tokens) / (
+        1 - per_pos_rate
+    )
+    tolerance = 0.15
+
+    spec_llm = LLM(
+        model="meta-llama/Llama-3.2-1B-Instruct",
+        trust_remote_code=True,
+        speculative_config={
+            "method": "eagle3",
+            "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
+            "num_speculative_tokens": num_spec_tokens,
+            "max_model_len": 2048,
+            "rejection_sample_method": "synthetic",
+            "synthetic_acceptance_rate": per_pos_rate,
+        },
+        max_model_len=2048,
+        enforce_eager=True,
+        disable_log_stats=False,
+    )
+
+    test_prompts = get_test_prompts(mm_enabled=False, num_prompts=50)
+    spec_llm.chat(
+        test_prompts,
+        SamplingParams(temperature=0, max_tokens=64, ignore_eos=True),
+    )
+
+    metrics = spec_llm.get_metrics()
+    acceptance_len = compute_acceptance_len(metrics)
+
+    print(
+        f"Synthetic acceptance length: {acceptance_len:.3f}"
+        f" (expected={expected_acceptance_len:.3f},"
+        f" tolerance=±{tolerance})"
+    )
+    assert abs(acceptance_len - expected_acceptance_len) <= tolerance, (
+        f"Synthetic acceptance length {acceptance_len:.3f} is not within"
+        f" ±{tolerance} of expected {expected_acceptance_len:.3f}"
+    )
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+
+
 def test_dflash_correctness(dflash_config):
     """
     E2E test for DFlash (block diffusion) speculative decoding.

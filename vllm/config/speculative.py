@@ -188,12 +188,15 @@ class SpeculativeConfig:
     distribution, but the latter yields a higher acceptance rate at the cost
     of more memory to cache draft logits."""
 
-    synthetic_acceptance_rate: float | None = None
-    """Average acceptance rate for synthetic rejection sampling. Draft
-    tokens are accepted with a position-dependent probability that decays
-    geometrically, calibrated so that the mean rate across all speculative
-    positions equals this value. Only used when rejection_sample_method
-    is 'synthetic'. Must be in [0, 1]."""
+    synthetic_acceptance_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    """Per-position conditional acceptance rate for synthetic rejection
+    sampling. Each draft token is independently accepted with this
+    probability, conditioned on all prior tokens being accepted.
+    The V1 model runner uses this value directly as a flat per-position
+    rate; the V2 model runner (ModelRunnerV2) uses geometric decay
+    across positions, calibrated so that the mean rate equals this
+    value. Only used when rejection_sample_method is 'synthetic'.
+    Must be in [0, 1]."""
 
     def compute_hash(self) -> str:
         """

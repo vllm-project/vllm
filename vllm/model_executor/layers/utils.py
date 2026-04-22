@@ -148,216 +148,150 @@ def _init_tinygemm():
 _init_tinygemm()
 
 
-_inductor_big_gpu_override_applied = False
+_inductor_autotune_applied = False
 
 
-def _patch_is_big_gpu(inductor_utils) -> bool:
-    """Force `torch._inductor.utils.is_big_gpu` to return True.
+def force_inductor_max_autotune_gemm() -> None:
+    """Enable inductor max-autotune-gemm for BF16 linear torch.compile path.
 
-    Returns True if the patch was applied (or was already applied) this
-    process, False if `is_big_gpu` is missing on this torch version.
+    Called lazily when the first compiled BF16 linear is created. NOT called
+    at import time — baseline configs get zero inductor changes.
+
+    Patches:
+    - is_big_gpu -> True (enables Triton templates on < 68 SM GPUs)
+    - is_datacenter_blackwell_arch -> True for SM120/121
+    - max_autotune_gemm with ATEN+TRITON backends (no inductor CUTLASS)
+    - Persistent TMA matmul for Blackwell
+    - TF32 precision for FP32 GEMMs
+    - Dynamo cache limits (large values to avoid eviction/crashes)
     """
-    original = getattr(inductor_utils, "is_big_gpu", None)
-    if original is None:
-        logger.warning(
-            "torch._inductor.utils.is_big_gpu not found; "
-            "torch version may have renamed it."
-        )
-        return False
-    if getattr(original, "__vllm_big_gpu_override__", False):
-        return True
+    global _inductor_autotune_applied
+    if _inductor_autotune_applied:
+        return
+    _inductor_autotune_applied = True
 
-    def _forced_big_gpu(*args, **kwargs) -> bool:  # noqa: ARG001
-        return True
-
-    _forced_big_gpu.__vllm_big_gpu_override__ = True  # type: ignore[attr-defined]
-    inductor_utils.is_big_gpu = _forced_big_gpu
-    # Clear any cached result from a prior call in this process.
-    cache_clear = getattr(original, "cache_clear", None)
-    if callable(cache_clear):
-        try:
-            cache_clear()
-        except Exception:
-            pass
-    return True
-
-
-def _patch_is_datacenter_blackwell_arch() -> bool:
-    """Expand inductor's Blackwell-arch gate to SM120/121 and beyond.
-
-    `torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch`
-    currently whitelists only arch ∈ [100, 110) (data-center SM100, e.g.
-    B200). GB10 / DGX Spark (SM121) and RTX Pro 6000 Blackwell (SM120)
-    report False, disabling Blackwell-specific codegen paths. Patch the
-    helper to also return True for any major ≥ 10 (Blackwell family).
-    """
     try:
-        from torch._inductor.codegen.cuda import cuda_env
-    except Exception:
-        logger.warning(
-            "torch._inductor.codegen.cuda.cuda_env could not be imported; "
-            "leaving is_datacenter_blackwell_arch untouched.",
-            exc_info=True,
-        )
-        return False
-    original = getattr(cuda_env, "is_datacenter_blackwell_arch", None)
-    if original is None:
-        logger.warning(
-            "torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch"
-            " not found; torch version may have renamed it."
-        )
-        return False
-    if getattr(original, "__vllm_blackwell_family_override__", False):
-        return True
-
-    def _forced_blackwell_family_arch() -> bool:
-        if original():
-            return True
-        if torch.cuda.is_available():
-            major, _minor = torch.cuda.get_device_capability()
-            if major >= 10:
-                return True
-        return False
-
-    _forced_blackwell_family_arch.__vllm_blackwell_family_override__ = True  # type: ignore[attr-defined]
-    cuda_env.is_datacenter_blackwell_arch = _forced_blackwell_family_arch
-    cache_clear = getattr(original, "cache_clear", None)
-    if callable(cache_clear):
-        try:
-            cache_clear()
-        except Exception:
-            pass
-    return True
-
-
-def _apply_inductor_autotune_config() -> None:
-    """Set global inductor config for max-autotune-gemm with ATEN/TRITON/
-    CUTLASS templates and persistent TMA matmul (Blackwell-aware). Also bump
-    dynamo cache limits so many distinct shapes don't evict each other."""
-    try:
-        import torch._dynamo.config
+        import torch._dynamo.config as dynamo_config
         import torch._inductor.config as inductor_config
+        import torch._inductor.utils as inductor_utils
     except Exception:
         logger.warning(
-            "torch._inductor/_dynamo config modules could not be imported.",
+            "torch._inductor/_dynamo could not be imported; "
+            "leaving inductor config untouched.",
             exc_info=True,
         )
         return
 
+    # -- Patch is_big_gpu to always return True --
+    big_gpu_ok = False
+    original_big_gpu = getattr(inductor_utils, "is_big_gpu", None)
+    if original_big_gpu is not None:
+        if not getattr(original_big_gpu, "__vllm_patched__", False):
+            def _forced_big_gpu(*args, **kwargs) -> bool:
+                return True
+            _forced_big_gpu.__vllm_patched__ = True
+            inductor_utils.is_big_gpu = _forced_big_gpu
+            cache_clear = getattr(original_big_gpu, "cache_clear", None)
+            if callable(cache_clear):
+                try:
+                    cache_clear()
+                except Exception:
+                    pass
+        big_gpu_ok = True
+
+    # -- Patch is_datacenter_blackwell_arch for SM120/121 --
+    blackwell_ok = False
+    try:
+        from torch._inductor.codegen.cuda import cuda_env
+        original_blackwell = getattr(
+            cuda_env, "is_datacenter_blackwell_arch", None
+        )
+        if original_blackwell is not None and not getattr(
+            original_blackwell, "__vllm_patched__", False
+        ):
+            def _forced_blackwell_family_arch() -> bool:
+                if original_blackwell():
+                    return True
+                if torch.cuda.is_available():
+                    major, _ = torch.cuda.get_device_capability()
+                    if major >= 10:
+                        return True
+                return False
+            _forced_blackwell_family_arch.__vllm_patched__ = True
+            cuda_env.is_datacenter_blackwell_arch = (
+                _forced_blackwell_family_arch
+            )
+            cache_clear = getattr(original_blackwell, "cache_clear", None)
+            if callable(cache_clear):
+                try:
+                    cache_clear()
+                except Exception:
+                    pass
+        blackwell_ok = True
+    except Exception:
+        pass
+
+    # -- Inductor autotune (ATEN + TRITON only, no CUTLASS) --
     inductor_config.max_autotune = True
     inductor_config.max_autotune_gemm = True
-    existing_backends = getattr(
-        inductor_config, "max_autotune_gemm_backends", ""
-    )
-    backend_tokens = []
-    if isinstance(existing_backends, str) and existing_backends:
-        backend_tokens = [
-            token.strip().upper() for token in existing_backends.split(",")
-        ]
-    for backend in ("ATEN", "TRITON", "CUTLASS"):
-        if backend not in backend_tokens:
-            backend_tokens.append(backend)
-    inductor_config.max_autotune_gemm_backends = ",".join(backend_tokens)
-
-    # Ensure CUTLASS source dir is set so the inductor backend can find it.
-    # The default points to ../third_party/cutlass/ (developer source tree),
-    # which does not exist in pip-installed or container environments.
-    from pathlib import Path
-    configured_cutlass_dir = Path(inductor_config.cuda.cutlass_dir)
-    if not configured_cutlass_dir.exists():
-        fallback_candidates = [
-            Path("/tmp/vllm/.deps/cutlass-src"),
-            Path(__file__).resolve().parents[3] / ".deps" / "cutlass-src",
-        ]
-        for fallback in fallback_candidates:
-            if fallback.exists():
-                inductor_config.cuda.cutlass_dir = str(fallback.resolve())
-                inductor_config.cutlass.cutlass_dir = str(fallback.resolve())
-                logger.info("Set inductor cutlass_dir to %s", fallback)
-                break
-
+    inductor_config.max_autotune_gemm_backends = "ATEN,TRITON"
     if hasattr(inductor_config, "triton") and hasattr(
         inductor_config.triton, "enable_persistent_tma_matmul"
     ):
         inductor_config.triton.enable_persistent_tma_matmul = True
 
-    torch._dynamo.config.accumulated_cache_size_limit = 1024
-    if hasattr(torch._dynamo.config, "cache_size_limit"):
-        torch._dynamo.config.cache_size_limit = 1024
+    # -- TF32 for FP32 GEMMs (e.g. router layers) --
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
+    # -- Dynamo cache limits --
+    _CACHE_LIMIT = 65536
+    _ACCUMULATED_LIMIT = 1048576
 
-def _maybe_override_inductor_is_big_gpu() -> None:
-    """Force inductor max-autotune-gemm on sub-68-SM / Blackwell-edge devices.
-
-    Inductor has two hard-coded gates that exclude sub-data-center Blackwell
-    hardware from its best GEMM templates:
-
-    1. `torch._inductor.utils.is_big_gpu` compares `multi_processor_count`
-       against 68 (3080 baseline). GB10 / DGX Spark (48 SMs) fails this,
-       dropping Triton templates from the max-autotune-gemm pool.
-    2. `torch._inductor.codegen.cuda.cuda_env.is_datacenter_blackwell_arch`
-       whitelists only arch ∈ [100, 110), excluding SM120/121 (consumer /
-       edge Blackwell), which disables Blackwell-specific codegen paths.
-
-    When `VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1`, monkey-patch both helpers and
-    set global inductor config to prefer Triton + ATEN + CUTLASS templates with
-    persistent TMA matmul. All patches are global (affect every
-    torch.compile call in the process) and one-shot. Must run before the
-    first inductor autotune call, since both helpers are cached.
-    """
-    global _inductor_big_gpu_override_applied
-    if _inductor_big_gpu_override_applied:
-        return
-    if not envs.VLLM_INDUCTOR_OVERRIDE_BIG_GPU:
-        return
-    _inductor_big_gpu_override_applied = True
-
-    try:
-        import torch._inductor.utils as inductor_utils
-    except Exception:
-        logger.warning(
-            "VLLM_INDUCTOR_OVERRIDE_BIG_GPU set but torch._inductor.utils "
-            "could not be imported; leaving inductor config untouched.",
-            exc_info=True,
+    dynamo_config.accumulated_cache_size_limit = max(
+        getattr(dynamo_config, "accumulated_cache_size_limit", 0),
+        _ACCUMULATED_LIMIT,
+    )
+    if hasattr(dynamo_config, "cache_size_limit"):
+        dynamo_config.cache_size_limit = max(
+            dynamo_config.cache_size_limit, _CACHE_LIMIT
         )
-        return
-
-    big_gpu_ok = _patch_is_big_gpu(inductor_utils)
-    blackwell_ok = _patch_is_datacenter_blackwell_arch()
-    _apply_inductor_autotune_config()
+    if hasattr(dynamo_config, "recompile_limit"):
+        dynamo_config.recompile_limit = max(
+            dynamo_config.recompile_limit, _CACHE_LIMIT
+        )
+    if hasattr(dynamo_config, "accumulated_recompile_limit"):
+        dynamo_config.accumulated_recompile_limit = max(
+            dynamo_config.accumulated_recompile_limit, _ACCUMULATED_LIMIT
+        )
+    if hasattr(dynamo_config, "fail_on_recompile_limit_hit"):
+        dynamo_config.fail_on_recompile_limit_hit = False
+    if hasattr(dynamo_config, "fail_on_cache_limit_hit"):
+        dynamo_config.fail_on_cache_limit_hit = False
 
     logger.info(
-        "VLLM_INDUCTOR_OVERRIDE_BIG_GPU=1: is_big_gpu patched=%s, "
-        "is_datacenter_blackwell_arch patched=%s. Inductor config set to "
-        "max_autotune_gemm=True, backends include ATEN/TRITON/CUTLASS, "
-        "persistent TMA matmul=True. For FP32 GEMMs (e.g. Nemotron "
-        "routers), also set VLLM_FLOAT32_MATMUL_PRECISION=high to let "
-        "Triton autotune pick tensor-core kernels.",
+        "force_inductor_max_autotune_gemm: is_big_gpu=%s, "
+        "blackwell_arch=%s, backends=ATEN,TRITON, TF32=high, "
+        "dynamo cache_size=%d, accumulated=%d",
         big_gpu_ok,
         blackwell_ok,
+        _CACHE_LIMIT,
+        _ACCUMULATED_LIMIT,
     )
-
-
-_maybe_override_inductor_is_big_gpu()
 
 
 # State for the torch.compile-wrapped BF16 linear fast path.
 # Each unique (shape, stride, dtype, device) combination gets its own
-# statically-compiled kernel via dynamic=False + fullgraph=True.  This
-# generates tighter code than dynamic=True at the cost of more compiles,
-# which is fine for LLM serving where weight shapes are fixed and batch
-# sizes cycle through a small set of CUDA graph capture sizes.
+# statically-compiled function with fullgraph=True, dynamic=False.
+# This lets inductor pick the best GEMM kernel per exact shape.
 import itertools as _itertools
-import torch.nn.functional as _F
-
-_unquant_bf16_linear_cache: dict[tuple, Callable] = {}
-_unquant_bf16_linear_compile_id = _itertools.count()
+_COMPILED_LINEAR_CACHE: dict[tuple, Callable] = {}
+_COMPILED_LINEAR_ID_GEN = _itertools.count()
 _unquant_bf16_linear_capture_safe_keys: set[tuple] = set()
 _unquant_bf16_linear_torch_compile_configured = False
 _unquant_bf16_linear_torch_compile_disabled = False
-
-_DYNAMO_CACHE_SIZE_LIMIT = 65536
-_DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT = 1048576
 
 
 def _configure_unquant_bf16_linear_torch_compile_once() -> None:
@@ -365,42 +299,18 @@ def _configure_unquant_bf16_linear_torch_compile_once() -> None:
     if _unquant_bf16_linear_torch_compile_configured:
         return
 
-    import torch._dynamo.config
-    import torch._inductor.config
+    # Apply all inductor patches (is_big_gpu, blackwell, autotune, TF32, etc.)
+    force_inductor_max_autotune_gemm()
 
+    import torch._inductor.config
     torch._inductor.config.coordinate_descent_tuning = True
     torch._inductor.config.triton.unique_kernel_names = True
     torch._inductor.config.fx_graph_cache = True
 
-    # Large cache limits needed because dynamic=False creates a separate
-    # compiled kernel per distinct tensor shape.
-    torch._dynamo.config.accumulated_cache_size_limit = max(
-        getattr(torch._dynamo.config, "accumulated_cache_size_limit", 0),
-        _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
-    )
-    if hasattr(torch._dynamo.config, "cache_size_limit"):
-        torch._dynamo.config.cache_size_limit = max(
-            torch._dynamo.config.cache_size_limit,
-            _DYNAMO_CACHE_SIZE_LIMIT,
-        )
-    torch._dynamo.config.recompile_limit = max(
-        getattr(torch._dynamo.config, "recompile_limit", 0),
-        _DYNAMO_CACHE_SIZE_LIMIT,
-    )
-    if hasattr(torch._dynamo.config, "accumulated_recompile_limit"):
-        torch._dynamo.config.accumulated_recompile_limit = max(
-            torch._dynamo.config.accumulated_recompile_limit,
-            _DYNAMO_ACCUMULATED_CACHE_SIZE_LIMIT,
-        )
-    if hasattr(torch._dynamo.config, "fail_on_recompile_limit_hit"):
-        torch._dynamo.config.fail_on_recompile_limit_hit = False
-    if hasattr(torch._dynamo.config, "fail_on_cache_limit_hit"):
-        torch._dynamo.config.fail_on_cache_limit_hit = False
-
     _unquant_bf16_linear_torch_compile_configured = True
 
 
-def _unquant_bf16_linear_cache_key(
+def _compiled_linear_key(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
@@ -425,65 +335,63 @@ def _compile_linear_for_args(
     weight: torch.Tensor,
     bias: torch.Tensor | None,
 ) -> Callable:
-    """Create a statically-compiled F.linear for the exact shapes of x/weight/bias.
-
-    Each compile gets a unique function name (via exec) to avoid Dynamo guard
-    collisions between different shape specializations.
-    """
     _configure_unquant_bf16_linear_torch_compile_once()
-    compile_id = next(_unquant_bf16_linear_compile_id)
-    ns = {"F": _F, "torch": torch}
+    compile_id = next(_COMPILED_LINEAR_ID_GEN)
+    import torch.nn.functional as F
 
     if bias is None:
+        namespace = {"F": F, "torch": torch}
         fn_name = f"_linear_no_bias_{compile_id}"
         exec(
-            f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:\n"
+            f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor)"
+            " -> torch.Tensor:\n"
             "    return F.linear(x, weight, None)\n",
-            ns,
+            namespace,
         )
         compiled = torch.compile(
-            ns[fn_name],
+            namespace[fn_name],
             fullgraph=True,
             dynamic=False,
             mode="max-autotune-no-cudagraphs",
         )
-        compiled(x, weight)  # trigger compilation now
+        compiled(x, weight)  # warmup — triggers compilation for this shape
         return compiled
 
+    namespace = {"F": F, "torch": torch}
     fn_name = f"_linear_with_bias_{compile_id}"
     exec(
-        f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:\n"
+        f"def {fn_name}(x: torch.Tensor, weight: torch.Tensor,"
+        " bias: torch.Tensor) -> torch.Tensor:\n"
         "    return F.linear(x, weight, bias)\n",
-        ns,
+        namespace,
     )
     compiled = torch.compile(
-        ns[fn_name],
+        namespace[fn_name],
         fullgraph=True,
         dynamic=False,
         mode="max-autotune-no-cudagraphs",
     )
-    compiled(x, weight, bias)  # trigger compilation now
+    compiled(x, weight, bias)  # warmup
     return compiled
 
 
-def _get_or_invoke_compiled_linear(
+def _get_or_create_compiled_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
     bias: torch.Tensor | None,
-) -> torch.Tensor | None:
-    key = _unquant_bf16_linear_cache_key(x, weight, bias)
-    compiled = _unquant_bf16_linear_cache.get(key)
-    if compiled is None:
-        if torch.cuda.is_current_stream_capturing():
-            return None  # never compile during CUDA graph capture
-        compiled = _compile_linear_for_args(x, weight, bias)
-        _unquant_bf16_linear_cache[key] = compiled
-        # Already called during _compile_linear_for_args, return result
-        # by calling again (result is cached by inductor)
+    allow_new_compile: bool,
+) -> Callable | None:
+    key = _compiled_linear_key(x, weight, bias)
+    compiled = _COMPILED_LINEAR_CACHE.get(key)
+    if compiled is not None:
+        return compiled
 
-    if bias is None:
-        return compiled(x, weight)
-    return compiled(x, weight, bias)
+    if not allow_new_compile:
+        return None
+
+    compiled = _compile_linear_for_args(x, weight, bias)
+    _COMPILED_LINEAR_CACHE[key] = compiled
+    return compiled
 
 
 def _should_use_unquant_bf16_linear_torch_compile(
@@ -513,16 +421,23 @@ def _apply_unquant_bf16_linear_torch_compile(
 ) -> torch.Tensor | None:
     global _unquant_bf16_linear_torch_compile_disabled
 
-    key = _unquant_bf16_linear_cache_key(x, weight, bias)
+    key = _compiled_linear_key(x, weight, bias)
     is_capturing = torch.cuda.is_current_stream_capturing()
 
-    # Never compile during CUDA graph capture; only reuse kernels whose
-    # shape key has been observed and compiled in an earlier warm-up.
     if is_capturing and key not in _unquant_bf16_linear_capture_safe_keys:
         return None
 
+    compiled = _get_or_create_compiled_linear(
+        x, weight, bias, allow_new_compile=not is_capturing
+    )
+    if compiled is None:
+        return None
+
     try:
-        output = _get_or_invoke_compiled_linear(x, weight, bias)
+        if bias is None:
+            output = compiled(x, weight)
+        else:
+            output = compiled(x, weight, bias)
     except Exception:
         if is_capturing:
             return None
@@ -532,9 +447,6 @@ def _apply_unquant_bf16_linear_torch_compile(
             exc_info=True,
         )
         _unquant_bf16_linear_torch_compile_disabled = True
-        return None
-
-    if output is None:
         return None
 
     if not is_capturing:
