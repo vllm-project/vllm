@@ -95,7 +95,93 @@ def default_unquantized_gemm(
     weight: torch.Tensor,
     bias: torch.Tensor | None = None,
 ):
+    fi_backend = envs.VLLM_BF16_GEMM_BACKEND
+    if fi_backend != "torch" and x.device.type == "cuda":
+        output = maybe_flashinfer_bf16_unquantized_gemm(x, weight, bias, fi_backend)
+        if output is not None:
+            return output
+
     return torch.nn.functional.linear(x, weight, bias)
+
+
+def maybe_flashinfer_bf16_unquantized_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None,
+    backend: str | None,
+) -> torch.Tensor | None:
+    from vllm.utils.flashinfer import (
+        flashinfer_bf16_mm,
+        get_flashinfer_bf16_supported_backends,
+        has_flashinfer_bf16_gemm,
+        is_flashinfer_bf16_backend_supported,
+    )
+
+    if x.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+        return None
+
+    if bias is not None and bias.dtype != torch.bfloat16:
+        return None
+
+    if x.ndim < 2 or weight.ndim != 2 or not x.is_contiguous():
+        return None
+
+    if not weight.is_contiguous():
+        return None
+
+    if weight.shape[1] != x.shape[-1]:
+        return None
+
+    flashinfer_backend = backend or "auto"
+    if not current_platform.is_cuda():
+        if backend is not None:
+            raise ValueError(
+                f"VLLM_BF16_GEMM_BACKEND={backend!r} requires CUDA."
+            )
+        return None
+
+    if not has_flashinfer_bf16_gemm():
+        if backend is not None:
+            raise ValueError(
+                f"VLLM_BF16_GEMM_BACKEND={backend!r} requires "
+                "FlashInfer with mm_bf16 support to be installed."
+            )
+        return None
+
+    # Keep the default rollout scoped to Blackwell unless the user explicitly
+    # forces a FlashInfer BF16 backend.
+    if backend is None and not current_platform.is_device_capability_family(100):
+        return None
+
+    if flashinfer_backend == "cutlass" and bias is not None:
+        raise ValueError(
+            "VLLM_BF16_GEMM_BACKEND='cutlass' does not support bias for "
+            "FlashInfer BF16 GEMM."
+        )
+
+    if not is_flashinfer_bf16_backend_supported(flashinfer_backend):
+        if backend is None:
+            return None
+        supported_backends = get_flashinfer_bf16_supported_backends()
+        supported_str = ", ".join(supported_backends) if supported_backends else "none"
+        raise ValueError(
+            f"VLLM_BF16_GEMM_BACKEND={backend!r} is not supported on this device. "
+            f"Supported FlashInfer BF16 backends: {supported_str}."
+        )
+
+    x_2d = x.reshape(-1, x.shape[-1])
+    output = flashinfer_bf16_mm(
+        x_2d,
+        weight.t(),
+        bias=bias,
+        backend=flashinfer_backend,
+    )
+    logger.info_once(
+        "Using FlashInfer BF16 GEMM backend %s for unquantized linear.",
+        flashinfer_backend,
+        scope="global",
+    )
+    return output.view(*x.shape[:-1], weight.shape[0])
 
 
 def use_aiter_triton_gemm(n, m, k, dtype):
