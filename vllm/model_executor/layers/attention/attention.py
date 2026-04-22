@@ -429,30 +429,30 @@ class Attention(nn.Module, AttentionLayerBase):
         )
         self._tq_config = tq_config
 
-        # Pre-allocate decode intermediate buffers so model.to(device) moves
-        # them to GPU *before* the memory profiler runs.  Without this the
-        # profiler gives all free memory to KV cache blocks and the first
-        # decode OOMs when these buffers are lazily allocated.
+        # Share decode intermediate buffers across all TQ attention layers.
+        # Layers execute sequentially so one set of buffers is sufficient.
+        # This reduces memory from O(num_layers) to O(1) — saving ~11 GiB
+        # for a 64-layer model like Qwen2.5-32B.
         _vllm_cfg = get_current_vllm_config()
         B = _vllm_cfg.scheduler_config.max_num_seqs
         Hq = self.num_heads
         S = _vllm_cfg.attention_config.tq_max_kv_splits_for_cuda_graph
         D = head_size
-        self.register_buffer(
-            "_tq_mid_o_buf",
-            torch.empty(B, Hq, S, D + 1, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_tq_output_buf",
-            torch.empty(B, Hq, D, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_tq_lse_buf",
-            torch.empty(B, Hq, dtype=torch.float32),
-            persistent=False,
-        )
+
+        if not hasattr(
+            Attention, "_tq_shared_mid_o_buf"
+        ) or Attention._tq_shared_mid_o_buf.shape != (B, Hq, S, D + 1):
+            # First TQ layer initializes the shared buffers
+            Attention._tq_shared_mid_o_buf = torch.empty(
+                B, Hq, S, D + 1, dtype=torch.float32
+            )
+            Attention._tq_shared_output_buf = torch.empty(B, Hq, D, dtype=torch.float32)
+            Attention._tq_shared_lse_buf = torch.empty(B, Hq, dtype=torch.float32)
+
+        # Point this layer's buffers to the shared ones (no new allocation)
+        self._tq_mid_o_buf = Attention._tq_shared_mid_o_buf
+        self._tq_output_buf = Attention._tq_shared_output_buf
+        self._tq_lse_buf = Attention._tq_shared_lse_buf
 
     def forward(
         self,
