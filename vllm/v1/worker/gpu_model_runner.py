@@ -581,18 +581,8 @@ class GPUModelRunner(
 
         self.num_spec_tokens = 0
         self.valid_sampled_token_count_gpu: torch.Tensor | None = None
-        self.drafter_has_shorter_max_model_len = False
-        self.drafter_max_model_len = self.max_model_len
         if self.speculative_config:
             self.num_spec_tokens = self.speculative_config.num_speculative_tokens
-            draft_config = self.speculative_config.draft_model_config
-            if (
-                draft_config is not None
-                and draft_config.max_model_len is not None
-                and draft_config.max_model_len < self.max_model_len
-            ):
-                self.drafter_has_shorter_max_model_len = True
-                self.drafter_max_model_len = draft_config.max_model_len
         self.use_async_spec_decode = (
             self.use_async_scheduling and self.num_spec_tokens > 0
         )
@@ -4458,13 +4448,6 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
-
-        if self.drafter_has_shorter_max_model_len:
-            common_attn_metadata.seq_lens = torch.clamp(
-                common_attn_metadata.seq_lens,
-                max=self.drafter_max_model_len,
-            )
-
         if spec_config.method == "ngram":
             from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 

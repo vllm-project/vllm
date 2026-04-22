@@ -683,16 +683,16 @@ class SpeculativeConfig:
         draft_max_model_len: int,
         target_max_model_len: int,
     ) -> int:
-        """Determine the max sequence len for the draft model. This is usually
-        the draft_max_model_len, but may be the target_max_model_len if it is
-        less than the draft_max_model_len, or may be speculative_max_model_len
-        if it is specified.
+        """Determine the max sequence len for the draft model.
 
-        This is necessary so that sequences do not exceed the capacity of the
-        draft model or the target model.
-
-        speculative_max_model_len is mainly used for testing that sequences can
-        skip speculation.
+        If the user explicitly sets speculative_max_model_len, that value
+        is used. Otherwise, the draft model's max_model_len is clamped to
+        at least target_max_model_len so that the drafter's KV cache and
+        CUDA graphs are sized to handle any sequence the target model can
+        process. This prevents DP hangs when sequences exceed the drafter's
+        native context window — the drafter still runs (keeping DP ranks
+        synchronized) but may produce lower-quality drafts, which the
+        verifier rejects.
         """
 
         if speculative_max_model_len is not None:
@@ -710,10 +710,19 @@ class SpeculativeConfig:
 
             return speculative_max_model_len
 
-        return min(
-            draft_max_model_len,
-            target_max_model_len,
-        )
+        if draft_max_model_len < target_max_model_len:
+            logger.warning(
+                "Draft model max_model_len (%d) is less than target "
+                "model max_model_len (%d). Overriding to %d to prevent "
+                "DP hangs. Drafts for sequences longer than %d tokens "
+                "may be low quality.",
+                draft_max_model_len,
+                target_max_model_len,
+                target_max_model_len,
+                draft_max_model_len,
+            )
+
+        return max(draft_max_model_len, target_max_model_len)
 
     @staticmethod
     def _verify_and_get_draft_tp(
