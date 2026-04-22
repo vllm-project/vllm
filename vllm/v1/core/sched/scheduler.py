@@ -624,29 +624,11 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    new_computed_blocks, num_new_local_computed_tokens = (
-                        self.kv_cache_manager.get_computed_blocks(request)
-                    )
-
-                    # More proper check would be:
-                    # if isinstance(self.kv_cache_manager.coordinator,
-                    #               HybridKVCacheCoordinator):
-                    # but this check is similar and avoids
-                    # importing HybridKVCacheCoordinator:
-                    if self.has_mamba_layers:
-                        # HybridKVCacheCoordinator returns the longest hit:
-                        longest_hit_length = num_new_local_computed_tokens
-                        # HybridKVCacheCoordinator returns the blocks of
-                        # the common hit, from which we obtain the hit length:
-                        common_hit_length = (
-                            len(new_computed_blocks.blocks[0]) * self.block_size
-                        )
-                        # How many tokens mamba cache is behind the longest hit:
-                        num_uncached_common_prefix_tokens = (
-                            longest_hit_length - common_hit_length
-                        )
-                        # Resume default scheduler logic based on the common hit
-                        num_new_local_computed_tokens = common_hit_length
+                    (
+                        new_computed_blocks,
+                        num_new_local_computed_tokens,
+                        num_uncached_common_prefix_tokens,
+                    ) = self.kv_cache_manager.get_computed_blocks(request)
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
