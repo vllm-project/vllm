@@ -154,7 +154,13 @@ class MoRIIOWriter:
         self._deferred_tasks = still_deferred
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
-        """Check if remote blocks are allocated for this task.
+        """Check if remote blocks are allocated and populated for this task.
+
+        Returns True only when the remote allocation entry exists *and*
+        carries a non-None ``block_ids`` mapping. The latter check ensures
+        that ``_execute_write_task`` is never invoked for a task whose
+        remote ``block_ids`` are still being filled in by the scheduler;
+        without it we would either drop the task or busy-loop on it.
 
         Args:
             task: The write task
@@ -162,9 +168,10 @@ class MoRIIOWriter:
         Returns:
             True if remote blocks are ready
         """
-        return (
-            task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
+        info = self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+            task.transfer_id
         )
+        return info is not None and info.block_ids is not None
 
     def _get_remote_alloc_info(self, transfer_id: str) -> RemoteAllocInfo:
         """Get remote allocation info for a request.
@@ -188,20 +195,16 @@ class MoRIIOWriter:
     def _execute_write_task(self, task: WriteTask) -> None:
         """Execute a single write task.
 
+        Callers must ensure ``_is_remote_ready(task)`` returned ``True``
+        before invoking this method; ``_is_remote_ready`` guarantees that
+        ``request_info.block_ids`` is non-None and the entry exists.
+
         Args:
             task: The write task to execute
 
         """
         # Get remote allocation info
         request_info = self._get_remote_alloc_info(task.transfer_id)
-
-        if request_info.block_ids is None:
-            logger.debug(
-                "Request remote block IDs not ready:request_id = %s, transfer_id = %s",
-                task.request_id,
-                task.transfer_id,
-            )
-            return
 
         # Wait for CUDA event
         # The attention computation of the current layer cannot
